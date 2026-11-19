@@ -241,7 +241,7 @@ $ skep policy decisions --actor 'acp:*'
         <ul>
           <li><strong>Always in the sandbox.</strong> The run is forced into sandbox mode whatever the flag says, the adapters refuse to start outside it, and when no backend can be applied the run does not start.</li>
           <li><strong>The patch still waits for you.</strong> skep captures the agent's changes as a diff, re-runs the pinned verify command on a clean checkout, and holds the patch for approval.</li>
-          <li><strong>Landing.</strong> Approval is needed by default. Two opt-in lanes land a re-verified patch without a click, and only on a <code>skep/*</code> branch: <code>--auto-approve</code> for fixes that change only dependency manifests, and the verified-patch lane, which is on for a project in the maintain phase or set <code>--unlocked</code>. Your default branch moves only through actions you confirm.</li>
+          <li><strong>Landing.</strong> Approval is needed by default. One opt-in lane lands a re-verified patch without a click, and only on a <code>skep/*</code> branch: the verified-patch lane, which is on for a project in the maintain phase or set <code>--unlocked</code>, and needs a pinned verify command. Your default branch moves only through actions you confirm.</li>
         </ul>
       </div>
       <div class="grid">

@@ -47,7 +47,8 @@ skep status [--personal] [--json]
 - `onboard --quiet | --verbose` (first-run O4) turns the first-session
   `why:` line under every chat verdict card, and the per-turn tally, off or
   back on (`~/.skep/first_run.json` `dismissed`; REST:
-  `POST /api/onboard/transparency {"verbose": bool}`).
+  `POST /api/onboard/transparency {"verbose": bool}`). Beside any other
+  onboard flag they only set the why-lines: every step still runs (v127-T2).
   Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `setup --template NAME` applies a policy template (`builder`, `operator`,
@@ -100,8 +101,10 @@ Important options:
   configured provider whatever this list says.
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
-- `--auto-approve` opts in to auto-applying a verified, re-verified,
-  manifest-only fix.
+- `--auto-approve` has no effect (retired; still accepted on `run`, `tick` and
+  `serve` for one release, with a note): a patch lands without a click only
+  when the project turns on `auto_apply_verified_patch` (the maintain phase and
+  unlocked mode turn it on) and pins a real check.
 - `--planning-protocol plan|react` chooses one upfront plan (the default) or the
   bounded act-observe loop; omitted, the project's `worker_protocol` applies.
 - `--budget-wall-clock`, `--budget-max-iterations`, `--budget-max-actions` and
@@ -198,7 +201,7 @@ skep schedule add NAME REPO --template TEMPLATE --every 1d [--param KEY=VALUE]
 skep schedule list
 skep schedule remove NAME
 skep schedule health
-skep tick [--worker-cmd COMMAND] [--auto-approve]
+skep tick [--worker-cmd COMMAND]
 ```
 
 - `schedule add` creates a recurring direct run or template-bound run.
@@ -252,7 +255,7 @@ exist because a *model* proposed the action, not a human.
 ## Serve
 
 ```sh
-skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve] [--no-readopt]
+skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--no-readopt]
 ```
 
 `serve` starts the local HTTP API and browser dashboard. It prints the URL and

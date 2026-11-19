@@ -26,8 +26,7 @@ its decisions. Say it in their terms:
 - **Landing is the approval.** Finished work is a patch. `skep review
   <task_id>` shows it; `skep review <task_id> --approve` lands it as a commit
   on a new `skep/<task_id>` branch — never the default branch. Landing
-  without a human is opt-in (the maintain phase, `--unlocked`,
-  `--auto-approve`): it takes only a patch skep re-verified, and only onto a
+  without a human is opt-in (the maintain phase or `--unlocked`): it takes only a patch skep re-verified, and only onto a
   `skep/*` branch.
 - **Some things are never allowed.** A worker cannot push, pull, fetch or
   switch branches, whatever the rules say. That is the floor.

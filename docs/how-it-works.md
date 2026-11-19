@@ -115,7 +115,9 @@ This is the core safety property: Skep does not trust an agent saying "tests
 passed" if the patch fails when replayed on a clean copy.
 
 If re-verification disagrees with the worker, Skep surfaces that in `status` and
-`review`, and auto-approval does not apply.
+`review`, and auto-approval does not apply. Nor does it when every command the
+replay ran is known-vacuous (`true`, `git diff --check`, ...): see
+[`verification.md`](verification.md).
 
 See [`verification.md`](verification.md) for the four outcomes and the
 re-run's environment, and
@@ -142,14 +144,13 @@ Skep pushes that branch only when you ask it to: `skep review <task_id>
 A worker never pushes, pulls, fetches or switches branches. You keep the
 normal Git decision: inspect, merge, edit, or delete the branch.
 
-Landing without your approval is opt-in, and has two lanes. A project in the
-**maintain** phase (or with `auto_apply_verified_patch` set, or set up with
-`--unlocked`) auto-applies a patch that the pinned verify command confirmed;
-in the maintain phase those land on ONE integration branch (`skep/maintain`)
-instead of a fresh branch per run. `--auto-approve` lands a confirmed patch
-that touches only dependency manifests and lockfiles. Both lanes land only a
-re-verified patch, only on a `skep/*` branch, and record the approval as
-`auto:<rule>`. `main` never advances automatically; you merge when you choose.
+Landing without your approval is opt-in. A project in the **maintain** phase
+(or with `auto_apply_verified_patch` set, or set up with `--unlocked`)
+auto-applies a patch that the pinned verify command confirmed, when that pin
+is not known-vacuous; in the maintain phase those land on ONE integration
+branch (`skep/maintain`) instead of a fresh branch per run. It lands only a
+re-verified patch, only on a `skep/*` branch, and records the approval as
+`auto:verified-patch`. `--auto-approve` is retired and lands nothing. `main` never advances automatically; you merge when you choose.
 See [`guide-auto-landing.md`](guide-auto-landing.md).
 
 ## What Skep Guarantees

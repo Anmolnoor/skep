@@ -133,7 +133,7 @@ def test_an_external_engine_gets_only_its_own_host(config: SupervisorConfig, rep
             name="app",
             strategy="trusted_local_dev",
             phase="build",
-            policy={"verify_command": "true"},
+            policy={"verify_command": "uv run pytest"},
         )
     finally:
         store.close()

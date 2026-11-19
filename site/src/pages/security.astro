@@ -414,12 +414,11 @@ $ skep doctor
         <Callout kind="limit" title="Limits">
           <ul class="plain-list">
             <li>
-              Landing without a click exists, and it is opt-in: <code>--auto-approve</code> for dependency-only
-              diffs, and <code>auto_apply_verified_patch</code> (on in the maintain phase and for unlocked projects).
-              Both land only a re-verified patch, only on a <code>skep/*</code> branch, recorded as
-              <code>auto:&lt;rule&gt;</code>.
+              Landing without a click exists, and it is opt-in: <code>auto_apply_verified_patch</code> (on in the
+              maintain phase and for unlocked projects). It lands only a re-verified patch, only on a
+              <code>skep/*</code> branch, recorded as <code>auto:verified-patch</code>.
             </li>
-            <li>The dependency-only lane does not require a pinned verify command.</li>
+            <li>It needs the project's pinned verify command, and refuses a known-vacuous one.</li>
             <li>An approval is a person's judgement. skep shows the evidence; it does not review the diff for you.</li>
           </ul>
         </Callout>

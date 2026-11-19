@@ -503,16 +503,17 @@ def test_v126_f5_the_memory_block_rides_an_external_dispatch_and_the_audit_says_
 
 def test_v126_f5_castes_without_memory_in_their_prompt_say_not_delivered() -> None:
     """v126-F5 (review): the reviewer has a prompt that carries no memory, and
-    the audit, verifier and script workers run no model prompt — each audit
-    says "not delivered" instead of leaving the question open."""
+    the audit and script workers run no model prompt (the verifier caste is
+    retired, v127-F11) — each audit says "not delivered" instead of leaving
+    the question open."""
     from types import SimpleNamespace
     from typing import Any, cast
 
-    from skep.workers import audit, reviewer, script_worker, verifier
+    from skep.workers import audit, reviewer, script_worker
 
     task = cast(
         Any, SimpleNamespace(project_context=None, dispatch_decision=None, landing_decision=None)
     )
-    for module in (reviewer, audit, verifier, script_worker):
+    for module in (reviewer, audit, script_worker):
         payload = module._task_start_payload(task)
         assert str(payload["memory_delivered"]).startswith("not delivered"), module.__name__

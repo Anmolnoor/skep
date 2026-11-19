@@ -434,26 +434,13 @@ const decisions = [
       </div>
     </div>
     <div class="grid after-split">
-      <h3 class="t-h3">Two opt-in lanes land without a click</h3>
+      <h3 class="t-h3">One opt-in lane lands without a click</h3>
       <p class="prose-width">
-        Landing needs your approval by default. Two lanes land by themselves once you switch them on. Both land only a
-        patch that re-verification confirmed, both refuse to append past the commit that was re-verified, and both
-        record the approval with the actor <code>auto:&lt;rule&gt;</code>.
+        Landing needs your approval by default. One lane lands by itself once you switch it on. It lands only a patch
+        that re-verification confirmed, refuses to append past the commit that was re-verified, and records the
+        approval with the actor <code>auto:verified-patch</code>.
       </p>
       <div class="grid grid-2">
-        <Card title="deps-safe" icon="package-check" level="h4">
-          <dl class="facts">
-            <dt>Switched on by</dt>
-            <dd><code>--auto-approve</code> on <code>skep run</code>, <code>skep tick</code> or <code>skep serve</code></dd>
-            <dt>Lands when</dt>
-            <dd>
-              The worker verified, re-verification confirmed, there are no risk flags, at most 10 files changed, and
-              every one is a manifest or a lockfile.
-            </dd>
-            <dt>Branch</dt>
-            <dd>The project's <code>auto_apply_branch</code> if it sets one, otherwise <code>skep/&lt;task_id&gt;</code></dd>
-          </dl>
-        </Card>
         <Card title="verified-patch" icon="git-merge" level="h4">
           <dl class="facts">
             <dt>Switched on by</dt>
@@ -473,8 +460,16 @@ const decisions = [
             </dd>
           </dl>
         </Card>
+        <Card title="Still left for you" icon="hand" level="h4">
+          <ul class="plain-list">
+            <li>A pin that is known-vacuous: <code>true</code>, <code>git diff --check</code> and the like.</li>
+            <li>A patch that touches the test setup or a file the pin runs.</li>
+            <li>A run with risk flags, or one the worker did not report as passed.</li>
+            <li><code>--auto-approve</code> is retired: it prints a note and lands nothing.</li>
+          </ul>
+        </Card>
       </div>
-      <p class="prose-width"><strong class="hi">Neither lane can land on the default branch.</strong></p>
+      <p class="prose-width"><strong class="hi">The lane can never land on the default branch.</strong></p>
       <p class="prose-width t-small c-mut">
         A patch that cannot append cleanly to the integration branch goes back to a normal approval. From a messenger
         only four low-risk action classes can be confirmed (<code>dispatch_run</code>,

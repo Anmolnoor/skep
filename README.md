@@ -144,7 +144,10 @@ branch never moves without you.
   ([`docs/approvals.md`](docs/approvals.md))
 - **Audit.** Runs, events, patches, re-verifications and approvals are
   durable local records, and every policy decision goes to a decision log.
-  An external engine's individual tool calls are not logged one by one.
+  For an external engine (Claude Code, Codex, ...) skep keeps the evidence for
+  every run (the command it launched, the patch, the sandbox profile, the
+  re-verify), not each tool call the agent made inside the sandbox
+  ([ADR 0047](docs/adr/0047-cli-agent-engines.md)).
 
 The non-negotiable rules behind all of this are written down in
 [`docs/invariants.md`](docs/invariants.md) — that file is the part of the

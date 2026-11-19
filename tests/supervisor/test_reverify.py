@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -239,7 +241,8 @@ def _uv_stub(tmp_path: Path) -> tuple[Path, Path]:
         'patched="no"\n'
         '[ -e patched_marker.txt ] && patched="yes"\n'
         'echo "$1 nosync=${UV_NO_SYNC:-unset} cache=${UV_CACHE_DIR:-unset}'
-        ' patched=$patched" >> "$UV_LOG"\n'
+        " patched=$patched link=${UV_LINK_MODE:-unset} offline=${UV_OFFLINE:-unset}"
+        ' proxy=${HTTPS_PROXY:-unset}" >> "$UV_LOG"\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -358,7 +361,7 @@ def test_reverify_removes_its_proxy_socket_dir_whatever_the_proxy_did(
     reverify_module = importlib.import_module("skep.supervisor.reverify")
     root = tmp_path / "runtime"
     root.mkdir()
-    monkeypatch.setattr(dispatch, "_proxy_socket_root", lambda: str(root))
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
     bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
     monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
     monkeypatch.setattr(sandbox, "write_profile", lambda path, **_kw: path)
@@ -466,19 +469,38 @@ def test_slug_bound_pin_survives_the_run_task_fallback(
 def test_reverify_run_primes_against_the_shared_project_cache(
     repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """v109-F4: priming resolves into the per-project cache dispatch already
-    uses — not a worktree-local throwaway that dies with the tree — and both
-    reverify profiles keep that root writable."""
+    """v109-F4: priming resolves into a per-project cache that outlives the
+    worktree — not a throwaway that dies with the tree. v127-A0 review
+    (council round 3, I2/G10): it is re-verify's own half of the project
+    root, never the half the worker's sandbox writes, and the offline verify
+    step gets a throwaway cache, so neither the worker nor patch code can
+    leave anything a later prime installs from."""
     (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
     git(repo, "add", "pyproject.toml")
     git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    from skep.supervisor.policy_resolver import project_cache_root
+    from skep.supervisor.reverify import reverify_run
+
+    store = RunStore(config.db_path)
+    try:
+        root = project_cache_root(store, config, repo)
+    finally:
+        store.close()
+    shared = root / "reverify" / "uv"
     bin_dir = tmp_path / "uvbin"
     bin_dir.mkdir()
     stub = bin_dir / "uv"
-    # The stub logs INTO the cache dir itself: the log lands at the shared
-    # root only if UV_CACHE_DIR points there AND the profiles let uv write it.
+    # Every call tries to log INTO the shared cache: only a step whose
+    # profile may write it leaves a line. The pinned command must run with
+    # a throwaway cache, offline — or the stub fails the verify.
     stub.write_text(
-        '#!/bin/sh\necho "$1 cache=${UV_CACHE_DIR:-unset}" >> "$UV_CACHE_DIR/uv.log"\nexit 0\n',
+        "#!/bin/sh\n"
+        f'echo "$1 cache=$UV_CACHE_DIR link=$UV_LINK_MODE" >> "{shared}/calls.log"\n'
+        'if [ "$1" = run ]; then\n'
+        f'  [ "$UV_CACHE_DIR" != "{shared}" ] && [ "$UV_OFFLINE" = 1 ] || exit 3\n'
+        '  case "$UV_CACHE_DIR" in *.reverify-tmp*) ;; *) exit 4 ;; esac\n'
+        "fi\n"
+        "exit 0\n",
         encoding="utf-8",
     )
     stub.chmod(0o755)
@@ -488,9 +510,6 @@ def test_reverify_run_primes_against_the_shared_project_cache(
     assert happy.record.state == "completed"
     store = RunStore(config.db_path)
     try:
-        from skep.supervisor.policy_resolver import project_cache_root
-        from skep.supervisor.reverify import reverify_run
-
         outcome = reverify_run(
             store=store,
             task_id=happy.record.task_id,
@@ -500,18 +519,60 @@ def test_reverify_run_primes_against_the_shared_project_cache(
             config=config,
             verify_command="uv run pytest",
         )
-        shared = project_cache_root(store, config, repo) / "uv"
     finally:
         store.close()
     assert outcome.outcome == "passed", outcome.detail
-    lines = (shared / "uv.log").read_text(encoding="utf-8").splitlines()
-    # The prime ran first against the shared cache; the pinned command ran
-    # second with the same cache. The throwaway never appears.
-    assert lines[0].startswith("sync")
-    assert lines[1].startswith("run")
-    assert f"cache={shared}" in lines[0]
-    assert f"cache={shared}" in lines[1]
-    assert ".uv-cache" not in "\n".join(lines)
+    # The prime wrote re-verify's shared cache, copying (never hard-linking)
+    # into the venv; the verify step, under the real wall, could not.
+    lines = (shared / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert lines == [f"sync cache={shared} link=copy"]
+    assert not (root / "uv").exists()
+
+
+def test_a_failed_rerun_keeps_its_full_output_as_evidence(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0 trial fix (V01): `reverify.output.txt` was named the full output
+    but held the 2000-char tail from pytest's short summary on — the traceback
+    that said WHY (PermissionError on /tmp) was gone. The file keeps the whole
+    output, bounded to its last 200 KB; the record keeps the short tail."""
+    pin = (
+        "python3 -c \"import sys; print('TRACEBACK-HEAD PermissionError'); "
+        "print('x' * 300_000); print('short test summary info'); "
+        "print('ERROR test_a'); sys.exit(1)\""
+    )
+    evidence = tmp_path / "evidence"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=[pin],
+        config=config,
+        profile_path=None,
+        env={"PATH": "/usr/bin:/bin"},
+        evidence_dir=evidence,
+    )
+    assert outcome.outcome == "failed", outcome.detail
+    tail = outcome.detail.split("--- re-run output (tail) ---\n", 1)[1]
+    assert tail.startswith("short test summary info") and "ERROR test_a" in tail
+    text = (evidence / "reverify.output.txt").read_text(encoding="utf-8")
+    assert "ERROR test_a" in text and "x" * 1000 in text
+    output = text.split("(exit 1)\n", 1)[1]
+    assert len(output) == 200_000 and "TRACEBACK-HEAD" not in output  # bounded
+
+    small = tmp_path / "small"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["python3 -c \"print('TRACEBACK-HEAD'); print('y' * 3000); exit(1)\""],
+        config=config,
+        profile_path=None,
+        env={"PATH": "/usr/bin:/bin"},
+        evidence_dir=small,
+    )
+    text = (small / "reverify.output.txt").read_text(encoding="utf-8")
+    assert "TRACEBACK-HEAD" in text and "y" * 3000 in text
 
 
 def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
@@ -528,6 +589,11 @@ def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
 def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: SupervisorConfig) -> None:
     """v107-F3: the re-run's TMPDIR lives inside its own worktree — unset it
     fell back to /tmp, which a nested bwrap (skep's own suite) tmpfs-masks."""
+    from skep.supervisor.sandbox import in_wall_tmp_env
+
+    # v127-A0 trial fix (V01): the runtime-dir fallback is inside the wall too
+    # where the in-wall temp env names it (macOS: /tmp is outside Seatbelt).
+    runtime_dir = '"$TMPDIR"' if "XDG_RUNTIME_DIR" in in_wall_tmp_env(Path("t")) else "unset"
     happy = run_task(repo, "Fix the bug. MODE:happy", config=config)
     store = RunStore(config.db_path)
     try:
@@ -543,6 +609,7 @@ def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: Superv
             verify_command=(
                 'sh -c \'case "$TMPDIR" in *".reverify-tmp") ;; *) exit 7;; esac; '
                 'case "$TMPPREFIX" in "$TMPDIR"/zsh) ;; *) exit 9;; esac; '
+                f'[ "${{XDG_RUNTIME_DIR-unset}}" = {runtime_dir} ] || exit 6; '
                 'case "$CLANG_MODULE_CACHE_PATH" in "$TMPDIR"/*) exit 0;; *) exit 8;; esac\''
             ),
         )
@@ -610,6 +677,45 @@ def test_a_lockfile_patch_is_primed_again_after_it_applies(
     assert lines[0].startswith("sync nosync=unset") and "patched=no" in lines[0]
     assert lines[1].startswith("sync nosync=unset") and "patched=yes" in lines[1]
     assert lines[2].startswith("run nosync=1") and "patched=yes" in lines[2]
+
+
+def test_a_patched_install_never_writes_the_shared_reverify_cache(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v127 council round 4 (N1, second door): the post-patch `uv sync` builds
+    the PATCHED project — a patch-chosen build backend runs. It gets its own
+    throwaway cache and a wall with no shared cache writable, so it cannot
+    poison the per-project cache every later baseline prime trusts."""
+    import importlib
+
+    rv = importlib.import_module("skep.supervisor.reverify")
+
+    walls: list[list[Path]] = []
+    real_init = rv._PrimeWall.__init__
+
+    def recording_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        walls.append(list(kwargs["writable"]))
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(rv._PrimeWall, "__init__", recording_init)
+    _uv_project(repo)
+    bin_dir, log = _uv_stub(tmp_path)
+    shared = tmp_path / "shared-reverify-uv"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_lock_bump_patch(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        uv_cache_dir=shared,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={shared}" in lines[0]  # the baseline prime warms the shared cache
+    assert "patched=yes" in lines[1] and str(shared) not in lines[1]
+    assert walls == [[shared], []]  # the patched install's wall writes no shared cache
 
 
 def test_a_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
@@ -684,3 +790,964 @@ def test_es_f3_landing_builds_on_the_exact_base_g10_verified(
         store.close()
     parent = git(repo, "rev-parse", f"{landed['branch']}^").stdout.strip()
     assert parent == verified_on
+
+
+# --- v127-A0: G10 confirms Node patches -------------------------------------
+
+
+def _node_stubs(tmp_path: Path) -> tuple[Path, Path]:
+    """Fake `npm`/`pnpm`/`yarn`/`node` that log each call (tool, argv, whether the
+    patch had landed, the npm cache) — no network, like `_uv_stub`."""
+    bin_dir = tmp_path / "nodebin"
+    bin_dir.mkdir()
+    log = tmp_path / "node.log"
+    for tool in ("npm", "pnpm", "yarn", "node"):
+        stub = bin_dir / tool
+        stub.write_text(
+            "#!/bin/sh\n"
+            'patched="no"\n'
+            '[ -e patched_marker.txt ] && patched="yes"\n'
+            f'echo "{tool} $* patched=$patched cache=${{npm_config_cache:-unset}}'
+            " proxy=${HTTPS_PROXY:-unset} corepack=${COREPACK_ENABLE_NETWORK:-unset}"
+            " logs=${npm_config_logs_dir:-unset}"
+            f' import=${{npm_config_package_import_method:-unset}}" >> "$NODE_LOG"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+    return bin_dir, log
+
+
+def _npm_lock(version: str, *, host: str = "registry.npmjs.org") -> str:
+    """A one-line npm v3 lockfile pinning jest@version (resolved + integrity)."""
+    entry = {
+        "version": version,
+        "resolved": f"https://{host}/jest/-/jest-{version}.tgz",
+        "integrity": "sha512-abc",
+    }
+    return json.dumps(
+        {
+            "lockfileVersion": 3,
+            "packages": {"": {"devDependencies": {"jest": version}}, "node_modules/jest": entry},
+        }
+    )
+
+
+def _node_project(repo: Path, lockfile: str | None = "package-lock.json") -> None:
+    (repo / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    files = ["package.json"]
+    if lockfile is not None:
+        (repo / lockfile).write_text(_npm_lock("1.0.0") + "\n", encoding="utf-8")
+        files.append(lockfile)
+    git(repo, "add", *files)
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "node project")
+
+
+def _node_lock_bump_patch(
+    tmp_path: Path, *, extra: str = "", lock: str = "", old: str = ""
+) -> Path:
+    patch = tmp_path / "node-lock.patch"
+    patch.write_text(
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        f"-{old or _npm_lock('1.0.0')}\n"
+        f"+{lock or _npm_lock('2.0.0')}\n"
+        "diff --git a/patched_marker.txt b/patched_marker.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/patched_marker.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+patched\n" + extra,
+        encoding="utf-8",
+    )
+    return patch
+
+
+def _node_reverify(
+    repo: Path, config: SupervisorConfig, patch: Path, bin_dir: Path, log: Path, pin: str
+) -> ReverifyOutcome:
+    return reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=[pin],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "pin", "install"),
+    [
+        ("package-lock.json", "npm test", "npm ci --ignore-scripts"),
+        (
+            "pnpm-lock.yaml",
+            "pnpm test",
+            "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
+        ),
+        ("yarn.lock", "yarn test", "yarn install --frozen-lockfile --ignore-scripts"),
+    ],
+)
+def test_a_node_pin_primes_from_the_baseline_lockfile_then_verifies_offline(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, lockfile: str, pin: str, install: str
+) -> None:
+    """v127-A0 (O12, I2): G10 re-ran `npm test` in a fresh worktree with no
+    node_modules, so every Node patch read NOT CONFIRMED. The baseline
+    lockfile is installed first — lifecycle scripts off, before the patch
+    lands — then the pin runs as before."""
+    _node_project(repo, lockfile)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith(f"{install} ") and "patched=no" in lines[0]
+    assert "cache=unset" not in lines[0]  # never the operator's ~/.npm
+    assert lines[1].startswith(f"{pin} ") and "patched=yes" in lines[1]
+    assert "primed from the baseline" in outcome.detail
+    assert len(lines) == 2  # no lockfile change, no second install
+
+
+def test_a_bare_node_pin_in_a_repo_with_dependencies_is_primed_too(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0 review: `node --test tests/*.test.mjs` is the pin setup and the
+    trial repos use; its tests import the repo's dependencies just like
+    `npm test` does, so it primes from the baseline lockfile the same way."""
+    _node_project(repo, "package-lock.json")
+    bin_dir, log = _node_stubs(tmp_path)
+    pin = "node --test tests/a.test.mjs"
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("npm ci --ignore-scripts ") and "patched=no" in lines[0]
+    assert lines[1].startswith(f"{pin} ") and "patched=yes" in lines[1]
+
+
+def test_a_node_lockfile_patch_is_primed_again_after_it_applies(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0, the v115-F13 twin: a patch that bumps the lockfile is verified
+    against the NEW packages, not the baseline's."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert "re-primed against the patched lockfile" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("npm ci --ignore-scripts ") and "patched=no" in lines[0]
+    assert lines[1].startswith("npm ci --ignore-scripts ") and "patched=yes" in lines[1]
+    assert lines[2].startswith("npm test ") and "patched=yes" in lines[2]
+
+
+def test_a_patched_node_install_uses_a_throwaway_cache(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127 council round 4: the post-patch Node install never writes the
+    shared re-verify cache either."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    shared = tmp_path / "shared-reverify-node"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_node_lock_bump_patch(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=None,
+        node_cache_dir=shared,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={shared}" in lines[0]
+    assert "patched=yes" in lines[1] and str(shared) not in lines[1]
+
+
+def test_a_node_lockfile_patch_that_also_edits_installer_config_is_not_reprimed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The re-prime has the network. `--ignore-scripts` keeps lifecycle scripts
+    off, but a patched `.yarnrc.yml` (yarnPath) or `.npmrc` would run patch
+    code or reroute the install anyway — so that patch is not re-primed and
+    is never confirmed against the old packages either (I2, I12)."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    npmrc = (
+        "diff --git a/.npmrc b/.npmrc\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/.npmrc\n"
+        "@@ -0,0 +1 @@\n"
+        "+ignore-scripts=false\n"
+    )
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path, extra=npmrc), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert ".npmrc" in outcome.detail and "was not run" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and "patched=no" in lines[0]  # baseline prime only
+
+
+def test_a_node_repo_with_dependencies_and_no_lockfile_is_not_confirmed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """No lockfile, nothing to install from deterministically: the truthful
+    verdict, not a crash and not a re-run against missing node_modules."""
+    _node_project(repo, lockfile=None)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable"
+    assert "not confirmed: no lockfile to prime from" in outcome.detail
+    assert not log.exists()  # neither an install nor the pin ran
+
+
+def test_a_dependency_free_node_repo_runs_its_pin_unprimed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """A package.json with no dependencies has nothing to prime — the pin runs
+    exactly as it did before A0."""
+    (repo / "package.json").write_text('{"name": "x"}\n', encoding="utf-8")
+    git(repo, "add", "package.json")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "bare node")
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "passed", outcome.detail
+    assert log.read_text(encoding="utf-8").splitlines()[0].startswith("npm test ")
+
+
+def test_a_failed_node_prime_is_unavailable_not_patch_guilt(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    (bin_dir / "npm").write_text("#!/bin/sh\necho 'registry down' >&2\nexit 9\n", encoding="utf-8")
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == [9]
+    assert "npm ci --ignore-scripts" in outcome.detail and "was not run" in outcome.detail
+
+
+def test_a_node_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    (bin_dir / "npm").write_text(
+        "#!/bin/sh\n"
+        'echo "npm $*" >> "$NODE_LOG"\n'
+        'if [ -e patched_marker.txt ]; then echo "no tarball for jest 2.0.0" >&2; exit 7; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == [7]
+    assert "never confirmed against the old dependencies" in outcome.detail
+    assert "no tarball for jest 2.0.0" in outcome.detail
+    assert [line.split()[1] for line in log.read_text(encoding="utf-8").splitlines()] == [
+        "ci",
+        "ci",
+    ]  # the pin never ran
+
+
+# --- v127-A0 trial fix (Fedora V17/V18): yarn behind a corepack launcher ---
+
+
+def _corepack_yarn(bin_dir: Path) -> None:
+    """A fake corepack launcher for `yarn`: it finds its home the way corepack
+    does (COREPACK_HOME, else $XDG_CACHE_HOME/node/corepack, else
+    ~/.cache/node/corepack) and runs only a yarn already cached there; with
+    COREPACK_ENABLE_NETWORK=0 a miss is corepack's own refusal."""
+    stub = bin_dir / "yarn"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'home="${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}"\n'
+        'if [ -e "$home/v1/yarn/1.22.22/.corepack" ]; then\n'
+        '  echo "yarn $* home=$home network=${COREPACK_ENABLE_NETWORK:-unset}'
+        ' latest=${COREPACK_DEFAULT_TO_LATEST:-unset}" >> "$NODE_LOG"; exit 0\n'
+        "fi\n"
+        'if [ "$COREPACK_ENABLE_NETWORK" = 0 ]; then\n'
+        "  echo \"Network access disabled by the environment; can't reach npm repository"
+        ' https://registry.npmjs.org" >&2; exit 1\n'
+        "fi\n"
+        'echo "corepack would download yarn" >&2; exit 3\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+def _cache_yarn(corepack_home: Path) -> None:
+    (corepack_home / "v1" / "yarn" / "1.22.22").mkdir(parents=True)
+    (corepack_home / "v1" / "yarn" / "1.22.22" / ".corepack").write_text("{}", encoding="utf-8")
+
+
+@pytest.mark.parametrize("located_by", ["COREPACK_HOME", "XDG_CACHE_HOME", "HOME"])
+def test_a_corepack_yarn_prime_uses_the_hosts_cached_yarn_offline(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    located_by: str,
+) -> None:
+    """Fedora V17/V18: `yarn` is Node's corepack launcher there. The prime
+    pointed XDG_CACHE_HOME at skep's own cache, so corepack found no yarn and,
+    with its network off, could not fetch one — every yarn.lock patch read
+    UNAVAILABLE. The prime now hands corepack the host's own corepack home
+    (read-only through the wall), network still off: the yarn the host
+    already has runs; corepack never downloads one."""
+    monkeypatch.delenv("COREPACK_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    host = {
+        "COREPACK_HOME": tmp_path / "corepack-home",
+        "XDG_CACHE_HOME": tmp_path / "xdg" / "node" / "corepack",
+        "HOME": tmp_path / "home" / ".cache" / "node" / "corepack",
+    }[located_by]
+    monkeypatch.setenv(
+        located_by,
+        str(
+            {"COREPACK_HOME": host, "XDG_CACHE_HOME": tmp_path / "xdg"}.get(
+                located_by, tmp_path / "home"
+            )
+        ),
+    )
+    _cache_yarn(host)
+    _node_project(repo, "yarn.lock")
+    bin_dir, log = _node_stubs(tmp_path)
+    _corepack_yarn(bin_dir)
+    outcome = _node_reverify(
+        repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "yarn test"
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("yarn install --frozen-lockfile --ignore-scripts ")
+    assert lines[1].startswith("yarn test ")
+    for line in lines:
+        assert f"home={host} " in line and "network=0" in line and "latest=0" in line
+
+
+@pytest.mark.parametrize(
+    ("package_manager", "named"), [(None, "yarn@<version>"), ("yarn@1.22.22", "yarn@1.22.22")]
+)
+def test_a_corepack_yarn_the_host_never_cached_is_unavailable_with_the_fix(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_manager: str | None,
+    named: str,
+) -> None:
+    """No cached yarn on the host: still no download — the record names what
+    is missing and the one command that fixes it."""
+    monkeypatch.setenv("COREPACK_HOME", str(tmp_path / "empty-corepack-home"))
+    _node_project(repo, "yarn.lock")
+    if package_manager is not None:
+        manifest = json.loads((repo / "package.json").read_text(encoding="utf-8"))
+        manifest["packageManager"] = package_manager
+        (repo / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+        git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "pin pm")
+    bin_dir, log = _node_stubs(tmp_path)
+    _corepack_yarn(bin_dir)
+    outcome = _node_reverify(
+        repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "yarn test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert (
+        "yarn via corepack is not installed on this host "
+        f"(run `corepack prepare {named} --activate`)"
+    ) in outcome.detail
+    assert "was not run" in outcome.detail
+    assert not log.exists()  # the pin never ran
+
+
+# --- v127-A0 review (council round 2): the prime's network is the registry ---
+
+
+def _new_file_diff(path: str, body: str) -> str:
+    lines = body.splitlines()
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
+    )
+
+
+class _RecordingWall:
+    """Stand-ins for the sandbox and proxy: record every profile and proxy the
+    re-verify builds, run the commands unwrapped (no real wall in tests)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import importlib
+
+        from skep.supervisor import sandbox
+
+        self.profiles: dict[str, dict[str, object]] = {}
+        self.proxies: list[tuple[str, ...]] = []
+        module = importlib.import_module("skep.supervisor.reverify")
+        wall = self
+
+        def write_profile(path: Path, **kwargs: object) -> Path:
+            wall.profiles[path.name] = kwargs
+            return path
+
+        class Proxy:
+            port = 40123
+
+            def __init__(
+                self, allow: tuple[str, ...], *, unix_socket_path: str | None = None, **_kw: object
+            ) -> None:
+                wall.proxies.append(tuple(allow))
+                self.unix_socket_path = unix_socket_path
+
+            def start(self) -> Proxy:
+                return self
+
+            def stop(self) -> None:
+                pass
+
+        seatbelt = sandbox.SandboxAvailability(True, backend="seatbelt")
+        monkeypatch.setattr(sandbox, "availability", lambda backend=None: seatbelt)
+        monkeypatch.setattr(sandbox, "write_profile", write_profile)
+        monkeypatch.setattr(sandbox, "wrap_command", lambda argv, _profile, **_kw: list(argv))
+        monkeypatch.setattr(module, "FilteringProxy", Proxy)
+
+
+def test_the_node_prime_reaches_only_the_baseline_registry_hosts(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 2 (HIGH, I12/I2/I11): the prime and the re-prime ran under
+    ALLOW_ALL_NETWORK, so a patched lockfile's `resolved` URLs reached any
+    host before approval. Both now go through the filtering proxy, which
+    admits the default registries plus the hosts the BASELINE lockfile
+    resolves from — never allow-all."""
+    from skep.supervisor import sandbox
+
+    _node_project(repo)
+    (repo / "package-lock.json").write_text(
+        _npm_lock("1.0.0", host="npm.example.com") + "\n", encoding="utf-8"
+    )
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "own registry")
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _node_stubs(tmp_path)
+    # The patch names a new host: the wall is still the BASELINE's hosts,
+    # so that fetch meets the proxy's 403 — no lockfile parsing needed.
+    patch = _node_lock_bump_patch(
+        tmp_path,
+        old=_npm_lock("1.0.0", host="npm.example.com"),
+        lock=_npm_lock("2.0.0", host="evil.example.com"),
+    )
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=["npm test"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    hosts = ("npm.example.com", "registry.npmjs.org", "registry.yarnpkg.com")
+    # the baseline prime and the patched install: two walls, both the baseline's hosts
+    assert wall.proxies == [hosts, hosts]
+    prime = wall.profiles["reverify.profile.prime.sb"]
+    assert prime["network"] == sandbox.NetworkPolicy(allow=hosts)
+    assert prime["proxy_port"] == 40123
+    lines = log.read_text(encoding="utf-8").splitlines()
+    # both installs went through the proxy with corepack offline; the pin did not
+    for line in lines[:2]:
+        assert line.startswith("npm ci ") and "proxy=http://127.0.0.1:40123" in line
+        assert "corepack=0" in line
+    assert lines[2].startswith("npm test ") and "proxy=unset" in lines[2]
+
+
+def test_the_uv_prime_reaches_only_the_baseline_index_hosts(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The uv twin: pypi.org, files.pythonhosted.org and the indexes the
+    baseline uv.lock names — never allow-all. Council round 3 (N2): a
+    baseline `source = { git = ... }` host counts too (host only), or every
+    repo with a git dependency could never prime."""
+    from skep.supervisor import sandbox
+
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    (repo / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "dep"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.example.org/simple" }\n'
+        '[[package]]\nname = "gitdep"\nversion = "0.1"\n'
+        'source = { git = "https://git.example.com/x/gitdep?rev=main#abc123" }\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "pyproject.toml", "uv.lock")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "uv project")
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _uv_stub(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    hosts = ("files.pythonhosted.org", "git.example.com", "pypi.example.org", "pypi.org")
+    assert wall.proxies == [hosts]
+    assert wall.profiles["reverify.profile.prime.sb"]["network"] == sandbox.NetworkPolicy(
+        allow=hosts
+    )
+
+
+def test_the_verify_profile_keeps_the_node_cache_read_only(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 2 (LOW, I2): patch code ran offline with the shared Node
+    cache writable, so a never-landed patch could poison later verdicts. The
+    verify profile reads it only; npm's logs go to the re-verify tmp dir."""
+    _node_project(repo)
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _node_stubs(tmp_path)
+    node_cache = tmp_path / "cache" / "node"
+    uv_cache = tmp_path / "cache" / "uv"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+        node_cache_dir=node_cache,
+        uv_cache_dir=uv_cache,
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    verify = wall.profiles["reverify.profile.sb"]
+    assert node_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
+    assert uv_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
+    assert node_cache in list(verify["extra_readable"])  # type: ignore[call-overload]
+    prime = wall.profiles["reverify.profile.prime.sb"]
+    assert node_cache in list(prime["extra_writable"])  # type: ignore[call-overload]
+    prime_line, pin_line = log.read_text(encoding="utf-8").splitlines()
+    # pnpm hard-links its store into node_modules, which the verify step can
+    # write: the prime copies instead, so the store stays out of patch reach.
+    assert "import=copy" in prime_line
+    assert pin_line.startswith("npm test ") and ".reverify-tmp" in pin_line.split("logs=")[1]
+
+
+def test_the_verify_step_never_writes_a_uv_cache_a_later_prime_reads(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 3 (HIGH, I2/G10): uv installs cached files without
+    re-checking them, and the verify step (patch code, offline) kept the
+    shared uv cache writable — a never-landed patch could poison what every
+    later re-verify installs. The verify step now gets a throwaway cache
+    (uv cannot run on a read-only one: it takes a lock there) and the prime
+    copies files into the venv, so no venv file is a hard link into the cache."""
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _uv_stub(tmp_path)
+    uv_cache = tmp_path / "cache" / "uv"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+        uv_cache_dir=uv_cache,
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    verify = wall.profiles["reverify.profile.sb"]
+    assert uv_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
+    assert uv_cache in list(wall.profiles["reverify.profile.prime.sb"]["extra_writable"])  # type: ignore[call-overload]
+    prime_line, pin_line = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={uv_cache} " in prime_line and "link=copy" in prime_line
+    assert str(uv_cache) not in pin_line and ".reverify-tmp" in pin_line
+    assert "offline=1" in pin_line
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (_new_file_diff("pnpm-workspace.yaml", "packages: ['../*']"), "pnpm-workspace.yaml"),
+        (_new_file_diff("sub/.yarnrc", 'yarn-path "../x.js"'), "sub/.yarnrc"),
+        (_new_file_diff(".pnpmfile.mjs", "export default {}"), ".pnpmfile.mjs"),
+    ],
+)
+def test_a_patch_that_moves_installer_config_is_never_installed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, extra: str, reason: str
+) -> None:
+    """Council round 2 (HIGH): the re-prime installs the patched lockfile, so
+    the patch must leave every installer config alone — otherwise nothing is
+    installed and the verdict is unavailable (with the reason). Where the
+    packages come from is the registry-only proxy's job, not a parser's."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    patch = _node_lock_bump_patch(tmp_path, extra=extra)
+    outcome = _node_reverify(repo, config, patch, bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert reason in outcome.detail and "was not run" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and "patched=no" in lines[0]  # the baseline prime only
+
+
+def test_a_patch_that_changes_package_manager_is_never_installed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """A changed `packageManager` is a different installer (corepack would
+    fetch and run it), so the re-prime refuses it."""
+    manifest = '{"name": "x", "devDependencies": {"jest": "1.0.0"}, "packageManager": "yarn@4.0.0"}'
+    reason = "packageManager"
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    patch = tmp_path / "manifest.patch"
+    patch.write_text(
+        "diff --git a/package.json b/package.json\n"
+        "--- a/package.json\n"
+        "+++ b/package.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n'
+        f"+{manifest}\n",
+        encoding="utf-8",
+    )
+    outcome = _node_reverify(repo, config, patch, bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert reason in outcome.detail and "was not run" in outcome.detail
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_patch_to_the_baseline_yarn_path_target_is_never_installed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """yarn v1 runs the file a `.yarnrc` `yarn-path` names — outside `.yarn/`
+    a patch could rewrite it and the re-prime would run it with the network."""
+    _node_project(repo, "yarn.lock")
+    (repo / ".yarnrc").write_text('yarn-path "tools/yarn.js"\n', encoding="utf-8")
+    git(repo, "add", ".yarnrc")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "yarnrc")
+    bin_dir, log = _node_stubs(tmp_path)
+    patch = tmp_path / "yarn-path.patch"
+    patch.write_text(
+        "diff --git a/yarn.lock b/yarn.lock\n"
+        "--- a/yarn.lock\n"
+        "+++ b/yarn.lock\n"
+        "@@ -1 +1 @@\n"
+        f"-{_npm_lock('1.0.0')}\n"
+        f"+{_npm_lock('2.0.0')}\n" + _new_file_diff("tools/yarn.js", "fetch('https://x')"),
+        encoding="utf-8",
+    )
+    outcome = _node_reverify(repo, config, patch, bin_dir, log, "yarn test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "tools/yarn.js" in outcome.detail
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_bare_node_pin_without_a_lockfile_runs_unprimed_and_says_so(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """Council round 2: the bare-`node` trigger made `node --test` in a repo
+    with dependencies but no lockfile unavailable forever. It runs unprimed
+    and the record says why; npm/pnpm/yarn pins keep the refusal."""
+    _node_project(repo, lockfile=None)
+    bin_dir, log = _node_stubs(tmp_path)
+    pin = "node --test tests/a.test.mjs"
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    assert "unprimed" in outcome.detail and "no lockfile" in outcome.detail
+    assert log.read_text(encoding="utf-8").splitlines()[0].startswith(f"{pin} ")
+
+
+def _first_deps_patch(tmp_path: Path, *, lockfile: bool) -> Path:
+    patch = tmp_path / "first-deps.patch"
+    body = (
+        "diff --git a/package.json b/package.json\n"
+        "--- a/package.json\n"
+        "+++ b/package.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"name": "x"}\n'
+        '+{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n'
+    )
+    if lockfile:
+        body += _new_file_diff("package-lock.json", _npm_lock("1.0.0"))
+    patch.write_text(body + _new_file_diff("patched_marker.txt", "patched"), encoding="utf-8")
+    return patch
+
+
+def _dependency_free_node_repo(repo: Path) -> None:
+    (repo / "package.json").write_text('{"name": "x"}\n', encoding="utf-8")
+    git(repo, "add", "package.json")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "bare node")
+
+
+def test_a_patch_adding_the_first_dependencies_is_primed_from_its_lockfile(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """Council round 2: the baseline had nothing to prime, so a patch adding
+    the first dependencies and a lockfile ran with no node_modules and was
+    recorded FAILED. It is a lockfile change: validated, then primed."""
+    _dependency_free_node_repo(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(
+        repo, config, _first_deps_patch(tmp_path, lockfile=True), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert "primed against the patched lockfile" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("npm ci --ignore-scripts ") and "patched=yes" in lines[0]
+    assert lines[1].startswith("npm test ")
+
+
+def test_a_patch_adding_dependencies_without_a_lockfile_is_unavailable_not_failed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _dependency_free_node_repo(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(
+        repo, config, _first_deps_patch(tmp_path, lockfile=False), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "no lockfile" in outcome.detail and "was not run" in outcome.detail
+    assert not log.exists()
+
+
+def test_a_patch_adding_a_new_uv_lock_is_primed_against_it(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """One helper for "what did the patch touch": `git diff` missed a NEW
+    (untracked) uv.lock, so a patch that adds the first lockfile was verified
+    against the baseline's resolution."""
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    bin_dir, log = _uv_stub(tmp_path)
+    patch = tmp_path / "new-lock.patch"
+    patch.write_text(
+        _new_file_diff("uv.lock", 'version = 1\n[[package]]\nname = "dep"')
+        + _new_file_diff("patched_marker.txt", "patched"),
+        encoding="utf-8",
+    )
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert "re-primed against the patched lockfile" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert [line.split()[0] for line in lines] == ["sync", "sync", "run"]
+
+
+def test_the_prime_wall_bridges_and_cleans_up_on_bubblewrap(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On bubblewrap the prime's proxy also listens on a unix socket the netns
+    reaches through netshim; its directory is removed afterwards (ES-F257)."""
+    from skep.supervisor import dispatch, sandbox
+
+    _node_project(repo)
+    wall = _RecordingWall(monkeypatch)
+    bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    socket = wall.profiles["reverify.profile.prime.sb"]["unix_socket_path"]
+    assert isinstance(socket, str) and socket.startswith(str(root))
+    assert list(root.iterdir()) == []
+
+
+# --- v127-A0 review (council round 3) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["proxy", "sandbox_unavailable", "allowlist_unsupported"],
+)
+def test_a_prime_wall_that_cannot_start_is_unavailable_not_a_crash(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Council round 3 (N3): an OSError from the prime's proxy or a refused
+    prime profile escaped reverify() — G10 crashed instead of saying it could
+    not prime. Now it is "unavailable", nothing ran, and the reason rides."""
+    import importlib
+
+    from skep.supervisor import sandbox
+
+    _node_project(repo)
+    wall = _RecordingWall(monkeypatch)
+    module = importlib.import_module("skep.supervisor.reverify")
+    errors = {
+        "proxy": OSError("cannot bind the prime proxy"),
+        "sandbox_unavailable": sandbox.SandboxUnavailableError("no prime wall"),
+        "allowlist_unsupported": sandbox.SandboxAllowlistUnsupported("no domain list here"),
+    }
+    if failure == "proxy":
+
+        class Broken:
+            def __init__(self, *_a: object, **_kw: object) -> None:
+                raise errors["proxy"]
+
+        monkeypatch.setattr(module, "FilteringProxy", Broken)
+    else:
+        recorded = sandbox.write_profile
+
+        def refuse(path: Path, **kwargs: object) -> Path:
+            if path.name.endswith(".prime.sb"):
+                raise errors[failure]
+            return recorded(path, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sandbox, "write_profile", refuse)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert outcome.exit_codes == []
+    assert str(errors[failure]) in outcome.detail and "was not run" in outcome.detail
+    assert not log.exists()
+    assert wall.profiles.get("reverify.profile.sb") is None
+    _no_leftovers(repo, config)
+
+
+def test_a_proxy_that_fails_to_stop_never_skips_the_rest_of_the_cleanup(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 3 (N4): the finally stopped the loopback proxy, then
+    closed the prime wall — a stop() that raised skipped the wall, leaving
+    its proxy running and its bridge socket dir behind. Every cleanup runs."""
+    import importlib
+
+    from skep.supervisor import dispatch, sandbox
+
+    _node_project(repo)
+    _RecordingWall(monkeypatch)
+    module = importlib.import_module("skep.supervisor.reverify")
+    bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
+    stops: list[str] = []
+
+    class Proxy:
+        port = 40000
+
+        def __init__(self, _allow: object, *, unix_socket_path: str, **_kw: object) -> None:
+            self.unix_socket_path = unix_socket_path
+
+        def start(self) -> Proxy:
+            return self
+
+        def stop(self) -> None:
+            stops.append(self.unix_socket_path)
+            raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(module, "FilteringProxy", Proxy)
+    bin_dir, log = _node_stubs(tmp_path)
+    with pytest.raises(RuntimeError):
+        reverify(
+            repo=repo,
+            ref=None,
+            patch_path=_patch_adding_marker(tmp_path),
+            commands=["npm test"],
+            config=config,
+            profile_path=tmp_path / "reverify.profile.sb",
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+            loopback_ports=(5432,),
+        )
+    assert len(stops) == 2  # the loopback proxy AND the prime wall's
+    assert list(root.iterdir()) == []
+    _no_leftovers(repo, config)
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["CI=1 npm test", "cd . && npm test", "env FORCE_COLOR=0 npm test", "true; npm test | cat"],
+)
+def test_a_node_pin_behind_env_or_another_command_is_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str
+) -> None:
+    """Council round 3 (N6): pin detection read only the first word, so
+    `CI=1 npm test` and `cd web && npm test` ran with no node_modules."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    assert log.read_text(encoding="utf-8").splitlines()[0].startswith("npm ci --ignore-scripts ")
+
+
+def test_a_uv_pin_behind_env_is_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    bin_dir, log = _uv_stub(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["PYTHONHASHSEED=0 uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert [line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()] == [
+        "sync",
+        "run",
+    ]
+
+
+def test_the_corepack_hint_matches_what_real_corepack_prints_offline() -> None:
+    """v127 council round 7: with a read-only COREPACK_HOME, real corepack
+    0.34.5 says "Failed to create cache directory" for an uncached version,
+    not the network message — the hint must fire on that text too."""
+    from skep.supervisor.reverify import _corepack_missing
+
+    real = "Internal Error: Failed to create cache directory (/home/u/.cache/node/corepack/v1)"
+    hint = _corepack_missing("yarn install --frozen-lockfile", real, "yarn@1.22.22")
+    assert hint == (
+        "yarn via corepack is not installed on this host "
+        "(run `corepack prepare yarn@1.22.22 --activate`)"
+    )
+    assert _corepack_missing("yarn install", "some other failure", None) == ""

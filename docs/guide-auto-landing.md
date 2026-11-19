@@ -5,8 +5,8 @@
      under ~/.cache, using the built-in worker with no model configured (it can only
      write hello.py). Output is pasted as printed, with these rewrites: temporary
      repository paths became /home/you/code/..., the temporary home became
-     /home/you/.skep. Lines left out are marked "...". The one lane that could not be
-     exercised end to end is named where it appears. -->
+     /home/you/.skep. Lines left out are marked "...". The refusals added after 1.4.2 (a
+     known-vacuous pin, a patch touching the test setup) are from code. -->
 
 By default a finished run waits for you: nothing is applied to your repository
 until you run `skep review <task_id> --approve`. This guide is for someone who
@@ -27,20 +27,23 @@ only ever writes a `skep/...` branch. Merging it is still yours.
 - For the `--unlocked` switch only: an approved policy baseline
   (`skep policy approve --template builder`, or `skep onboard`).
 
-## The two lanes
+## The lane
 
 | Lane | Lands | Requires |
 |---|---|---|
 | `verified-patch` | any diff | the worker reported `passed`; skep's re-run of the **pinned** verify command passed; no risk flags |
-| `deps-safe` | a diff that touches only dependency manifests and lockfiles, at most 10 files | the worker reported `passed`; skep's re-run passed (pinned or not); no risk flags |
+
+`--auto-approve` used to switch on a second, dependency-only lane
+(`deps-safe`). It is retired: `skep run`, `skep tick` and `skep serve` still
+accept it for one release, print a note, and land nothing because of it.
 
 <!-- src/skep/supervisor/policy.py:44-76 (the two rules), :100-126 (why a rule does not
      apply), src/skep/supervisor/dispatch.py:1073-1102 (which rules a run gets). -->
 
-Both lanes record an approval whose actor is `auto:<lane>`, so the record
-always says a rule approved it and which one.
+The lane records an approval whose actor is `auto:verified-patch`, so the
+record always says a rule approved it and which one.
 
-## Lane 1: `verified-patch`
+## Switching on `verified-patch`
 
 There are three ways to switch it on. All three are per project.
 
@@ -158,43 +161,6 @@ it when the policy is resolved (which is why `skep project show` can print
 `"auto_apply_verified_patch": false` next to `"unlocked": true` and the run
 still lands).
 
-## Lane 2: `deps-safe` (`--auto-approve`)
-
-```sh
-skep run ~/code/loose "Write a Python hello world script" --execution-mode sandbox --auto-approve
-```
-
-`--auto-approve` exists on `skep run`, `skep tick` and `skep serve`. It lands a
-confirmed patch only when every changed file matches one of:
-
-```text
-requirements.txt  requirements*.txt  constraints.txt  uv.lock  poetry.lock
-Pipfile.lock  package-lock.json  yarn.lock  *.lock
-```
-
-and no more than 10 files changed. It does not need a pinned verify command.
-
-Two things to know, both reproduced:
-
-- **The project's policy wins over the flag.** In a project where
-  `auto_apply_verified_patch` is `false` (the `build` phase default),
-  `--auto-approve` lands nothing. The first line of the run says so:
-  `landing: require_approval landing.require_approval.project_policy_disabled_auto_apply`.
-  The flag acts on a repository that is not a project
-  (`landing: allow landing.auto_apply.global_policy_rules`), and alongside
-  `verified-patch` in a project where auto-landing is on.
-- **A diff outside the list is left for you.** The built-in worker's
-  `hello.py` patch under `--auto-approve` was confirmed and then not landed;
-  the reason recorded for the run was
-
-  ```text
-  {"auto_apply_blocked": {"deps-safe": "files outside diff scope ['requirements.txt', 'requirements*.txt', 'constraints.txt', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'package-lock.json', 'yarn.lock', '*.lock']: ['hello.py']"}}
-  ```
-
-A `deps-safe` landing itself (a real manifest-only diff) was not exercised for
-this guide: it needs a worker with a model. The rule is
-`src/skep/supervisor/policy.py:59-67`.
-
 ## What auto-landing still refuses
 
 Each of these leaves the run `completed` and waiting for
@@ -207,11 +173,12 @@ Each of these leaves the run `completed` and waiting for
 | A worker that did not report `passed` | `verification is '<outcome>', not 'passed'` |
 | `verified-patch` on an unpinned project | `the project pins no verify_command, so re-verification re-ran the command the worker chose for itself — set verify_command in the project policy to auto-land (v88-F4); the patch is still landable by hand` |
 | A run with risk flags | `risk flags present: [...]` |
+| A pin that is known-vacuous (`true`, `git diff --check`, ...), or a patch that touches the test setup or a file the pin runs | named in the run's `auto_apply_blocked` record; the full list is in [`verification.md`](verification.md#current-limits) |
 | A run that changed nothing | `no changed files to apply` |
 | A branch that moved past the commit skep verified | `<branch> is at <sha>, past the commit re-verified (<sha>); land it by hand` |
 
 <!-- Reproduced on 2026-11-18: the unpinned-project row (a maintain-phase project with
-     no verify command), "no changed files to apply", and the out-of-scope row above.
+     no verify command) and "no changed files to apply".
      From code, not reproduced: the other rows, src/skep/supervisor/policy.py:100-126
      and :213-233; the skep/<name> rule, src/skep/supervisor/projects.py:170-190. -->
 
@@ -248,7 +215,7 @@ Branches that already landed stay where they are. Delete `skep/maintain` or a
 
 | What you see | Cause | Fix |
 |---|---|---|
-| `landing: require_approval …project_policy_disabled_auto_apply` although you passed `--auto-approve` | the project's policy has `auto_apply_verified_patch: false` | change the phase or the key; the flag does not override a project |
+| `--auto-approve has no effect: ...` on stderr, and nothing landed | the flag is retired | switch the project on (maintain phase, `--unlocked` or `auto_apply_verified_patch`) and pin a real check |
 | a confirmed run in a maintain project did not land | no pinned verify command | pin one; `skep doctor` lists such projects under Advisories |
 | `unlocked=true needs an approved policy baseline` | fresh home | `skep policy approve --template builder` |
 | the second identical run shows `re-verify: unavailable … claimed 1 changed file(s) but deposited no patch artifact` | it started from `skep/maintain`, where the change already exists, so there was nothing to patch | nothing to fix; the work is already on the branch |

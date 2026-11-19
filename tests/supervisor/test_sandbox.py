@@ -584,3 +584,29 @@ def test_a_zsh_here_document_runs_inside_the_worker_wall(tmp_path: Path) -> None
     proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=30)
     assert proc.returncode != 0
     assert "here document" in proc.stderr
+
+
+def test_a_runtime_dir_temp_fallback_works_inside_the_worker_wall(tmp_path: Path) -> None:
+    """v127-A0 trial fix (V01): skep's own suite makes its temp dirs under
+    $XDG_RUNTIME_DIR, else /tmp — and /tmp is outside the Seatbelt wall, so
+    every test of a correct patch ERRORed at setup in re-verify. The in-wall
+    temp env names XDG_RUNTIME_DIR too; /tmp stays closed."""
+    workspace = tmp_path / "ws"
+    tmp = workspace / "tmp"
+    tmp.mkdir(parents=True)
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb", workspace=workspace, skep_home=tmp_path / "skep"
+    )
+    code = (
+        "import os, tempfile; "
+        "tempfile.mkdtemp(prefix='skt-', dir=os.environ.get('XDG_RUNTIME_DIR') or '/tmp')"
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", code], profile)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **sandbox.in_wall_tmp_env(tmp)}
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert any(p.name.startswith("skt-") for p in tmp.iterdir())
+
+    env.pop("XDG_RUNTIME_DIR")
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=30)
+    assert proc.returncode != 0 and "PermissionError" in proc.stderr

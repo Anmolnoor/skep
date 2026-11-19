@@ -124,11 +124,12 @@ def write_boot_banner(log_path: Path, banner: str) -> None:
 def cmd_serve(args: argparse.Namespace) -> int:
     # Lazy imports: registering the parser must not pay the FastAPI import cost
     # for every other CLI invocation.
-    from ..cli_cmds import build_config
+    from ..cli_cmds import build_config, note_retired_auto_approve
 
     # v111-F1: before anything reads the process env — engine auth rides it.
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
-    config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
+    note_retired_auto_approve(args)
+    config = build_config(args.home, args.worker_cmd)
     # ADR 0060 §6: the kill switch for restart re-adoption — the flag, or
     # SKEP_READOPT_WORKERS=0 in the environment or serve.env (loaded above,
     # read by build_config).
@@ -207,6 +208,8 @@ def make_server(app: Any, **config: Any) -> Any:
 def register_serve_command(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
+    from ..cli_cmds import AUTO_APPROVE_HELP  # loaded already: it builds this parser
+
     serve = subcommands.add_parser("serve", help="run the HTTP API daemon (v5)")
     serve.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
     serve.add_argument("--port", type=int, default=8765, help="HTTP bind port")
@@ -218,7 +221,7 @@ def register_serve_command(
     serve.add_argument(
         "--auto-approve",
         action="store_true",
-        help="activate D3: auto-apply safe manifest-only fixes (U1)",
+        help=AUTO_APPROVE_HELP,
     )
     serve.add_argument(
         "--no-readopt",

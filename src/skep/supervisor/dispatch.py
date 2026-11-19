@@ -58,6 +58,7 @@ from skep.worker_contract import (
 
 from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_commit
 from .autonomy import AutonomyDecision, AutonomyVerdict
+from .castes import CASTES, resolve_caste
 from .config import SupervisorConfig
 from .contracts_io import (
     DEFAULT_BUDGET,
@@ -113,7 +114,7 @@ def sandbox_backend() -> str | None:
     return sandbox_availability().backend
 
 
-def _proxy_socket_root() -> str:
+def proxy_socket_root() -> str:
     """A short dir for the proxy's AF_UNIX socket (108-char path limit).
 
     NEVER the test-redirected TMPDIR (bwrap tmpfs-masks it and it can be long);
@@ -402,6 +403,10 @@ def run_task(
     skep's own worker. An EXTERNAL engine's own commands do not pass the
     capability layer — the sandbox is what confines it.
     """
+    # v127-F11 (I9): the funnel for every face that skips submit_run (CLI run,
+    # scheduler tick, resume, batch) — an unknown or retired caste is refused
+    # here, before a run row exists, never routed to the coding worker (v42).
+    resolve_caste(worker_kind)
     owns_store = store is None
     run_store = store if store is not None else RunStore(config.db_path)
     proxy: FilteringProxy | None = None
@@ -490,6 +495,15 @@ def run_task(
             f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
         )
         execution_mode = "sandbox"
+    if execution_mode != "sandbox" and getattr(CASTES.get(worker_kind), "needs_network", False):
+        # v127-F7 (v94-F4 pattern): a fetching caste reaches the web with its
+        # own urllib — no capability gate sees it, the sandbox's egress pin is
+        # its only wall. The resolver coerces; this covers resume and flags.
+        raise ValueError(
+            f"the {worker_kind} caste fetches from the web and only the sandbox confines "
+            f"it — it never runs in {execution_mode!r} mode; dispatch it with execution "
+            "mode 'sandbox' (no usable sandbox here? `skep doctor` names the fix)"
+        )
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the
@@ -832,7 +846,7 @@ def run_task(
                 and domains != ("*",)
             ):
                 # AF_UNIX 108-char limit: a short host dir, cleaned in finally.
-                proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
+                proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
                 # D6: loopback only on the run's ports; ES-F6 (B05): never on
@@ -884,7 +898,12 @@ def run_task(
         # provider env above.
         from .policy_resolver import project_cache_root
 
-        cache_root = project_cache_root(run_store, config, repo)
+        # v127-A0 review (council round 3, I2/G10): the worker's half of the
+        # project cache root only. Re-verify primes from a sibling
+        # (``reverify/``) this sandbox never mounts — uv installs cached files
+        # without re-checking them, so a worker that could write it could
+        # poison what G10 installs and confirm any patch.
+        cache_root = project_cache_root(run_store, config, repo) / "worker"
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         if codex_auth is not None:
             # ES-F122 (D20): the run's own login copy — in its audit dir, which
@@ -1384,7 +1403,7 @@ def recover_interrupted_runs(
         worker = _recorded_worker(run_store, task_id)
         if worker is not None and worker[4]:
             held.add(Path(worker[4]).parent)
-    for stale in Path(_proxy_socket_root()).glob("skep-nx-*"):
+    for stale in Path(proxy_socket_root()).glob("skep-nx-*"):
         with suppress(OSError):
             if (
                 stale not in held

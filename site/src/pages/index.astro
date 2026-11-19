@@ -273,10 +273,10 @@ const comparisons = [
         </div>
         <Callout kind="limit" title="Auto-landing exists. It is opt-in.">
           <p>
-            Two lanes land without a click when you switch them on: <code>verified-patch</code> (the maintain
-            phase, <code>--unlocked</code>, or <code>auto_apply_verified_patch</code>) and
-            <code>--auto-approve</code> for dependency-only diffs. Both land only a re-verified patch, only on
-            a <code>skep/*</code> branch, and record the approval as <code>auto:&lt;rule&gt;</code>.
+            One lane lands without a click when you switch it on: <code>verified-patch</code> (the maintain
+            phase, <code>--unlocked</code>, or <code>auto_apply_verified_patch</code>), with a pinned verify
+            command. It lands only a re-verified patch, only on a <code>skep/*</code> branch, and records the
+            approval as <code>auto:verified-patch</code>.
           </p>
         </Callout>
       </li>

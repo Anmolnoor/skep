@@ -232,8 +232,8 @@ Three things to know before choosing this over the wrapper:
 <!-- src/skep/supervisor/scheduler.py:958-972 passes no coding_engine to the dispatch;
      src/skep/supervisor/cli_cmds.py:2262-2281 is `skep tick`, which always returns 0. -->
 
-`skep tick --auto-approve` switches on the dependency-only auto-landing lane
-for scheduled runs.
+`skep tick --auto-approve` is retired: it is still accepted, prints a note,
+and lands nothing.
 
 ## What a running `skep serve` does by itself
 

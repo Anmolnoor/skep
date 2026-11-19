@@ -33,13 +33,12 @@ from .autonomy import (
     resume_after_approval_decision,
     run_request_resolved_decision,
 )
-from .castes import caste_worker_commands
+from .castes import caste_names, caste_worker_commands
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
 from .engines import engine_names
 from .github import default_pr_body, default_pr_title, open_pull_request
-from .policy import SAFE_DEPENDENCY_RULE
 from .policy_resolver import PolicyResolutionError, ResolvedRunPolicy, resolve_run_policy
 from .projects import (
     list_projects,
@@ -167,9 +166,26 @@ def _usage_summary(usage: UsageRecord) -> str:
     return ", ".join(parts)
 
 
-def build_config(
-    home: Path, worker_cmd: str | None, *, auto_approve: bool = False
-) -> SupervisorConfig:
+# v127-F5 round 3: `--auto-approve` installed deps-safe, which needs the
+# project's pin since round 2 — so it could only land where the project's own
+# auto_apply_verified_patch lands anyway. Accepted for one release, then removed.
+AUTO_APPROVE_RETIRED = (
+    "--auto-approve has no effect: a patch lands without a click only when the project "
+    "turns on auto_apply_verified_patch (maintain phase or unlocked turn it on) and pins "
+    "a real check"
+)
+AUTO_APPROVE_HELP = (
+    "no effect (retired): a patch lands without a click only when the project turns on "
+    "auto_apply_verified_patch and pins a real check"
+)
+
+
+def note_retired_auto_approve(args: argparse.Namespace) -> None:
+    if getattr(args, "auto_approve", False):
+        print(AUTO_APPROVE_RETIRED, file=sys.stderr)
+
+
+def build_config(home: Path, worker_cmd: str | None) -> SupervisorConfig:
     home = home.expanduser().resolve()
     command = worker_cmd or os.environ.get("SKEP_WORKER_CMD") or DEFAULT_WORKER_CMD
     return SupervisorConfig(
@@ -180,8 +196,6 @@ def build_config(
         # that lived here is now castes.CASTES — five surfaces kept their own
         # copy of this roster and all five had diverged (ADR 0049).
         caste_worker_commands=caste_worker_commands(),
-        # D3 active: opt in to auto-applying safe manifest-only fixes (U1).
-        auto_approval_rules=(SAFE_DEPENDENCY_RULE,) if auto_approve else (),
         # ADR 0060 §6: the kill switch reaches CLI-started runs too (no keeper).
         readopt_workers=os.environ.get(READOPT_ENV) != "0",
     )
@@ -586,6 +600,8 @@ def _print_project_setup_summary(result: dict[str, Any], *, preview: bool) -> No
     # D6: loopback is closed to workers unless the project lists the port.
     ports = ", ".join(str(p) for p in (policy or {}).get("loopback_ports") or [])
     print(f"  loopback ports: {ports or 'closed (--loopback-port PORT opens one)'}")
+    for note in result.get("notes") or []:
+        print(f"  note: {note}")
 
 
 def _status_autonomy_summary(task: CodingWorkerTask | None) -> str:
@@ -726,7 +742,8 @@ def _unique_template_name(store: RunStore, base: str) -> str:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
+    note_retired_auto_approve(args)
+    config = build_config(args.home, args.worker_cmd)
     matched_template: WorkflowTemplate | None = None
     if args.template and args.minimal:
         return _err("--minimal cannot be combined with --template.")
@@ -891,10 +908,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 return answer
             permissions, answered = _preanswer(permissions, answer)
     except PolicyResolutionError as exc:
-        return _err(
-            str(exc),
-            next_command='skep run <repo> "<instructions>" --execution-mode workspace',
-        )
+        # v127-T4 (trial V14): the refusal's own next step — this once said
+        # `--execution-mode workspace` under every refusal, the vacuous-pin one too.
+        return _err(str(exc), next_command=exc.next_command)
     finally:
         store.close()
 
@@ -1012,8 +1028,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     elapsed = time.monotonic() - started
     print(f"task {record.task_id}")
     print(f"  state:        {record.state} ({elapsed:.1f}s)")
-    print(f"  verification: {record.verification_outcome or '-'}")
-    print(f"  summary:      {record.summary or '-'}")
+    print("\n".join(_verification_lines(config, record)))
     print(f"  evidence:     {config.audit_dir / record.task_id}")
     if record.state == "pending_approval":
         inline_code = _prompt_inline_approval(config, record)
@@ -1023,6 +1038,36 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif record.state == "completed":
         print(f"  next:         skep review {record.task_id}")
     return STATE_EXIT_CODES.get(record.state, 3)
+
+
+def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str]:
+    """v127-T3 (I8, trial V01/V13): once G10 re-ran the patch its verdict is
+    the verification line; the worker's own check (`git diff --check` for an
+    external engine) is shown as the worker's claim, never as the verdict."""
+    store = RunStore(config.db_path)
+    try:
+        rv = store.reverification_for(record.task_id)
+    finally:
+        store.close()
+    claim = f"{record.verification_outcome or '-'} — {record.summary or '-'}"
+    if rv is None or rv.outcome == "not_applicable":
+        return [
+            f"  verification: {record.verification_outcome or '-'}",
+            f"  summary:      {record.summary or '-'}",
+        ]
+    if rv.confirmed:
+        verdict = "confirmed by re-verify (G10)"
+    elif rv.outcome == "unavailable":
+        verdict = "unavailable — re-verify (G10) could not run, NOT CONFIRMED"
+    else:
+        verdict = "NOT CONFIRMED by re-verify (G10)"
+    # Round 7 (I8): only a passed/failed outcome means the pin itself ran; a
+    # failed install stores the INSTALLER's exit code beside it.
+    if rv.exit_codes and rv.outcome in ("passed", "failed"):
+        how = f"re-ran {'; '.join(rv.commands)} → exit {', '.join(map(str, rv.exit_codes))}"
+    else:
+        how = rv.detail.splitlines()[0] if rv.detail else "no command re-ran"
+    return [f"  verification: {verdict} — {how}", f"  worker claim: {claim}"]
 
 
 def _answer_hosts(
@@ -1801,7 +1846,7 @@ def _resume_claimed_gate(
         )
     print(f"resumed: {record.task_id} -> {new.task_id}")
     print(f"  state:        {new.state}")
-    print(f"  verification: {new.verification_outcome or '-'}")
+    print("\n".join(_verification_lines(config, new)))
     print(f"  evidence:     {config.audit_dir / new.task_id}")
     if remembered_template is not None:
         action, name = remembered_template
@@ -1937,8 +1982,8 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     once=args.once,
                     role=args.role,
                 )
-            except ValueError as exc:
-                return _err(str(exc))
+            except ValueError as exc:  # v127-F11: a retired caste
+                return _err(str(exc), next_command="skep schedule add ... --caste coding")
             refusal = _schedule_role_refusal(config, store, schedule)
             if refusal is not None:
                 return refusal
@@ -2267,9 +2312,8 @@ def cmd_provider_health(args: argparse.Namespace) -> int:
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    config = build_config(
-        args.home, getattr(args, "worker_cmd", None), auto_approve=args.auto_approve
-    )
+    note_retired_auto_approve(args)
+    config = build_config(args.home, getattr(args, "worker_cmd", None))
     if not config.db_path.is_file():
         print("no schedules to run")
         return 0
@@ -2544,6 +2588,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     unlocked = getattr(args, "unlocked", None)
     if unlocked is not None:
         overrides["unlocked"] = bool(unlocked)
+    execution_mode = getattr(args, "execution_mode", None)
+    if execution_mode:  # v127-F8: the doctor's fix line needs a CLI face
+        overrides["default_execution_mode"] = execution_mode
     return overrides
 
 
@@ -2594,23 +2641,24 @@ def cmd_project_setup(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         # A re-run that names no pack or strategy (`--loopback-port N` alone)
-        # updates the project as it stands, never resets its phase to build.
+        # updates the project as it stands, never resets its phase to build;
+        # setup_project_record takes its stored strategy and pack (v127-F10).
         stored = store.get_project_policy(project_id)
-        keep = stored is not None and args.pack is None and args.strategy is None
         result = setup_project_record(
             run_store=store,
             root=_project_root(config),
             project_id=project_id,
             name=name,
-            strategy=stored.strategy if keep and stored else args.strategy,
+            strategy=args.strategy,
             phase=args.phase or (stored.phase if stored else "build"),
-            pack_name=stored.pack_name if keep and stored else args.pack,
+            pack_name=args.pack,
             repo_path=str(repo),
             repo_slug=_managed_repo_slug(repo, config),
             template_names=[],
             policy_overrides=_project_policy_overrides(args),
             seed_default_schedules=not args.no_seed_schedules,
             seed_shell_commands=not args.no_seed_commands,
+            from_shell=True,
         )
     except HTTPException as exc:
         return _err(_http_error_detail(exc))
@@ -3328,7 +3376,7 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
         return _err(f"no project named {args.project_id!r}.", next_command="skep project list")
     store = RunStore(config.db_path)
     try:
-        set_project_phase(store, args.project_id, args.phase)
+        moved = set_project_phase(store, args.project_id, args.phase)
     except HTTPException as exc:
         if exc.status_code == 404:
             return _err(str(exc.detail), next_command="skep project list")
@@ -3336,6 +3384,8 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(f"phase updated: {args.project_id} -> {args.phase}")
+    for note in moved.get("notes") or []:
+        print(f"  note: {note}")
     return 0
 
 
@@ -3419,7 +3469,7 @@ def register_supervisor_commands(
     run.add_argument(
         "--caste",
         default="coding",
-        help="worker caste (D2): 'coding' (default skep worker) or 'audit' (skep dep/audit bot)",
+        help=f"worker caste (D2): {', '.join(caste_names())}; default coding (the skep worker)",
     )
     run.add_argument("--resume-of", default=None, help="task_id this run supersedes (Q8)")
     run.add_argument(
@@ -3468,7 +3518,7 @@ def register_supervisor_commands(
     run.add_argument(
         "--auto-approve",
         action="store_true",
-        help="activate D3: auto-apply a verified, re-verified, risk-free manifest-only fix (U1)",
+        help=AUTO_APPROVE_HELP,
     )
     run.add_argument(
         "--planning-protocol",
@@ -3718,7 +3768,7 @@ def register_supervisor_commands(
     tick.add_argument(
         "--auto-approve",
         action="store_true",
-        help="activate D3: auto-apply safe manifest-only fixes from scheduled runs (U1)",
+        help=AUTO_APPROVE_HELP,
     )
     tick.set_defaults(func=cmd_tick)
 
@@ -3855,6 +3905,13 @@ def register_supervisor_commands(
         "refresh token (ES-F121; `skep doctor` shows the login); "
         "--no-codex-chatgpt-login turns it off",
     )
+    project_preview.add_argument(
+        "--execution-mode",
+        choices=("sandbox", "workspace"),
+        default=None,
+        help="where this project's workers run (v127-F8, ADR 0066): a new project "
+        "defaults to sandbox when this host can sandbox; an existing one keeps its own",
+    )
     project_preview.set_defaults(func=cmd_project_preview)
 
     project_setup = project_sub.add_parser("setup", help="save a project policy setup")
@@ -3928,6 +3985,13 @@ def register_supervisor_commands(
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",
+    )
+    project_setup.add_argument(
+        "--execution-mode",
+        choices=("sandbox", "workspace"),
+        default=None,
+        help="where this project's workers run (v127-F8, ADR 0066): a new project "
+        "defaults to sandbox when this host can sandbox; an existing one keeps its own",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 
