@@ -383,3 +383,90 @@ def test_an_external_engine_refuses_a_vacuous_pin(repo: Path, config: Supervisor
             )  # fmt: skip
     finally:
         store.close()
+
+
+# -- round 2: one behaviour on every save face ----------------------------------
+
+
+def _store_project(config: SupervisorConfig, repo: Path, policy: dict[str, object]) -> None:
+    """The operator's live `store`: maintain, auto-apply on, pinned to
+    `git diff --check` — saved before v127 refused that combination."""
+    _bind(config, repo, policy)
+
+
+def _editor_post(config: SupervisorConfig, repo: Path, policy: dict[str, object]) -> Any:
+    from .conftest import serve_client
+
+    return serve_client(config).post("/api/projects", json={
+        "project_id": "vac", "name": "vac", "strategy": "trusted_local_dev",
+        "phase": "maintain", "policy": policy,
+        "bindings": [{"kind": "repo_path", "value": str(repo)}],
+    })  # fmt: skip
+
+
+def test_the_web_editor_saves_other_keys_on_a_stored_vacuous_auto_apply(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    stored = {"auto_apply_verified_patch": True, "verify_command": "git diff --check"}
+    _store_project(config, repo, stored)
+    response = _editor_post(config, repo, {**stored, "default_execution_mode": "workspace",
+                                           "auto_dispatch_allowed": False})  # fmt: skip
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["policy"]["auto_dispatch_allowed"] is False
+    assert body["policy"]["auto_apply_verified_patch"] is False
+    assert any("auto-apply is off" in n and "known-vacuous" in n for n in body["notes"])
+
+
+@pytest.mark.parametrize("pin", ["git diff --check", None])
+def test_the_web_editor_refuses_turning_auto_apply_on_with_a_bad_pin(
+    repo: Path, config: SupervisorConfig, pin: str | None
+) -> None:
+    _store_project(config, repo, {"auto_apply_verified_patch": False})
+    policy: dict[str, object] = {"auto_apply_verified_patch": True}
+    if pin is not None:
+        policy["verify_command"] = pin
+    response = _editor_post(config, repo, policy)
+    assert response.status_code == 400
+    assert "auto_apply_verified_patch=true needs" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("route", ["setup", "preview"])
+def test_an_explicit_auto_apply_without_a_pin_is_refused(
+    repo: Path, config: SupervisorConfig, route: str
+) -> None:
+    response = _rest_setup(config, repo, route, phase="build",
+                           policy_overrides={"auto_apply_verified_patch": True})  # fmt: skip
+    assert response.status_code == 400
+    assert "pins no verify_command" in response.json()["detail"]
+
+
+def test_a_resetup_of_a_stored_vacuous_auto_apply_coerces(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    _store_project(config, repo, {"auto_apply_verified_patch": True,
+                                  "verify_command": "git diff --check"})  # fmt: skip
+    response = _rest_setup(config, repo, "setup", phase="maintain")
+    assert response.status_code == 201, response.text
+    assert response.json()["policy"]["auto_apply_verified_patch"] is False
+
+
+def test_an_unpinned_external_engine_keeps_the_plain_message(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.policy_resolver import PolicyResolutionError, resolve_run_policy
+
+    _bind(config, repo, {"coding_engine": "codex"})
+    store = RunStore(config.db_path)
+    try:
+        with pytest.raises(PolicyResolutionError) as raised:
+            resolve_run_policy(
+                store=store, config=config, repo=repo, caste="coding", network=None,
+                env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+                max_actions=None, max_provider_calls=None, execution_mode=None,
+            )  # fmt: skip
+    finally:
+        store.close()
+    message = str(raised.value)
+    assert "known-vacuous" not in message
+    assert "a check that cannot fail" in message and "--verify-command" in message

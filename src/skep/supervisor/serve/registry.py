@@ -628,38 +628,43 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
     return None
 
 
-def auto_apply_block_reason(policy: dict[str, Any]) -> str | None:
-    """v127-F5: why an explicit ``auto_apply_verified_patch=true`` may not be
-    saved, or None. The landing gate refuses a known-vacuous re-run anyway;
-    refusing here says so at the moment the operator asks for it (I9)."""
-    if policy.get("auto_apply_verified_patch") is not True:
-        return None
+_PIN_HINT = (
+    'pin the project\'s real check (`skep project setup <repo> --verify-command "<command>"`, '
+    "or verify_command in policy_overrides) — until then patches land by approval"
+)
+
+
+def _pin_problem(policy: dict[str, Any]) -> str | None:
+    """v127-F5: why the project's pin cannot carry an auto-landing — missing
+    or known-vacuous — or None."""
     pin = str(policy.get("verify_command") or "").strip()
-    vacuous = known_vacuous_verify(pin) if pin else None
-    if vacuous is None:
-        return None
-    return (
-        f"auto_apply_verified_patch=true needs a verify_command that is not known-vacuous: "
-        f"{vacuous}. Pin the project's real check (--verify-command, or verify_command in "
-        "policy_overrides), or leave auto-apply off — patches still land by approval."
-    )
+    return known_vacuous_verify(pin) if pin else "the project pins no verify_command"
+
+
+def auto_apply_block_reason(policy: dict[str, Any]) -> str | None:
+    """v127-F5: why a request that itself turns ``auto_apply_verified_patch``
+    on may not be saved, or None (I9: refused when asked, not at landing)."""
+    problem = _pin_problem(policy) if policy.get("auto_apply_verified_patch") is True else None
+    return problem and f"auto_apply_verified_patch=true needs a real check: {problem}; {_PIN_HINT}."
 
 
 def _coerce_auto_apply_default(policy: dict[str, Any], notes: list[str]) -> None:
-    """v127-F5: the maintain phase's auto-apply DEFAULT falls to false on a
-    missing or known-vacuous pin, with the reason (an explicit override is
-    ``auto_apply_block_reason``'s). ``store`` keeps working, by approval."""
-    if policy.get("auto_apply_verified_patch") is not True:
-        return
-    pin = str(policy.get("verify_command") or "").strip()
-    why = known_vacuous_verify(pin) if pin else "the project pins no verify_command"
-    if why is None:
-        return
-    policy["auto_apply_verified_patch"] = False
-    notes.append(
-        f"auto-apply is off: {why}. Patches land by approval until a real check is "
-        'pinned (`skep project setup <repo> --verify-command "<command>"`).'
-    )
+    """v127-F5: auto-apply the request did not turn on (a phase default, a
+    stored value) falls to false on a missing or known-vacuous pin, with a
+    note — so a save of other keys on `store` still works, by approval."""
+    problem = _pin_problem(policy) if policy.get("auto_apply_verified_patch") is True else None
+    if problem is not None:
+        policy["auto_apply_verified_patch"] = False
+        notes.append(f"auto-apply is off: {problem}; {_PIN_HINT}.")
+
+
+def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str]) -> None:
+    """The one save-face behaviour: refuse when the request turns auto-apply
+    on with a bad pin, coerce it off (with a note) otherwise."""
+    block = auto_apply_block_reason(policy) if requested else None
+    if block is not None:
+        raise HTTPException(status_code=400, detail=block)
+    _coerce_auto_apply_default(policy, notes)
 
 
 def _choose_strategy(
@@ -774,9 +779,7 @@ def _default_execution_mode(
 
 
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
-    block = unlocked_block_reason(run_store, project.policy) or auto_apply_block_reason(
-        project.policy
-    )
+    block = unlocked_block_reason(run_store, project.policy)
     if block is not None:
         raise HTTPException(status_code=400, detail=block)
     run_store.add_project_policy(
@@ -1186,8 +1189,11 @@ def setup_project_record(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
-    if "auto_apply_verified_patch" not in (policy_overrides or {}):
-        _coerce_auto_apply_default(base_policy, notes)
+    _gate_auto_apply(
+        base_policy,
+        requested="auto_apply_verified_patch" in (policy_overrides or {}),
+        notes=notes,
+    )
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1425,11 +1431,9 @@ def preview_project_setup(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
-    if "auto_apply_verified_patch" not in policy_overrides:
-        _coerce_auto_apply_default(base_policy, notes)
-    block = auto_apply_block_reason(base_policy)
-    if block is not None:
-        raise HTTPException(status_code=400, detail=block)
+    _gate_auto_apply(
+        base_policy, requested="auto_apply_verified_patch" in policy_overrides, notes=notes
+    )
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1917,6 +1921,15 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/projects", status_code=201)
     def put_project(body: ProjectRequest) -> dict[str, Any]:
+        # v127-F5: the editor re-POSTs the whole policy, so "the request turns
+        # auto-apply on" means the stored row did not already have it on.
+        stored = run_store.get_project_policy(body.project_id)
+        notes: list[str] = []
+        _gate_auto_apply(
+            body.policy,
+            requested=stored is None or stored.policy.get("auto_apply_verified_patch") is not True,
+            notes=notes,
+        )
         try:
             project = validate_project_definition(
                 project_id=body.project_id,
@@ -1940,7 +1953,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 kind=binding.kind,
                 value=binding.value,
             )
-        return _vetted_persist(run_store, project, project.bindings)
+        return {**_vetted_persist(run_store, project, project.bindings), "notes": notes}
 
     @app.delete("/api/projects/{project_id}")
     def delete_project(project_id: str) -> dict[str, Any]:

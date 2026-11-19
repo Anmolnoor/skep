@@ -696,7 +696,9 @@ def test_v9_golden_project_policy_roundtrips_through_api(
     created = client.post("/api/projects", json=payload)
 
     assert created.status_code == 201
-    assert created.json() == payload
+    body = created.json()
+    assert body.pop("notes") == []  # v127-F5: the save face's coercion notes
+    assert body == payload
     detail = client.get(f"/api/projects/{payload['project_id']}")
     assert detail.status_code == 200
     assert detail.json() == payload

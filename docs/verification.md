@@ -132,8 +132,10 @@ This catches common failures:
   `[tool.hatch.envs]`, ...) or `package.json`'s `scripts` (a dependency bump in
   those two files still lands). Skep reads this from the patch, not the worker.
   Known-vacuous is a list of shapes, not proof that any other command can fail.
-  Project setup turns the maintain phase's auto-apply default off on a missing
-  or known-vacuous pin, and refuses an explicit one.
+  Every save face (setup, preview, phase change, the web policy editor) turns
+  an auto-apply it did not ask for (a phase default or a stored value) off on
+  a missing or known-vacuous pin, with a note, and refuses a request that
+  itself turns auto-apply on with such a pin.
 - Toolchain mismatch is reported as `unavailable`, not `failed`. For example, if
   the worker recorded `pytest` but the supervisor environment cannot find it,
   Skep cannot honestly confirm the run.
