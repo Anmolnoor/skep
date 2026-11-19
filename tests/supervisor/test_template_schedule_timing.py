@@ -103,6 +103,27 @@ def test_a_tick_carries_the_creating_chats_current_taint(
         store.close()
 
 
+def test_a_tick_whose_creating_chat_is_gone_counts_as_tainted(
+    tmp_path: Path, config: SupervisorConfig
+) -> None:
+    """v126-F11 (review): fail closed, as get_chat_taint does — a chat that is
+    not there counts as both bits, never as clean."""
+    store = RunStore(config.db_path)
+    try:
+        store.add_template(_template())
+        store.add_schedule(
+            make_template_schedule(
+                name="m", template=_template(), params={}, repo=tmp_path, interval_seconds=60,
+                start_at=EIGHT, chat_id="deleted-chat",
+            )
+        )  # fmt: skip
+        seen: list[dict[str, Any]] = []
+        run_due(store=store, config=config, now=EIGHT, dispatch=_fake_dispatch(seen))
+        assert seen[0]["dispatch_decision"].constraints["chat_taint"] == ["private", "untrusted"]
+    finally:
+        store.close()
+
+
 def test_rest_threads_start_at_and_once_for_a_template_schedule(
     repo: Path, config: SupervisorConfig
 ) -> None:

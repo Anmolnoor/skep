@@ -422,8 +422,9 @@ def _with_chat_taint(
     """v126-F11: a tick of a schedule a chat created carries that chat's
     CURRENT taint bits (``constraints.chat_taint``), as a live dispatch from
     the chat does (ADR 0059 D5) — so the run card shows them on every tick,
-    not only on the card that created the schedule."""
-    if not schedule.chat_id or store.get_chat(schedule.chat_id) is None:
+    not only on the card that created the schedule. A chat that is gone
+    counts as both bits (get_chat_taint fails closed; v126-F11 review)."""
+    if not schedule.chat_id:
         return decision
     bits = store.get_chat_taint(schedule.chat_id).bits()
     if not bits:
