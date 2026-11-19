@@ -434,8 +434,10 @@ def test_toolchain_state_gets_a_writable_workspace_home(
     uv_cache = child_env.get("UV_CACHE_DIR", "")
     assert uv_cache.startswith(cache_prefix)
     assert uv_cache.endswith(f"{os.sep}uv")
-    # One per-project root: uv/ and npm/ are siblings under the same key.
+    # One per-project root: uv/ and npm/ are siblings under its worker/ half
+    # (v127-A0 review: re-verify's half is a sibling the worker never sees).
     assert Path(npm_cache).parent == Path(uv_cache).parent
+    assert Path(uv_cache).parent.name == "worker"
     # v107-F3: TMPDIR rides inside the wall too — unset, tools fell back to
     # /tmp, which any nested bwrap tmpfs-masks (the "~184 blocked tests").
     tmpdir = child_env.get("TMPDIR", "")
@@ -531,11 +533,24 @@ def test_sandbox_writable_roots_include_the_project_cache(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """v109-F4: the per-project cache is mounted through the wall on every
-    backend — the recorded profile (SBPL subpath or bind argv) names it."""
+    backend — the recorded profile (SBPL subpath or bind argv) names it.
+    v127-A0 review (council round 3, I2/G10): only its worker/ half. uv
+    installs cached files without re-checking them, so a worker that could
+    write re-verify's cache could poison what G10 installs and confirm any
+    patch; the profile never names the root itself or reverify/."""
+    from skep.supervisor.policy_resolver import project_cache_root
+
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
     assert outcome.record.state == "completed"
     profile = (config.audit_dir / outcome.record.task_id / "sandbox.profile.sb").read_text()
-    assert str(config.home / "cache" / "projects") in profile
+    store = RunStore(config.db_path)
+    try:
+        root = project_cache_root(store, config, repo)
+    finally:
+        store.close()
+    assert str(root / "worker") in profile
+    assert str(root / "reverify") not in profile
+    assert f'"{root}"' not in profile
 
 
 def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorConfig) -> None:

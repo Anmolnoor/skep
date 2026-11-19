@@ -176,11 +176,14 @@ def _manifest(worktree: Path) -> dict[str, Any]:
 def _node_env(cache_dir: Path, tmp_dir: Path) -> dict[str, str]:
     """Every installer's cache under one root outside the worktree (like the
     uv cache), never the operator's ~/.npm, ~/.cache or ~/Library; npm's logs
-    in the re-verify tmp dir (the verify profile reads the cache only); and
-    corepack never downloads a package manager."""
+    in the re-verify tmp dir (the verify profile reads the cache only); pnpm
+    copies out of its store (a hard link would let the verify step write the
+    store through node_modules); and corepack never downloads a package
+    manager."""
     return {
         "npm_config_cache": str(cache_dir / "npm"),
         "npm_config_store_dir": str(cache_dir / "pnpm-store"),
+        "npm_config_package_import_method": "copy",
         "npm_config_logs_dir": str(tmp_dir / "npm-logs"),
         "YARN_CACHE_FOLDER": str(cache_dir / "yarn"),
         "XDG_CACHE_HOME": str(cache_dir / "xdg-cache"),
@@ -490,9 +493,11 @@ def reverify(
     019fc72c timed out at -1 while perfectly healthy). Callers with the run's
     budget in hand pass it so the re-run is afforded what the worker was.
 
-    ``uv_cache_dir`` (v109-F4) is the per-project cache dispatch already
-    uses; when set, priming resolves into it instead of a worktree-local
-    throwaway, so the work survives across runs. None keeps the throwaway.
+    ``uv_cache_dir`` (v109-F4) is a per-project cache; when set, priming
+    resolves into it instead of a worktree-local throwaway, so the work
+    survives across runs. None keeps the throwaway. It must be a cache no
+    worker can write (``reverify_run`` passes re-verify's own half of the
+    project root): uv installs cached files without re-checking them.
 
     ``loopback_ports`` (D6, I2): the run's loopback ports (the project's and
     its local model provider's, ES-F252), so a verify that talks to a local
@@ -548,13 +553,13 @@ def reverify(
         env["CLANG_MODULE_CACHE_PATH"] = str(reverify_tmp / "clang")  # ignores TMPDIR
         # v109-F4: a shared cache sits outside the worktree, so the prime
         # profile needs it as an explicit writable root. The offline verify
-        # keeps the uv cache writable (uv takes locks there; content-addressed
-        # artifacts, never patch material) but only READS the Node cache:
-        # patch code runs there, and a never-landed patch must not leave
-        # anything a later verdict installs from (council round 2, I2).
+        # never writes either cache: patch code runs there, and a never-landed
+        # patch must not leave anything a later prime installs from — uv
+        # installs cached files without re-checking them (council rounds 2
+        # and 3, I2). It reads the Node cache and gets a throwaway uv cache
+        # (uv takes a lock in its cache, so a read-only one will not run).
         node_cache = node_cache_dir or worktree / ".node-cache"
         cache_writable = [d for d in (uv_cache_dir, node_cache_dir) if d is not None]
-        verify_writable = [uv_cache_dir] if uv_cache_dir is not None else []
         verify_readable = [node_cache_dir] if node_cache_dir is not None else []
         primed = ""
         node_pin = _pin_uses(commands, _NODE_TOOLS)
@@ -604,7 +609,10 @@ def reverify(
             # when the caller resolved it — a workspace-local cache dies with
             # the worktree, which made every re-verify resolve from zero.
             cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
-            prime_code, _prime_tail = wall.run("uv sync", {**env, "UV_CACHE_DIR": str(cache_dir)})
+            # Copies, never hard links (uv's Linux default): a venv file linked
+            # to the cache would let the verify step write the cache through it.
+            uv_prime_env = {**env, "UV_CACHE_DIR": str(cache_dir), "UV_LINK_MODE": "copy"}
+            prime_code, _prime_tail = wall.run("uv sync", uv_prime_env)
             if prime_code != 0:
                 # A prime that cannot complete is a supervisor-side environment
                 # problem, not patch guilt — the honest shape is "unavailable"
@@ -617,8 +625,8 @@ def reverify(
                     f"re-verification (uv sync exited {prime_code}); the "
                     "verification command was not run",
                 )
-            env["UV_CACHE_DIR"] = str(cache_dir)
-            env["UV_NO_SYNC"] = "1"
+            env["UV_CACHE_DIR"] = str(reverify_tmp / "uv-cache")
+            env["UV_NO_SYNC"] = env["UV_OFFLINE"] = "1"
             primed = f"{primed}; deps primed from the baseline (uv sync), verify ran offline"
         if isinstance(node_prime, tuple):
             # v127-A0: the same shape for Node — the BASELINE lockfile installs
@@ -661,7 +669,7 @@ def reverify(
                 sandbox.write_profile(
                     profile_path,
                     workspace=worktree,
-                    extra_writable=[*git_metadata_writable_roots(worktree), *verify_writable],
+                    extra_writable=git_metadata_writable_roots(worktree),
                     extra_readable=[*git_metadata_readable_roots(worktree), *verify_readable],
                     network=network,
                     proxy_port=proxy.port if proxy is not None else None,
@@ -702,8 +710,7 @@ def reverify(
             # have passed. Prime again, after the patch, from the same cache,
             # through the same wall (the baseline's index hosts alone); the
             # pinned command still runs offline afterwards.
-            resync_env = {key: value for key, value in env.items() if key != "UV_NO_SYNC"}
-            resync_code, resync_tail = wall.run("uv sync", resync_env)
+            resync_code, resync_tail = wall.run("uv sync", uv_prime_env)
             if resync_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
@@ -878,12 +885,15 @@ def reverify_run(
             return outcome
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
 
-    # v109-F4: prime against the same per-project cache dispatch used, so the
-    # resolve work one run pays for, the next run keeps. (Runtime import: the
-    # resolver pulls in the serve tree — the same cycle dispatch dodges.)
+    # v109-F4: prime against a per-project cache, so the resolve work one
+    # re-verify pays for, the next one keeps. (Runtime import: the resolver
+    # pulls in the serve tree — the same cycle dispatch dodges.)
     from .policy_resolver import project_cache_root
 
-    uv_cache_dir = project_cache_root(store, config, repo) / "uv"
+    # v127-A0 review (council round 3, I2): re-verify's own half of the
+    # project root — the worker's sandbox mounts only ``worker/``, so nothing
+    # a worker writes reaches what a re-verify installs from.
+    uv_cache_dir = project_cache_root(store, config, repo) / "reverify" / "uv"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
     node_cache_dir = uv_cache_dir.parent / "node"  # v127-A0: the same root, Node's half
     node_cache_dir.mkdir(exist_ok=True)

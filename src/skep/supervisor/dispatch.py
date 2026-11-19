@@ -898,7 +898,12 @@ def run_task(
         # provider env above.
         from .policy_resolver import project_cache_root
 
-        cache_root = project_cache_root(run_store, config, repo)
+        # v127-A0 review (council round 3, I2/G10): the worker's half of the
+        # project cache root only. Re-verify primes from a sibling
+        # (``reverify/``) this sandbox never mounts — uv installs cached files
+        # without re-checking them, so a worker that could write it could
+        # poison what G10 installs and confirm any patch.
+        cache_root = project_cache_root(run_store, config, repo) / "worker"
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         if codex_auth is not None:
             # ES-F122 (D20): the run's own login copy — in its audit dir, which

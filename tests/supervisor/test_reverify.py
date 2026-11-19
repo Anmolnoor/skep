@@ -240,7 +240,8 @@ def _uv_stub(tmp_path: Path) -> tuple[Path, Path]:
         'patched="no"\n'
         '[ -e patched_marker.txt ] && patched="yes"\n'
         'echo "$1 nosync=${UV_NO_SYNC:-unset} cache=${UV_CACHE_DIR:-unset}'
-        ' patched=$patched" >> "$UV_LOG"\n'
+        " patched=$patched link=${UV_LINK_MODE:-unset} offline=${UV_OFFLINE:-unset}"
+        ' proxy=${HTTPS_PROXY:-unset}" >> "$UV_LOG"\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -467,19 +468,38 @@ def test_slug_bound_pin_survives_the_run_task_fallback(
 def test_reverify_run_primes_against_the_shared_project_cache(
     repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """v109-F4: priming resolves into the per-project cache dispatch already
-    uses — not a worktree-local throwaway that dies with the tree — and both
-    reverify profiles keep that root writable."""
+    """v109-F4: priming resolves into a per-project cache that outlives the
+    worktree — not a throwaway that dies with the tree. v127-A0 review
+    (council round 3, I2/G10): it is re-verify's own half of the project
+    root, never the half the worker's sandbox writes, and the offline verify
+    step gets a throwaway cache, so neither the worker nor patch code can
+    leave anything a later prime installs from."""
     (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
     git(repo, "add", "pyproject.toml")
     git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    from skep.supervisor.policy_resolver import project_cache_root
+    from skep.supervisor.reverify import reverify_run
+
+    store = RunStore(config.db_path)
+    try:
+        root = project_cache_root(store, config, repo)
+    finally:
+        store.close()
+    shared = root / "reverify" / "uv"
     bin_dir = tmp_path / "uvbin"
     bin_dir.mkdir()
     stub = bin_dir / "uv"
-    # The stub logs INTO the cache dir itself: the log lands at the shared
-    # root only if UV_CACHE_DIR points there AND the profiles let uv write it.
+    # Every call tries to log INTO the shared cache: only a step whose
+    # profile may write it leaves a line. The pinned command must run with
+    # a throwaway cache, offline — or the stub fails the verify.
     stub.write_text(
-        '#!/bin/sh\necho "$1 cache=${UV_CACHE_DIR:-unset}" >> "$UV_CACHE_DIR/uv.log"\nexit 0\n',
+        "#!/bin/sh\n"
+        f'echo "$1 cache=$UV_CACHE_DIR link=$UV_LINK_MODE" >> "{shared}/calls.log"\n'
+        'if [ "$1" = run ]; then\n'
+        f'  [ "$UV_CACHE_DIR" != "{shared}" ] && [ "$UV_OFFLINE" = 1 ] || exit 3\n'
+        '  case "$UV_CACHE_DIR" in *.reverify-tmp*) ;; *) exit 4 ;; esac\n'
+        "fi\n"
+        "exit 0\n",
         encoding="utf-8",
     )
     stub.chmod(0o755)
@@ -489,9 +509,6 @@ def test_reverify_run_primes_against_the_shared_project_cache(
     assert happy.record.state == "completed"
     store = RunStore(config.db_path)
     try:
-        from skep.supervisor.policy_resolver import project_cache_root
-        from skep.supervisor.reverify import reverify_run
-
         outcome = reverify_run(
             store=store,
             task_id=happy.record.task_id,
@@ -501,18 +518,14 @@ def test_reverify_run_primes_against_the_shared_project_cache(
             config=config,
             verify_command="uv run pytest",
         )
-        shared = project_cache_root(store, config, repo) / "uv"
     finally:
         store.close()
     assert outcome.outcome == "passed", outcome.detail
-    lines = (shared / "uv.log").read_text(encoding="utf-8").splitlines()
-    # The prime ran first against the shared cache; the pinned command ran
-    # second with the same cache. The throwaway never appears.
-    assert lines[0].startswith("sync")
-    assert lines[1].startswith("run")
-    assert f"cache={shared}" in lines[0]
-    assert f"cache={shared}" in lines[1]
-    assert ".uv-cache" not in "\n".join(lines)
+    # The prime wrote re-verify's shared cache, copying (never hard-linking)
+    # into the venv; the verify step, under the real wall, could not.
+    lines = (shared / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert lines == [f"sync cache={shared} link=copy"]
+    assert not (root / "uv").exists()
 
 
 def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
@@ -704,7 +717,8 @@ def _node_stubs(tmp_path: Path) -> tuple[Path, Path]:
             '[ -e patched_marker.txt ] && patched="yes"\n'
             f'echo "{tool} $* patched=$patched cache=${{npm_config_cache:-unset}}'
             " proxy=${HTTPS_PROXY:-unset} corepack=${COREPACK_ENABLE_NETWORK:-unset}"
-            f' logs=${{npm_config_logs_dir:-unset}}" >> "$NODE_LOG"\n'
+            " logs=${npm_config_logs_dir:-unset}"
+            f' import=${{npm_config_package_import_method:-unset}}" >> "$NODE_LOG"\n'
             "exit 0\n",
             encoding="utf-8",
         )
@@ -1086,12 +1100,50 @@ def test_the_verify_profile_keeps_the_node_cache_read_only(
     assert outcome.outcome == "passed", outcome.detail
     verify = wall.profiles["reverify.profile.sb"]
     assert node_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
-    assert uv_cache in list(verify["extra_writable"])  # type: ignore[call-overload]
+    assert uv_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
     assert node_cache in list(verify["extra_readable"])  # type: ignore[call-overload]
     prime = wall.profiles["reverify.profile.prime.sb"]
     assert node_cache in list(prime["extra_writable"])  # type: ignore[call-overload]
-    pin_line = log.read_text(encoding="utf-8").splitlines()[1]
+    prime_line, pin_line = log.read_text(encoding="utf-8").splitlines()
+    # pnpm hard-links its store into node_modules, which the verify step can
+    # write: the prime copies instead, so the store stays out of patch reach.
+    assert "import=copy" in prime_line
     assert pin_line.startswith("npm test ") and ".reverify-tmp" in pin_line.split("logs=")[1]
+
+
+def test_the_verify_step_never_writes_a_uv_cache_a_later_prime_reads(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 3 (HIGH, I2/G10): uv installs cached files without
+    re-checking them, and the verify step (patch code, offline) kept the
+    shared uv cache writable — a never-landed patch could poison what every
+    later re-verify installs. The verify step now gets a throwaway cache
+    (uv cannot run on a read-only one: it takes a lock there) and the prime
+    copies files into the venv, so no venv file is a hard link into the cache."""
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _uv_stub(tmp_path)
+    uv_cache = tmp_path / "cache" / "uv"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+        uv_cache_dir=uv_cache,
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    verify = wall.profiles["reverify.profile.sb"]
+    assert uv_cache not in list(verify["extra_writable"])  # type: ignore[call-overload]
+    assert uv_cache in list(wall.profiles["reverify.profile.prime.sb"]["extra_writable"])  # type: ignore[call-overload]
+    prime_line, pin_line = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={uv_cache} " in prime_line and "link=copy" in prime_line
+    assert str(uv_cache) not in pin_line and ".reverify-tmp" in pin_line
+    assert "offline=1" in pin_line
 
 
 @pytest.mark.parametrize(
