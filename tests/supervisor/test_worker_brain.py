@@ -200,7 +200,10 @@ def test_a_missed_edit_shows_the_closest_window_redacted(repo: Path) -> None:
 
     lines = [f"line {n}" for n in range(200)]
     lines[120] = "title: Skep is live!"
-    lines[121] = "API_TOKEN=sk-" + "abcdefghijklmnopqrstuvwx"
+    # joined at runtime: the compiler folds `"a" + "b"`, so a key-shaped
+    # literal would still sit in the .pyc that CI's gitleaks scans
+    fake_key = "".join(["sk", "-", "abcdefghijklmnopqrstuvwx"])
+    lines[121] = f"API_TOKEN={fake_key}"
     (repo / "post.mdx").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with pytest.raises(CapabilityDenied) as caught:
         _registry(repo).invoke(
@@ -210,7 +213,7 @@ def test_a_missed_edit_shows_the_closest_window_redacted(repo: Path) -> None:
     hint = caught.value.hint or ""
     assert "title: Skep is live!" in hint
     assert "API_TOKEN=***" in hint
-    assert "sk-" + "abcdefghijklmnopqrstuvwx" not in hint
+    assert fake_key not in hint
     assert "line 0\n" not in hint  # the window, not the whole file
     assert len(hint.encode()) < 2_400
 
@@ -237,7 +240,10 @@ def test_a_missed_edit_on_a_secret_file_shows_nothing(repo: Path, name: str) -> 
 
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("STRIPE=" + "sk_" + "live_" + "51HxQabcdefghijklmnop" + "\n", encoding="utf-8")
+    fake_key = "".join(
+        ["sk", "_live_", "51HxQabcdefghijklmnop"]
+    )  # runtime: not folded into the .pyc
+    path.write_text(f"STRIPE={fake_key}\n", encoding="utf-8")
     with pytest.raises(CapabilityDenied) as caught:
         _registry(repo).invoke("filesystem.edit", {"path": name, "old": "STRIPE=x", "new": "t"})
     assert str(caught.value) == f"old text not found in {name}"
