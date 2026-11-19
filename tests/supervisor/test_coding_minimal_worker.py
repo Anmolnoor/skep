@@ -175,7 +175,7 @@ def test_default_coding_worker_without_a_provider_names_the_missing_provider(
 
     assert outcome.record.state == "failed"
     summary = outcome.record.summary or ""
-    assert "no model provider is configured for the builtin worker" in summary
+    assert "no real model provider is configured for the builtin worker" in summary
     assert "skep onboard" in summary and "Settings" in summary
 
 

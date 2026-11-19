@@ -746,7 +746,9 @@ def resolve_run_policy(
             f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
             "(chat: setup_project verify_command=...).",
             # v127-T4 (trial V14): never workspace mode — that is the naked host.
-            next_command=f'skep project setup {repo} --verify-command "<command>"',
+            next_command=(
+                f'skep project setup {shlex.quote(str(repo))} --verify-command "<command>"'
+            ),
         )
     # v94-F4: an external agent bypasses the capability layer by design — the
     # sandbox IS its confinement (ADR 0047). No policy default or request flag

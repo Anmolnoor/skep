@@ -359,10 +359,17 @@ def _onboard(args: argparse.Namespace) -> int:
         # v127-T2 (trial V15/V16): alone they only flip the why-lines; beside
         # any other onboard flag every step still runs — `--quiet` once ate
         # --provider/--template/--yes and exited 0 having configured nothing.
-        steps = ("provider", "model", "endpoint", "api_key_env", "workdir", "sandbox")
-        if not (args.check or args.yes) and all(
-            getattr(args, key) is None for key in (*steps, "template", "role")
-        ):
+        setup_flags = (
+            "provider",
+            "model",
+            "endpoint",
+            "api_key_env",
+            "workdir",
+            "sandbox",
+            "template",
+            "role",
+        )
+        if not (args.check or args.yes) and all(getattr(args, key) is None for key in setup_flags):
             return 0
     if args.check:
         result = onboard.onboard_check(config.home)
