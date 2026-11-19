@@ -15,9 +15,13 @@ auto:<rule>`), so the audit trail always names what granted the autonomy.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
+import subprocess
+import tempfile
+import tomllib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -162,6 +166,87 @@ def known_vacuous_verify(command: str) -> str | None:
     return None
 
 
+# v127-F5 round 2 (I2): files that decide what the pinned check runs. G10
+# re-runs the pin on the PATCHED tree, so a patch that edits these gets the
+# check it wrote. Any touch blocks, except pyproject.toml and package.json,
+# whose test sections are compared so dependency bumps still land.
+_PIN_CONTROL_NAMES = frozenset(
+    {"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "noxfile.py", "Makefile"}
+)
+# ponytail: the test-runner tables seen in the wild; a runner configured
+# elsewhere in pyproject.toml is not seen — add its table here.
+_PYPROJECT_TEST_TABLES = (
+    ("tool", "pytest"),
+    ("tool", "hatch", "envs"),
+    ("tool", "tox"),
+    ("tool", "nox"),
+    ("tool", "poe"),
+    ("tool", "pdm", "scripts"),
+    ("tool", "coverage"),
+)
+
+
+def _test_config(name: str, text: str | None) -> object:
+    """The parts of ``pyproject.toml``/``package.json`` that steer the check.
+    Unparseable → a sentinel that never compares equal (blocks)."""
+    if text is None:
+        return None
+    try:
+        if name == "package.json":
+            doc = json.loads(text)
+            return doc.get("scripts") if isinstance(doc, dict) else object()
+        doc = tomllib.loads(text)
+    except ValueError:
+        return object()
+    tables = []
+    for keys in _PYPROJECT_TEST_TABLES:
+        node: object = doc
+        for key in keys:
+            node = node.get(key) if isinstance(node, dict) else None
+        tables.append(node)
+    return tables
+
+
+def _git_text(repo: Path, *args: str, env: dict[str, str] | None = None) -> str | None:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=False
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def pin_control_changes(
+    repo: Path,
+    patch_path: Path,
+    base: str,
+    changed_files: tuple[str, ...],
+    pin_commands: tuple[str, ...],
+) -> tuple[str, ...]:
+    """The changed files that steer the pinned check — read by the supervisor
+    from the patch artifact applied to ``base`` in a scratch index, never from
+    the worker. Includes the pin's own script (its first two words as paths)."""
+    pin_paths = {os.path.normpath(t) for c in pin_commands for t in (_tokens(c) or [])[:2] if t}
+    hits = [
+        path
+        for path in changed_files
+        if os.path.basename(path) in _PIN_CONTROL_NAMES or os.path.normpath(path) in pin_paths
+    ]
+    parsed = [p for p in changed_files if os.path.basename(p) in ("pyproject.toml", "package.json")]
+    if not parsed:
+        return tuple(hits)
+    with tempfile.TemporaryDirectory(prefix="skep-pinctl-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        applied = _git_text(repo, "read-tree", base, env=env) is not None and (
+            _git_text(repo, "apply", "--cached", str(patch_path), env=env) is not None
+        )
+        for path in parsed:
+            name = os.path.basename(path)
+            before = _git_text(repo, "show", f"{base}:{path}")
+            after = _git_text(repo, "show", f":{path}", env=env)
+            if not applied or _test_config(name, before) != _test_config(name, after):
+                hits.append(path)
+    return tuple(sorted(set(hits), key=changed_files.index))
+
+
 @dataclass(frozen=True)
 class AutoApprovalContext:
     verification_outcome: str | None
@@ -174,6 +259,8 @@ class AutoApprovalContext:
     verify_pinned: bool = False
     # v127-F5: the commands G10 actually re-ran (reverifications.commands_json).
     reverify_commands: tuple[str, ...] = ()
+    # v127-F5 round 2: changed files that steer the pinned check (supervisor-read).
+    pin_control_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -212,6 +299,12 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
             f"{why} — auto-landing needs a check that is not known-vacuous: pin one "
             '(`skep project setup <repo> --verify-command "<command>"`); the patch is '
             "still landable by hand"
+        )
+    if ctx.pin_control_files:
+        return (
+            f"the patch changes what the pinned check runs ({', '.join(ctx.pin_control_files)})"
+            " — G10 confirmed it with the patch's own test config, so a human reviews it; "
+            "the patch is still landable by hand"
         )
     if rule.forbid_risk_flags and ctx.risk_flags:
         return f"risk flags present: {list(ctx.risk_flags)}"
@@ -277,13 +370,25 @@ def maybe_auto_approve(
     changed_files = (
         patch_paths(repo, patch_path) if patch_path is not None and patch_path.is_file() else ()
     )
+    reverify_commands = tuple(reverify.commands) if reverify is not None else ()
     ctx = AutoApprovalContext(
         verification_outcome=verification_outcome,
         reverify_confirmed=reverify is not None and reverify.confirmed,
         risk_flags=risk_flags,
         changed_files=changed_files,
         verify_pinned=verify_pinned,
-        reverify_commands=tuple(reverify.commands) if reverify is not None else (),
+        reverify_commands=reverify_commands,
+        pin_control_files=(
+            pin_control_changes(
+                repo,
+                patch_path,
+                store.verified_base(task_id) or "HEAD",
+                changed_files,
+                reverify_commands,
+            )
+            if patch_path is not None and changed_files
+            else ()
+        ),
     )
     matched = evaluate(rules, ctx)
     if matched is None:

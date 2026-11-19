@@ -125,7 +125,12 @@ This catches common failures:
   runs through `/bin/sh -c`, so a chain joined by `&&` is vacuous only when
   every part is (`true && pytest` is a real check), and a pin containing an
   operator that can hide the exit code (`||`, `;`, `|`, a background `&`,
-  backticks, `$(`) is refused for auto-landing outright.
+  backticks, `$(`) is refused for auto-landing outright. A patch that changes
+  what the pin runs never auto-lands either: `conftest.py` (any directory),
+  `pytest.ini`, `tox.ini`, `setup.cfg`, `noxfile.py`, `Makefile`, the pinned
+  script itself, the test-runner tables of `pyproject.toml` (`[tool.pytest*]`,
+  `[tool.hatch.envs]`, ...) or `package.json`'s `scripts` (a dependency bump in
+  those two files still lands). Skep reads this from the patch, not the worker.
   Known-vacuous is a list of shapes, not proof that any other command can fail.
   Project setup turns the maintain phase's auto-apply default off on a missing
   or known-vacuous pin, and refuses an explicit one.
