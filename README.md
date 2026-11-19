@@ -243,11 +243,11 @@ policy changes, and landings are never confirmable from a messenger. See
 
 As of 1.4.2:
 
-| Works today | Being wired up | Not planned |
+| Works today | Being wired up | Opinions pending code |
 |---|---|---|
-| Sandbox-mode runs (Seatbelt, bubblewrap with Landlock, opt-in podman), re-verification with the pinned verify command, patch approval, local audit records | Nothing is tracked in public issues today; open work is in the [pull requests](https://github.com/Anmolnoor/skep/pulls) | More than one operator per home |
-| One policy engine (`skep policy why / explain / decisions`), the locked baseline, `skep onboard`, roles and delegation | | A hosted skep service |
-| Claude Code, Codex, Aider and pi as engines; the built-in worker on your model provider | | A Windows sandbox backend |
+| Sandbox-mode runs (Seatbelt, bubblewrap with Landlock, opt-in podman), re-verification with the pinned verify command, patch approval, local audit records | Nothing is tracked in public issues today; open work is in the [pull requests](https://github.com/Anmolnoor/skep/pulls) | Multi-operator / team use |
+| One policy engine (`skep policy why / explain / decisions`), the locked baseline, `skep onboard`, roles and delegation | | Hosted service |
+| Claude Code, Codex, Aider and pi as engines; the built-in worker on your model provider | | Ambient/self-directed learning |
 | The Claude Code policy hook and the ACP governor, for agents you run elsewhere | | |
 | Chat Queen (web, terminal, Telegram/Slack/Discord) with carded mutations | | |
 | Schedules, digests, MCP tools, Agent Skills shelves, memory + notes | | |
