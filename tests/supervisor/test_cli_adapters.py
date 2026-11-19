@@ -503,8 +503,9 @@ def test_v126_f5_the_memory_block_rides_an_external_dispatch_and_the_audit_says_
 
 def test_v126_f5_castes_without_memory_in_their_prompt_say_not_delivered() -> None:
     """v126-F5 (review): the reviewer has a prompt that carries no memory, and
-    the audit and script workers run no model prompt (the verifier caste is retired, v127-F11) — each audit
-    says "not delivered" instead of leaving the question open."""
+    the audit and script workers run no model prompt (the verifier caste is
+    retired, v127-F11) — each audit says "not delivered" instead of leaving
+    the question open."""
     from types import SimpleNamespace
     from typing import Any, cast
 
