@@ -172,8 +172,12 @@ def test_every_rule_refuses_a_known_vacuous_reverify(rule: object) -> None:
     assert "so skep can't land a patch on it by itself" in blocked and HINT in blocked
     assert "landable by hand" in blocked
     assert rule_block_reason(rule, _ctx(("uv run pytest",))) is None
-    # nothing re-ran at all is no check either
-    assert rule_block_reason(rule, _ctx(())) is not None
+    # nothing re-ran at all is no check either, said plainly (round 5)
+    nothing = rule_block_reason(rule, _ctx(()))
+    assert nothing is not None
+    assert not any(w in nothing for w in ("known-vacuous", "G10", "cannot fail"))
+    assert nothing.startswith("no check was re-run, so skep can't land the patch by itself")
+    assert HINT in nothing and "landable by hand" in nothing
 
 
 @pytest.mark.parametrize("rule", [VERIFIED_PATCH_RULE, SAFE_DEPENDENCY_RULE])
