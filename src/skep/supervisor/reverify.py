@@ -273,8 +273,10 @@ class _PrimeWall:
         profile_path: Path | None,
         writable: list[Path],
         config: SupervisorConfig,
+        name: str = "prime",
     ) -> None:
         self.hosts = hosts
+        self._name = name
         self._stack = stack
         self._worktree = worktree
         self._profile_path = profile_path
@@ -307,7 +309,7 @@ class _PrimeWall:
         proxy = _start_proxy(self._stack, self.hosts, config=self._config, bridge=bridge)
         if self._profile_path is not None:
             self._profile = sandbox.write_profile(
-                self._profile_path.with_suffix(".prime.sb"),
+                self._profile_path.with_suffix(f".{self._name}.sb"),
                 workspace=self._worktree,
                 extra_writable=[*git_metadata_writable_roots(self._worktree), *self._writable],
                 extra_readable=git_metadata_readable_roots(self._worktree),
@@ -500,6 +502,21 @@ def reverify(
             writable=cache_writable,
             config=config,
         )
+        # v127 council round 4 (N1, second door): an install AFTER the patch
+        # applies builds/installs patch-chosen code (a uv build backend, a
+        # lockfile's packages), so it gets its own wall with no shared cache
+        # writable and throwaway caches in the re-verify tmp dir — it can
+        # never poison the per-project cache every later baseline prime
+        # trusts. The cost is a cold download, only for dependency changes.
+        patched_wall = _PrimeWall(
+            stack,
+            tuple(sorted(hosts)),
+            worktree=worktree,
+            profile_path=profile_path,
+            writable=[],
+            config=config,
+            name="patched-prime",
+        )
         if uv_prime:
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
@@ -598,10 +615,12 @@ def reverify(
             # a patch that changes the lockfile must be verified against the
             # NEW ones. Run 01a16157 bumped starlette 1.3.0 → 1.9.0 in uv.lock
             # and re-verification ran the suite on 1.3.0 — a breaking bump would
-            # have passed. Prime again, after the patch, from the same cache,
-            # through the same wall (the baseline's index hosts alone); the
+            # have passed. Prime again, after the patch, through the baseline's
+            # index hosts alone and a throwaway cache (patched_wall above); the
             # pinned command still runs offline afterwards.
-            resync_code, resync_tail = wall.run("uv sync", uv_prime_env)
+            resync_code, resync_tail = patched_wall.run(
+                "uv sync", {**uv_prime_env, "UV_CACHE_DIR": str(reverify_tmp / "uv-patched")}
+            )
             if resync_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
@@ -645,7 +664,9 @@ def reverify(
                     f"{refusal}; the verification command was not run — a dependency "
                     "change is never confirmed against the old dependencies",
                 )
-            reprime_code, reprime_tail = wall.run(install, env)
+            reprime_code, reprime_tail = patched_wall.run(
+                install, {**env, **_node_env(reverify_tmp / "node-patched", reverify_tmp)}
+            )
             if reprime_code != 0:
                 return ReverifyOutcome(
                     "unavailable",

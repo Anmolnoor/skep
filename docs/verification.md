@@ -59,7 +59,9 @@ unconfined on the host.
 Known residual: uv still builds source distributions, and the project itself,
 during the prime and the re-prime. A build step from a patched lockfile or
 `pyproject.toml` therefore runs before approval, with the same registry-only
-network and write access to re-verify's dependency cache.
+network. It cannot write re-verify's shared dependency cache: every install
+after the patch applies uses a throwaway cache inside the replay and a sandbox
+profile with no shared cache writable, so it downloads from cold.
 
 The dependency caches live under the project's cache root
 (`~/.skep/cache/projects/<project>/`). A sandboxed worker writes only its

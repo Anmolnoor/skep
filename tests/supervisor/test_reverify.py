@@ -626,6 +626,45 @@ def test_a_lockfile_patch_is_primed_again_after_it_applies(
     assert lines[2].startswith("run nosync=1") and "patched=yes" in lines[2]
 
 
+def test_a_patched_install_never_writes_the_shared_reverify_cache(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v127 council round 4 (N1, second door): the post-patch `uv sync` builds
+    the PATCHED project — a patch-chosen build backend runs. It gets its own
+    throwaway cache and a wall with no shared cache writable, so it cannot
+    poison the per-project cache every later baseline prime trusts."""
+    import importlib
+
+    rv = importlib.import_module("skep.supervisor.reverify")
+
+    walls: list[list[Path]] = []
+    real_init = rv._PrimeWall.__init__
+
+    def recording_init(self: object, *args: object, **kwargs: object) -> None:
+        walls.append(list(kwargs["writable"]))  # type: ignore[arg-type]
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(rv._PrimeWall, "__init__", recording_init)
+    _uv_project(repo)
+    bin_dir, log = _uv_stub(tmp_path)
+    shared = tmp_path / "shared-reverify-uv"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_lock_bump_patch(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        uv_cache_dir=shared,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={shared}" in lines[0]  # the baseline prime warms the shared cache
+    assert "patched=yes" in lines[1] and str(shared) not in lines[1]
+    assert walls == [[shared], []]  # the patched install's wall writes no shared cache
+
+
 def test_a_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:
@@ -854,6 +893,30 @@ def test_a_node_lockfile_patch_is_primed_again_after_it_applies(
     assert lines[2].startswith("npm test ") and "patched=yes" in lines[2]
 
 
+def test_a_patched_node_install_uses_a_throwaway_cache(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127 council round 4: the post-patch Node install never writes the
+    shared re-verify cache either."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    shared = tmp_path / "shared-reverify-node"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_node_lock_bump_patch(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=None,
+        node_cache_dir=shared,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert f"cache={shared}" in lines[0]
+    assert "patched=yes" in lines[1] and str(shared) not in lines[1]
+
+
 def test_a_node_lockfile_patch_that_also_edits_installer_config_is_not_reprimed(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:
@@ -1033,7 +1096,8 @@ def test_the_node_prime_reaches_only_the_baseline_registry_hosts(
     )
     assert outcome.outcome == "passed", outcome.detail
     hosts = ("npm.example.com", "registry.npmjs.org", "registry.yarnpkg.com")
-    assert wall.proxies == [hosts]
+    # the baseline prime and the patched install: two walls, both the baseline's hosts
+    assert wall.proxies == [hosts, hosts]
     prime = wall.profiles["reverify.profile.prime.sb"]
     assert prime["network"] == sandbox.NetworkPolicy(allow=hosts)
     assert prime["proxy_port"] == 40123
