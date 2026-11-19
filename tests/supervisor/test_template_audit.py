@@ -121,7 +121,15 @@ def test_rest_template_post_refuses_an_overwrite_without_replace(
     assert client.post("/api/templates", json=body).status_code == 201
     refused = client.post("/api/templates", json={**body, "network": ["evil.example"]})
     assert refused.status_code == 409
-    assert "replace" in refused.json()["detail"]
+    detail = refused.json()["detail"]
+    assert "replace" in detail
+    # v126-F4 (review): a web-form user can act on it too.
+    assert "pick another name" in detail and "delete" in detail
+    assert client.get("/api/templates/t1").json()["network"] == []
+    # A string "false" is not a yes: only the JSON boolean true replaces.
+    for not_true in ("false", "true", 1):
+        sneaky = {**body, "network": ["evil.example"], "replace": not_true}
+        assert client.post("/api/templates", json=sneaky).status_code == 409
     assert client.get("/api/templates/t1").json()["network"] == []
     ok = client.post("/api/templates", json={**body, "network": ["evil.example"], "replace": True})
     assert ok.status_code == 201

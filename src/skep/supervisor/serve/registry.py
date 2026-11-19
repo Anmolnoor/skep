@@ -1311,7 +1311,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/templates", status_code=201)
     def put_template(body: dict[str, Any]) -> dict[str, Any]:
-        replace = bool(body.pop("replace", False))
+        # v126-F4 (review): only the JSON boolean true — bool("false") is True.
+        replace = body.pop("replace", False) is True
         try:
             template = template_from_dict(body)
             validate_template(template)
@@ -1321,8 +1322,9 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         if not replace and run_store.get_template(template.name) is not None:
             raise HTTPException(
                 status_code=409,
-                detail=f"template {template.name!r} already exists; send replace: true "
-                "to overwrite it (the old and new grants are recorded)",
+                detail=f"a template named {template.name!r} already exists — pick another "
+                "name, or delete the old one first and save again. (API callers: send "
+                "replace: true to overwrite; the old and new grants are recorded.)",
             )
         run_store.add_template(template, actor="api-user")
         return template_to_dict(template)
