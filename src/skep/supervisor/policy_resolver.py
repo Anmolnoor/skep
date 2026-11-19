@@ -79,7 +79,12 @@ TRUSTED_DEV_REGISTRY_HOSTS: tuple[str, ...] = (
 
 
 class PolicyResolutionError(ValueError):
-    """The resolved policy cannot support the requested run."""
+    """The resolved policy cannot support the requested run. ``next_command``
+    is the operator's next step when the refusal has one (v127-T4)."""
+
+    def __init__(self, message: str, *, next_command: str | None = None) -> None:
+        super().__init__(message)
+        self.next_command = next_command
 
 
 @dataclass(frozen=True)
@@ -739,7 +744,9 @@ def resolve_run_policy(
             f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose own "
             "check is `git diff --check` (whitespace only), which passes whether or not the "
             f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
-            "(chat: setup_project verify_command=...)."
+            "(chat: setup_project verify_command=...).",
+            # v127-T4 (trial V14): never workspace mode — that is the naked host.
+            next_command=f'skep project setup {repo} --verify-command "<command>"',
         )
     # v94-F4: an external agent bypasses the capability layer by design — the
     # sandbox IS its confinement (ADR 0047). No policy default or request flag
@@ -908,7 +915,8 @@ def _resolve_execution_mode(policy: dict[str, Any], repo: Path, requested: str |
         if default == "ask":
             raise PolicyResolutionError(
                 "execution_mode required by policy: choose 'workspace' for trusted "
-                "local project work or 'sandbox' for isolated work"
+                "local project work or 'sandbox' for isolated work",
+                next_command='skep run <repo> "<instructions>" --execution-mode sandbox',
             )
         if default not in RUN_EXECUTION_MODES:
             raise PolicyResolutionError("configured execution policy is invalid")

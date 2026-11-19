@@ -519,3 +519,32 @@ def test_an_unpinned_external_engine_keeps_the_plain_message(
         store.close()
     message = str(raised.value)
     assert _plain(message) and "Your pin" not in message and HINT in message
+
+
+def test_the_cli_refusal_points_at_a_real_pin_never_workspace_mode(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v127-T4 (trial V14): the refusal said "pin a real check" and its
+    `next:` said `--execution-mode workspace` — the unsandboxed mode, which
+    an external engine may not run in anyway. The next step is the pin."""
+    home = tmp_path / "home"
+    pin: dict[str, object] = {"coding_engine": "claude_code", "verify_command": "git diff --check"}
+    _bind(build_config(home, None), repo, pin)
+    code = main(["--home", str(home), "run", str(repo), "Bump it.", "--quiet"])
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert f'next:     skep project setup {repo} --verify-command "<command>"' in err
+    assert "workspace" not in err
+
+
+def test_an_execution_mode_refusal_suggests_the_sandbox(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v127-T4: the policy asks for an explicit mode — the hint offers the
+    isolated one; the message still names both."""
+    home = tmp_path / "home"
+    _bind(build_config(home, None), repo, {"default_execution_mode": "ask"})
+    code = main(["--home", str(home), "run", str(repo), "Fix it.", "--quiet"])
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "--execution-mode sandbox" in err.split("next:")[1]

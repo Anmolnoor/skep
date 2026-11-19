@@ -908,10 +908,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 return answer
             permissions, answered = _preanswer(permissions, answer)
     except PolicyResolutionError as exc:
-        return _err(
-            str(exc),
-            next_command='skep run <repo> "<instructions>" --execution-mode workspace',
-        )
+        # v127-T4 (trial V14): the refusal's own next step — this once said
+        # `--execution-mode workspace` under every refusal, the vacuous-pin one too.
+        return _err(str(exc), next_command=exc.next_command)
     finally:
         store.close()
 
