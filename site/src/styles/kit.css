@@ -267,6 +267,33 @@ a.card:hover {
 .diff .panel-foot {
   color: var(--green);
 }
+.diff .diff-captured {
+  display: block;
+  color: var(--text-faint);
+}
+.term.wrap pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Running text on a page: inline code and inline links ---- */
+.copy :where(p, li, td, dd, figcaption) > code {
+  padding: 1px var(--s-1);
+  border: 1px solid var(--line-inner);
+  border-radius: var(--r-chip);
+  background: var(--bg-chip);
+  font-size: var(--fs-small);
+  color: var(--text-soft);
+}
+.copy :where(p, li, td, dd) > a:not([class]) {
+  color: var(--green);
+  text-decoration: underline;
+  text-decoration-color: rgba(123, 224, 140, 0.35);
+  text-underline-offset: 3px;
+}
+.copy :where(p, li, td, dd) > a:not([class]):hover {
+  color: var(--orange-soft);
+}
 
 /* ---- Ledger ---- */
 .ledger-rows {

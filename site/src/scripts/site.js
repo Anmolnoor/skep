@@ -103,7 +103,6 @@ async function liveStats() {
     for (const [name, value] of Object.entries(stats)) {
       if (value != null) setAll(`[data-stat="${name}"]`, compact(value));
     }
-    if (stats.stars != null) setAll('[data-stat="stars-inline"]', `★ ${compact(stats.stars)} · `);
     if (repo.pushed_at) setAll('[data-stat="pushed"]', new Date(repo.pushed_at).toISOString().slice(0, 10));
     document.dispatchEvent(new CustomEvent('skep:stats', { detail: stats }));
   } catch {}

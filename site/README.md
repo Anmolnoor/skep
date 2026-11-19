@@ -261,6 +261,7 @@ A captured transcript. Lines starting `$ ` are commands, `# ` are notes, the res
 | `captured` | string | required | provenance, printed under the transcript |
 | `title` | string | terminal | |
 | `caret` | boolean | false | blinking CSS cursor after the last line |
+| `wrap` | boolean | false | wrap long lines instead of scrolling sideways |
 
 ```astro
 ---
@@ -280,6 +281,12 @@ $ skep doctor
 | `file` | string | patch | name in the head |
 | `stage` | boolean | false | lines stage in as the block scrolls into view (CSS only) |
 | `landed` | string | | line under the diff |
+| `captured` | string | | provenance, printed under the diff |
+
+File headers (`--- a/x`, `+++ b/x`) are shown as context, not as a removed and an added line.
+
+Running text on a page: put the class `copy` on the section (or `main`) and inline
+`<code>` and plain `<a>` inside `p`, `li`, `td` and `dd` get the kit's inline styles.
 
 ```astro
 <Diff code={patch} file="src/app.py" stage landed="skep/<task> ← patch · main untouched" />

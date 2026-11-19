@@ -9,11 +9,20 @@ interface Props {
   file?: string;
   stage?: boolean;
   landed?: string;
+  /** Where the patch came from, printed under it like Terminal's `captured`. */
+  captured?: string;
 }
-const { code, file = 'patch', stage = false, landed } = Astro.props;
+const { code, file = 'patch', stage = false, landed, captured } = Astro.props;
 const lines = code.replace(/^\n+|\s+$/g, '').split('\n');
+// `--- a/x` and `+++ b/x` are file headers, not a removed and an added line.
 const kind = (line: string) =>
-  line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : undefined;
+  line.startsWith('@@') || /^(---|\+\+\+) /.test(line)
+    ? 'hunk'
+    : line.startsWith('+')
+      ? 'add'
+      : line.startsWith('-')
+        ? 'del'
+        : undefined;
 ---
 
 <figure class="panel diff" style="margin:0">
@@ -21,5 +30,10 @@ const kind = (line: string) =>
   <pre tabindex="0" class:list={[stage && 'stage-rows']}>{lines.map((line, index) => (
     <span class:list={['line', kind(line)]} style={`--i:${index}`}>{line || ' '}</span>
   ))}</pre>
-  {landed && <figcaption class="panel-foot">{landed}</figcaption>}
+  {(landed || captured) && (
+    <figcaption class="panel-foot">
+      {landed}
+      {captured && <span class="diff-captured">captured: {captured}</span>}
+    </figcaption>
+  )}
 </figure>
