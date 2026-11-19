@@ -2,8 +2,8 @@
 // Upstream: src/ts-default/TextAnimations/BlurText/BlurText.tsx at d01aa914dcbe.
 // skep changes: the 'use client' directive is dropped (Astro island); a `tag` prop
 // replaces the hard-coded <p>; the server renders the settled text; reduced
-// motion shows the settled text and never loops or replays; `holdIfInView` keeps
-// text the reader is already looking at settled, so it never flashes.
+// motion shows the settled text and never loops or replays; `holdIfInView` (on by
+// default) keeps text the reader is already looking at settled, so it never flashes.
 import { motion, MotionConfig, type Easing, type MotionStyle, type Transition } from 'motion/react';
 import {
   useEffect,
@@ -51,7 +51,9 @@ type BlurTextProps = {
   fromColor?: string;
   focusOnHover?: boolean;
   // skep: text that is already in the viewport when the component hydrates stays
-  // settled. Without it such text is shown by the server HTML, hidden, then blurred in.
+  // settled and never plays; it plays only when it scrolls into view later. On by
+  // default. With `false` (upstream) such text is shown by the server HTML, hidden,
+  // then blurred in.
   holdIfInView?: boolean;
 };
 
@@ -275,7 +277,7 @@ const BlurText = ({
   color,
   fromColor,
   focusOnHover = false,
-  holdIfInView = false
+  holdIfInView = true
 }: BlurTextProps) => {
   const ref = useRef<HTMLElement>(null);
   const Tag = tag as ElementType;

@@ -1,7 +1,9 @@
 // From React Bits (DavidHDev/react-bits), © David Haz, MIT + Commons Clause; modified. Not covered by this repository's MIT licence.
 // Upstream: src/ts-default/TextAnimations/CountUp/CountUp.tsx at d01aa914dcbe.
 // skep changes: the 'use client' directive is dropped (Astro island); the server
-// renders the final value (`to`, a build-time number); reduced motion never counts.
+// renders the final value (`to`, a build-time number); reduced motion never counts;
+// `holdIfInView` (on by default) keeps a number the reader is already looking at
+// on its final value instead of dropping it to `from` and counting again.
 import { animate, cubicBezier, useInView } from 'motion/react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
@@ -25,6 +27,10 @@ interface CountUpProps {
   format?: 'standard' | 'compact';
   trigger?: 'view' | 'load';
   replayOnHover?: boolean;
+  // skep: a number that is already in the viewport when the component hydrates
+  // keeps its final value and does not play; it plays only when it scrolls into
+  // view later. On by default. A later change of `to` still counts on from there.
+  holdIfInView?: boolean;
   onStart?: () => void;
   onEnd?: () => void;
 }
@@ -214,6 +220,7 @@ export default function CountUp({
   format = 'standard',
   trigger = 'view',
   replayOnHover = false,
+  holdIfInView = true,
   onStart,
   onEnd
 }: CountUpProps) {
@@ -268,9 +275,18 @@ export default function CountUp({
     };
   });
 
+  // skep: see `holdIfInView`. Decided once, in a layout effect, so it is settled
+  // before the first paint after hydration and before the effect below runs.
+  const heldRef = useRef(false);
   useIsoLayoutEffect(() => {
-    // skep: under reduced motion the number never leaves its final value.
-    if (!startedRef.current) valueRef.current = prefersReducedMotion() ? endValue : startValue;
+    if (!holdIfInView || !ref.current) return;
+    const box = ref.current.getBoundingClientRect();
+    heldRef.current = box.bottom > 0 && box.top < window.innerHeight;
+  }, []);
+
+  useIsoLayoutEffect(() => {
+    // skep: under reduced motion, or held, the number never leaves its final value.
+    if (!startedRef.current) valueRef.current = prefersReducedMotion() || heldRef.current ? endValue : startValue;
     if (mode === 'count' && !runningRef.current && textRef.current) {
       textRef.current.textContent = formatValue(valueRef.current);
     }
@@ -278,6 +294,13 @@ export default function CountUp({
 
   useEffect(() => {
     if (!active || !startWhen) return;
+    // skep: a held number skips its first play and counts as played, at its final value.
+    if (heldRef.current) {
+      heldRef.current = false;
+      startedRef.current = true;
+      valueRef.current = endValue;
+      return;
+    }
     startedRef.current = true;
     setPlay(previous => ({
       id: (previous?.id || 0) + 1,
