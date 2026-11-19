@@ -44,8 +44,9 @@ class AutoApprovalRule:
     max_changed_files: int | None = None
     # v90-F4: require that the re-verification was earned by the PROJECT's
     # pinned verify_command, not the command the worker nominated for itself
-    # (v88-F4). Off by default; on for the rule that auto-lands broad diffs.
-    require_pinned_verify: bool = False
+    # (v88-F4). v127-F5 round 3 (I2): on by default, so a library caller's
+    # own rule cannot skip the pin by leaving the field out.
+    require_pinned_verify: bool = True
 
 
 # Manifest / lockfile globs — the "safe" diff scope U1 auto-lands (D3 active).

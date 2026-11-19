@@ -23,6 +23,7 @@ _PASS = AutoApprovalContext(
     reverify_confirmed=True,
     risk_flags=(),
     changed_files=("toypkg/math_utils.py",),
+    verify_pinned=True,
     reverify_commands=("uv run pytest",),
 )
 
@@ -67,6 +68,15 @@ def test_rule_matches_a_clean_confirmed_run() -> None:
     assert rule_block_reason(rule, _PASS) is None
     matched = evaluate((rule,), _PASS)
     assert matched is not None and matched[0] is rule
+
+
+def test_a_custom_rule_needs_the_projects_pin_by_default() -> None:
+    """v127-F5 round 3 (I2): a library caller's own rule cannot skip the pin
+    by leaving the field out — opting out is explicit."""
+    rule = AutoApprovalRule(name="custom")
+    assert rule.require_pinned_verify is True
+    reason = rule_block_reason(rule, dataclasses.replace(_PASS, verify_pinned=False))
+    assert reason is not None and "pins no verify_command" in reason
 
 
 def test_rule_blocks_when_reverification_unconfirmed() -> None:
