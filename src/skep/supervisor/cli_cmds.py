@@ -2601,6 +2601,7 @@ def cmd_project_setup(args: argparse.Namespace) -> int:
             policy_overrides=_project_policy_overrides(args),
             seed_default_schedules=not args.no_seed_schedules,
             seed_shell_commands=not args.no_seed_commands,
+            from_shell=True,
         )
     except HTTPException as exc:
         return _err(_http_error_detail(exc))

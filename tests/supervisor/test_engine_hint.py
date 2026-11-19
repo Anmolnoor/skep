@@ -24,8 +24,9 @@ _PIN = "uv run pytest"
 
 
 @pytest.fixture
-def ready(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Every condition true for both engines (and aider), auth from the shell."""
+def ready(monkeypatch: pytest.MonkeyPatch, config: SupervisorConfig) -> Any:
+    """Every condition true for both engines (and aider), auth in serve.env —
+    the file the daemon loads, so scheduled runs have it."""
     import skep.supervisor.engines as engines
     import skep.supervisor.serve.registry as registry
 
@@ -35,8 +36,10 @@ def ready(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(engines, "engine_available", lambda e: (True, f"/usr/bin/{e.name}"))
     for var in ("OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok-test")
+    config.home.parent.mkdir(parents=True, exist_ok=True)
+    (config.home.parent / "serve.env").write_text(
+        "OPENAI_API_KEY=sk-test\nCLAUDE_CODE_OAUTH_TOKEN=tok-test\n"
+    )
     return monkeypatch
 
 
@@ -52,7 +55,7 @@ def _setup(config: SupervisorConfig, repo: Path, **overrides: Any) -> dict[str, 
 
 
 def _hints(body: dict[str, Any]) -> str:
-    return "\n".join(note for note in body["notes"] if "is ready here" in note)
+    return "\n".join(note for note in body["notes"] if "--engine" in note)
 
 
 def test_a_ready_engine_is_named_and_never_picked(
@@ -60,7 +63,7 @@ def test_a_ready_engine_is_named_and_never_picked(
 ) -> None:
     body = _setup(config, repo)
     hints = _hints(body)
-    assert "codex is ready here (OPENAI_API_KEY in your shell, sandbox usable)" in hints
+    assert "codex is ready here (OPENAI_API_KEY in serve.env, sandbox usable)" in hints
     assert "add `--engine codex`" in hints and "ADR 0047" in hints
     assert "claude_code is ready here" in hints
     assert "aider" not in hints and "pi " not in hints
@@ -74,14 +77,33 @@ def test_a_ready_engine_is_named_and_never_picked(
     assert "sk-test" not in str(body) and "tok-test" not in str(body)  # never a value
 
 
-def test_auth_in_serve_env_counts(repo: Path, config: SupervisorConfig, ready: Any) -> None:
-    ready.delenv("OPENAI_API_KEY")
-    ready.delenv("CLAUDE_CODE_OAUTH_TOKEN")
-    config.home.parent.mkdir(parents=True, exist_ok=True)
-    (config.home.parent / "serve.env").write_text("OPENAI_API_KEY=sk-file\n")
+def test_a_key_only_in_the_daemon_environment_is_not_ready(
+    repo: Path, config: SupervisorConfig, ready: Any
+) -> None:
+    """Round 2: the REST/chat face's os.environ is the daemon's, not "your
+    shell" — and a key outside serve.env does not survive a restart."""
+    (config.home.parent / "serve.env").write_text("")
+    ready.setenv("OPENAI_API_KEY", "sk-env")
     hints = _hints(_setup(config, repo))
-    assert "codex is ready here (OPENAI_API_KEY in serve.env" in hints
+    assert "is ready here" not in hints and "your shell" not in hints
+    assert "codex" in hints and "not in serve.env" in hints
     assert "claude_code" not in hints
+
+
+def test_the_cli_names_a_shell_only_key_for_skep_run(
+    repo: Path, config: SupervisorConfig, ready: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+
+    (config.home.parent / "serve.env").write_text("")
+    ready.setenv("OPENAI_API_KEY", "sk-env")
+    code = main(["--home", str(config.home.parent), "project", "setup", str(repo),
+                 "--project-id", "eng", "--verify-command", _PIN])  # fmt: skip
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "codex works for `skep run` from this shell" in out
+    assert "scheduled runs need it in serve.env" in out
+    assert "is ready here" not in out
 
 
 def test_codex_opted_in_chatgpt_login_counts(
@@ -89,7 +111,7 @@ def test_codex_opted_in_chatgpt_login_counts(
 ) -> None:
     import skep.supervisor.codex_login as codex_login
 
-    ready.delenv("OPENAI_API_KEY")
+    (config.home.parent / "serve.env").write_text("")
     ready.setattr(
         codex_login, "login_status", lambda min_seconds=0: type("S", (), {"problem": None})()
     )
