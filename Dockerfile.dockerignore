@@ -17,3 +17,7 @@ node_modules
 plans
 plan
 .claude
+# The docs site is not part of the image: it is built and deployed by the site
+# workflow, and its React Bits copies (site/src/components/reactbits) must not be
+# redistributed. This also keeps site/node_modules, site/dist and site/.astro out.
+site

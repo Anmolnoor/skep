@@ -1,0 +1,39 @@
+---
+// Diff: a unified diff, coloured by line prefix. With `stage` the lines stage in
+// as the block scrolls into view (CSS only) and `landed` is the line under it,
+// e.g. "skep/<task> ← patch · main untouched".
+interface Props {
+  /** Unified diff text. */
+  code: string;
+  /** File name shown in the head. */
+  file?: string;
+  stage?: boolean;
+  landed?: string;
+  /** Where the patch came from, printed under it like Terminal's `captured`. */
+  captured?: string;
+}
+const { code, file = 'patch', stage = false, landed, captured } = Astro.props;
+const lines = code.replace(/^\n+|\s+$/g, '').split('\n');
+// `--- a/x` and `+++ b/x` are file headers, not a removed and an added line.
+const kind = (line: string) =>
+  line.startsWith('@@') || /^(---|\+\+\+) /.test(line)
+    ? 'hunk'
+    : line.startsWith('+')
+      ? 'add'
+      : line.startsWith('-')
+        ? 'del'
+        : undefined;
+---
+
+<figure class="panel diff">
+  <div class="panel-head"><div class="panel-title"><span>{file}</span></div></div>
+  <pre tabindex="0" class:list={[stage && 'stage-rows']} data-pagefind-ignore>{lines.map((line, index) => (
+    <span class:list={['line', kind(line)]} style={`--i:${index}`}>{line || ' '}</span>
+  ))}</pre>
+  {(landed || captured) && (
+    <figcaption class="panel-foot">
+      {landed}
+      {captured && <span class="diff-captured">captured: {captured}</span>}
+    </figcaption>
+  )}
+</figure>

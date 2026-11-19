@@ -8,16 +8,16 @@ memory: every claim below has a command that shows it.
 ## The one-sentence version
 
 > skep is a governor for coding agents: the agent works in a throwaway copy
-> of your repo under rules you approved, skep checks its work itself, and
-> nothing reaches your repo until you approve the patch.
+> of your repo under rules you approved, skep checks its work itself, and the
+> patch waits for your approval. Your main branch never moves without you.
 
 Then stop and let them ask. Three ideas carry almost every follow-up.
 
 ## 1. The governor, not the agent
 
 skep does not write code. It decides what an agent may do — Claude Code,
-Codex, Aider, a local model, or skep's own worker — and records every
-decision. Say it in their terms:
+Codex, Aider, pi, or skep's own worker on a model you choose — and records
+its decisions. Say it in their terms:
 
 - **The agent is competent and untrusted.** It never touches the real repo.
   It works in a disposable git worktree, often inside a sandbox.
@@ -25,7 +25,9 @@ decision. Say it in their terms:
   the verification itself. Either alone is not enough.
 - **Landing is the approval.** Finished work is a patch. `skep review
   <task_id>` shows it; `skep review <task_id> --approve` lands it as a commit
-  on a new `skep/<task_id>` branch — never the default branch.
+  on a new `skep/<task_id>` branch — never the default branch. Landing
+  without a human is opt-in (the maintain phase or `--unlocked`): it takes only a patch skep re-verified, and only onto a
+  `skep/*` branch.
 - **Some things are never allowed.** A worker cannot push, pull, fetch or
   switch branches, whatever the rules say. That is the floor.
 

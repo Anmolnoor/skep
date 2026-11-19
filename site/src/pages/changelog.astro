@@ -1,0 +1,82 @@
+---
+// Generated from the `## vX.Y.Z — title (date)` sections of docs/version-history.md.
+// A version that was never published is shown inside the release that shipped
+// its work, never as a release of its own.
+import { getEntry } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import Chip from '../components/Chip.astro';
+import { publishedReleases } from '../lib/changelog.mjs';
+import { DOCS_DIR, siteFacts } from '../lib/repo.mjs';
+import { renderDocsFragment } from '../plugins/markdown.mjs';
+
+const history = await getEntry('docs', 'version-history');
+if (!history?.body) throw new Error('docs/version-history.md is missing from the docs collection');
+const html = (markdown: string) => renderDocsFragment(markdown, 'version-history.md', DOCS_DIR);
+
+const releases = await Promise.all(
+  publishedReleases(history.body).map(async (release) => ({
+    ...release,
+    html: await html(release.body),
+    includes: await Promise.all(
+      release.includes.map(async (folded) => ({ ...folded, html: await html(folded.body) })),
+    ),
+  })),
+);
+if (releases.length === 0) throw new Error('docs/version-history.md has no release sections');
+const { version } = siteFacts();
+---
+
+<Base
+  title="Changelog"
+  description="Every published skep release, generated from the version history."
+  active="changelog"
+>
+  <section class="section">
+    <div class="wrap narrow">
+      <header class="stack" style="margin-bottom: var(--s-6)">
+        <p class="eyebrow t-micro">Changelog</p>
+        <h1 class="t-h2">Releases</h1>
+        <p class="t-lead">
+          Published releases, newest first, generated from
+          <a href="/docs/version-history.html" class="c-green">the version history</a>.
+        </p>
+      </header>
+
+      {
+        releases.map((release) => (
+          <article class="release" id={`v${release.version}`}>
+            <div class="release-meta">
+              <div class="version">v{release.version}</div>
+              <time datetime={release.date}>{release.date}</time>
+              {release.version === version && <Chip kind="ok">latest</Chip>}
+            </div>
+            <div>
+              <h2 class="t-h3">{release.title}</h2>
+              <div class="prose" set:html={release.html} />
+              {release.includes.length > 0 && (
+                <p class="folded-intro t-small">
+                  This release also carries work that was versioned but never published:
+                </p>
+              )}
+              {release.includes.map((folded) => (
+                <details class="folded" id={`v${folded.version}`}>
+                  <summary>
+                    <Chip kind="limit">not published</Chip>
+                    <strong class="mono">v{folded.version}</strong>
+                    <span>{folded.title}</span>
+                  </summary>
+                  <div class="prose" set:html={folded.html} />
+                </details>
+              ))}
+            </div>
+          </article>
+        ))
+      }
+
+      <p class="t-small c-mut" style="padding-top: var(--s-5); border-top: 1px solid var(--line-hair)">
+        Earlier releases and the round-by-round record are in
+        <a href="/docs/version-history.html" class="c-green">the full version history</a>.
+      </p>
+    </div>
+  </section>
+</Base>

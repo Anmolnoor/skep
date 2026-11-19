@@ -1,0 +1,71 @@
+---
+// Blog: the launch post, and a pointer to the changelog for everything since.
+// The launch version is read from docs/version-history.md, never typed.
+import Base from '../layouts/Base.astro';
+import Card from '../components/Card.astro';
+import Section from '../components/Section.astro';
+import { readRepoFile } from '../lib/repo.mjs';
+import { GH_URL } from '../lib/site-nav.mjs';
+
+const opened = /public repository opens at \*\*v(\d+\.\d+\.\d+)\*\*/.exec(
+  readRepoFile('docs/version-history.md'),
+);
+if (!opened) throw new Error('docs/version-history.md no longer states the version the public repository opened at');
+const launch = opened[1];
+---
+
+<Base
+  title="Blog"
+  description="The skep launch post. Everything since the launch is in the changelog."
+>
+  <section class="section">
+    <div class="wrap narrow stack">
+      <p class="eyebrow t-micro">Blog</p>
+      <h1 class="t-h2">One post, and a changelog</h1>
+      <p class="t-lead prose-width">
+        There is one post here: the launch. What has changed since is recorded release by release
+        in the changelog, which is generated from the project’s version history.
+      </p>
+    </div>
+  </section>
+
+  <Section band narrow eyebrow="Launch" title="The launch post">
+    <article class="card post">
+      <p class="t-micro c-mut"><time datetime="2026-07-30">2026-07-30</time> · Launch</p>
+      <h3 class="t-h3">skep <span class="mono">v{launch}</span>: the public launch</h3>
+      <p class="prose-width">
+        skep opened as a local supervisor for coding agents: the agent works in a disposable
+        worktree, skep re-verifies what it claims, and the patch waits for your approval. It had
+        been in daily use since mid-July 2026 and arrived as one <code>pipx install skep</code>.
+      </p>
+      <p class="prose-width t-small c-mut">
+        That is the project as it launched. It has changed since: one policy engine, external
+        agents always in the sandbox, a pinned verify command, opt-in auto-landing. For what it
+        does now, read <a class="c-green" href="/how-it-works.html">how it works</a>.
+      </p>
+      <div class="row">
+        <a class="link-arrow" href={`${GH_URL}/releases/tag/v${launch}`}>Release notes on GitHub</a>
+        <a class="link-arrow" href="https://anmolnoor.com/blog/skep-is-live">The launch post, in skep’s own words</a>
+      </div>
+    </article>
+  </Section>
+
+  <Section narrow eyebrow="Since then" title="What changed since">
+    <div class="grid grid-2">
+      <Card title="Changelog" icon="history" href="/changelog.html">
+        Published releases, newest first, with the work each one carried.
+      </Card>
+      <Card title="Version history" icon="file-text" href="/docs/version-history.html">
+        The round-by-round record the changelog is generated from, including the releases
+        before the changelog starts.
+      </Card>
+    </div>
+  </Section>
+</Base>
+
+<style>
+  .post {
+    display: grid;
+    gap: var(--s-4);
+  }
+</style>

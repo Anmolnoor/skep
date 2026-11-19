@@ -87,6 +87,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/skep"]
 
+# The docs site never ships on PyPI: its React Bits copies
+# (site/src/components/reactbits, MIT + Commons Clause) may be used in the
+# website but not redistributed as components. See NOTICE.
+[tool.hatch.build.targets.sdist]
+exclude = ["site"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

@@ -1,0 +1,73 @@
+---
+// Code of conduct. One of the two pages allowed to carry the published contact
+// address (the release hygiene scan allows it here and on the security page).
+import Base from '../layouts/Base.astro';
+import Section from '../components/Section.astro';
+import { ISSUES_URL } from '../lib/site-nav.mjs';
+
+const CONTACT = 'anmolnoor59@gmail.com';
+const mailto = `mailto:${CONTACT}?subject=${encodeURIComponent('[skep conduct]')}`;
+---
+
+<Base
+  title="Code of Conduct"
+  description="The standard of behaviour in skep's issues and pull requests, how to report a concern, and how it is enforced."
+>
+  <section class="section">
+    <div class="wrap narrow stack">
+      <p class="eyebrow t-micro">Code of conduct</p>
+      <h1 class="t-h2">Be excellent to each other</h1>
+      <p class="t-lead prose-width">
+        This applies to every space the project runs: issues, pull requests, code review, and any
+        other channel that carries its name.
+      </p>
+    </div>
+  </section>
+
+  <Section band narrow eyebrow="The standard" title="What is expected">
+    <div class="prose prose-width">
+      <ul>
+        <li>Be respectful and constructive. Critique code and ideas, not people.</li>
+        <li>Assume good faith, especially with newcomers and non-native English speakers.</li>
+        <li>No harassment, discrimination, personal attacks or sustained disruption, in public or in private.</li>
+        <li>
+          Keep threads on topic and honest: if something is broken, say so plainly; if a claim is
+          unverified, label it.
+        </li>
+        <li>
+          Respect maintainer decisions. Disagreement is welcome; reopening a settled decision in
+          every thread is not.
+        </li>
+      </ul>
+    </div>
+  </Section>
+
+  <Section narrow eyebrow="Reporting" title="If something concerns you">
+    <div class="stack prose-width">
+      <p>
+        Email <a class="c-green" href={mailto}>{CONTACT}</a> with <code>[skep conduct]</code> in the
+        subject. Reports are read by the maintainer, kept confidential, and acknowledged within a
+        week.
+      </p>
+      <p>
+        For an ordinary disagreement about code or a decision, an
+        <a class="c-green" href={ISSUES_URL}>issue</a> is the right place. For a security problem,
+        use <a class="c-green" href="/security.html">the security page</a>, not this address’s
+        conduct tag.
+      </p>
+    </div>
+  </Section>
+
+  <Section band narrow eyebrow="Enforcement" title="What happens">
+    <div class="stack prose-width">
+      <p>
+        A violation gets a warning. Repeated or severe violations get the person removed from
+        project spaces. The maintainer’s decision is final.
+      </p>
+      <p class="t-small c-mut">
+        Adapted in spirit from the
+        <a class="c-green" href="https://www.contributor-covenant.org/">Contributor Covenant</a>.
+      </p>
+    </div>
+  </Section>
+</Base>

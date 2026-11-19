@@ -1,0 +1,212 @@
+---
+// Roadmap: what works today, what is tracked in public, what is not planned.
+// The release list is generated from docs/version-history.md, like the changelog.
+import { getEntry } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import Icon from '../components/Icon.astro';
+import Section from '../components/Section.astro';
+import { publishedReleases } from '../lib/changelog.mjs';
+import { siteFacts } from '../lib/repo.mjs';
+import { GH_URL, ISSUES_URL } from '../lib/site-nav.mjs';
+
+const history = await getEntry('docs', 'version-history');
+if (!history?.body) throw new Error('docs/version-history.md is missing from the docs collection');
+const releases = publishedReleases(history.body);
+const { version } = siteFacts();
+
+const works = [
+  {
+    title: 'Runs in a sandbox',
+    icon: 'box',
+    body: 'Each task gets a disposable git worktree. Sandbox-mode runs are confined by Seatbelt on macOS, bubblewrap with Landlock on Linux, or podman if you opt in, and are refused when no backend applies.',
+    limit: 'The built-in worker can also run in workspace mode, which has no OS wall.',
+  },
+  {
+    title: 'Re-verification',
+    icon: 'shield-check',
+    body: 'skep re-runs the project’s pinned verify command on a clean checkout with the patch applied, and records one of four results.',
+    limit: 'A project with no pin falls back to the worker’s own command, and the record says so.',
+  },
+  {
+    title: 'Landing by approval',
+    icon: 'git-branch',
+    body: 'A patch waits for your approval and lands as a commit on skep/<task_id> or a branch you name, never the default branch. A pull request is opened only when you ask.',
+    limit: 'Auto-landing is opt-in: it takes only a re-verified patch and writes only a skep/* branch.',
+  },
+  {
+    title: 'One policy engine',
+    icon: 'scale',
+    body: 'Layered allow, ask and deny rules with skep policy why, explain, rsop and decisions; a locked baseline built from three templates; skep onboard for the first run.',
+    limit: 'The decision log is a local file. It is rotated, never deleted, and not tamper-evident.',
+  },
+  {
+    title: 'Five engines',
+    icon: 'cpu',
+    body: 'Claude Code, Codex, Aider and pi as external agents, plus skep’s own worker on the model provider you configure. Codex can use a ChatGPT plan login, per project.',
+    limit: 'External agents need a pinned verify command; Claude Code and Codex need their auth environment variable.',
+  },
+  {
+    title: 'Roles and delegation',
+    icon: 'users',
+    body: 'A role is a prompt, a voice and a policy layer that only narrows. skep team runs a manager and up to three tasks under one record.',
+    limit: 'Still one operator per home: a team is one person’s agents.',
+  },
+  {
+    title: 'Agents you run elsewhere',
+    icon: 'plug',
+    body: 'A Claude Code PreToolUse hook and an ACP governor answer an outside agent’s permission questions from your policy and record them.',
+    limit: 'Neither is a sandbox. The hook covers four tool kinds; an ACP agent in a mode that never asks is only observed.',
+  },
+  {
+    title: 'The chat assistant',
+    icon: 'message-square',
+    body: 'The same conversation in the web UI, the terminal, Telegram, Slack and Discord. Changes are proposed as cards you confirm.',
+    limit: 'A messenger can confirm four low-risk action classes. Shell commands, policy changes and landings stay in the web UI.',
+  },
+  {
+    title: 'Schedules and tools',
+    icon: 'calendar-clock',
+    body: 'Recurring runs through skep schedule and skep tick, MCP servers behind the same policy, skill shelves, memory and notes.',
+    limit: 'Scheduled runs use the built-in worker, not a project’s pinned external agent.',
+  },
+  {
+    title: 'Releases',
+    icon: 'package',
+    body: 'A version tag runs the release gate, publishes to PyPI and cuts the GitHub release. CI runs on Linux and macOS.',
+    limit: 'The macOS leg runs lint, types, unit tests and smoke; coverage and the sandbox smoke are Linux-only.',
+  },
+];
+
+const notPlanned = [
+  {
+    title: 'More than one operator',
+    body: 'One person stands behind a home and its serve token. Several people sharing one supervisor changes the trust model and would need its own design.',
+  },
+  {
+    title: 'A hosted skep',
+    body: 'There is no skep-operated service. A hosted version would be a separate product (cloud sandboxes, tenant accounts, billing), not part of the local tool.',
+  },
+  {
+    title: 'Self-directed work',
+    body: 'The assistant proposing its own work stays behind your explicit control. Making that ambient is not on the list.',
+  },
+];
+---
+
+<Base
+  title="Roadmap"
+  description="What skep does today, what is being worked on in public, and what is deliberately not planned."
+>
+  <section class="section">
+    <div class="wrap narrow stack">
+      <p class="eyebrow t-micro">Roadmap</p>
+      <h1 class="t-h2">What works, what is in the open, what is not planned</h1>
+      <p class="t-lead prose-width">
+        This page lists what has shipped and what is tracked in public. It carries no dates and no
+        promises: a feature is on it when the code is released.
+      </p>
+    </div>
+  </section>
+
+  <Section
+    band
+    narrow
+    eyebrow="Works today"
+    tone="green"
+    title="In the current release"
+    lead="Each capability is stated with its limit."
+  >
+    <p class="t-small c-mut" style="margin-bottom: var(--s-5)">
+      Current release: <span class="mono" data-version>v{version}</span>. The full record is in
+      <a class="c-green" href="/changelog.html">the changelog</a>.
+    </p>
+    <div class="grid grid-3">
+      {
+        works.map((item) => (
+          <Card title={item.title} icon={item.icon} tone="green">
+            <p>{item.body}</p>
+            <p class="t-small c-mut works-limit">
+              <span class="c-yellow">Limit.</span> {item.limit}
+            </p>
+          </Card>
+        ))
+      }
+    </div>
+  </Section>
+
+  <Section narrow eyebrow="Shipped" title="Release by release" lead="Generated from the version history.">
+    <ul class="hub-list">
+      {
+        releases.map((release) => (
+          <li>
+            <a href={`/changelog.html#v${release.version}`}>
+              <div>
+                <strong>v{release.version} · {release.title}</strong>
+                <span>
+                  {release.date}
+                  {release.includes.length > 0 &&
+                    `, also carrying: ${release.includes.map((folded) => folded.title).join('; ')}`}
+                </span>
+              </div>
+              <Icon name="chevron-right" size={16} />
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    <p class="t-small c-mut" style="margin-top: var(--s-4)">
+      Earlier releases are in <a class="c-green" href="/docs/version-history.html">the version history</a>.
+    </p>
+  </Section>
+
+  <Section
+    band
+    narrow
+    eyebrow="In the open"
+    title="Being worked on in public"
+    lead="Planned work is whatever is in the issue tracker and the open pull requests. Nothing else is promised here."
+  >
+    <div class="stack prose-width">
+      <p>
+        Checked on 2026-11-18: the issue tracker has no open issues, and there is one open pull
+        request, which its author has marked as parked (a role that pins its own model provider).
+        Nothing else is scheduled in public.
+      </p>
+      <p>
+        If something you need is missing, open an issue. A report of what broke on your machine, or
+        of a claim on this site that the code does not keep, is the most useful kind.
+      </p>
+      <div class="row">
+        <Button href={ISSUES_URL} icon="arrow-up-right">Open issues</Button>
+        <Button href={`${GH_URL}/pulls`} variant="ghost" icon="arrow-up-right">Open pull requests</Button>
+      </div>
+    </div>
+  </Section>
+
+  <Section
+    narrow
+    eyebrow="Not planned"
+    tone="yellow"
+    title="Deliberately not planned"
+    lead="These are not in skep and not on the list above. Each would change what skep is, so each waits for evidence that people who use it need it."
+  >
+    <div class="stack">
+      {notPlanned.map((item) => <Card title={item.title} icon="circle-slash" tone="yellow">{item.body}</Card>)}
+    </div>
+    <div style="margin-top: var(--s-5)">
+      <Callout kind="limit" title="Also not there today">
+        There is no Windows sandbox backend, and no one is working on one in public. The limits of
+        what does exist are on <a href="/security.html">the security page</a>.
+      </Callout>
+    </div>
+  </Section>
+</Base>
+
+<style>
+  .works-limit {
+    margin-top: var(--s-3);
+  }
+</style>

@@ -1,0 +1,9 @@
+---
+// Eyebrow: the mono, uppercase label above a section heading. One per section.
+interface Props {
+  tone?: 'orange' | 'green' | 'red' | 'yellow';
+}
+const { tone = 'orange' } = Astro.props;
+---
+
+<p class:list={['eyebrow', 't-micro', tone !== 'orange' && tone]}><slot /></p>

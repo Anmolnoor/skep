@@ -1,0 +1,27 @@
+---
+// Redirect shim for the old `doc.html?d=<slug>#hash` URLs. The table is the old
+// DOC_MAP (src/lib/slugs.mjs); the hash is kept; an unknown slug goes to the hub.
+import Base from '../layouts/Base.astro';
+import { oldSlugTable } from '../lib/slugs.mjs';
+
+const table = oldSlugTable();
+---
+
+<Base title="Docs" description="This page moved: the documentation is at /docs.html." active="docs" noindex>
+  <script is:inline define:vars={{ table }} slot="head">
+    const slug = new URLSearchParams(location.search).get('d') || 'quickstart';
+    const target = Object.hasOwn(table, slug) ? table[slug] : '/docs.html';
+    location.replace(target + location.hash);
+  </script>
+  <section class="section">
+    <div class="wrap narrow stack">
+      <h1 class="t-h2">This page moved</h1>
+      <p class="t-lead">
+        Each document now has its own page. <a href="/docs.html" class="c-green">Open the documentation</a>.
+      </p>
+      <ul class="stack t-small c-mut" style="padding-left: var(--s-5)">
+        {Object.entries(table).map(([slug, url]) => <li><a href={url}><code>{slug}</code></a></li>)}
+      </ul>
+    </div>
+  </section>
+</Base>

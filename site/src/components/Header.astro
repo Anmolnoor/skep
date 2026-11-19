@@ -1,0 +1,38 @@
+---
+// Header: brand, primary nav, search, GitHub (version), Install.
+// Below 1240px the nav folds into a native <details> menu, so it works without JS.
+import Icon from './Icon.astro';
+import Search from './Search.astro';
+import { GH_URL, NAV } from '../lib/site-nav.mjs';
+import { siteFacts } from '../lib/repo.mjs';
+
+interface Props {
+  /** `id` of the NAV entry for the current page. */
+  active?: string;
+}
+const { active } = Astro.props;
+const { version } = siteFacts();
+---
+
+<header class="site-header">
+  <a href="/" class="brand" aria-label="skep home"><Icon name="skep" size={30} /><span>skep</span></a>
+  <nav class="site-nav" aria-label="Primary">
+    {NAV.map((item) => <a href={item.href} aria-current={item.id === active ? 'page' : undefined}>{item.label}</a>)}
+  </nav>
+  <div class="header-actions">
+    <Search />
+    <a href={GH_URL} class="header-btn github" rel="noopener">
+      <Icon name="github" size={15} /><span>GitHub</span>
+      <span class="meta"><span data-version>v{version}</span></span>
+    </a>
+    <a href="/install.html" class="header-btn install"><span>Install</span><Icon name="arrow-right" size={15} /></a>
+    <details class="mobile-menu">
+      <summary class="header-btn" aria-label="Menu"><Icon name="menu" size={17} /></summary>
+      <nav aria-label="Primary, small screens">
+        {NAV.map((item) => <a href={item.href} aria-current={item.id === active ? 'page' : undefined}>{item.label}</a>)}
+        <a href="/install.html">Install</a>
+        <a href={GH_URL} rel="noopener">GitHub</a>
+      </nav>
+    </details>
+  </div>
+</header>

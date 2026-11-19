@@ -1,0 +1,41 @@
+---
+// Footer: every page of the site, the feedback link (Issues: Discussions is
+// disabled on the repository) and the build-time worker contract version.
+import Icon from './Icon.astro';
+import { FOOTER, GH_URL, ISSUES_URL, PYPI_URL } from '../lib/site-nav.mjs';
+import { siteFacts } from '../lib/repo.mjs';
+
+const { version, contract } = siteFacts();
+---
+
+<footer class="site-footer">
+  <div class="footer-grid">
+    <div class="footer-about">
+      <a href="/" class="brand" aria-label="skep home"><Icon name="skep" size={30} /><span>skep</span></a>
+      <p class="t-small">Govern agents. Protect your code.</p>
+      <div class="footer-social">
+        <a href={GH_URL} aria-label="skep on GitHub" rel="noopener"><Icon name="github" size={16} /></a>
+        <a href={PYPI_URL} aria-label="skep on PyPI" rel="noopener"><Icon name="package" size={16} /></a>
+        <a href={ISSUES_URL} aria-label="Open an issue" rel="noopener"><Icon name="message-circle" size={16} /></a>
+      </div>
+    </div>
+    {
+      FOOTER.map((column) => (
+        <nav aria-label={column.title}>
+          <div class="footer-col-title">{column.title}</div>
+          <ul class="footer-links">
+            {column.links.map((link) => (
+              <li>
+                <a href={link.href} rel={link.href.startsWith('http') ? 'noopener' : undefined}>{link.label}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      ))
+    }
+  </div>
+  <div class="footer-bottom">
+    <span>© 2026 skep. Released under the MIT License.</span>
+    <span class="mono"><span data-version>v{version}</span> · worker contract {contract}</span>
+  </div>
+</footer>

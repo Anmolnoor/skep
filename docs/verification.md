@@ -19,17 +19,30 @@ that independent result.
 
 For a completed run, Skep:
 
-1. Creates a fresh worktree at the original repo baseline.
-2. Applies the worker's patch artifact.
-3. Takes the project's pinned `verify_command` (v88-F4); only an unpinned
-   project falls back to the command list from the worker's `verify.result`
-   event. The record says which of the two it re-ran.
-4. Re-runs those commands from the clean worktree.
-5. Records the outcome, exit codes, and detail message.
+1. Chooses the command. The project's pinned `verify_command` comes first.
+   The command list from the worker's `verify.result` event is the fallback,
+   used only when the project pins nothing or the run belongs to no project.
+2. Creates a fresh worktree at the commit the run started from, and records
+   that commit.
+3. For a `uv` or Node project, installs its dependencies from the baseline's
+   lockfile in that worktree first, before the patch is applied (see the
+   dependency priming below).
+4. Applies the worker's patch artifact. If the patch changes the lockfile, the
+   dependencies are installed once more so the new ones are the ones tested.
+5. Re-runs the command from the clean worktree.
+6. Records the outcome, exit codes, a detail message, and which command it
+   was: `[command from the project's pinned verify_command]` or
+   `[command from the worker's own verify step]`.
 
-The replay uses only `PATH` and `HOME` from the supervisor environment. When the
-supervisor sandbox is available, the replay command is run with deny-all network
-and writes confined to the clean worktree.
+The replay passes only `PATH` and `HOME` through from the supervisor
+environment. The command runs inside the sandbox with deny-all network and
+writes confined to the clean worktree; loopback ports the project opened
+(`--loopback-port`) stay reachable. If the sandbox cannot be built, the command
+is not run on the bare host: the outcome is `unavailable`. Each command is
+bounded by the run's wall-clock budget, and never by less than 300 seconds.
+
+To pin the command, see
+[`guide-pin-verify-command.md`](guide-pin-verify-command.md).
 
 Because the replay has no network, Skep first installs the project's
 dependencies from the baseline's lockfile, then again from the patched lockfile
@@ -87,16 +100,13 @@ one it is `unavailable`, never `failed`.
 
 | Outcome | Meaning |
 | --- | --- |
-| `passed` | Patch applied and every recorded command exited `0`. |
-| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. |
-| `unavailable` | Skep could not honestly re-run the check, usually because there was no patch, no recorded verification command, or the command was not installed. |
-
-A `failed` replay records the tail of the command's output (from pytest's
-short summary on, when there is one); the whole output, up to its last 200 KB,
-is kept in `reverify.output.txt` in the run's audit dir.
+| `passed` | Patch applied and every command exited `0`. |
+| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. The tail of the output is kept (from pytest's short summary on, when there is one), and the whole output, up to its last 200 KB, is written to `reverify.output.txt` in the run's evidence directory. |
+| `unavailable` | Skep could not honestly re-run the check: the command was not installed (exit 127), the sandbox could not be built, the dependency install failed or was refused (see above), the worker claimed changed files but left no patch, or there was no command to run. |
+| `not_applicable` | The run changed no files or produced no patch, so there is nothing to re-verify. Shown as `nothing to re-verify`, without an alarm. |
 
 A run is `confirmed` only when the worker reported verification `passed` and
-Skep's replay outcome is also `passed`.
+Skep's replay outcome is also `passed`. A run has one re-verification record.
 
 ## What Run Shows
 
@@ -118,27 +128,27 @@ as the worker's claim (v127-T3) — an external engine's own check is only
 task 019...
   state:        completed
   verification: passed (worker says tests passed)
-  re-verify:    passed [confirmed] (G10): re-ran clean: all exit 0
-                re-ran ['python -m pytest'] -> exit [0]
+  re-verify:    passed [confirmed] (G10): re-ran clean: all exit 0 [command from the project's pinned verify_command]
+                re-ran ['pytest'] → exit [0]
 ```
 
 If replay disagrees with the worker, review marks it loudly:
 
 ```text
-  re-verify:    failed [NOT CONFIRMED - DO NOT TRUST] (G10): re-run exit codes [1]
+  re-verify:    failed [NOT CONFIRMED — DO NOT TRUST] (G10): re-run exit codes [1] (expected all 0); full output: <evidence dir>/reverify.output.txt
 ```
 
-That disagreement blocks auto-approval, and so does a confirmed replay of a
-known-vacuous check (below). You can still inspect the evidence and
-decide what to do manually, but Skep will not treat the run as safe to land by
-policy.
+That disagreement blocks auto-landing, and so does a confirmed replay of a
+known-vacuous check (below). You can still inspect the evidence and approve by
+hand; `skep review <task_id> --approve` then lands the patch and prints a
+warning that re-verification failed.
 
 ## Why This Matters
 
 Without re-verification, a supervisor would still be trusting the agent's own
-summary. Re-verification changes the trust boundary: the agent supplies a patch
-and a command, but Skep checks whether that patch actually satisfies that command
-on a clean copy.
+summary. Re-verification changes the trust boundary: the agent supplies a
+patch, the project supplies the command, and Skep checks whether that patch
+satisfies that command on a clean copy.
 
 This catches common failures:
 
@@ -150,9 +160,11 @@ This catches common failures:
 
 ## Current Limits
 
-- Re-verification is only as strong as the recorded command. If a worker records
-  `true`, Skep can confirm only that `true` exits successfully. Such a run is
-  never auto-landed: every auto-landing rule needs
+- Re-verification is only as strong as the command. A pinned command that does
+  not cover the change confirms a wrong patch. On an unpinned project the
+  worker chose the command: if it recorded `true`, Skep can confirm only that
+  `true` exits successfully. External engines refuse to work without a pin for
+  that reason, and such a run is never auto-landed: every auto-landing rule needs
   the project's pinned `verify_command`, never the worker's own choice, and
   refuses a replay whose commands
   are all known-vacuous (`true`, `:`, `exit 0`, `test`/`[`, `echo`, `printf`,
@@ -194,8 +206,11 @@ This catches common failures:
   a missing or known-vacuous pin, with a note, and refuses a request that
   itself turns auto-apply on with such a pin.
 - Toolchain mismatch is reported as `unavailable`, not `failed`. For example, if
-  the worker recorded `pytest` but the supervisor environment cannot find it,
+  the command is `pytest` but the supervisor environment cannot find it,
   Skep cannot honestly confirm the run.
+- The dependency install (uv and Node) reaches the package registries before
+  the offline re-run. Other toolchains are not primed: their dependencies must
+  already be available offline.
 - Skep does not re-verify failed or pending runs as successful work. There is no
   completed patch claim to confirm.
 - Long-running verification commands are bounded by the supervisor timeout.

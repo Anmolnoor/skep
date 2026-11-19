@@ -1,0 +1,107 @@
+---
+// Doc: one markdown file from docs/ as a page: sidebar, on-page contents,
+// previous / next, and "edit on GitHub". The markdown's own `# ` heading is the h1.
+import type { MarkdownHeading } from 'astro';
+import Base from './Base.astro';
+import DocsSidebar from '../components/DocsSidebar.astro';
+import Icon from '../components/Icon.astro';
+import { editUrl } from '../lib/links.mjs';
+import { ISSUES_URL } from '../lib/site-nav.mjs';
+
+interface Neighbour {
+  href: string;
+  title: string;
+}
+interface Props {
+  /** Collection id, e.g. `adr/0050-…`. */
+  id: string;
+  /** Path under docs/, e.g. `adr/0050-….md`. */
+  file: string;
+  title: string;
+  headings: MarkdownHeading[];
+  prev?: Neighbour | null;
+  next?: Neighbour | null;
+}
+const { id, file, title, headings, prev, next } = Astro.props;
+// Long files (the version history has ~180 h2) list h2 only.
+const candidates = headings.filter((heading) => heading.depth === 2 || heading.depth === 3);
+const toc = candidates.length > 40 ? candidates.filter((heading) => heading.depth === 2) : candidates;
+const isAdr = id.startsWith('adr/') && id !== 'adr/readme';
+---
+
+<Base title={title} description={`${title}: skep documentation.`} active="docs">
+  <div class="docs-layout">
+    <aside class="docs-rail left"><DocsSidebar current={id} /></aside>
+
+    <div class="docs-main">
+      <details class="docs-drawer">
+        <summary>Documentation menu</summary>
+        <div><DocsSidebar current={id} /></div>
+      </details>
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="/docs.html">Docs</a>
+        <Icon name="chevron-right" size={13} />
+        {isAdr && <a href="/docs/adr/readme.html">Decision records</a>}
+        {isAdr && <Icon name="chevron-right" size={13} />}
+        <span aria-current="page">{title}</span>
+      </nav>
+      {
+        toc.length > 1 && (
+          <details class="docs-drawer contents">
+            <summary>On this page</summary>
+            <div>
+              <ul class="toc">
+                {toc.map((heading) => (
+                  <li class={`depth-${heading.depth}`}><a href={`#${heading.slug}`}>{heading.text}</a></li>
+                ))}
+              </ul>
+            </div>
+          </details>
+        )
+      }
+
+      <article class="prose" data-pagefind-meta={`title:${title}`}>
+        <slot />
+      </article>
+
+      {
+        (prev || next) && (
+          <nav class="prev-next" aria-label="Previous and next page">
+            {prev && (
+              <a href={prev.href} rel="prev">
+                <small class="t-micro">Previous</small>
+                <span>{prev.title}</span>
+              </a>
+            )}
+            {next && (
+              <a href={next.href} rel="next" class="next">
+                <small class="t-micro">Next</small>
+                <span>{next.title}</span>
+              </a>
+            )}
+          </nav>
+        )
+      }
+      <div class="doc-foot">
+        <a href={editUrl(file)} class="link-arrow muted" rel="noopener"><Icon name="pencil" size={14} /><span>Edit this page on GitHub</span></a>
+        <a href={ISSUES_URL} class="link-arrow muted" rel="noopener"><Icon name="message-circle" size={14} /><span>Report a problem</span></a>
+        <a href={`/${file}`} class="link-arrow muted"><Icon name="file-text" size={14} /><span>Raw markdown</span></a>
+      </div>
+    </div>
+
+    <aside class="docs-rail right">
+      {
+        toc.length > 1 && (
+          <nav aria-label="On this page">
+            <div class="toc-title">On this page</div>
+            <ul class="toc">
+              {toc.map((heading) => (
+                <li class={`depth-${heading.depth}`}><a href={`#${heading.slug}`}>{heading.text}</a></li>
+              ))}
+            </ul>
+          </nav>
+        )
+      }
+    </aside>
+  </div>
+</Base>

@@ -10,7 +10,8 @@ the launch workflow.
 skep [--home HOME] [--version] <command> ...
 ```
 
-- `--home HOME` selects the Skep state directory. Defaults to `~/.skep`.
+- `--home HOME` selects the Skep state directory. Defaults to `$SKEP_HOME`, else
+  `~/.skep`. It goes before the command.
 - `--version` prints the Skep package version and worker contract version.
 
 ## Setup and Health
@@ -22,6 +23,7 @@ skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env E
 skep onboard --check
 skep onboard --quiet | --verbose
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
+skep setup --template NAME [--dry-run] [--apply]
 skep doctor
 skep status [--personal] [--json]
 ```
@@ -49,6 +51,9 @@ skep status [--personal] [--json]
   onboard flag they only set the why-lines: every step still runs (v127-T2).
   Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
+- `setup --template NAME` applies a policy template (`builder`, `operator`,
+  `assistant`). `--dry-run` prints the resolved policy table and writes
+  nothing; `--apply` confirms switching an existing policy document.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.
 - `doctor` also reports non-blocking runtime checks such as sandbox backend
   availability.
@@ -73,28 +78,45 @@ skep run --template web-feature /path/to/repo --execution-mode workspace
 
 Important options:
 
-- `--worker-cmd COMMAND` sets the worker adapter command for this run.
 - `--execution-mode workspace|sandbox` chooses host-visible workspace execution
-  or the host sandbox backend.
+  (no OS sandbox; skep's own worker only) or the host sandbox backend. An
+  external engine always runs in `sandbox`.
+- `--engine aider|builtin|claude_code|codex|pi` picks the coding engine for this
+  run, over the project's pinned `coding_engine`.
+- `--worker-cmd COMMAND` sets the worker adapter command for this run (default:
+  `$SKEP_WORKER_CMD`, else skep's own worker). A project pinned to an external
+  engine refuses it unless `--engine builtin` is passed.
+- `--ref REF` bases the worktree on a git ref.
 - `--template NAME` instantiates a saved workflow template.
 - `--param KEY=VALUE` fills a template parameter; repeatable.
 - `--no-template` skips learned-template auto-match for this run.
-- `--minimal` starts with empty network, env, shell, and git grants so the run
-  learns through approvals.
+- `--minimal` starts with deny-all grants so the run learns through approvals.
+  A worker that calls the LLM still reaches its configured provider.
 - When multiple learned templates match in an interactive terminal, `run` shows
   a one-key picker; choose `no template` to start from the normal policy.
-- `--network DOMAIN` allows one domain; repeatable. Omitted means deny all
-  outbound unless policy or a matched template grants more.
+- `--network DOMAIN` allows one domain; repeatable; added to the project's
+  hosts. Omitted, the policy's `default_network` applies: the builder and
+  operator baselines allow their package-registry hosts, the assistant baseline
+  and a bare home allow none. A worker that calls the LLM reaches its
+  configured provider whatever this list says.
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
 - `--auto-approve` has no effect (retired; still accepted on `run`, `tick` and
   `serve` for one release, with a note): a patch lands without a click only
   when the project turns on `auto_apply_verified_patch` (the maintain phase and
   unlocked mode turn it on) and pins a real check.
+- `--planning-protocol plan|react` chooses one upfront plan (the default) or the
+  bounded act-observe loop; omitted, the project's `worker_protocol` applies.
+- `--budget-wall-clock`, `--budget-max-iterations`, `--budget-max-actions` and
+  `--budget-max-provider-calls` set this run's budget.
+- `--resume-of TASK_ID` names the task this run supersedes.
 - `--role NAME` gives the worker a role: its layer narrows the worker's grants
   (see Roles).
 - `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost
   first); the worker holds no more than it does.
+- `--answer-host HOST` answers, for this run only, a host the run would ask
+  about on a home with no approved baseline; repeatable, and required off a
+  terminal (see Roles).
 - `--quiet` suppresses the live phase tail.
 
 `--minimal` cannot be combined with `--template`, `--network`, or `--env-allow`.
@@ -117,18 +139,25 @@ detection patterns are data from herdr (Apache-2.0; see `NOTICE`).
 ## Review and Approval
 
 ```sh
-skep review <task_id> [--approve | --deny | --allow-command]
+skep review <task_id> [--approve | --deny | --allow-command | --reverify]
+                      [--branch NAME] [--pr] [--pr-base BRANCH] [--note TEXT]
+                      [--actor NAME] [--worker-cmd COMMAND]
 ```
 
 - Plain `review` shows the run evidence, patch, approval state, and
   re-verification result.
 - `--approve` applies a completed patch to a `skep/<task_id>` branch, or resumes
-  a pending approval.
+  a pending approval. A run with no re-verification record is refused.
+- `--branch NAME` names the landing branch for `--approve` on a completed run;
+  it must be a new branch, not the default branch.
+- `--reverify` re-verifies (G10) a completed run that was never re-verified,
+  with the project's pinned verify command.
 - `--allow-command` approves and remembers a pending shell command, then resumes
   the run.
 - `--deny` rejects the pending approval.
-- `--actor NAME` records who made the decision.
-- `--pr` opens a GitHub pull request after applying a completed patch.
+- `--actor NAME` records who made the decision; `--note TEXT` adds a note to it.
+- `--pr` opens a GitHub pull request after applying a completed patch (needs
+  `gh`); `--pr-base BRANCH` sets its base (default `main`).
 - `--worker-cmd COMMAND` sets the worker adapter command for resuming a pending
   run.
 
@@ -171,20 +200,26 @@ skep schedule add NAME REPO "instructions" --every 1d [options]
 skep schedule add NAME REPO --template TEMPLATE --every 1d [--param KEY=VALUE]
 skep schedule list
 skep schedule remove NAME
+skep schedule health
 skep tick [--worker-cmd COMMAND]
 ```
 
 - `schedule add` creates a recurring direct run or template-bound run.
 - `--every` accepts intervals such as `30s`, `5m`, `2h`, or `1d`.
+- `schedule add` also takes `--caste CASTE`, `--ref REF`, `--network DOMAIN`,
+  `--env-allow ENV` and `--role NAME` (holds the schedule's runs to a role).
+- `schedule health` reports how each schedule has been doing.
 - `--start-at 2026-11-19T08:00:00Z` sets the first run (a naive time is UTC);
   later runs keep that time of day. `--once` fires once, then disables.
 - `tick` dispatches all due schedules and is intended for cron or another
-  scheduler.
+  scheduler. A running `skep serve` dispatches due schedules itself.
 
 ## Branches and Pull Requests
 
 ```sh
+skep repo list
 skep repo refresh REPO
+skep repo push-baseline REPO [--base BRANCH]
 
 skep branch list   REPO
 skep branch create REPO NAME [--from REF]
@@ -202,8 +237,10 @@ These are the operator's half of the git surface (ADR 0050). They run
 supervisor-side on your own credentials; workers can never reach a remote or
 move a branch, and neither can the Queen's shell.
 
+- `repo list` shows every repo skep can reach: clones and workon directories.
 - `repo refresh` fetches origin and fast-forwards the default branch. Run it
   before reasoning about how stale anything is.
+- `repo push-baseline` creates the missing default branch on an empty origin.
 - `branch merge` is for catching a branch up (`--source origin/main`) or
   consolidating several task branches onto one before a single PR. It refuses
   to merge **into** the default branch, and a conflict aborts cleanly naming
@@ -240,7 +277,8 @@ See ADR 0060.
 ## Chat
 
 ```sh
-skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--oneshot MESSAGE] [--role NAME]
+skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--role NAME]
+          [--oneshot MESSAGE] [--yes]
 ```
 
 `chat` is the terminal face of the same Queen the web UI talks to. It is an
@@ -258,31 +296,53 @@ daemon: run `skep serve` first. The REPL never opens the store directly.
   one and replays its recent transcript.
 - `--oneshot "message"` sends one message to a new chat, streams the reply,
   and exits 0 — no prompts; cards are skipped and reported by id (the
-  scripting/cron face).
+  scripting/cron face). With `--yes` it pre-confirms every card that turn
+  proposes, once — never a policy card: allowlist and grant changes stay
+  pending, named for `/approve`.
 - A new interactive chat asks for its role once (Enter takes the default —
   `skep role use`, else the role `skep onboard` recorded); `--role NAME`
   skips the question. See "Roles" below.
 
 Messages starting with `/` are the command deck — deterministic operator
-commands the model never sees, identical to the web deck:
+commands the model never sees. The first 22 are the same in the web deck:
 
 | Command | Purpose |
 |---|---|
 | `/help` | list the command deck |
-| `/policy [repo]` | effective policy for a repo |
+| `/policy [repo]` | effective policy for a repo (default: last used) |
 | `/repos` | registered repos |
+| `/skills` | learned-skill candidates and admitted skills |
 | `/runs [n]` | recent runs |
 | `/approvals` | the pending approval queue |
-| `/state <repo>` | a repo's git state |
-| `/setup <repo>` | bind a repo to a trusted project (confirm card) |
-| `/phase <project-id> <phase>` | move a project's trust phase (confirm card) |
+| `/state <repo>` | a repo's git state: branches, HEAD, recent commits |
+| `/setup <repo> [--pack X] [--phase Y]` | bind a repo to a trusted project (confirm card) |
+| `/phase <project-id> <bootstrap\|build\|maintain>` | move a project's trust phase (confirm card) |
 | `/unregister <project-id>` | unregister a project: skep forgets it, its folder stays (confirm card) |
 | `/land <task-id> [branch]` | land a completed run's patch (confirm card) |
-| `/approve <review-id> [branch]` | approve a pending review (confirm card) |
-| `/deny <review-id>` | deny a pending review (confirm card) |
-| `/workon <path>` | make a local directory a first-class workspace (confirm card) |
-| `/role <name>` | switch this chat's role — prompt, voice and policy layer together (confirm card) |
-| `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); never a model tool, never from a channel |
+| `/approve <review-id\|card-id> [branch]` | approve a pending review (confirm card), or a pending card by its id |
+| `/deny <review-id\|card-id>` | deny a pending review (confirm card), or a pending card by its id |
+| `/workon <path> [--pack X] [--phase Y]` | make a local directory a first-class workspace: git baseline plus a trusted project (confirm card) |
+| `/schedule <name> <repo> <every> <instructions…>` | create a recurring schedule the ticker dispatches; `every` takes 30m/6h/1d (confirm card) |
+| `/role <builder\|operator\|assistant\|custom-role>` | switch this chat's role — prompt, voice and policy layer together (confirm card) |
+| `/personality <concise\|technical\|friendly\|custom:text\|default>` | set this chat's reply style — style only, never policy (confirm card) |
+| `/persona <text…\|default>` | set the profile-level identity every chat starts with — identity only, never policy (confirm card) |
+| `/btw <question…>` | ask a side question without touching running work: a read-only turn, no cards, no mutations |
+| `/steer <task-id> <text…>` | send a steering note into a running react run — input, never authority; acts at once, no card |
+| `/resume <task-id>` | continue a crashed or timed-out run from its checkpoint, model-free (confirm card) |
+| `/browser` | register the built-in Playwright browser under the browse scope (confirm card) |
+| `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); acts at once, never a model tool, never from a channel |
+
+Four more exist only in the terminal:
+
+| Command | Purpose |
+|---|---|
+| `/status` | re-print the startup banner: assistant readiness, approvals and cards waiting |
+| `/model [name] [--scope chat\|default]` | show the effective model for this chat; with a name, propose a model change on a card |
+| `/replay` | print the last messages of this chat |
+| `/exit` | leave the REPL; a bare `exit` or `quit` also works |
+
+A typed `/approve` or `/deny` in the terminal is the decision itself and is
+not asked twice.
 
 `skep trust CHAT_ID [--bit private|untrusted]` is the same verb outside chat.
 A `/trust` that clears `untrusted` also covers the finish notice of the runs
@@ -306,8 +366,16 @@ registry. Use `skep skill --help` for the full subcommand list.
 ## Projects and Policy
 
 ```sh
-skep project preview REPO [--pack PACK] [--phase PHASE]
-skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME]
+skep project preview REPO [--pack PACK] [--strategy STRATEGY] [--phase PHASE]
+                     [--project-id ID] [--name NAME] [--no-seed-commands]
+                     [--engine ENGINE] [--verify-command CMD] [--loopback-port PORT]
+                     [--codex-chatgpt-login | --no-codex-chatgpt-login]
+skep project setup   REPO [--pack PACK] [--strategy STRATEGY] [--phase PHASE]
+                     [--project-id ID] [--name NAME]
+                     [--no-seed-schedules] [--no-seed-commands]
+                     [--engine ENGINE] [--verify-command CMD] [--group NAME]
+                     [--loopback-port PORT]
+                     [--codex-chatgpt-login | --no-codex-chatgpt-login]
                      [--unlocked | --no-unlocked]
 skep project list
 skep project show    PROJECT_ID
@@ -317,15 +385,22 @@ skep policy registry
 skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE [--role NAME] [--delegated-by ACTOR@ROLE ...]
 skep policy explain SUBJECT
-skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]
+skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes] [--diff]
 skep policy baseline [status|diff]
+skep policy migrate --dry-run
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
-                   [--delegated-by ACTOR@ROLE ...]
+                   [--delegated-by ACTOR@ROLE ...] [--read-only]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N] [--team ID]
 skep policy grants
 skep policy revoke RULE_ID
 ```
+
+`policy migrate --dry-run` replays the decision log under today's policy and
+lists every verdict that flips; it writes nothing. `policy approve --diff`
+does the same replay under the layer about to be locked, before locking.
+`policy decide --read-only` marks an MCP tool, browse or email action as one
+that reports itself read-only.
 
 `policy grants` lists every learned grant (id, what it matches, lifetime,
 what it is bound to) and `policy revoke` removes one by id — the same verbs
@@ -333,7 +408,15 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `--unlocked` is the top rung of the trust ramp (ADR 0061): the
+wins. A repo that is not a project yet needs `--pack` or `--strategy` (for
+example `--strategy trusted_local_dev`); without one setup is refused with
+`project setup requires a pack or strategy`. `--no-seed-schedules` and
+`--no-seed-commands` save the project without the pack's schedules or the
+toolchain-seeded shell commands. `--codex-chatgpt-login` lets this project's
+codex runs use your ChatGPT plan login when no `OPENAI_API_KEY` is set: an
+access-token-only copy per run, never the refresh token (see
+[codex-chatgpt-login.md](codex-chatgpt-login.md)); `--no-codex-chatgpt-login`
+turns it off. `--unlocked` is the top rung of the trust ramp (ADR 0061): the
 project's sandboxed workers stop asking about commands no rule names on
 runs the serve dispatches (a CLI `skep run` still stops at every gate; a
 host no rule names is still refused or asked, never auto-approved), dispatch
@@ -432,6 +515,7 @@ dispatches: a `worker@…` hop refuses.
 ```sh
 skep team --manager ROLE --task REPO INSTRUCTIONS [--task ...] [--role NAME]
           [--delegated-by ACTOR@ROLE] [--execution-mode workspace|sandbox]
+          [--answer-host HOST] [--worker-cmd COMMAND]
 ```
 
 A team run (first-run R3) is a batch of 1-3 runs with a manager as the

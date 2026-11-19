@@ -1,0 +1,23 @@
+---
+// Card: a titled panel. With `href` the whole card is one link.
+import Icon from './Icon.astro';
+
+interface Props {
+  title?: string;
+  /** Lucide icon name for the badge above the title. */
+  icon?: string;
+  tone?: 'orange' | 'green' | 'red' | 'yellow';
+  href?: string;
+  /** Heading level of the title. Default h3 (cards sit under a section h2). */
+  level?: 'h2' | 'h3' | 'h4';
+  class?: string;
+}
+const { title, icon, tone = 'orange', href, level: Heading = 'h3', class: className } = Astro.props;
+const Tag = href ? 'a' : 'div';
+---
+
+<Tag href={href} class:list={['card', className]}>
+  {icon && <div class:list={['card-icon', tone !== 'orange' && tone]}><Icon name={icon} size={18} /></div>}
+  {title && <Heading class="card-title">{title}</Heading>}
+  <div class="card-body"><slot /></div>
+</Tag>

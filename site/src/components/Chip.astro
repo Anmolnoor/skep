@@ -1,0 +1,10 @@
+---
+// Chip: a verdict (allow / ask / deny, as the policy engine prints them) or a
+// status (ok / risk / limit). The label defaults to the kind.
+interface Props {
+  kind: 'allow' | 'ask' | 'deny' | 'ok' | 'risk' | 'limit';
+}
+const { kind } = Astro.props;
+---
+
+<span class:list={['chip', `chip-${kind}`]}><slot>{kind}</slot></span>

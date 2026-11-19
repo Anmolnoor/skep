@@ -1,0 +1,31 @@
+---
+// Button: a link styled as a button (or a <button> when there is no href).
+import Icon from './Icon.astro';
+
+interface Props {
+  href?: string;
+  variant?: 'primary' | 'ghost';
+  size?: 'md' | 'sm';
+  /** Lucide icon name, shown after the label. */
+  icon?: string;
+  type?: 'button' | 'submit';
+  class?: string;
+}
+const { href, variant = 'primary', size = 'md', icon, type = 'button', class: className } = Astro.props;
+const classes = ['btn', `btn-${variant}`, size === 'sm' && 'btn-sm', className];
+const external = href ? /^https?:/.test(href) : false;
+---
+
+{
+  href ? (
+    <a href={href} class:list={classes} rel={external ? 'noopener' : undefined}>
+      <span><slot /></span>
+      {icon && <Icon name={icon} size={16} />}
+    </a>
+  ) : (
+    <button type={type} class:list={classes}>
+      <span><slot /></span>
+      {icon && <Icon name={icon} size={16} />}
+    </button>
+  )
+}
