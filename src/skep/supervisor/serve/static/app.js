@@ -1007,7 +1007,7 @@ const HASH_ALIASES = {
 // An unknown tab is rewritten to the first, so an item is always lit.
 const SECTIONS = {
   settings: ["models", "workers", "projects", "channels", "setup"],
-  policies: ["now", "decisions", "grants", "groups", "defaults"],
+  policies: ["now", "decisions", "grants", "groups", "defaults", "tree"],
 };
 
 async function route() {

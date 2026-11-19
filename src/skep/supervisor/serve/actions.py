@@ -85,13 +85,21 @@ from ..policy_schema import (
     SCOPE_ACTIONS,
     SCOPES,
     PolicyDocument,
+    ResolvedRule,
+    ResolvedScopePolicy,
     document_from_settings,
     logged_url,
     operator_document_from_settings,
     pattern_matches,
     shell_segments,
 )
-from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
+from ..policy_templates import (
+    TEMPLATE_LAYER,
+    PolicyTemplate,
+    layer_view,
+    load_policy_template,
+    shipped_descriptions,
+)
 from ..policy_v3 import (
     Request,
     Stack,
@@ -2388,7 +2396,7 @@ def policy_why(
         "action": action,
         "value": value,
         "baseline": stack.baseline,
-        "operator": _face(operator),
+        "operator": {**_face(operator), **_deciding_text(operator, stack.operator, scope)},
     }
     if run is None:
         view["run"] = {"error": stack.run_note}
@@ -2400,14 +2408,18 @@ def policy_why(
             parts = (shell_segments(value) or []) if scope == "shell" else [value]
             scope_policy = stack.run.get(scope)
             considered = [
-                asdict(rule)
+                {**asdict(rule), **_shipped_text(scope, rule)}
                 for rule in (scope_policy.rules if scope_policy else ())
                 if rule.action == action
                 and any(
                     pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
                 )
             ]
-        view["run"] = {**_face(run), "considered": considered}
+        view["run"] = {
+            **_face(run),
+            **_deciding_text(run, stack.run or {}, scope),
+            "considered": considered,
+        }
     if operator.source == "floor":
         view["floor"] = operator.note  # the floor binds workers AND the Queen (v83-F9)
     if (scope, action) == ("network", "fetch"):
@@ -2501,6 +2513,28 @@ def _why_faces(
 
 def _face(verdict: Verdict) -> dict[str, Any]:
     return {key: getattr(verdict, key) for key in ("verdict", "rule_id", "decided_by")}
+
+
+def _shipped_text(scope: str, rule: ResolvedRule) -> dict[str, str]:
+    """v124-F1: a rule the baseline layer states carries its shipped template's
+    sentence; every other rule (custom, learned, compiled from a knob) none."""
+    layer, _, name = (rule.layer or "").partition(":")
+    if layer != TEMPLATE_LAYER:
+        return {}
+    key = (scope, rule.verdict, rule.action, rule.pattern, rule.rule_id)
+    text = shipped_descriptions(name).get(key)
+    return {"description": text} if text else {}
+
+
+def _deciding_text(
+    verdict: Verdict, lane: dict[str, ResolvedScopePolicy], scope: str
+) -> dict[str, str]:
+    """The deciding rule's sentence, when a shipped template rule decided."""
+    policy = lane.get(scope)
+    for rule in policy.rules if policy else ():
+        if (rule.layer, rule.rule_id) == (verdict.layer, verdict.rule_id):
+            return _shipped_text(scope, rule)
+    return {}
 
 
 def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:

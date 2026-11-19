@@ -1,11 +1,19 @@
-// Graphite round A: the Policies page (policies.js), executed — five pages,
+// Graphite round A: the Policies page (policies.js), executed — six pages
+// (v124 added the tree),
 // each answering one question, built from reads the server already serves.
 // graphite-nav: #/policies/<tab> renders the one page it names; the sidebar's
 // Settings surface is the list.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { loadApp, texts } from "./harness.mjs";
+
+// The engine's real answers on a throwaway home with the builder baseline
+// locked (tests/supervisor/test_policy_tree_fixtures.py pins them).
+const LOCKED = JSON.parse(readFileSync(new URL("./fixtures/policy-locked.json", import.meta.url), "utf8"));
+const REAL = Object.fromEntries(["GET /api/projects", "GET /api/schedules", "GET /api/roles"].map(k => [k, LOCKED[k]]));
+const WHY_UV_SYNC = "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync";
 
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
 
@@ -66,6 +74,8 @@ function withPolicies(routes = {}) {
     "GET /api/policy/rules": { rules: [], operator_rules: [] },
     "GET /api/policy/decisions": { rows: [], total: 0, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0 } },
     "GET /api/policy": POLICY,
+    "GET /api/schedules": { schedules: [] },
+    "GET /api/repos/": { keys: [], scopes: {} },
     ...routes,
   };
   app.api = async (method, path, body) => {
@@ -87,6 +97,7 @@ const PAGE_MARK = {
   grants: main => texts(main, "policy-section-header").includes("Standing grants"),
   groups: main => Boolean(main.querySelector(".policy-effective")),
   defaults: main => texts(main, "policy-section-header").includes("Limits"),
+  tree: main => Boolean(main.querySelector(".policy-tree")),
 };
 const shown = main => Object.keys(PAGE_MARK).filter(tab => PAGE_MARK[tab](main));
 
@@ -234,6 +245,118 @@ test("Now: Test an action asks /api/policy/why and names both verdicts in words"
   assert.match(out, /asks first/);
   assert.match(out, /denied/);
   assert.match(out, /template:builder\/shell-ask/);
+});
+
+test("Now: Test an action on network.fetch shows the Queen's lane only, never a workers' answer", async () => {
+  const { main, app } = withPolicies({
+    "GET /api/policy/why": { run: { verdict: "allow", decided_by: "net:example.com", considered: [{ verdict: "allow", pattern: "example.com", rule_id: "net:example.com" }] }, operator: { verdict: "require_approval", decided_by: "template:builder/net-fetch-gated" }, baseline: "b" },
+  });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "network"; action.value = "fetch"; value.value = "https://example.com/x";
+  await box.querySelector("button").click();
+  const out = box.querySelector(".policy-test-out").textContent;
+  assert.doesNotMatch(out, /Workers in/);
+  assert.match(out, /decided on the Queen's lane/);
+  assert.match(out, /The Queen: asks first — decided by template:builder\/net-fetch-gated/);
+  assert.equal(box.querySelectorAll(".policy-tree-rule").length, 0);
+});
+
+// v124-F3 + review: the request is what a live run sends — a chat's role, or
+// a schedule tick's hop (schedule:<name>@<role>, role=None, against the
+// schedule's repo: scheduler.run_due), never both. Real why answers.
+test("Now: Test an action sends a role, and shows what why says about it", async () => {
+  const query = `${WHY_UV_SYNC}&role=assistant`;
+  const { main, app, calls } = withPolicies({ ...REAL, [query]: LOCKED[query] });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope, role, schedule] = box.querySelectorAll("select");
+  // Roles from /api/roles; only schedules that run as a role can delegate.
+  assert.deepEqual(role.children.map(o => o.getAttribute("value")), ["", ...LOCKED["GET /api/roles"].roles.map(r => r.name)]);
+  assert.deepEqual(schedule.children.map(o => o.getAttribute("value")), ["", "nightly"]);
+  assert.match(schedule.children[1].textContent, /nightly.*builder/);
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "shell"; action.value = "run"; value.value = "uv sync";
+  role.value = "assistant";
+  await box.querySelector("button").click();
+  assert.ok(calls.some(([, p]) => `GET ${p}` === query), calls.map(c => c[1]).join("\n"));
+  const out = box.querySelector(".policy-test-out").textContent;
+  assert.match(out, /role:assistant sits under the baseline/);
+  assert.match(out, /Workers in app: asks first — decided by role:assistant\/shell-gated/);
+  // why's considered rows are compiled rules: real ones carry no sentence.
+  const considered = box.querySelectorAll(".policy-tree-rule").map(n => n.textContent);
+  assert.equal(considered.length, 1);
+  assert.match(considered[0], /allow.*uv sync.*shell:uv sync.*template:builder.*No description/s);
+});
+
+test("Now: picking a schedule clears and locks the role, selects its project, and sends only its chain", async () => {
+  const query = `${WHY_UV_SYNC}&delegation_chain=schedule%3Anightly%40builder`;
+  const { main, app, calls } = withPolicies({
+    ...REAL,
+    "GET /api/projects": { projects: [{ project_id: "other", name: "other", bindings: [{ kind: "repo_path", value: "/fixture/other" }] }, ...LOCKED["GET /api/projects"].projects] },
+    [query]: LOCKED[query],
+  });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope, role, schedule] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "other"; scope.value = "shell"; action.value = "run"; value.value = "uv sync";
+  role.value = "assistant";
+  schedule.value = "nightly";
+  await Promise.all(schedule.listeners.change.map(fn => fn()));
+  assert.equal(role.value, "");
+  assert.equal(role.disabled, true);
+  assert.equal(project.value, "app"); // nightly's repo is app's
+  assert.equal(project.disabled, true);
+  await box.querySelector("button").click();
+  assert.ok(calls.some(([, p]) => `GET ${p}` === query), calls.map(c => c[1]).join("\n"));
+  assert.ok(!calls.some(([, p]) => /role=/.test(p)));
+  assert.match(box.querySelector(".policy-test-out").textContent, /delegated by schedule:nightly@builder/);
+  // Back to no schedule: the role and the project are the operator's again.
+  schedule.value = "";
+  await Promise.all(schedule.listeners.change.map(fn => fn()));
+  assert.equal(role.disabled, false);
+  assert.equal(project.disabled, false);
+});
+
+// v124 review (F1/F3): the deciding rule's description rides each face of
+// why (_deciding_text); it shows under that face's verdict line.
+test("Now: Test an action shows each face's deciding-rule description under its verdict", async () => {
+  const why = LOCKED[WHY_UV_SYNC];
+  assert.ok(why.operator.description);
+  const { main, app } = withPolicies({ ...REAL, [WHY_UV_SYNC]: why });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "shell"; action.value = "run"; value.value = "uv sync";
+  await box.querySelector("button").click();
+  const out = box.querySelector(".policy-test-out");
+  const lines = out.children.map(n => n.textContent);
+  const queen = lines.findIndex(t => t.startsWith("The Queen: "));
+  assert.equal(lines[queen + 1], why.operator.description);
+  // The workers' deciding rule is compiled from a knob: no shipped sentence, none shown.
+  assert.equal(why.run.description, undefined);
+  assert.match(lines[0], /^Workers in app: allowed/);
+  assert.ok(lines[1].startsWith("The Queen: "));
+});
+
+// v124 review nit 11: the schedules read only feeds Test an action's picker;
+// a failed one must not blank the page.
+test("Now: a failed schedules read leaves the page standing, with no schedule to pick", async () => {
+  const { main, app } = withPolicies({ "GET /api/schedules": () => { throw new Error("schedules unavailable"); } });
+  await app.viewPolicies(main);
+  await flush();
+  const now = panel(main);
+  assert.match(now.querySelector(".policy-status").textContent, /Baseline locked/);
+  const schedule = now.querySelector(".policy-test").querySelectorAll("select")[3];
+  assert.deepEqual(schedule.children.map(o => o.getAttribute("value")), [""]);
 });
 
 test("Decisions: summary counts, newest-first rows, a verdict filter, and an empty state", async () => {
