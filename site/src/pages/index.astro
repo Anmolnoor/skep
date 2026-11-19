@@ -13,10 +13,33 @@ import Section from '../components/Section.astro';
 import Table from '../components/Table.astro';
 import Terminal from '../components/Terminal.astro';
 import RunPanel from '../components/islands/RunPanel.tsx';
+import BlurText from '../components/reactbits/BlurText.tsx';
+import CountUp from '../components/reactbits/CountUp.tsx';
+import RotatingText from '../components/reactbits/RotatingText.tsx';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homeNumbers } from '../lib/facts.mjs';
 import { GH_URL } from '../lib/site-nav.mjs';
-import { siteFacts } from '../lib/repo.mjs';
+import { REPO_ROOT, readRepoFile, siteFacts } from '../lib/repo.mjs';
 
 const { version } = siteFacts();
+
+// The numbers strip: counted from the repository at build (src/lib/facts.mjs),
+// never typed. A source the readers cannot parse throws, which fails the build.
+const counted = homeNumbers({ read: readRepoFile, list: (dir: string) => readdirSync(join(REPO_ROOT, dir)) });
+const numbers = [
+  { n: counted.engines.length, label: 'engines a task can run on', href: '/agents.html#engines' },
+  { n: counted.outcomes.length, label: 'outcomes a re-verification can record', href: '#re-verify' },
+  { n: counted.backends.length, label: 'sandbox backends', href: '/docs/sandboxing.html#backends' },
+  { n: counted.invariants, label: 'design invariants', href: '/docs/invariants.html' },
+  { n: counted.adrs, label: 'architecture decision records', href: '/docs/adr/readme.html' },
+];
+
+// A section h2 that resolves once as it scrolls in (BlurText, never the h1). It
+// hydrates 200px before it is on screen; a heading already on screen when it
+// hydrates stays as the server rendered it (holdIfInView), so nothing flashes.
+const heading = { tag: 'h2', className: 't-h2', delay: 70, blur: 6, distance: 12, stepDuration: 0.3, holdIfInView: true } as const;
+const soon = { rootMargin: '200px' };
 
 // Captured 2026-11-18 from the real CLI under a throwaway SKEP_HOME, with an
 // environment that held no engine credentials (`env -i`). The home directory is
@@ -97,6 +120,13 @@ const engines = [
     "skep's capability layer on every action, in sandbox or workspace mode.",
   ],
 ];
+// The table above is typed prose; its ids must be exactly the registry's.
+const engineIds = engines.map((row) => row[0]);
+if ([...engineIds].sort().join() !== [...counted.engines].sort().join()) {
+  throw new Error(`index.astro: the engines table lists [${engineIds}] but engines.py registers [${counted.engines}]`);
+}
+// One line whose engine name cycles once through the real ids, then rests on the first.
+const engineLine = 'skep run ~/code/your-app "fix the failing test" --execution-mode sandbox';
 
 const comparisons = [
   {
@@ -131,7 +161,7 @@ const comparisons = [
   description="skep runs Claude Code or Codex inside an OS sandbox, re-runs your project's own test command on a clean checkout, and holds the patch on a branch for your approval."
   home
 >
-  <section class="hero">
+  <section class="hero atmos">
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <Eyebrow>Local supervisor for coding agents · <span data-version>v{version}</span></Eyebrow>
@@ -151,15 +181,32 @@ const comparisons = [
       </div>
       <RunPanel client:idle />
     </div>
+    <div class="wrap">
+      <ul class="numbers" aria-label="skep in numbers, counted from its repository">
+        {
+          numbers.map((item, index) => (
+            <li>
+              <a href={item.href}>
+                <span class="numbers-n">
+                  <CountUp client:visible={soon} to={item.n} duration={1.1} delay={index * 0.08} easing="expo" />
+                </span>
+                <span class="numbers-label">{item.label}</span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="numbers-note t-micro">Counted from the repository when this page was built</p>
+    </div>
   </section>
 
   <Section
     id="claims"
     band
     eyebrow="What holds on every run"
-    title="Three rules the agent cannot talk its way past"
     lead="Each one is enforced by skep before the agent starts or after it stops. None of them is a request to the agent."
   >
+    <BlurText slot="heading" client:visible={soon} text="Three rules the agent cannot talk its way past" {...heading} />
     <div class="grid grid-3">
       <Card title="Always inside the sandbox" icon="box">
         Claude Code and Codex always run inside skep's sandbox. If no backend works, the run does not start.
@@ -194,11 +241,11 @@ const comparisons = [
   <Section
     id="mechanism"
     eyebrow="Mechanism"
-    title="Sandbox, run, re-verify, approve"
     lead="Four steps. Each is shown with the thing it does not do."
     reveal
   >
-    <ol class="steps">
+    <BlurText slot="heading" client:visible={soon} text="Sandbox, run, re-verify, approve" {...heading} />
+    <ol class="steps rail">
       <li class="step">
         <div class="stack">
           <h3 class="t-h3 step-head"><span class="step-no">1</span>Sandbox</h3>
@@ -240,7 +287,7 @@ const comparisons = [
           </p>
         </Callout>
       </li>
-      <li class="step">
+      <li class="step" id="re-verify">
         <div class="stack">
           <h3 class="t-h3 step-head"><span class="step-no">3</span>Re-verify</h3>
           <p>
@@ -286,15 +333,25 @@ const comparisons = [
     id="engines"
     band
     eyebrow="Engines"
-    title="Your agent, behind skep's wall"
     lead="Choose the engine per project, or per run with --engine. Four external agents and skep's own worker ship today."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="Your agent, behind skep's wall" {...heading} />
+    <p class="engine-line">
+      <span class="engine-cmd">{engineLine}</span>{' '}
+      <span class="engine-flag">
+        --engine{' '}
+        <span class="engine-name" style={`--longest: ${Math.max(...engineIds.map((id) => id.length))}ch`}>
+          <RotatingText client:visible texts={engineIds} rotationInterval={1600} cycles={1} />
+        </span>
+      </span>
+    </p>
     <Table
       caption="The five engine ids skep run accepts."
       head={['Engine', 'What runs', 'Authenticates from', 'Confined by']}
       rows={engines}
       rowHeaders
+      stack
     />
     <p class="after t-small c-mut">
       Ollama is a model provider for skep's own worker, not an engine. The Codex ChatGPT plan login hands the
@@ -306,10 +363,10 @@ const comparisons = [
   <Section
     id="landing"
     eyebrow="Landing"
-    title="Approval lands a patch on a branch"
     lead="What the agent produced is a patch against the commit the task started from. Your checkout did not change while it ran."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="Approval lands a patch on a branch" {...heading} />
     <div class="grid grid-2 landing">
       <div class="stack">
         <ol class="plain-steps">
@@ -356,10 +413,10 @@ const comparisons = [
     id="elsewhere"
     band
     eyebrow="Outside a skep run"
-    title="Governing an agent you run somewhere else"
     lead="Two smaller tools apply the same policy to an agent that is not running under skep. Neither is a sandbox."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="Governing an agent you run somewhere else" {...heading} />
     <div class="grid grid-2">
       <div class="stack">
         <Card title="The Claude Code hook" icon="webhook">
@@ -390,10 +447,10 @@ const comparisons = [
   <Section
     id="quickstart"
     eyebrow="Quickstart"
-    title="From install to a patch you can review"
     lead="The unattended path with Claude Code, on Linux or macOS. Swap the engine and its key for Codex."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="From install to a patch you can review" {...heading} />
     <div class="grid grid-2">
       <CodeBlock step={1} title="Install" code="$ pipx install skep" />
       <CodeBlock
@@ -466,10 +523,10 @@ $ skep review <task_id> --approve --pr`}
     band
     eyebrow="Honest limits"
     tone="yellow"
-    title="What skep does not do"
     lead="Read these before you rely on it."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="What skep does not do" {...heading} />
     <div class="grid grid-2">
       <Callout kind="limit" title="Reads are mostly open">
         The sandbox confines writes. It masks a list of credential paths; the rest of what your user can
@@ -496,10 +553,10 @@ $ skep review <task_id> --approve --pr`}
   <Section
     id="next"
     eyebrow="Why skep"
-    title="Where it fits, and where it does not"
     lead="How skep compares, by mechanism, with four other ways to run a coding agent."
     reveal
   >
+    <BlurText slot="heading" client:visible={soon} text="Where it fits, and where it does not" {...heading} />
     <div class="grid grid-4">
       {
         comparisons.map((item) => (
@@ -522,7 +579,7 @@ $ skep review <task_id> --approve --pr`}
 
 <style>
   .hero {
-    padding-block: var(--s-7) var(--pad-y);
+    padding-block: var(--s-6);
   }
   .hero-grid {
     display: grid;
@@ -542,6 +599,71 @@ $ skep review <task_id> --approve --pr`}
   }
   .hero-install {
     max-width: 420px;
+  }
+
+  /* The numbers strip: five facts counted at build, each a link to where it is explained. */
+  .numbers {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    margin: var(--s-7) 0 0;
+    padding: 0;
+    border-block: 1px solid var(--line-inner);
+    list-style: none;
+  }
+  .numbers li + li {
+    border-left: 1px solid var(--line-inner);
+  }
+  .numbers a {
+    display: grid;
+    align-content: start;
+    gap: var(--s-1);
+    height: 100%;
+    padding: var(--s-5);
+    transition: background var(--dur-1) ease;
+  }
+  .numbers a:hover {
+    background: color-mix(in srgb, var(--orange) 5%, transparent);
+  }
+  .numbers-n {
+    font-family: var(--mono);
+    font-size: var(--fs-h2);
+    font-weight: 600;
+    line-height: var(--lh-h2);
+    letter-spacing: -0.02em;
+    color: var(--text-bright);
+  }
+  .numbers a:hover .numbers-n {
+    color: var(--orange-soft);
+  }
+  .numbers-label {
+    font-size: var(--fs-small);
+    line-height: var(--lh-small);
+    color: var(--text-muted);
+  }
+  .numbers-note {
+    margin-top: var(--s-3);
+    color: var(--text-faint);
+  }
+  @media (max-width: 760px) {
+    .numbers {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: var(--s-7);
+    }
+    .numbers li + li {
+      border-left: 0;
+    }
+    .numbers li:nth-child(even) {
+      border-left: 1px solid var(--line-inner);
+    }
+    .numbers li:nth-child(n + 3) {
+      border-top: 1px solid var(--line-inner);
+    }
+    .numbers li:last-child {
+      grid-column: 1 / -1;
+    }
+    .numbers a {
+      padding: var(--s-4);
+    }
   }
 
   /* inline code in running text (code inside the kit's panels is not authored here) */
@@ -577,12 +699,89 @@ $ skep review <task_id> --approve --pr`}
     list-style: none;
   }
   .step {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
     gap: var(--s-4) var(--s-6);
     align-items: start;
     padding-block: var(--s-5);
-    border-top: 1px solid var(--line-inner);
+    padding-left: calc(var(--badge) + var(--s-4));
+    scroll-margin-top: calc(var(--header-h) + var(--s-4));
+  }
+
+  /* The rail: the four step numbers sit on one vertical line, and the line fills
+     as the reader scrolls through the steps. Each step owns the segment from its
+     number to the next one. Server HTML, no scroll timelines, reduced motion:
+     the line is drawn full and every number is lit (M3). */
+  .rail {
+    --badge: 22px;
+    --badge-top: calc(var(--s-5) + 2px);
+  }
+  @media (max-width: 640px) {
+    .rail .step {
+      padding-left: calc(var(--badge) + var(--s-3));
+    }
+  }
+  .rail .step-no {
+    position: absolute;
+    top: var(--badge-top);
+    left: 0;
+    z-index: 1;
+    border: 1px solid color-mix(in srgb, var(--orange) 45%, transparent);
+    background: color-mix(in srgb, var(--orange) 16%, var(--bg));
+    color: var(--orange-soft);
+  }
+  .rail .step:not(:last-child)::before,
+  .rail .step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    top: calc(var(--badge-top) + var(--badge) / 2);
+    left: calc(var(--badge) / 2 - 1px);
+    width: 2px;
+    height: 100%;
+  }
+  .rail .step::before {
+    background: var(--line-strong);
+  }
+  .rail .step::after {
+    background: var(--orange);
+    transform-origin: 50% 0;
+  }
+  @keyframes rail-fill {
+    from {
+      transform: scaleY(0);
+    }
+  }
+  @keyframes rail-lit {
+    from {
+      border-color: var(--line-strong);
+      background: var(--bg);
+      color: var(--text-muted);
+    }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    @supports (animation-timeline: view()) {
+      /* The reading line sits 60% down the viewport: progress is where it is inside the step.
+         The timeline is set in its own rule (`:where(*)`), apart from `animation`: see base.css. */
+      :global(html.js) .rail .step {
+        view-timeline: --step block;
+        view-timeline-inset: 60% 40%;
+      }
+      :global(html.js) .rail .step::after {
+        animation: rail-fill linear both;
+      }
+      :global(html.js) .rail .step:where(*)::after {
+        animation-timeline: --step;
+        animation-range: cover 37px cover 100%;
+      }
+      :global(html.js) .rail .step-no {
+        animation: rail-lit linear both;
+      }
+      :global(html.js) .rail .step-no:where(*) {
+        animation-timeline: --step;
+        animation-range: cover 16px cover 48px;
+      }
+    }
   }
   .step p {
     max-width: var(--prose);
@@ -592,6 +791,35 @@ $ skep review <task_id> --approve --pr`}
     display: flex;
     align-items: center;
     gap: var(--s-3);
+  }
+
+  /* One real command; the engine name turns once through the registry, then rests. */
+  .engine-line {
+    margin-bottom: var(--s-4);
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line-card);
+    border-radius: var(--r-card);
+    background: var(--bg-panel);
+    font-family: var(--mono);
+    font-size: var(--fs-small);
+    line-height: 1.75;
+    color: var(--text-bright);
+  }
+  .engine-line::before {
+    content: '$ ';
+    color: var(--orange);
+  }
+  .engine-flag {
+    display: inline-flex;
+    gap: 1ch;
+    white-space: nowrap;
+  }
+  /* as wide as the longest id, so the line never re-wraps while the name turns */
+  .engine-name {
+    display: inline-block;
+    min-width: var(--longest);
+    font-weight: 600;
+    color: var(--green);
   }
 
   .landing {
