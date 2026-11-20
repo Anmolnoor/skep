@@ -61,12 +61,13 @@ from . import (
     telegram as telegram_adapter,
 )
 from .commands import (
+    COMMANDS,
     CommandContext,
+    discord_subcommands,
     new_channel_chat,
     parse_command,
     run_command,
-    runs_text,
-    status_text,
+    telegram_menu,
 )
 
 logger = logging.getLogger("skep.serve")
@@ -231,6 +232,11 @@ def _telegram_call(token: str, method: str, payload: dict[str, object]) -> Any:
         json=payload,
         timeout=httpx.Timeout(10.0, connect=5.0),
     )
+
+
+def _default_telegram_set_commands(token: str, commands: list[dict[str, str]]) -> bool:
+    # v130-F14: the "/" menu in the Telegram client, from the deck.
+    return bool(_telegram_call(token, "setMyCommands", {"commands": commands}).status_code == 200)
 
 
 def _telegram_status_post(token: str, chat_id: str, text: str) -> str | None:
@@ -506,8 +512,12 @@ class TelegramPoller(threading.Thread):
         idle_seconds: float = 2.0,
         status_ops: StatusOps | None = None,
         typing: Callable[[str, str], object] | None = None,
+        set_commands: Callable[[str, list[dict[str, str]]], object] | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
+        # v130-F14: None = no menu call (the suite); serve wires the real one.
+        self._set_commands = set_commands
+        self._menu_set = False
         # v130-F6: None = no status line / no typing (the suite); serve wires
         # the real calls (app.py) — no test ever reaches api.telegram.org.
         self._status_ops = status_ops
@@ -532,6 +542,9 @@ class TelegramPoller(threading.Thread):
         secret = resolve_channel_secret(self._home, telegram_adapter.CHANNEL)
         if not adapter_ready(config, secret) or secret is None:
             return 0
+        if not self._menu_set:
+            self._menu_set = True  # once per start, success or not
+            self._register_menu(secret)
         updates = self._fetch(secret, self._offset)
         for update in updates:
             update_id = update.get("update_id")
@@ -567,6 +580,19 @@ class TelegramPoller(threading.Thread):
                     logger.warning("telegram delivery failed: %s", result.detail)
             handled += 1
         return handled
+
+    def _register_menu(self, token: str) -> None:
+        """v130-F14: a failed menu call costs the menu, never the poll."""
+        if self._set_commands is None:
+            return
+        try:
+            ok = self._set_commands(token, telegram_menu())
+        except Exception as exc:  # the URL holds the token: log the type only
+            ok, detail = False, exc.__class__.__name__
+        else:
+            detail = "rejected"
+        if not ok:
+            logger.warning("telegram setMyCommands failed (%s); the / menu is stale", detail)
 
     def _turn_with_status(
         self, message: ChannelMessage, token: str
@@ -1209,23 +1235,21 @@ def _default_discord_followup(application_id: str, interaction_token: str, text:
     return response.status_code in (200, 204)
 
 
-# v78-F4: the /skep command tree — deterministic store reads plus the two
-# verdict spellings. Bulk-overwritten via Discord's idempotent PUT form, so
-# re-registering on every reconnect is a server-side no-op.
+# v78-F4: the two verdict spellings Discord had before the deck; v130-F14:
+# only while the deck lacks an entry of the same name.
+_SLASH_VERDICTS: list[dict[str, object]] = [
+    {"type": 1, "name": "approve", "description": "confirm this chat's pending card"},
+    {"type": 1, "name": "deny", "description": "deny this chat's pending card"},
+]
+# v78-F4, v130-F14: the /skep tree, generated from the deck. Bulk-overwritten
+# via Discord's idempotent PUT form, so re-registering on every reconnect is a
+# server-side no-op.
 SKEP_COMMAND_TREE: list[dict[str, object]] = [
     {
         "name": "skep",
         "description": "the skep supervisor",
-        "options": [
-            {"type": 1, "name": "status", "description": "running runs + what waits on you"},
-            {"type": 1, "name": "runs", "description": "the 5 most recent runs"},
-            {
-                "type": 1,
-                "name": "approve",
-                "description": "confirm this chat's pending card",
-            },
-            {"type": 1, "name": "deny", "description": "deny this chat's pending card"},
-        ],
+        "options": discord_subcommands()
+        + [v for v in _SLASH_VERDICTS if v["name"] not in COMMANDS],
     }
 ]
 
@@ -1863,12 +1887,37 @@ class DiscordGateway(threading.Thread):
         if not isinstance(inner, dict) or str(inner.get("name") or "") != "skep":
             return
         options = inner.get("options")
-        sub = (
-            str(options[0].get("name") or "")
+        option = (
+            options[0]
             if isinstance(options, list) and options and isinstance(options[0], dict)
-            else ""
+            else {}
         )
+        sub = str(option.get("name") or "")
         channel_id = str(data.get("channel_id") or "")
+        if sub in COMMANDS:  # v130-F14: one deck — Discord's tree never drifts from it
+            args = option.get("options")
+            arg = args[0] if isinstance(args, list) and args and isinstance(args[0], dict) else {}
+            text = str(arg.get("value") or "").strip()
+            user_id = _interaction_user(data)
+            message = ChannelMessage(
+                channel=discord_adapter.CHANNEL,
+                identity=ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id),
+                text=f"/{sub} {text}".strip(),
+                session_key=f"{discord_adapter.CHANNEL}:{channel_id}",
+                user_id=user_id,
+            )
+            ctx = CommandContext(
+                engine=self._engine, message=message, config=config, web_ui_url=self._web_ui_url
+            )
+            # Deferred like a verdict: a deck command may outlast the 3s window.
+            self._defer_and_finish(
+                interaction_id=str(data.get("id") or ""),
+                interaction_token=str(data.get("token") or ""),
+                channel_id=channel_id,
+                token=token,
+                resolve=lambda: run_command(ctx, sub, text),
+            )
+            return
         if sub in ("approve", "deny"):
             # v106-F13: a verdict runs a mutation plus a model continuation —
             # the same 3-second trap the buttons had; same deferred flow.
@@ -1882,20 +1931,7 @@ class DiscordGateway(threading.Thread):
                 ),
             )
             return
-        if sub == "status":
-            text = self._slash_status()
-        elif sub == "runs":
-            text = self._slash_runs()
-        else:
-            return  # unknown subcommands resolve nothing
-        if not self._ack(str(data.get("id") or ""), str(data.get("token") or ""), text):
-            logger.warning("discord interaction ack failed")
-
-    def _slash_status(self) -> str:
-        return status_text(self._store)  # v130-F7: one deck, every channel
-
-    def _slash_runs(self) -> str:
-        return runs_text(self._store)
+        # unknown subcommands resolve nothing
 
     def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> Verdict:
         """The typed command IS the decision, asked once (I7): resolve the

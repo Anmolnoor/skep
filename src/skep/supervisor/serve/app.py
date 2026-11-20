@@ -93,6 +93,7 @@ from .channels.runtime import (
     TELEGRAM_STATUS_OPS,
     DiscordGateway,
     TelegramPoller,
+    _default_telegram_set_commands,
     _default_telegram_typing,
     add_slack_routes,
 )
@@ -546,6 +547,7 @@ def create_app(
                 web_ui_url=web_ui_url,
                 status_ops=TELEGRAM_STATUS_OPS,  # v130-F6
                 typing=_default_telegram_typing,
+                set_commands=_default_telegram_set_commands,  # v130-F14
             )
             if channels_on and chat_engine is not None
             else None
