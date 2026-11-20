@@ -220,6 +220,72 @@ def _deny(ctx: CommandContext, args: str) -> Reply:
     return _verdict(ctx, args, confirm=False)
 
 
+def _compact(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: run the ADR 0037 deterministic compaction now. It folds only
+    what overflows the replay budget (no model call; rows never change, I8),
+    so a chat that fits is left alone and says so."""
+    from ..chat import chat_turn_lock
+
+    chat_id = ctx.bound_chat_id()
+    if chat_id is None:
+        return "skep: no session here yet; nothing to compact.", []
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return "skep: a turn is running in this conversation; wait for it, then /compact.", []
+    try:
+        before = ctx.engine.context_view(chat_id)
+        ctx.engine._compact_if_needed(chat_id)
+        after = ctx.engine.context_view(chat_id)
+    finally:
+        lock.release()
+    if after == before:
+        return (
+            f"skep: nothing to compact: the chat fits its replay budget ({before['percent']}% "
+            "of the window). Compaction folds only what overflows.",
+            [],
+        )
+    return (
+        f"skep: compacted. Context {before['percent']}% → {after['percent']}% of the window "
+        f"(replay {before['history_chars']:,} → {after['history_chars']:,} chars, "
+        f"digest {after['digest_chars']:,} chars). Every message stays in the transcript.",
+        [],
+    )
+
+
+def _usage_line(label: str, store: Any, chat_id: str | None = None) -> str:
+    five = store.llm_usage_totals(hours=5, chat_id=chat_id)
+    week = store.llm_usage_totals(hours=24 * 7, chat_id=chat_id)
+    return (
+        f"{label}: 5h {five['total_tokens']:,} tok ({five['requests']} req) · "
+        f"7d {week['total_tokens']:,} tok ({week['requests']} req)"
+    )
+
+
+def _usage(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: the v74 tally (``/api/llm/usage``), this chat's share too."""
+    chat_id = ctx.bound_chat_id()
+    lines = ["skep usage, counted from skep's own requests (other clients are not seen):"]
+    lines.append(_usage_line("all chats", ctx.store))
+    if chat_id is not None:
+        lines.append(_usage_line("this chat", ctx.store, chat_id))
+    return "\n".join(lines), []
+
+
+def _model(ctx: CommandContext, args: str) -> Reply:
+    """v130-F12: show-only — the chat's model or the default. Changing it is a
+    desk act (the composer's model select, ``skep chat`` /model)."""
+    if args:
+        return "skep: /model only shows the model here; change it at the desk.", []
+    from ..llm import llm_config_view
+
+    chat_id = ctx.bound_chat_id()
+    chat = ctx.store.get_chat(chat_id) if chat_id else None
+    if chat is not None and chat.model:
+        return f"skep: this chat: {chat.model} (override)", []
+    default = llm_config_view(ctx.store, ctx.engine.home)["default_model"]
+    return f"skep: default: {default or 'not set (Settings)'}", []
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
@@ -231,6 +297,9 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
     "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
     "approve": ("confirm the waiting card (/approve 1a2b3c4d when several wait)", _approve),
     "deny": ("deny the waiting card (/deny 1a2b3c4d)", _deny),
+    "compact": ("fold this chat's overflow into its digest now", _compact),
+    "usage": ("tokens skep spent: this chat and all, 5h and 7d", _usage),
+    "model": ("which model answers here (change it at the desk)", _model),
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}
