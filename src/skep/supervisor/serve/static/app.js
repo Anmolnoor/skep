@@ -5404,8 +5404,9 @@ async function renderChannelsTab(panel) {
       channel.secret_configured ? el("span", { class: "note" }, "· token configured") : null))));
   panel.append(el("p", { class: "note" },
     "Messenger entrances route into the same chat → confirmation → audit flow as this UI. "
-    + "Only low-risk actions are ever confirmable from a channel; shell and policy approvals "
-    + "stay web-UI-only."));
+    + "Only low-risk actions are confirmable from a channel; shell and policy approvals "
+    + "stay web-UI-only — except for a channel admin you name below, who can confirm "
+    + "every card from that messenger (for when the web UI is out of reach)."));
   for (const [name, channel] of Object.entries(channels)) {
     const enabled = el("input", { type: "checkbox" });
     enabled.checked = channel.enabled;
@@ -5441,6 +5442,12 @@ async function renderChannelsTab(panel) {
       value: (channel.allowed_users || []).join(", "),
       placeholder: "user ids who may drive skep, comma-separated (empty = nobody)",
     });
+    // v130-F5 (ADR 0067): the owner who may confirm EVERY card from this
+    // messenger — named here, at the desk, never from the channel itself.
+    const admins = el("input", {
+      value: (channel.admin_users || []).join(", "),
+      placeholder: "your user id: confirm every card from this channel (must be an allowed user)",
+    });
     const saveChannel = el("button", { class: "primary" }, "Save channel");
     saveChannel.addEventListener("click", async () => {
       saveChannel.disabled = true;
@@ -5454,6 +5461,11 @@ async function renderChannelsTab(panel) {
         if (requireMention) body.require_mention = requireMention.checked;
         if (autoThread) body.auto_thread = autoThread.checked;
         body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
+        body.admin_users = admins.value.split(",").map(s => s.trim()).filter(Boolean);
+        // naming an admin turns confirming on (an admin who cannot confirm is none)
+        if (body.admin_users.join() && body.admin_users.join() !== (channel.admin_users || []).join()) {
+          body.channel_can_confirm = true;
+        }
         if (secret.value.trim()) body.secret = secret.value.trim();
         if (signingSecret && signingSecret.value.trim()) {
           body.signing_secret = signingSecret.value.trim();
@@ -5488,6 +5500,10 @@ async function renderChannelsTab(panel) {
           autoThread, " auto-thread per mention")) : null,
       el("div", { class: "row" },
         el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)),
+      el("div", { class: "row" },
+        el("div", { class: "field grow" },
+          el("label", { title: "confirms every card from this messenger, HIGH ones included" },
+            "admin users (approve every card here)"), admins)),
       el("div", { class: "row" },
         el("div", { class: "field grow" }, el("label", {}, "bot token (write-only)"), secret),
         signingSecret

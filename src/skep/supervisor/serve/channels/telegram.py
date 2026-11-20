@@ -22,6 +22,8 @@ from . import (
     ChannelIdentity,
     ChannelMessage,
     NormalizedInbound,
+    admin_nudge_line,
+    channel_admin,
     channel_confirmation_decision,
     confirm_off_line,
     identity_allowlisted,
@@ -103,11 +105,18 @@ def confirmation_card(
     """v41-F2: the confirm-card text and, only when the shared gate could allow
     an inline verdict, a Confirm/Deny inline keyboard. Web-UI-only action
     classes and channels without ``channel_can_confirm`` keep the v16 text."""
-    view = render_confirm_card(action_class, commands, card)
+    view = render_confirm_card(action_class, commands, card, admin=bool(config.admin_users))
     if view.web_ui_only or not config.channel_can_confirm:
         text = confirmation_text(action_class, commands, web_ui_url, card)
-        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
-        return (f"{text}\n{off}" if off else text), None
+        extra = [
+            line
+            for line in (
+                confirm_off_line(CHANNEL, view, config),  # v129-F5
+                admin_nudge_line(CHANNEL, view, config),  # v130-F5
+            )
+            if line
+        ]
+        return "\n".join([text, *extra]), None
     lines = "\n".join(f"  {line}" for line in view.commands)
     body = f"Action '{action_class}' needs confirmation."
     if lines:
@@ -159,6 +168,7 @@ def handle_callback(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,
         identity_allowlisted=both_listed,
+        admin=channel_admin(from_id, config),  # v130-F5
     )
 
 

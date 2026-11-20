@@ -1016,7 +1016,7 @@ SYSTEM_PROMPT = (
     "source_allowlist and result URLs as seed_urls — its card is where the user "
     "approves that exact source list. "
     "Discord moderation (discord_delete_message, discord_timeout_member) always cards "
-    "and is confirmable only in the web UI. "
+    "and is confirmable only in the web UI or by a channel admin. "
     "The operator also has deterministic /commands in this composer (/policy, /state, "
     "/setup, /workon, /phase, /land, /approve, /deny, /schedule, /role, /personality, "
     "/persona, /btw, /runs, /approvals, /repos, /help) "
@@ -3144,9 +3144,18 @@ class ChatEngine:
             store=self.store,
             manifest=fresh or shown,
         )
-        if confirm and high is not None and actor.startswith("channel:"):
+        from .channels import channel_admin_actor
+
+        if (
+            confirm
+            and high is not None
+            and actor.startswith("channel:")
+            and not channel_admin_actor(actor, self.store.get_channel_config)
+        ):
             # I6: a messenger account is not the operator's desk. Refused
-            # here, whatever the channel's own gate said.
+            # here, whatever the channel's own gate said — unless the operator
+            # named this person the channel's admin (v130-F5, ADR 0067), asked
+            # again here from the stored config, never from the press.
             line = taint_line(self.store, chat_id, taint)
             raise HTTPException(
                 status_code=403,

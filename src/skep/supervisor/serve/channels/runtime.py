@@ -46,6 +46,7 @@ from . import (
     ChannelMessage,
     adapter_ready,
     channel_actor,
+    channel_admin,
     channel_confirmation_decision,
     identity_allowlisted,
     resolve_channel_secret,
@@ -479,7 +480,7 @@ class TelegramPoller(threading.Thread):
                 chat,
                 action.action_id,
                 confirm=verb == "confirm",
-                actor=channel_actor(identity),
+                actor=channel_actor(identity, from_id if channel_admin(from_id, config) else None),
             ):
                 if event is None and payload.get("content"):
                     parts.append(str(payload["content"]))
@@ -787,13 +788,15 @@ def add_slack_routes(
             return
         parts: list[str] = []
         chained: list[dict[str, object]] = []
+        presser = str(user.get("id") or "") if isinstance(user, dict) else ""
+        admin_user = presser if channel_admin(presser, config) else None  # v130-F5
         try:
             for event, data in engine.verdict_events(
                 action.chat_id,
                 chat,
                 chat_action_id,
                 confirm=click == "confirm",
-                actor=channel_actor(identity),
+                actor=channel_actor(identity, admin_user),
             ):
                 if event is None and data.get("content"):
                     parts.append(str(data["content"]))
@@ -1471,10 +1474,12 @@ class DiscordGateway(threading.Thread):
         # ES (B114): the room is not the operator — the person must be listed
         # too, for buttons, reactions and /skep verdicts alike.
         identity_ok = identity_ok and user_allowlisted(user_id, config)
+        admin = channel_admin(user_id, config)  # v130-F5
         decision = channel_confirmation_decision(
             action_class=action.tool,
             channel_can_confirm=config.channel_can_confirm,
             identity_allowlisted=identity_ok,
+            admin=admin,
         )
         if not decision.allowed:
             return (
@@ -1494,7 +1499,7 @@ class DiscordGateway(threading.Thread):
                 chat,
                 action_id,
                 confirm=confirm,
-                actor=channel_actor(identity),
+                actor=channel_actor(identity, user_id if admin else None),
             ):
                 if event is None and data.get("content"):
                     parts.append(str(data["content"]))
@@ -1716,6 +1721,7 @@ class DiscordGateway(threading.Thread):
             # cards were fetched from the bound chat, so the reaction is
             # addressed to its own chat's card by construction.
             session_bound=binding.chat_id == action.chat_id,
+            admin=channel_admin(str(data.get("user_id") or ""), config),  # v130-F5
         )
         if not decision.allowed:
             self._deliver(

@@ -19,6 +19,7 @@ from . import (
     ChannelIdentity,
     ChannelMessage,
     NormalizedInbound,
+    admin_nudge_line,
     channel_confirmation_decision,
     confirm_off_line,
     identity_allowlisted,
@@ -98,7 +99,7 @@ def confirmation_embed(
     web_ui_url: str = "",
     card: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    view = render_confirm_card(action_class, commands, card)
+    view = render_confirm_card(action_class, commands, card, admin=bool(config.admin_users))
     fields = [{"name": "command", "value": line} for line in view.commands]
     fields += [{"name": "note", "value": line} for line in view.notes]
     if view.web_ui_only or not config.channel_can_confirm:
@@ -106,9 +107,12 @@ def confirmation_embed(
         description = "This action can only be confirmed from the skep web UI."
         if web_ui_url:
             description = f"{description[:-1]}: {web_ui_url}"
-        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
-        if off:
-            description = f"{description}\n{off}"
+        for line in (
+            confirm_off_line(CHANNEL, view, config),  # v129-F5
+            admin_nudge_line(CHANNEL, view, config),  # v130-F5
+        ):
+            if line:
+                description = f"{description}\n{line}"
         return {
             "embeds": [
                 {
@@ -178,6 +182,7 @@ def handle_reaction(
     identity: ChannelIdentity,
     config: ChannelConfig,
     session_bound: bool = False,
+    admin: bool = False,
 ) -> ChannelConfirmationDecision:
     """A ✅/❌ reaction resolves to a confirmation decision through the shared,
     fail-closed gate (identity must be allow-listed and the class low-risk).
@@ -188,6 +193,7 @@ def handle_reaction(
         channel_can_confirm=config.channel_can_confirm,
         identity_allowlisted=identity_allowlisted(identity, config.allowed_identities)
         or session_bound,
+        admin=admin,  # v130-F5: the reactor is the channel's admin
     )
     if reaction not in {"✅", "❌"}:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.unknown_reaction")

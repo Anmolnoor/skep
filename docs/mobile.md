@@ -1,9 +1,9 @@
 # skep in your pocket — the mobile story (v72-F6)
 
-**Can I approve from my phone? Yes** — for exactly four action classes,
-through a messenger binding. Everything else deliberately routes to the
-web UI, and the phone message carries that URL so you always know which
-kind you are holding.
+**Can I approve from my phone? Yes** — four low-risk action classes for
+every allowed user, and **every card** for the channel's admin (v130-F5,
+ADR 0067). Without an admin, everything else routes to the web UI, and the
+phone message carries that URL and how to name an admin.
 
 There is no skep app, on purpose: the Discord and Telegram apps you
 already carry ARE the remote face (I11 — remote channels are outbound
@@ -19,6 +19,10 @@ messenger is a doorway to it.
    as an entrance, never a trigger).
 3. Both the chat AND the pressing user must be allow-listed; a bystander
    in a group chat fails closed (v41-F2).
+4. Away from home a lot? Name yourself the channel's admin so every card
+   reaches you: `skep channel admin telegram <your user id>` (or Settings →
+   channels → admin users). The admin must already be an allowed user, and
+   naming one turns confirming on. `--clear` removes it.
 
 ## Is it actually working? (v87-F3)
 
@@ -38,8 +42,8 @@ those words, everywhere, instead of presenting as broken.
 
 ## What your phone can confirm
 
-`CHANNEL_CONFIRMABLE_ACTIONS` is a pinned frozen set — these four, no
-setting can widen it:
+`CHANNEL_CONFIRMABLE_ACTIONS` is a pinned frozen set — these four, for
+every allowed user (only naming an admin widens it, for that person alone):
 
 | action | what you're approving |
 |---|---|
@@ -53,14 +57,18 @@ Block Kit buttons (Telegram/Slack); ✅/❌ reactions work on Discord.
 Timeouts DENY, never confirm (I6) — an unanswered card on your phone is
 a card that did nothing.
 
-## What your phone can never confirm
+## What only the admin can confirm from a phone
 
 Shell allowlists, policy changes, patch landings, git/PR mutations, the
-forge, moderation verbs — **web UI always**. The Discord embed for such
-a card carries its web-UI URL (v66), so the phone tells you it is
-waiting and where; it just cannot pull that trigger. Discord moderation
-verbs are additionally never confirmable from Discord itself — a
-hijacked account must not approve its own moderation (v44-F5).
+forge, moderation verbs, and any HIGH-risk card — **web UI** for everyone
+except the channel admin. Without an admin, the Discord embed for such a
+card carries its web-UI URL (v66) and the line that names an admin. The
+admin's press is recorded as `channel:<channel>:<chat>:admin:<user>`, and
+the server checks the stored admin list again on every confirm, so
+`skep channel admin <channel> --clear` takes effect on the next press.
+The trade (ADR 0067): a stolen admin messenger account can approve what the
+admin can. Name an admin only on an account with its own second factor.
+A fold too long to show whole on a phone stays web-UI-only for everyone.
 
 ## What comes to you unasked (v72-F3)
 

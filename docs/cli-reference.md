@@ -606,6 +606,7 @@ tool, channel or webhook reaches it.
 
 ```sh
 skep channel status
+skep channel admin CHANNEL USER_ID... | --clear
 skep provider list
 skep provider health
 skep provider presets
@@ -619,7 +620,10 @@ skep provider remove ID
 ```
 
 `channel status` prints one honest line per messenger channel: config state,
-secret presence, last delivery. `provider` reads the registered LLM providers
+secret presence, last delivery, whether it can confirm and who its admin is.
+`channel admin` names who may confirm every card from that messenger (ADR
+0067): each must already be an allowed user, naming one turns confirming on,
+and `--clear` removes them all. `provider` reads the registered LLM providers
 and their latest health probes. `presets` prints the built-in catalog (v108,
 Hermes parity: OpenRouter, DeepSeek, GLM, Kimi, MiniMax, Copilot, Bedrock and
 more) with each row's egress truth; `add --preset` fills protocol/endpoint/

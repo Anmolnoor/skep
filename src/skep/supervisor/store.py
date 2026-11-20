@@ -1153,6 +1153,11 @@ class RunStore:
                 "ALTER TABLE channel_configs ADD COLUMN notification_level"
                 " TEXT NOT NULL DEFAULT 'all'"
             )
+        if "admin_users_json" not in channel_columns:
+            # v130-F5 (ADR 0067): who may confirm every card from the channel.
+            self._conn.execute(
+                "ALTER TABLE channel_configs ADD COLUMN admin_users_json TEXT NOT NULL DEFAULT '[]'"
+            )
         session_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_sessions)")
         }
@@ -3849,11 +3854,13 @@ class RunStore:
             auto_thread=bool(row[5]),
             allowed_users=tuple(json.loads(str(row[6]))),
             notification_level=str(row[7]),
+            admin_users=tuple(json.loads(str(row[8]))),
         )
 
     _CHANNEL_CONFIG_COLUMNS = (
         "channel, enabled, channel_can_confirm, allowed_identities_json,"
-        " require_mention, auto_thread, allowed_users_json, notification_level"
+        " require_mention, auto_thread, allowed_users_json, notification_level,"
+        " admin_users_json"
     )
 
     @_locked
@@ -3870,7 +3877,8 @@ class RunStore:
         self._conn.execute(
             "INSERT INTO channel_configs (channel, enabled, channel_can_confirm,"
             " allowed_identities_json, require_mention, auto_thread, allowed_users_json,"
-            " notification_level, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " notification_level, admin_users_json, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(channel) DO UPDATE SET enabled = excluded.enabled,"
             " channel_can_confirm = excluded.channel_can_confirm,"
             " allowed_identities_json = excluded.allowed_identities_json,"
@@ -3878,6 +3886,7 @@ class RunStore:
             " auto_thread = excluded.auto_thread,"
             " allowed_users_json = excluded.allowed_users_json,"
             " notification_level = excluded.notification_level,"
+            " admin_users_json = excluded.admin_users_json,"
             " updated_at = excluded.updated_at",
             (
                 config.channel,
@@ -3888,6 +3897,7 @@ class RunStore:
                 1 if config.auto_thread else 0,
                 json.dumps(list(config.allowed_users)),
                 config.notification_level,
+                json.dumps(list(config.admin_users)),
                 _now(),
             ),
         )

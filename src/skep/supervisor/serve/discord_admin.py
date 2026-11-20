@@ -6,6 +6,8 @@ call only ever produces a confirm card — and the classes are deliberately NOT
 in ``CHANNEL_CONFIRMABLE_ACTIONS``: a hijacked allow-listed Discord account
 must never be able to confirm its own moderation action, so the confirm click
 lives in the web UI (recorded as a decision in plans/v44, not an oversight).
+v130-F5 (ADR 0067): the one exception is a channel admin the operator named
+at the desk, who may confirm every card from the messenger.
 Transport functions are module-level so tests monkeypatch them; no live
 Discord anywhere in the suite.
 """
