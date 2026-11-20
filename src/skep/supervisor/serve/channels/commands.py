@@ -142,15 +142,11 @@ def _whoami(ctx: CommandContext, _args: str) -> Reply:
 def _new(ctx: CommandContext, args: str) -> Reply:
     """v130-F8: start a fresh session here; the old chat stays whole (I8) and
     its waiting cards stay resolvable from the web UI (I13)."""
-    from ..chat import chat_turn_lock
-
     old = ctx.bound_chat_id()
     waiting = 0
     if old is not None:
-        lock = chat_turn_lock(old)
-        if not lock.acquire(blocking=False):
+        if _turn_running(old):
             return "skep: a turn is running in this conversation; wait for it, then /new.", []
-        lock.release()
         waiting = len(ctx.store.pending_chat_actions(old))
     chat = new_channel_chat(ctx.store, ctx.message, args[:80])
     lines = [f"skep: new session started ({chat.title}). /sessions lists the earlier ones."]
@@ -159,11 +155,81 @@ def _new(ctx: CommandContext, args: str) -> Reply:
     return "\n".join(lines), []
 
 
+def _turn_running(chat_id: str) -> bool:
+    from ..chat import chat_turn_lock
+
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return True
+    lock.release()
+    return False
+
+
+def _sessions(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F9: this conversation's chats, latest first — never another's."""
+    chat_ids = ctx.store.channel_session_chats(ctx.message.session_key)[:10]
+    if not chat_ids:
+        return "skep: no sessions in this conversation yet.", []
+    bound = ctx.bound_chat_id()
+    lines = ["skep: sessions in this conversation (/resume <n>):"]
+    for n, chat_id in enumerate(chat_ids, 1):
+        chat = ctx.store.get_chat(chat_id)
+        cards = len(ctx.store.pending_chat_actions(chat_id))
+        line = f"{n}. {chat.title} · last active {chat.updated_at[:16].replace('T', ' ')}"
+        line += f" · {cards} card(s) · {chat_id[:8]}"
+        lines.append(f"{line} ← current" if chat_id == bound else line)
+    return "\n".join(lines), []
+
+
+def _resume(ctx: CommandContext, args: str) -> Reply:
+    """v130-F9: rebind to a chat from /sessions. Only this conversation's own
+    chats are reachable: a web chat or another conversation's may have read
+    private files the desk mirror withholds from a messenger (I6/I7)."""
+    chat_ids = ctx.store.channel_session_chats(ctx.message.session_key)
+    if args.isdigit():
+        n = int(args)
+        matches = [chat_ids[n - 1]] if 1 <= n <= len(chat_ids) else []
+    else:
+        matches = [c for c in chat_ids if args and c.startswith(args)]
+    if len(matches) != 1:
+        return f"skep: no session {args!r} in this conversation. /sessions lists them.", []
+    target = matches[0]
+    bound = ctx.bound_chat_id()
+    if target == bound:
+        return "skep: that is already the current session.", []
+    if bound is not None and _turn_running(bound):
+        return "skep: a turn is running in this conversation; wait for it, then /resume.", []
+    message = ctx.message
+    ctx.store.bind_channel_session(
+        session_key=message.session_key,
+        channel=message.channel,
+        identity_id=message.identity.identity_id,
+        chat_id=target,
+    )
+    chat = ctx.store.get_chat(target)
+    cards = len(ctx.store.pending_chat_actions(target))
+    return f"skep: resumed {chat.title}; {cards} card(s) waiting there.", []
+
+
+def _title(ctx: CommandContext, args: str) -> Reply:
+    chat_id = ctx.bound_chat_id()
+    chat = ctx.store.get_chat(chat_id) if chat_id else None
+    if chat is None:
+        return "skep: no session here yet; say something first.", []
+    if not args:
+        return f"skep: this session is titled {chat.title}. /title <name> renames it.", []
+    ctx.store.set_chat_title(chat.chat_id, args[:80])
+    return f"skep: renamed this session to {args[:80]}.", []
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
     "help": ("this list", _help),
     "new": ("start a fresh session here (/new trip planning)", _new),
+    "sessions": ("this conversation's earlier sessions", _sessions),
+    "resume": ("go back to a session from /sessions (/resume 2)", _resume),
+    "title": ("show or rename this session (/title trip planning)", _title),
     "status": ("what is running and what waits on you", _status),
     "runs": ("the latest runs (/runs 10)", _runs),
     "approvals": ("cards waiting in this conversation", _approvals),

@@ -4078,10 +4078,11 @@ class RunStore:
             (session_key, channel, identity_id, chat_id, now),
         )
         # v130-F8: every chat a conversation was ever bound to, for /sessions.
+        # v130-F9: REPLACE takes a fresh rowid, so a /resume in the same second
+        # as the last bind still lists first (bound_at ties break on rowid).
         self._conn.execute(
-            "INSERT INTO channel_session_history (session_key, chat_id, bound_at)"
-            " VALUES (?, ?, ?) ON CONFLICT(session_key, chat_id) DO UPDATE"
-            " SET bound_at = excluded.bound_at",
+            "INSERT OR REPLACE INTO channel_session_history (session_key, chat_id, bound_at)"
+            " VALUES (?, ?, ?)",
             (session_key, chat_id, now),
         )
         self._conn.commit()
