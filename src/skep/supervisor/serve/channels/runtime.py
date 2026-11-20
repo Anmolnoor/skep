@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import hmac
 import json
@@ -486,6 +487,39 @@ def _channel_turn(
     return text, actions
 
 
+class ConversationTurns:
+    """v130-F10: Queen turns run off the inbound loop — one worker per
+    conversation draining its turns in arrival order — so the loop keeps
+    reading and a /stop for a running turn is answered at once, not after it."""
+
+    def __init__(self, spawn: SpawnVerdict) -> None:
+        self._spawn = spawn
+        self._queues: dict[str, list[Callable[[], None]]] = {}
+        self._guard = threading.Lock()
+
+    def submit(self, key: str, work: Callable[[], None]) -> None:
+        with self._guard:
+            queue = self._queues.get(key)
+            if queue is not None:  # this conversation's worker is draining
+                queue.append(work)
+                return
+            self._queues[key] = [work]
+        self._spawn(lambda: self._drain(key))
+
+    def _drain(self, key: str) -> None:
+        while True:
+            with self._guard:
+                queue = self._queues[key]
+                if not queue:
+                    del self._queues[key]
+                    return
+                work = queue.pop(0)
+            try:
+                work()
+            except Exception:  # one broken turn never strands the queue
+                logger.exception("channel turn failed")
+
+
 class TelegramPoller(threading.Thread):
     """Long-poll ``getUpdates`` on a Ticker-style thread.
 
@@ -506,8 +540,10 @@ class TelegramPoller(threading.Thread):
         idle_seconds: float = 2.0,
         status_ops: StatusOps | None = None,
         typing: Callable[[str, str], object] | None = None,
+        spawn: SpawnVerdict | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
+        self._turns = ConversationTurns(spawn if spawn is not None else _spawn_daemon_thread)
         # v130-F6: None = no status line / no typing (the suite); serve wires
         # the real calls (app.py) — no test ever reaches api.telegram.org.
         self._status_ops = status_ops
@@ -547,26 +583,34 @@ class TelegramPoller(threading.Thread):
                 self._handle_callback(callback, config, secret)
                 handled += 1
         for message in telegram_adapter.poll_updates(updates, config):
-            text, actions = self._turn_with_status(message, secret)
-            replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
-            replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
-            for reply, markup in replies:
-
-                def send_with_markup(
-                    cid: str, body: str, markup: dict[str, object] | None = markup
-                ) -> bool:
-                    # v78-F5: Queen markdown renders; a rejected parse resends plain.
-                    return send_telegram_markdown(self._send, secret, cid, body, markup)
-
-                result = telegram_adapter.deliver(
-                    reply,
-                    chat_id=message.identity.identity_id,
-                    send=send_with_markup,
+            if parse_command(message.text) is not None:
+                self._reply(message, config, secret)  # v130-F10: never behind a turn
+            else:
+                self._turns.submit(
+                    message.session_key, functools.partial(self._reply, message, config, secret)
                 )
-                if not result.ok:
-                    logger.warning("telegram delivery failed: %s", result.detail)
             handled += 1
         return handled
+
+    def _reply(self, message: ChannelMessage, config: ChannelConfig, secret: str) -> None:
+        text, actions = self._turn_with_status(message, secret)
+        replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
+        replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
+        for reply, markup in replies:
+
+            def send_with_markup(
+                cid: str, body: str, markup: dict[str, object] | None = markup
+            ) -> bool:
+                # v78-F5: Queen markdown renders; a rejected parse resends plain.
+                return send_telegram_markdown(self._send, secret, cid, body, markup)
+
+            result = telegram_adapter.deliver(
+                reply,
+                chat_id=message.identity.identity_id,
+                send=send_with_markup,
+            )
+            if not result.ok:
+                logger.warning("telegram delivery failed: %s", result.detail)
 
     def _turn_with_status(
         self, message: ChannelMessage, token: str
@@ -1332,7 +1376,7 @@ def _interaction_user(data: dict[str, Any]) -> str:
 
 
 def _spawn_daemon_thread(work: Callable[[], None]) -> None:
-    threading.Thread(target=work, name="discord-verdict", daemon=True).start()
+    threading.Thread(target=work, name="skep-channel-work", daemon=True).start()
 
 
 class DiscordGateway(threading.Thread):
@@ -1380,6 +1424,7 @@ class DiscordGateway(threading.Thread):
         )
         self._followup = followup if followup is not None else _default_discord_followup
         self._spawn = spawn if spawn is not None else _spawn_daemon_thread
+        self._turns = ConversationTurns(self._spawn)  # v130-F10
         self._register = register if register is not None else _default_register_commands
         self._typing = typing if typing is not None else _default_discord_typing
         self._create_thread = (
@@ -1608,6 +1653,14 @@ class DiscordGateway(threading.Thread):
         blobs = self._image_attachments(data)
         if blobs:
             message = dataclasses.replace(message, attachments=tuple(blobs))
+        if parse_command(message.text) is not None:
+            self._turn_and_reply(message, token)  # v130-F10: never behind a turn
+        else:
+            self._turns.submit(
+                message.session_key, functools.partial(self._turn_and_reply, message, token)
+            )
+
+    def _turn_and_reply(self, message: ChannelMessage, token: str) -> None:
         channel_id = message.identity.identity_id
         # v47-F8: show "skep is typing…" for the whole turn, not just 10s.
         pulse = _TypingPulse(lambda: self._typing(token, channel_id))

@@ -9,6 +9,12 @@ LOOKS like a command (a path such as `/home/me/x`) still reaches the Queen.
 
 from __future__ import annotations
 
+import threading
+import time
+from typing import Any
+
+import pytest
+
 from skep.supervisor import SupervisorConfig
 from skep.supervisor.serve.channels.commands import COMMANDS, parse_command
 
@@ -172,3 +178,77 @@ def test_stop_asks_the_running_turn_without_taking_its_lock(config: SupervisorCo
             harness.close()
     finally:
         ollama.stop()
+
+
+def test_stop_reaches_a_telegram_turn_blocked_mid_tool(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v130-F10: the poller ran each turn inside its poll loop, so a /stop was
+    not even read until the turn it meant to stop had ended."""
+    from skep.supervisor.serve import chat as chat_mod
+
+    from .fake_ollama import FakeOllama
+
+    entered, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+    real = chat_mod.execute_read_tool  # type: ignore[attr-defined]
+
+    def tool(name: str, args: dict[str, Any], **kw: Any) -> Any:
+        ran.append(name)
+        entered.set()
+        assert release.wait(10)
+        return real(name, args, **kw)
+
+    monkeypatch.setattr(chat_mod, "execute_read_tool", tool)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(
+            config, spawn=lambda work: threading.Thread(target=work, daemon=True).start()
+        )
+        try:
+            ollama.script_tool_calls(("list_runs", {}), ("list_runs", {"limit": 2}))
+            harness.updates.append([_telegram_update(1, "42", "check twice")])
+            harness.poller.poll_once()  # returns while the turn runs
+            assert entered.wait(10)
+            assert "stopping" in _say(harness, "/stop", 2)  # answered mid-turn
+            release.set()
+            deadline = time.monotonic() + 10
+            while not any("stopped by telegram" in s[2] for s in list(harness.sent)):
+                assert time.monotonic() < deadline, harness.sent
+                time.sleep(0.02)
+            assert ran == ["list_runs"]
+        finally:
+            release.set()
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_conversation_turns_keep_order_and_never_block_another_conversation() -> None:
+    from skep.supervisor.serve.channels.runtime import ConversationTurns
+
+    turns = ConversationTurns(lambda work: threading.Thread(target=work, daemon=True).start())
+    gate, done, other = threading.Event(), threading.Event(), threading.Event()
+    log: list[str] = []
+
+    def first() -> None:
+        gate.wait(10)
+        log.append("a1")
+
+    def broken() -> None:
+        raise RuntimeError("one broken turn")
+
+    def last() -> None:
+        log.append("a2")
+        done.set()
+
+    turns.submit("a", first)
+    turns.submit("a", broken)  # never strands the queue
+    turns.submit("a", last)
+    turns.submit("b", other.set)
+    assert other.wait(10)  # b ran while a's first turn is still blocked
+    assert log == []
+    gate.set()
+    assert done.wait(10)
+    assert log == ["a1", "a2"]
