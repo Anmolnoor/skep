@@ -20,6 +20,7 @@ from . import (
     ChannelMessage,
     NormalizedInbound,
     channel_confirmation_decision,
+    confirm_off_line,
     identity_allowlisted,
     render_confirm_card,
 )
@@ -105,6 +106,9 @@ def confirmation_embed(
         description = "This action can only be confirmed from the skep web UI."
         if web_ui_url:
             description = f"{description[:-1]}: {web_ui_url}"
+        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
+        if off:
+            description = f"{description}\n{off}"
         return {
             "embeds": [
                 {

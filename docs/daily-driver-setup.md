@@ -115,3 +115,23 @@ becomes web-only. At the desk, `skep trust <chat id>` clears both bits:
 ```sh
 skep trust <chat id>
 ```
+
+## Desk turns reach the bound messenger
+
+A chat bound to a Telegram, Slack or Discord conversation is one conversation
+with two windows. The web UI shows everything. The phone also hears the
+Queen's replies to turns started at the desk: a message typed in the web UI
+(quoted as `(web) you: …`, cut to 300 characters), the continuation after you
+confirm or deny a card on the web, and the follow-up of a card confirmed while
+another turn ran. A card raised at the desk stays at the desk; it is re-sent,
+with buttons where the phone may confirm it, the next time you write from the
+phone. Attachments are not mirrored, and delivery is best-effort: the chat in
+the web UI is the record.
+
+The channel's `notification_level` is the dial: `all` mirrors desk turns,
+`approvals` or `none` keeps them at the desk. A chat that has read private
+files never sends a desk reply out; the phone gets one line saying a reply
+stayed in the web UI. A conversation removed from `allowed_identities` stops
+hearing desk turns. A group, or a Slack or Discord channel, has several readers, and all
+of them see the mirrored replies, just as they already see the replies to
+messages sent there. An unbound web chat is never pushed anywhere.

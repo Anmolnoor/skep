@@ -304,12 +304,30 @@ def render_confirm_card(
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
     too_long = len(items) > 1 and not fold_fits_a_messenger(items)
+    web_ui_only = action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long
+    headline = (card or {}).get("headline")
+    # v129-F5: a card the phone may confirm shows what it acts on (a
+    # read_url's target): no blind approvals. A web-only card keeps its
+    # headline at the desk; a fold lists its items in the notes.
+    lead = (str(headline),) if headline and not web_ui_only and len(items) <= 1 else ()
     return ConfirmCard(
         action_class=action_class,
         commands=command_lines,
-        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long,
-        notes=card_notes(card),
+        web_ui_only=web_ui_only,
+        notes=lead + card_notes(card),
         high=high,
+    )
+
+
+def confirm_off_line(channel: str, view: ConfirmCard, config: ChannelConfig) -> str | None:
+    """v129-F5 (I9): a pointer that is one setting away from buttons says so
+    — "never from a phone" and "you turned it off" must read differently.
+    None for a card that is web-UI-only by design, or when buttons show."""
+    if view.web_ui_only or config.channel_can_confirm:
+        return None
+    return (
+        f"Confirming from {channel.capitalize()} is off for this channel (channel_can_confirm). "
+        "Turn it on in the web UI's channel settings to confirm cards like this here."
     )
 
 

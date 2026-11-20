@@ -20,6 +20,7 @@ from . import (
     ChannelMessage,
     NormalizedInbound,
     channel_confirmation_decision,
+    confirm_off_line,
     identity_allowlisted,
     render_confirm_card,
     user_allowlisted,
@@ -77,6 +78,9 @@ def confirmation_blocks(
                 "text": {"type": "mrkdwn", "text": "Review and confirm in the skep web UI."},
             }
         )
+        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
+        if off:
+            blocks.append({"type": "section", "text": {"type": "plain_text", "text": off}})
         return blocks
     blocks.append(
         {

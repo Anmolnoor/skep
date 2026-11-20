@@ -271,7 +271,30 @@ def _channel_turn(
 ) -> tuple[str, list[dict[str, object]]]:
     store = engine.store
     base_url, api_key, model, protocol = llm
-    if blocking_cards(store, chat.chat_id):  # ES-F5: a gate never holds the chat
+    pending = blocking_cards(store, chat.chat_id)
+    if pending:  # ES-F5: a gate never holds the chat
+        if store.get_chat_taint(chat.chat_id).private is not None:
+            # v129-F4: a card's headline can quote what the chat read
+            return (
+                "skep: a confirmation is pending in this chat; it read private files, "
+                f"so review it in the web UI: {web_ui_url}",
+                [],
+            )
+        # v129-F4: the card may never have reached this phone (raised at the
+        # desk, by a queued follow-up, a run's completion turn, or a chained
+        # verdict) — re-send the Queen's cards; each transport renders them
+        # under its own posture. Operator /command cards resolve elsewhere.
+        cards: list[dict[str, object]] = [
+            {"action_id": r.action_id, "tool": r.tool, **engine.card_fields(chat.chat_id, r)}
+            for r in pending
+            if r.source == "assistant"
+        ]
+        if cards:
+            return (
+                "skep: a confirmation is pending: here it is again (or review it in "
+                f"the web UI: {web_ui_url}).",
+                cards,
+            )
         # v66-F3: buttons can resolve low-risk cards in-channel now — say so.
         return (
             "skep: a confirmation is pending for this conversation — confirm or "
@@ -370,16 +393,7 @@ class TelegramPoller(threading.Thread):
         for message in telegram_adapter.poll_updates(updates, config):
             text, actions = run_channel_turn(self._engine, message, web_ui_url=self._web_ui_url)
             replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
-            for action in actions:
-                # v41-F2: a low-risk card carries Confirm/Deny inline only when
-                # the shared gate could allow it; anything else keeps the v16
-                # web-UI pointer text.
-                card_text, keyboard = telegram_adapter.confirmation_card(
-                    str(action.get("tool")), (), config, self._web_ui_url, _card_of(action)
-                )
-                if keyboard is not None:
-                    keyboard = _telegram_action_keyboard(keyboard, str(action.get("action_id")))
-                replies.append((card_text, keyboard))
+            replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
             for reply, markup in replies:
 
                 def send_with_markup(
@@ -428,12 +442,20 @@ class TelegramPoller(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}"
             )
             return
+        # v129-F3: callback data is client-supplied — a press resolves only a
+        # card of the chat its own conversation is bound to.
+        binding = self._store.channel_session(f"{telegram_adapter.CHANNEL}:{chat_id}")
+        if binding is None or binding.chat_id != action.chat_id:
+            answer("skep: that card belongs to another conversation.")
+            return
         chat = self._store.get_chat(action.chat_id)
         if chat is None:
             answer("skep: the chat behind that card is gone.")
             return
         identity = ChannelIdentity(channel=telegram_adapter.CHANNEL, identity_id=chat_id)
         parts: list[str] = []
+        actions: list[dict[str, object]] = []
+        errors: list[str] = []
         try:
             for event, payload in self._engine.verdict_events(
                 action.chat_id,
@@ -444,17 +466,27 @@ class TelegramPoller(threading.Thread):
             ):
                 if event is None and payload.get("content"):
                     parts.append(str(payload["content"]))
+                elif event == "action":  # v129-F3: a chained card reaches the phone
+                    actions.append(dict(payload))
+                elif event == "error":
+                    errors.append(str(payload.get("detail")))
         except HTTPException as exc:
             answer(f"skep: {exc.detail}")
             return
         answer("skep: confirmed." if verb == "confirm" else "skep: denied.")
         text = "".join(parts).strip()
-        if text:
-            result = telegram_adapter.deliver(
-                text,
-                chat_id=chat_id,
-                send=lambda cid, body: send_telegram_markdown(self._send, token, cid, body),
-            )
+        if errors:
+            text = f"{text}\nskep error: {errors[0]}".strip()
+        replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
+        replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
+        for reply, markup in replies:
+
+            def send_with_markup(
+                cid: str, body: str, markup: dict[str, object] | None = markup
+            ) -> bool:
+                return send_telegram_markdown(self._send, token, cid, body, markup)
+
+            result = telegram_adapter.deliver(reply, chat_id=chat_id, send=send_with_markup)
             if not result.ok:
                 logger.warning("telegram delivery failed: %s", result.detail)
 
@@ -552,6 +584,24 @@ def _default_slack_send(
 
 def _text_blocks(text: str) -> list[dict[str, object]]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
+
+def _telegram_card_replies(
+    actions: list[dict[str, object]], config: ChannelConfig, web_ui_url: str
+) -> list[tuple[str, dict[str, object] | None]]:
+    """Each card as a Telegram reply. v41-F2: a low-risk card carries
+    Confirm/Deny inline only when the shared gate could allow it; anything
+    else keeps the v16 web-UI pointer text. v129-F3: shared by a message
+    turn and a button press's continuation."""
+    replies: list[tuple[str, dict[str, object] | None]] = []
+    for action in actions:
+        card_text, keyboard = telegram_adapter.confirmation_card(
+            str(action.get("tool")), (), config, web_ui_url, _card_of(action)
+        )
+        if keyboard is not None:
+            keyboard = _telegram_action_keyboard(keyboard, str(action.get("action_id")))
+        replies.append((card_text, keyboard))
+    return replies
 
 
 def _card_of(action: dict[str, object]) -> dict[str, Any] | None:
