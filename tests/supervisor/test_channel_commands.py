@@ -232,3 +232,34 @@ def test_title_shows_and_renames_the_bound_chat(config: SupervisorConfig) -> Non
             harness.close()
     finally:
         ollama.stop()
+
+
+def test_btw_asks_beside_a_pending_card_with_no_mutations(config: SupervisorConfig) -> None:
+    """v130-F13: the web deck's /btw on channels — a read-only side turn that
+    runs beside a pending card, is offered no mutation, and is recorded in the
+    bound chat as the web's /btw is."""
+    from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(config)
+        try:
+            assert "usage" in _plain(harness, "/btw").lower()
+            chat_id = _bind(harness, "telegram:42", "42", "telegram 42")
+            harness.store.add_chat_action(
+                chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+            ollama.script_reply("paris is the capital")
+            assert "paris is the capital" in _plain(harness, "/btw /help capital of france?", 2)
+            offered = {t["function"]["name"] for t in ollama.chat_bodies()[-1].get("tools", [])}
+            assert offered and not offered & MUTATING_TOOL_NAMES
+            said = [m.content for m in harness.store.chat_messages(chat_id)]
+            assert said[0] == "/help capital of france?"  # taken literally, not a command
+            assert len(harness.store.pending_chat_actions(chat_id)) == 1
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()

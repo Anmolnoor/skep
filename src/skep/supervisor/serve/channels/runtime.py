@@ -358,6 +358,7 @@ def run_channel_turn(
     *,
     web_ui_url: str,
     status: LiveStatus | None = None,
+    read_only: bool = False,
 ) -> tuple[str, list[dict[str, object]]]:
     """One channel message → one Queen turn. Returns (reply text, action events).
 
@@ -367,10 +368,13 @@ def run_channel_turn(
     the caller renders each returned action event per its channel's posture.
     """
     store = engine.store
-    command = parse_command(message.text)
+    # v130-F13: a /btw question is taken literally — never a command again
+    command = None if read_only else parse_command(message.text)
     if command is not None:  # v130-F7: the deck answers; the model never sees it
         config = store.get_channel_config(message.channel) or ChannelConfig(channel=message.channel)
-        ctx = CommandContext(engine=engine, message=message, config=config, web_ui_url=web_ui_url)
+        ctx = CommandContext(
+            engine=engine, message=message, config=config, web_ui_url=web_ui_url, status=status
+        )
         return run_command(ctx, *command)
     binding = store.channel_session(message.session_key)
     chat = store.get_chat(binding.chat_id) if binding is not None else None
@@ -399,6 +403,7 @@ def run_channel_turn(
             (base_url, api_key, model, protocol),
             web_ui_url=web_ui_url,
             status=status,
+            read_only=read_only,
         )
     finally:
         if status is not None:
@@ -414,11 +419,14 @@ def _channel_turn(
     *,
     web_ui_url: str,
     status: LiveStatus | None = None,
+    read_only: bool = False,
 ) -> tuple[str, list[dict[str, object]]]:
     store = engine.store
     base_url, api_key, model, protocol = llm
     pending = blocking_cards(store, chat.chat_id)
-    if pending:  # ES-F5: a gate never holds the chat
+    # v67-F3/v130-F13: a read-only /btw may run beside a pending card, as on
+    # the web — safe precisely because nothing it does can need confirmation.
+    if pending and not read_only:  # ES-F5: a gate never holds the chat
         if store.get_chat_taint(chat.chat_id).private is not None:
             # v129-F4: a card's headline can quote what the chat read
             return (
@@ -466,7 +474,7 @@ def _channel_turn(
     errors: list[str] = []
     for event, data in engine.turn_events(
         chat.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
-        channel=True,  # D16: the chat's session keeps are the web UI's
+        read_only=read_only, channel=True,  # D16: the chat's session keeps are the web UI's
     ):  # fmt: skip
         line = status_line(event, data) if status is not None else None
         if line is not None and status is not None:

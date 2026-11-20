@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ...roles import ROLE_LESS_CHAT_ROLE
@@ -38,6 +38,7 @@ class CommandContext:
     message: ChannelMessage
     config: ChannelConfig
     web_ui_url: str
+    status: Any = None  # LiveStatus for a deck command that runs a turn (/btw)
 
     @property
     def store(self) -> Any:
@@ -222,6 +223,23 @@ def _title(ctx: CommandContext, args: str) -> Reply:
     return f"skep: renamed this session to {args[:80]}.", []
 
 
+def _btw(ctx: CommandContext, args: str) -> Reply:
+    """v130-F13: the web deck's /btw — a read-only side question through the
+    ordinary channel turn: read tools only, never a card (I5), recorded in the
+    bound chat like the web's, and it may run beside a pending card."""
+    if not args:
+        return "skep: usage: /btw <question> (a read-only side question, no cards).", []
+    from .runtime import run_channel_turn  # runtime imports this module
+
+    return run_channel_turn(
+        ctx.engine,
+        replace(ctx.message, text=args),
+        web_ui_url=ctx.web_ui_url,
+        status=ctx.status,
+        read_only=True,
+    )
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
@@ -230,6 +248,7 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
     "sessions": ("this conversation's earlier sessions", _sessions),
     "resume": ("go back to a session from /sessions (/resume 2)", _resume),
     "title": ("show or rename this session (/title trip planning)", _title),
+    "btw": ("a read-only side question, even beside a pending card (/btw what is X?)", _btw),
     "status": ("what is running and what waits on you", _status),
     "runs": ("the latest runs (/runs 10)", _runs),
     "approvals": ("cards waiting in this conversation", _approvals),
