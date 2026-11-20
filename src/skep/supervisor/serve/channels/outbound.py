@@ -76,9 +76,18 @@ def push_desk_turn(store: RunStore, home: Path, chat_id: str, text: str, *, priv
     """v129-F1: the one door for desk-origin text — a turn started in the web
     UI of a messenger-bound chat is heard in that conversation too. ``info``,
     so ``notification_level`` is the dial; a ``private`` chat (its taint at
-    the end of the turn) sends only that the reply was withheld."""
-    if store.channel_binding_for_chat(chat_id) is None:
+    the end of the turn) sends only that the reply was withheld. v129-F6: a
+    binding whose identity left ``allowed_identities`` hears nothing (a
+    Discord thread skep made is admitted by binding, so it is not mirrored)."""
+    binding = store.channel_binding_for_chat(chat_id)
+    if binding is None:
         return "no channel"
+    config = store.get_channel_config(binding.channel)
+    if config is not None and binding.identity_id not in config.allowed_identities:
+        why = "not in allowed_identities"
+        logger.info("desk push to %s skipped: %s", binding.channel, why)
+        _note_delivery(store, binding.channel, ok=False, kind="info", note=why)
+        return why
     return push_outcome(store, home, chat_id, DESK_WITHHELD if private else text, kind="info")
 
 

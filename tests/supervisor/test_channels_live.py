@@ -1521,3 +1521,36 @@ def test_a_pending_card_is_resent_when_the_phone_speaks(
             harness.close()
     finally:
         ollama.stop()
+
+
+def test_a_desk_push_skips_a_revoked_identity(
+    config: SupervisorConfig, monkeypatch: object
+) -> None:
+    """v129-F6: desk text goes only to a conversation that is still allowed —
+    a binding outlives its allow-list entry."""
+    from .fake_ollama import FakeOllama
+
+    sent = _desk_sends(monkeypatch)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(config)
+        try:
+            client = serve_client(config)
+            ollama.script_reply("phone turn")
+            harness.updates.append([_telegram_update(1, "42", "hello")])
+            harness.poller.poll_once()
+            binding = harness.store.channel_session("telegram:42")
+            assert binding is not None
+            client.put("/api/channels/telegram", json={"allowed_identities": ["43"]})
+            ollama.script_reply("NOT FOR A REVOKED ROOM")
+            r = client.post(f"/api/chats/{binding.chat_id}/messages", json={"content": "hi"})
+            assert r.status_code == 200
+            _wait_desk_pushes()
+            assert sent == []
+            crumb = harness.store.get_setting("channel_last_delivery:telegram")
+            assert isinstance(crumb, dict) and crumb["note"] == "not in allowed_identities"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
