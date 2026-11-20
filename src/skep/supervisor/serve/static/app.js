@@ -1345,7 +1345,14 @@ function renderToolEvent(log, tool, result = null, options = {}) {
     log.append(thread);
   }
   const summary = options.summary || `tool: ${tool}`;
-  const content = result === null || result === undefined
+  // v128-F12: an object result reads as labeled rows (renderArgs), not JSON.
+  // Keys beside a wrapped result (a kept `grant`) stay; the envelope does not.
+  const inner = unwrapToolResult(result);
+  const beside = inner === result ? {} : Object.fromEntries(Object.entries(result)
+    .filter(([key]) => !["ok", "result", "action_id", "tool"].includes(key)));
+  const shown = inner && typeof inner === "object" && !Array.isArray(inner) ? { ...inner, ...beside } : inner;
+  const rows = shown && typeof shown === "object" && !Array.isArray(shown) ? renderArgs(shown) : null;
+  const content = rows || result === null || result === undefined
     ? ""
     : JSON.stringify(result, null, 2);
   const node = el("div", { class: "agent-thread-node" },
@@ -1358,8 +1365,10 @@ function renderToolEvent(log, tool, result = null, options = {}) {
       el("span", { class: "agent-thread-tool" }, tool),
       el("span", { class: "agent-thread-summary" }, summary),
       el("span", { class: "agent-thread-chevron", "aria-hidden": "true" }, "›")),
-    el("pre", { class: "agent-thread-content mono" }, content));
-  if (!content) node.querySelector(".agent-thread-content").classList.add("hidden");
+    rows
+      ? el("div", { class: "agent-thread-content" }, rows)
+      : el("pre", { class: "agent-thread-content mono" }, content));
+  if (!content && !rows) node.querySelector(".agent-thread-content").classList.add("hidden");
   thread.append(node);
   if (options.scroll) options.scroll();
   return node;
@@ -1383,6 +1392,87 @@ function shortTaskId(id) { return String(id || "").slice(0, 8); }
 function projectAfterCommand(tool, response) {
   if (tool !== "workon" || !response?.ok) return null;
   return unwrapToolResult(response)?.project?.project_id || null;
+}
+
+function toolLine(tool, raw = null) {
+  // v40-F2 (v35): every supervisor tool gets a deterministic human summary
+  // read off the tool RESULT json — never model text.
+  const result = unwrapToolResult(raw);
+  if (result && tool === "dispatch_run" && result.task_id) {
+    const where = result.repo ? ` on ${result.repo}` : "";
+    const delegated = delegationText(result.delegation);
+    return `dispatched worker ${shortTaskId(result.task_id)}${where}${delegated ? ` — ${delegated}` : ""}`;
+  }
+  if (result && tool === "batch_dispatch" && result.team) {
+    const chain = (result.delegation_chain || []).join(" → ");
+    return `dispatched team ${shortTaskId(result.team)}: ${chain} → ${result.count} worker(s)`;
+  }
+  if (result && tool === "start_research" && result.task_id) {
+    return `dispatched researcher ${shortTaskId(result.task_id)}`;
+  }
+  if (result && tool === "get_run" && (result.task_id || result.run)) {
+    const run = result.run && typeof result.run === "object" ? result.run : result;
+    const verified = run.verification_outcome ? `, ${run.verification_outcome}` : "";
+    return `checked run ${shortTaskId(run.task_id)} — ${run.state || "?"}${verified}`;
+  }
+  if (result && tool === "list_runs" && Array.isArray(result.runs)) {
+    return `listed ${result.runs.length} run${result.runs.length === 1 ? "" : "s"}`;
+  }
+  if (result && tool === "effective_policy") {
+    return `read effective policy${result.repo ? ` for ${result.repo}` : ""}`;
+  }
+  if (result && tool === "repo_state" && result.repo) {
+    return `checked repo state: ${result.repo}`;
+  }
+  if (result && tool === "land_run" && result.action) {
+    return result.action === "applied" ? `landed patch on ${result.branch}` : `land: ${result.action}`;
+  }
+  if (result && tool === "approve_review" && result.action) {
+    if (result.action === "resumed") return `approved — resumed as ${shortTaskId(result.resumed_as)}`;
+    if (result.action === "applied") return `approved — applied on ${result.branch}`;
+    return `approved (${result.action})`;
+  }
+  if (result && tool === "deny_review" && result.action) {
+    return "denied the review";
+  }
+  if (result && tool === "add_task" && result.task) {
+    return `task added: ${result.task.title}`;
+  }
+  if (result && tool === "complete_task" && result.task) {
+    return `task completed: ${result.task.title}`;
+  }
+  if (result && tool === "list_tasks" && Array.isArray(result.tasks)) {
+    const open = result.tasks.filter(task => task.status === "todo");
+    if (!open.length) return "todo: none";
+    const titles = open.slice(0, 3).map(task => task.title).join("; ");
+    return `todo: ${titles}${open.length > 3 ? ` (+${open.length - 3} more)` : ""}`;
+  }
+  if (result && tool === "add_note" && result.note) {
+    return "note added";
+  }
+  if (result && tool === "list_notes" && Array.isArray(result.notes)) {
+    return `${result.notes.length} note${result.notes.length === 1 ? "" : "s"}`;
+  }
+  return `tool: ${tool}`;
+}
+
+// v54-F3: labeled key-value rows instead of raw JSON — a human can scan
+// "repo: skep" where {"repo":"skep",...} was syntax noise. Nested values
+// (batch_dispatch.tasks) stay JSON, but under a labeled key.
+function renderArgs(args) {
+  if (!args || typeof args !== "object" || !Object.keys(args).length) return null;
+  return el("div", { class: "card-args" },
+    Object.entries(args).map(([key, value]) => el("div", { class: "arg-row" },
+      el("span", { class: "arg-key mono" }, `${key}:`),
+      el("span", { class: "arg-value" },
+        typeof value === "string" ? value : JSON.stringify(value, null, 2)))));
+}
+
+// v128-F12: a command result's row says what happened (toolLine) when there
+// is a deterministic line for the verb; otherwise the title stays.
+function commandSummary(title, tool, result) {
+  const line = tool ? toolLine(tool, result) : null;
+  return line && line !== `tool: ${tool}` ? line : title;
 }
 
 // v40-F1 (v35): consecutive Queen tool calls fold into ONE collapsed row with
@@ -2922,80 +3012,6 @@ async function viewChat(main, chatId) {
     scrollBottom();
     return node;
   };
-  const toolLine = (tool, raw = null) => {
-    // v40-F2 (v35): every supervisor tool gets a deterministic human summary
-    // read off the tool RESULT json — never model text.
-    const result = unwrapToolResult(raw);
-    if (result && tool === "dispatch_run" && result.task_id) {
-      const where = result.repo ? ` on ${result.repo}` : "";
-      const delegated = delegationText(result.delegation);
-      return `dispatched worker ${shortTaskId(result.task_id)}${where}${delegated ? ` — ${delegated}` : ""}`;
-    }
-    if (result && tool === "batch_dispatch" && result.team) {
-      const chain = (result.delegation_chain || []).join(" → ");
-      return `dispatched team ${shortTaskId(result.team)}: ${chain} → ${result.count} worker(s)`;
-    }
-    if (result && tool === "start_research" && result.task_id) {
-      return `dispatched researcher ${shortTaskId(result.task_id)}`;
-    }
-    if (result && tool === "get_run" && (result.task_id || result.run)) {
-      const run = result.run && typeof result.run === "object" ? result.run : result;
-      const verified = run.verification_outcome ? `, ${run.verification_outcome}` : "";
-      return `checked run ${shortTaskId(run.task_id)} — ${run.state || "?"}${verified}`;
-    }
-    if (result && tool === "list_runs" && Array.isArray(result.runs)) {
-      return `listed ${result.runs.length} run${result.runs.length === 1 ? "" : "s"}`;
-    }
-    if (result && tool === "effective_policy") {
-      return `read effective policy${result.repo ? ` for ${result.repo}` : ""}`;
-    }
-    if (result && tool === "repo_state" && result.repo) {
-      return `checked repo state: ${result.repo}`;
-    }
-    if (result && tool === "land_run" && result.action) {
-      return result.action === "applied" ? `landed patch on ${result.branch}` : `land: ${result.action}`;
-    }
-    if (result && tool === "approve_review" && result.action) {
-      if (result.action === "resumed") return `approved — resumed as ${shortTaskId(result.resumed_as)}`;
-      if (result.action === "applied") return `approved — applied on ${result.branch}`;
-      return `approved (${result.action})`;
-    }
-    if (result && tool === "deny_review" && result.action) {
-      return "denied the review";
-    }
-    if (result && tool === "add_task" && result.task) {
-      return `task added: ${result.task.title}`;
-    }
-    if (result && tool === "complete_task" && result.task) {
-      return `task completed: ${result.task.title}`;
-    }
-    if (result && tool === "list_tasks" && Array.isArray(result.tasks)) {
-      const open = result.tasks.filter(task => task.status === "todo");
-      if (!open.length) return "todo: none";
-      const titles = open.slice(0, 3).map(task => task.title).join("; ");
-      return `todo: ${titles}${open.length > 3 ? ` (+${open.length - 3} more)` : ""}`;
-    }
-    if (result && tool === "add_note" && result.note) {
-      return "note added";
-    }
-    if (result && tool === "list_notes" && Array.isArray(result.notes)) {
-      return `${result.notes.length} note${result.notes.length === 1 ? "" : "s"}`;
-    }
-    return `tool: ${tool}`;
-  };
-
-  // v54-F3: labeled key-value rows instead of raw JSON — a human can scan
-  // "repo: skep" where {"repo":"skep",...} was syntax noise. Nested values
-  // (batch_dispatch.tasks) stay JSON, but under a labeled key.
-  const renderArgs = (args) => {
-    if (!args || typeof args !== "object" || !Object.keys(args).length) return null;
-    return el("div", { class: "card-args" },
-      Object.entries(args).map(([key, value]) => el("div", { class: "arg-row" },
-        el("span", { class: "arg-key mono" }, `${key}:`),
-        el("span", { class: "arg-value" },
-          typeof value === "string" ? value : JSON.stringify(value, null, 2)))));
-  };
-
   // v90-F2: the three lines a human reads — what runs, what it is for, and the
   // one thing that needs attention. The model-facing description and the raw
   // args move behind a disclosure: they are reference, not the decision.
@@ -3103,8 +3119,9 @@ async function viewChat(main, chatId) {
     scrollBottom();
   };
 
-  const commandResult = (title, result) =>
-    renderToolEvent(log, title, result, { summary: title, scroll: scrollBottom });
+  const commandResult = (title, result, tool = null) =>
+    renderToolEvent(log, title, result,
+      { summary: commandSummary(title, tool, result), scroll: scrollBottom });
 
   // v128-F11: bind the chat to the project a confirmed /workon made, then
   // reload the picker and the sidebar so both show it.
@@ -3136,7 +3153,7 @@ async function viewChat(main, chatId) {
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
-        commandResult(verb === "confirm" ? `${d.tool}: result` : `${d.tool}: canceled`, result);
+        commandResult(verb === "confirm" ? `${d.tool}: result` : `${d.tool}: canceled`, result, d.tool);
         await followProject(d.tool, result);
         resolveCardUI(card, verb === "confirm" ? "✓ Confirmed" : "✗ Canceled", verb);
         refreshStrip();  // v96-F3: a confirmed verb may have moved branch/policy
@@ -3171,7 +3188,8 @@ async function viewChat(main, chatId) {
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
-        commandResult(verb === "confirm" ? "approve_review: result" : "deny_review: result", result);
+        commandResult(verb === "confirm" ? "approve_review: result" : "deny_review: result", result,
+          verb === "confirm" ? "approve_review" : "deny_review");
         resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
         refreshStrip();  // v96-F3: an approval may have landed a branch
       } catch (e) {
@@ -3234,7 +3252,7 @@ async function viewChat(main, chatId) {
     if (!card) return false;
     if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
-      commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
+      commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result, card.tool);
       await followProject(card.tool, result);
       refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {

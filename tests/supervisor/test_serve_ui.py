@@ -1089,7 +1089,7 @@ def test_chat_groups_consecutive_tool_calls_into_activity_rows() -> None:
     assert "let replayGroup = null;" in source
     assert "if (!replayGroup) replayGroup = renderActivityGroup(log" in source
     # /commands stay free-standing — the deck never folds into model activity
-    assert "renderToolEvent(log, title, result, { summary: title, scroll: scrollBottom })" in source
+    assert "renderToolEvent(log, title, result,\n" in source
 
     assert ".activity-group" in styles
     assert ".activity-group-header" in styles
