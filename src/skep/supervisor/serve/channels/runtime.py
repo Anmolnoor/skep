@@ -121,6 +121,26 @@ def _default_fetch(token: str, offset: int) -> list[dict[str, object]]:
     return list(results) if isinstance(results, list) else []
 
 
+def _default_fetch_telegram_file(token: str, file_id: str) -> bytes | None:
+    """v130-F15: getFile, then the download. Both URLs hold the bot token, so
+    nothing here logs or raises with them: any failure is just None."""
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    try:
+        meta = httpx.get(
+            f"{TELEGRAM_API}/bot{token}/getFile", params={"file_id": file_id}, timeout=timeout
+        )
+        result = meta.json().get("result") if meta.status_code == 200 else None
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not path:
+            return None
+        response = httpx.get(f"{TELEGRAM_API}/file/bot{token}/{path}", timeout=timeout)
+    except (httpx.HTTPError, ValueError):
+        return None
+    if response.status_code != 200 or len(response.content) > ATTACHMENT_MAX_BYTES:
+        return None
+    return response.content
+
+
 def _default_send(
     token: str,
     chat_id: str,
@@ -513,6 +533,7 @@ class TelegramPoller(threading.Thread):
         status_ops: StatusOps | None = None,
         typing: Callable[[str, str], object] | None = None,
         set_commands: Callable[[str, list[dict[str, str]]], object] | None = None,
+        fetch_file: Callable[[str, str], bytes | None] | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
         # v130-F14: None = no menu call (the suite); serve wires the real one.
@@ -530,6 +551,7 @@ class TelegramPoller(threading.Thread):
         self._fetch = fetch if fetch is not None else _default_fetch
         self._send = send if send is not None else _default_send
         self._answer = answer if answer is not None else _default_answer_callback
+        self._fetch_file = fetch_file if fetch_file is not None else _default_fetch_telegram_file
         self._idle = idle_seconds
         self._offset = 0
         self._stop_event = threading.Event()
@@ -559,7 +581,7 @@ class TelegramPoller(threading.Thread):
             if isinstance(callback, dict):
                 self._handle_callback(callback, config, secret)
                 handled += 1
-        for message in telegram_adapter.poll_updates(updates, config):
+        for message in self._inbound(updates, config, secret):
             text, actions = self._turn_with_status(message, secret)
             replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
             replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
@@ -580,6 +602,36 @@ class TelegramPoller(threading.Thread):
                     logger.warning("telegram delivery failed: %s", result.detail)
             handled += 1
         return handled
+
+    def _inbound(
+        self, updates: list[dict[str, object]], config: ChannelConfig, token: str
+    ) -> list[ChannelMessage]:
+        """The admitted messages, each photo fetched only AFTER admission
+        (v130-F15, Discord's v44-F9 path). A failed fetch keeps the caption;
+        a bare photo that cannot be fetched has nothing left to say."""
+        routed: list[ChannelMessage] = []
+        for update in updates:
+            message = telegram_adapter.normalize_inbound(update, config).message
+            raw = update.get("message")
+            file_id = (
+                telegram_adapter.image_file_id(raw, ATTACHMENT_MAX_BYTES)
+                if message is not None and isinstance(raw, dict)
+                else None
+            )
+            if message is not None and file_id:
+                try:
+                    blob, why = self._fetch_file(token, file_id), "no file"
+                except Exception as exc:  # the file URL holds the token: type only
+                    blob, why = None, exc.__class__.__name__
+                if blob:
+                    message = dataclasses.replace(message, attachments=(blob,))
+                else:
+                    logger.warning("telegram photo fetch failed (%s)", why)
+                    if not message.text:
+                        continue
+            if message is not None:
+                routed.append(message)
+        return routed
 
     def _register_menu(self, token: str) -> None:
         """v130-F14: a failed menu call costs the menu, never the poll."""
