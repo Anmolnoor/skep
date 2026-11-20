@@ -157,6 +157,12 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
     if not card:
         return ()
     notes: list[str] = []
+    items = card.get("items")
+    folded = isinstance(items, list) and len(items) > 1
+    if messenger and card.get("headline") and not folded:
+        # v129-F5: what the card acts on (a read_url's target) — the CLI
+        # prints the args themselves; a fold lists its items below.
+        notes.append(str(card["headline"]))
     if card.get("tier") == "high":
         notes.append(
             f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
@@ -172,8 +178,7 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
     schedule = card.get("schedule")
     if isinstance(schedule, Mapping):  # P4-2: what a script schedule really does
         notes.extend(schedule_lines(schedule))
-    items = card.get("items")
-    if isinstance(items, list) and len(items) > 1:
+    if isinstance(items, list) and folded:
         lines = [str(item) for item in items]
         if messenger and not fold_fits_a_messenger(lines):
             notes.append(
@@ -310,6 +315,18 @@ def render_confirm_card(
         web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long,
         notes=card_notes(card),
         high=high,
+    )
+
+
+def confirm_off_line(channel: str, view: ConfirmCard, config: ChannelConfig) -> str | None:
+    """v129-F5 (I9): a pointer that is one setting away from buttons says so
+    — "never from a phone" and "you turned it off" must read differently.
+    None for a card that is web-UI-only by design, or when buttons show."""
+    if view.web_ui_only or config.channel_can_confirm:
+        return None
+    return (
+        f"Confirming from {channel.capitalize()} is off for this channel (channel_can_confirm). "
+        "Turn it on in the web UI's channel settings to confirm cards like this here."
     )
 
 

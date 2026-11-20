@@ -127,7 +127,8 @@ def test_a_plain_note_schedule_has_no_schedule_block(store: RunStore) -> None:
 
 def test_channels_and_the_cli_list_the_facts(store: RunStore) -> None:
     notes = card_notes(card_summary("propose_schedule", SCRIPT, "", store=store))
-    assert notes[0].startswith("HIGH risk: a script schedule runs a command as you")
+    assert notes[0].startswith("propose_schedule")  # v129-F5: the headline leads
+    assert notes[1].startswith("HIGH risk: a script schedule runs a command as you")
     assert "command: df -h /" in notes and "every: 1d" in notes
     assert any(n.startswith("next runs: ") for n in notes)
     assert any(n.startswith("environment: ") for n in notes)

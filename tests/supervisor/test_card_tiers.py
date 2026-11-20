@@ -326,7 +326,10 @@ def test_channel_renderers_show_a_high_card_as_needs_the_web_ui() -> None:
 
 
 def test_card_notes_list_every_folded_item_and_stay_quiet_on_a_plain_card() -> None:
-    assert card_notes(None) == () and card_notes({"headline": "x"}) == ()
+    assert card_notes(None) == ()
+    # v129-F5: a messenger leads with the headline; the CLI prints the args
+    assert card_notes({"headline": "x"}) == ("x",)
+    assert card_notes({"headline": "x"}, messenger=False) == ()
     notes = card_notes({"items": ["read_url — https://a/1", "read_url — https://a/2"]})
     assert notes == (
         "2 items, one approval covers exactly these:",

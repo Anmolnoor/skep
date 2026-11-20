@@ -23,6 +23,7 @@ from . import (
     ChannelMessage,
     NormalizedInbound,
     channel_confirmation_decision,
+    confirm_off_line,
     identity_allowlisted,
     render_confirm_card,
     user_allowlisted,
@@ -104,7 +105,9 @@ def confirmation_card(
     classes and channels without ``channel_can_confirm`` keep the v16 text."""
     view = render_confirm_card(action_class, commands, card)
     if view.web_ui_only or not config.channel_can_confirm:
-        return confirmation_text(action_class, commands, web_ui_url, card), None
+        text = confirmation_text(action_class, commands, web_ui_url, card)
+        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
+        return (f"{text}\n{off}" if off else text), None
     lines = "\n".join(f"  {line}" for line in view.commands)
     body = f"Action '{action_class}' needs confirmation."
     if lines:
