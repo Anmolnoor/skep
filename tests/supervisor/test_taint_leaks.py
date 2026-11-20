@@ -435,12 +435,14 @@ def test_a_queued_follow_up_after_a_channel_click_replies_in_that_channel(
 
 
 @pytest.mark.parametrize("actor", ["channel:discord:c2", "channel:telegram:c1", "chat-user"])
-def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_come_from(
+def test_a_queued_follow_up_replies_only_to_the_bound_conversation_or_its_desk(
     env: Live, monkeypatch: pytest.MonkeyPatch, actor: str
 ) -> None:
     """ES-F180: the chat is bound to discord:c1; a click from another
-    conversation, another messenger or the web hears nothing pushed there."""
-    from skep.supervisor.serve.channels import outbound
+    conversation or another messenger hears nothing pushed there. v129-F2: a
+    click at the desk (``chat-user``) does — the bound conversation is the
+    desk's other window."""
+    from skep.supervisor.serve.channels import ChannelConfig, outbound, store_channel_secret
     from skep.supervisor.serve.chat import chat_turn_lock
 
     from .test_provider_replay import _wait_follow_ups
@@ -449,8 +451,17 @@ def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_co
     env.store.bind_channel_session(
         session_key="discord:c1", channel="discord", identity_id="c1", chat_id=chat
     )
+    env.store.upsert_channel_config(
+        ChannelConfig(channel="discord", enabled=True, allowed_identities=("c1",))
+    )
+    store_channel_secret(env.holder.current.home, "discord", "bot-token")
     pushed: list[str] = []
-    monkeypatch.setattr(outbound, "push_to_chat_channel", lambda *a, **k: pushed.append(a[3]))
+
+    def send(token: str, channel_id: str, payload: dict[str, object]) -> bool:
+        pushed.append(str(payload["content"]))
+        return True
+
+    monkeypatch.setattr(outbound, "_default_discord_send", send)
     set_taint(env.store, chat, "untrusted")
     env.ollama.script_tool_call("add_note", {"content": "x"})
     card = _action(env.turn(chat, "note it"))
@@ -466,7 +477,20 @@ def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_co
     lock.release()
     _wait_follow_ups()
     assert "not for discord:c1" in [m.content for m in env.store.chat_messages(chat)]
-    assert pushed == []
+    assert pushed == (["not for discord:c1"] if actor == "chat-user" else [])
+
+
+def test_committed_reply_strips_inline_thinking(env: Live) -> None:
+    """v129-F2: the provider-error paths store a half-reply unstripped; the
+    desk push must never carry the model's inline thinking."""
+    from skep.supervisor.serve.chat import _committed_reply
+
+    chat = env.chat()
+    first = env.store.add_chat_message(chat, role="user", content="go")
+    last = env.store.add_chat_message(
+        chat, role="assistant", content="<think>secret plan</think>partial"
+    )
+    assert _committed_reply(env.store, chat, first, last) == "partial"
 
 
 def test_get_run_quotes_a_research_report_and_taints_the_reader(env: Live) -> None:

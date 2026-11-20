@@ -554,7 +554,7 @@ def _queue_follow_up(
             if not engine.store.claim_follow_up(action_id) or blocking_cards(engine.store, chat_id):
                 return
             verdict = "denied" if action.status == "denied" else "confirmed"
-            engine.store.add_chat_message(
+            note = engine.store.add_chat_message(
                 chat_id, role="user", provenance="queen",
                 content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=action.tool),
             )  # fmt: skip
@@ -567,6 +567,11 @@ def _queue_follow_up(
                 )
                 if event is None
             ]  # fmt: skip
+            # v129-F2: a desk click's reply is the turn's committed rows
+            desk = _committed_reply(
+                engine.store, chat_id, note, _last_message_id(engine.store, chat_id)
+            )
+            private = engine.store.get_chat_taint(chat_id).private is not None
         text = "".join(parts).strip()
         binding = engine.store.channel_binding_for_chat(chat_id)
         if text and binding is not None and actor.startswith("channel:"):
@@ -576,6 +581,10 @@ def _queue_follow_up(
             # only into the conversation the click came from
             if actor == channel_actor(ChannelIdentity(binding.channel, binding.identity_id)):
                 push_to_chat_channel(engine.store, engine.home, chat_id, text, kind="reply")
+        elif desk and actor == CHAT_ACTOR:
+            from .channels.outbound import push_desk_turn
+
+            push_desk_turn(engine.store, engine.home, chat_id, desk, private=private)
 
     threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
 
@@ -607,12 +616,15 @@ def resume_follow_ups(engine: ChatEngine) -> int:
 
 def _committed_reply(store: RunStore, chat_id: str, after_id: int, upto_id: int) -> str:
     """v129-F1: the assistant text a turn committed (``after_id < id <= upto_id``)
-    — the stored rows, never the raw stream deltas."""
-    return "\n\n".join(
-        m.content.strip()
+    — the stored rows, never the raw stream deltas. v129-F2: each row loses
+    its inline thinking here, because the provider-error paths store the
+    half-reply unstripped."""
+    rows = (
+        _strip_inline_think(m.content)[0].strip()
         for m in store.chat_messages(chat_id)
-        if m.role == "assistant" and after_id < m.id <= upto_id and m.content.strip()
+        if m.role == "assistant" and after_id < m.id <= upto_id
     )
+    return "\n\n".join(row for row in rows if row)
 
 
 def _last_message_id(store: RunStore, chat_id: str) -> int:

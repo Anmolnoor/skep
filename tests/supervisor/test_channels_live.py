@@ -1233,7 +1233,7 @@ def test_a_queued_web_confirm_pushes_once(config: SupervisorConfig, monkeypatch:
             finally:
                 lock.release()
             _wait_desk_pushes()
-            assert sent == []  # the follow-up's own push is F2's
+            assert len(sent) == 1 and "QUEUED CONTINUATION" in sent[0]  # F2's push
         finally:
             harness.close()
     finally:
