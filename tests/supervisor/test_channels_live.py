@@ -8,6 +8,8 @@ Slack webhook (F4), and the honesty flags for what is actually live (F5).
 
 from __future__ import annotations
 
+from typing import Any
+
 from skep.supervisor import SupervisorConfig
 from skep.supervisor.serve.channels import (
     channel_secret_env,
@@ -137,7 +139,12 @@ def _telegram_update(update_id: int, chat_id: str, text: str) -> dict[str, objec
 class _TelegramHarness:
     """A poller over fakes: scripted updates in, delivered texts out."""
 
-    def __init__(self, config: SupervisorConfig, web_ui_url: str = "http://ui.test/") -> None:
+    def __init__(
+        self,
+        config: SupervisorConfig,
+        web_ui_url: str = "http://ui.test/",
+        spawn: Any = None,
+    ) -> None:
         from skep.supervisor import RunStore
         from skep.supervisor.serve.channels.runtime import TelegramPoller
         from skep.supervisor.serve.chat import ChatEngine
@@ -162,6 +169,8 @@ class _TelegramHarness:
             fetch=self._fetch,
             send=self._send,
             answer=self._answer,
+            # Inline unless a test asks for real threads: deterministic replies.
+            spawn=spawn if spawn is not None else (lambda work: work()),
         )
 
     def _fetch(self, token: str, offset: int) -> list[dict[str, object]]:

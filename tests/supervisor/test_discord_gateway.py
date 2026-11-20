@@ -86,6 +86,7 @@ class _DiscordHarness:
         self.deferred_acks: list[tuple[str, str]] = []
         self.followups: list[tuple[str, str, str]] = []
         self.spawned_inline = 0
+        self.deferred: list[Any] | None = None
         self.threads: list[tuple[str, str, str, str]] = []
         self.thread_id: str | None = "t-900"
         self.attachment_fetches: list[str] = []
@@ -137,6 +138,9 @@ class _DiscordHarness:
         # ORDER is still honest — _handle_interaction defers the ack before
         # this runs.
         self.spawned_inline += 1
+        if self.deferred is not None:  # v130-F10: a turn still waiting to run
+            self.deferred.append(work)
+            return
         work()
 
     def _register(self, token: str, application_id: str, commands: list[dict[str, object]]) -> int:
@@ -1511,6 +1515,35 @@ def test_with_two_cards_waiting_a_reaction_or_slash_verdict_resolves_neither(
             for action_id in ids:
                 waiting = harness.store.get_chat_action(action_id)
                 assert waiting is not None and waiting.status == "proposed"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_discord_deck_is_answered_while_a_turn_waits(config: SupervisorConfig) -> None:
+    """v130-F10: turns leave the gateway loop; the deck is answered inline,
+    so a /stop never queues behind the turn it means to stop."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama)
+        harness = _DiscordHarness(config)
+        try:
+            harness.deferred = []
+            ollama.script_reply("hello from the hive")
+            harness.script(
+                HELLO,
+                READY,
+                _message_create("42", "status?"),
+                _message_create("42", "/stop", seq=3),
+            )
+            assert harness.gateway.session_once() is True
+            assert len(harness.deferred) == 1  # the turn has not run yet
+            assert "nothing to stop" in str(harness.sent[-1][2])
+            harness.deferred.pop()()
+            assert harness.sent[-1][2] == {"content": "hello from the hive"}
         finally:
             harness.close()
     finally:

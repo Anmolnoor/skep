@@ -44,16 +44,17 @@ const deck = Object.entries(DECK).map(([name, { usage, desc }]) => ({
   effect: effects[effectOf(name, desc)],
 }));
 
-// The four commands that exist only in the terminal (usage from src/skep/cli_chat.py COMMANDS).
+// The five commands that exist only in the terminal (usage from src/skep/cli_chat.py COMMANDS).
 const terminalOnly = [
   ['/status', 'Print the startup line again: assistant readiness, approvals and cards waiting.'],
   ['/model [name] [--scope chat|default]', 'Show the model this chat uses. With a name, propose a change of model on a card.'],
   ['/replay', 'Print the last messages of this chat.'],
+  ['/stop', 'Stop this chat\'s running turn at its next step. The web chat has a Stop button on its working line.'],
   ['/exit', 'Leave the chat. A bare exit or quit also works.'],
 ];
 const cliOnly = /CLI_ONLY = frozenset\(\{([^}]*)\}\)/.exec(readRepoFile('src/skep/cli_chat.py'))?.[1];
 const cliOnlyNames = (cliOnly?.match(/[a-z]+/g) ?? []).sort().join(' ');
-if (cliOnlyNames !== 'exit model replay status') {
+if (cliOnlyNames !== 'exit model replay status stop') {
   throw new Error(`cli_chat.py CLI_ONLY is now "${cliOnlyNames}": update terminalOnly in cli.astro`);
 }
 
@@ -360,7 +361,7 @@ const groups: Group[] = [
             <li>There is no command that starts a run. Ask for the work in a plain message and confirm the card the assistant proposes, or use <code>skep run</code>.</li>
           </ul>
         </div>
-        <Table caption="Terminal only: these four exist in skep chat, not in the web chat">
+        <Table caption="Terminal only: these five exist in skep chat, not in the web chat">
           <thead>
             <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
           </thead>

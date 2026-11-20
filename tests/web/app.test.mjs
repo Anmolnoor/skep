@@ -492,3 +492,22 @@ test("isInternalNudge: only a user row skep wrote itself (provenance queen)", ()
   assert.equal(app.isInternalNudge({ role: "user", provenance: "webhook:ci", content: "hi" }), false);
   assert.equal(app.isInternalNudge({ role: "assistant", provenance: "queen", content: "ok" }), false);
 });
+
+// ---------- v130-F10: the working line's Stop button ----------
+
+test("stopButton asks the chat's running turn to stop and says what happened", async () => {
+  const app = loadApp();
+  const calls = [];
+  app.api = async (method, path) => {
+    calls.push(`${method} ${path}`);
+    return { stopped: true, detail: "stopping: the turn ends at its next step" };
+  };
+  const button = app.stopButton("c-1");
+  assert.equal(button.textContent, "Stop");
+  await button.click();
+  assert.deepEqual(calls, ["POST /api/chats/c-1/stop"]);
+  assert.deepEqual(app.flashes.map(f => [...f]), [["ok", "stopping: the turn ends at its next step"]]);
+  app.api = async () => { throw new Error("down"); };
+  await button.click();
+  assert.deepEqual([...app.flashes[1]], ["bad", "down"]);
+});

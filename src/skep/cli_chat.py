@@ -303,6 +303,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "usage": "/model [name] [--scope chat|default]",
         "desc": "show effective model for this chat; with name: propose set_assistant_model",
     },
+    "stop": {
+        "usage": "/stop",
+        "desc": "stop this chat's running turn at its next step (from another terminal: "
+        "skep chat --chat <id> --oneshot /stop) — cards stay pending, runs keep running",
+    },
     "exit": {
         "usage": "/exit",
         "desc": "leave the REPL — bare exit/quit also work",
@@ -316,8 +321,9 @@ COMMANDS: dict[str, dict[str, str]] = {
 # CLI_ONLY: commands that exist ONLY in the terminal — the web has equivalent
 # surfaces but no deck rows (v77-F3 parity pin): /status -> web status page +
 # topbar health dot; /model -> composer model select; /exit -> close tab;
-# /replay -> the web transcript is always on screen (v77-F5).
-CLI_ONLY = frozenset({"status", "model", "exit", "replay"})
+# /replay -> the web transcript is always on screen (v77-F5); /stop -> the
+# stop button on the working line (v130-F10: typing there queues mid-turn).
+CLI_ONLY = frozenset({"status", "model", "exit", "replay", "stop"})
 
 
 def _parse_slash(text: str) -> tuple[str, list[str], dict[str, str]]:
@@ -974,6 +980,11 @@ class ChatRepl:
             print(_c(DIM, f"trusted again — cleared: {cleared}"))
             if covers:
                 print(_c(DIM, f"covers the finish notice of run {covers}"))
+            return
+        if name == "stop":
+            # v130-F10: a direct POST — never waits on the turn it stops.
+            stopped = self.client.post(f"/api/chats/{self.chat_id}/stop", {"face": "skep chat"})
+            print(_c(DIM, f"skep: {stopped['detail']}"))
             return
         if name == "steer":
             if len(args) < 2:
