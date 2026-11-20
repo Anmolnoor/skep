@@ -149,13 +149,27 @@ def _write_patch(capabilities: CapabilityRegistry, patch_path: Path) -> bool:
     return bool((diff.output or "").strip())
 
 
-def _patch_file_count(patch_path: Path) -> int:
-    """v127-F3 (I8): the files the patch changes, counted from the patch
+def _patch_files(patch_path: Path) -> list[str]:
+    """v127-F3 (I8): the files the patch changes, read from the patch
     ``_write_patch`` wrote — git.diff against the startup baseline, not HEAD
     (a granted git.commit moves HEAD) — so a shell-run edit such as a
     lockfile bump is counted, not just tool writes."""
     text = patch_path.read_text(encoding="utf-8")
-    return sum(1 for line in text.splitlines() if line.startswith("diff --git "))
+    # ponytail: the b/ side of `diff --git a/X b/Y`; a path containing " b/" splits wrong
+    return [
+        line.rsplit(" b/", 1)[-1] for line in text.splitlines() if line.startswith("diff --git ")
+    ]
+
+
+def _patch_file_count(patch_path: Path) -> int:
+    return len(_patch_files(patch_path))
+
+
+def _result_files(patch_path: Path, artifacts: list[Artifact], written: list[str]) -> list[str]:
+    """v128-F8: result.json names the shipped patch's files; the tool-write
+    list only when no patch ships — reverify reads it exactly then (v65-F1)."""
+    shipped = any(artifact.kind == "patch" for artifact in artifacts)
+    return _patch_files(patch_path) if shipped else written
 
 
 def _resume_checkpoint_artifact(
@@ -1025,7 +1039,7 @@ def _execute(
         trace_id=task.trace_id,
         status=status,
         summary=summary,
-        changed_files=changed_files,
+        changed_files=_result_files(patch_path, artifacts, changed_files),
         commands=commands,
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,
@@ -1395,7 +1409,7 @@ def _apply_llm_plan(
         trace_id=task.trace_id,
         status=status,
         summary=summary,
-        changed_files=changed_files,
+        changed_files=_result_files(patch_path, artifacts, changed_files),
         commands=[
             CommandRecord(
                 command=verify_command,
@@ -1819,7 +1833,7 @@ def _execute_react(
         trace_id=task.trace_id,
         status=status,
         summary=summary,
-        changed_files=changed_files,
+        changed_files=_result_files(patch_path, artifacts, changed_files),
         commands=commands,
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,
@@ -2287,7 +2301,7 @@ def _apply_llm_tool_plan(
         trace_id=task.trace_id,
         status=status,
         summary=summary,
-        changed_files=changed_files,
+        changed_files=_result_files(patch_path, artifacts, changed_files),
         commands=commands,
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,

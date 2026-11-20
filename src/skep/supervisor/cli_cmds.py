@@ -3400,12 +3400,16 @@ def cmd_project_remove(args: argparse.Namespace) -> int:
         return _err(f"no project named {args.project_id!r}", next_command="skep project list")
     store = RunStore(config.db_path)
     try:
-        remove_project(store, args.project_id)
+        removed = remove_project(store, args.project_id)
     except HTTPException as exc:
         return _err(str(exc.detail), next_command="skep project list")
     finally:
         store.close()
-    print(f"project unregistered: {args.project_id} (its folder is untouched)")
+    seeds = ", ".join(removed["removed_seeds"])
+    print(
+        f"project unregistered: {args.project_id} (its folder is untouched)"
+        + (f"; removed its seeds: {seeds}" if seeds else "")
+    )
     return 0
 
 

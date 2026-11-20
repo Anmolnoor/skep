@@ -1433,3 +1433,102 @@ def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
         assert granted_commands(store, ConfigHolder(config, store), repo) == []
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("face", ["card", "command"])
+def test_v128_f7_denying_a_land_card_records_a_denied_landing(
+    repo: Path, config: SupervisorConfig, face: str
+) -> None:
+    """v128-F7: a denied land_run card left no trace — the approval row is
+    only made on confirm — so the run still read "ready to land". A deny now
+    records one denied apply_patch review; the run itself is unchanged."""
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    from .fake_ollama import FakeOllama
+    from .test_serve_chat import sse_events
+
+    task_id = run_task(repo, "Fix the bug. MODE:happy", config=config).record.task_id
+    client = _client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    if face == "command":
+        card = client.post(
+            f"/api/chats/{chat_id}/commands",
+            json={"tool": "land_run", "args": {"task_id": task_id}},
+        ).json()
+        assert client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/deny").is_success
+    else:
+        ollama = FakeOllama(api_key="sk-fake").start()
+        try:
+            client.put(
+                "/api/llm/config",
+                json={"base_url": ollama.base_url, "default_model": "q", "api_key": "sk-fake"},
+            )
+            ollama.script_tool_call("land_run", {"task_id": task_id})
+            events = sse_events(
+                client.post(f"/api/chats/{chat_id}/messages", json={"content": "land it"}).text
+            )
+            (card,) = [d for name, d in events if name == "action"]
+            ollama.script_reply("ok, not landing")
+            client.post(f"/api/chats/{chat_id}/actions/{card['action_id']}/deny")
+        finally:
+            ollama.stop()
+
+    store = RunStore(config.db_path)
+    try:
+        (approval,) = store.approvals_for(task_id)
+        assert (approval.action, approval.status) == ("apply_patch", "denied")
+        assert f"land denied on card {card['action_id']}" in (approval.resolution_note or "")
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "completed"
+        line = run_terminal_text(store, task_id)
+    finally:
+        store.close()
+    assert line is not None and "landing denied" in line[0], line
+
+
+def _deny_land_command(client: TestClient, chat_id: str, task_id: str) -> None:
+    card = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "land_run", "args": {"task_id": task_id}},
+    ).json()
+    assert client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/deny").is_success
+
+
+def test_v128_f7_a_denied_land_card_leaves_a_paused_runs_gate_alone(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Review round 1 (S1): the open review of a paused run is its shell gate,
+    not a landing — a Deny on a land card must not resolve it."""
+    client = _client(config)
+    task_id = _dispatch(client, repo, "Commit this. MODE:pending")
+    assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    _deny_land_command(client, chat_id, task_id)
+    store = RunStore(config.db_path)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["pending"]
+    finally:
+        store.close()
+
+
+def test_v128_f7_a_denied_land_card_after_landing_records_nothing(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Review round 1 (S2): a repeat land card on a run already landed — its
+    Deny is not a landing verdict; the history keeps the approved landing last."""
+    client = _client(config)
+    task_id = run_task(repo, "Fix the bug. MODE:happy", config=config).record.task_id
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    card = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "land_run", "args": {"task_id": task_id}},
+    ).json()
+    assert client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/confirm").is_success
+    _deny_land_command(client, chat_id, task_id)
+    store = RunStore(config.db_path)
+    try:
+        assert [(a.action, a.status) for a in store.approvals_for(task_id)] == [
+            ("apply_patch", "approved")
+        ]
+    finally:
+        store.close()

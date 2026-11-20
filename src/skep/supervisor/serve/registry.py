@@ -869,6 +869,31 @@ def _pack_provenance(pack: PolicyPack) -> str:
     return f"pack:{pack.name}@{pack.version}"
 
 
+def remove_pack_seeds(run_store: RunStore, project_id: str) -> list[str]:
+    """v128-F4: what `setup_project_record` seeded from the project's pack —
+    its schedules by name, its templates only while their provenance is still
+    that pack's (any version), so a same-named one the operator made stays."""
+    stored = run_store.get_project_policy(project_id)
+    if stored is None or stored.pack_name is None:
+        return []
+    try:
+        pack = get_policy_pack(stored.pack_name, include_draft=True)
+    except ValueError:
+        return []  # a pack an upgrade dropped: its seeds can't be named, unregister still works
+    removed: list[str] = []
+    for schedule_seed in pack.schedules:
+        name = _pack_template_name(project_id, schedule_seed.name)
+        if run_store.remove_schedule(name):
+            removed.append(f"schedule:{name}")
+    for template_seed in pack.templates:
+        name = _pack_template_name(project_id, template_seed.name)
+        template = run_store.get_template(name)
+        if template is not None and template.provenance.startswith(f"pack:{pack.name}@"):
+            run_store.remove_template(name, actor="remove_project")
+            removed.append(f"template:{name}")
+    return removed
+
+
 def _pack_template(project_id: str, pack: PolicyPack, seed: Any) -> WorkflowTemplate:
     return WorkflowTemplate(
         name=_pack_template_name(project_id, seed.name),
@@ -1152,12 +1177,6 @@ def setup_project_record(
         bindings.append(ProjectBinding(kind="repo_slug", value=repo_slug))
     for template_name in template_names or []:
         bindings.append(ProjectBinding(kind="template_name", value=template_name))
-    if not bindings:
-        raise HTTPException(
-            status_code=400,
-            detail="project setup requires at least one binding "
-            "(repo_path, repo_slug, or template_names)",
-        )
     strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     base_policy = (
         dict(pack.phase_defaults[phase])
@@ -1177,6 +1196,14 @@ def setup_project_record(
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
+    # v128-F3: after the carry-forward, so an update that sends only
+    # policy_overrides keeps the stored bindings; a new project still needs one.
+    if not bindings:
+        raise HTTPException(
+            status_code=400,
+            detail="project setup requires at least one binding "
+            "(repo_path, repo_slug, or template_names)",
+        )
     _vet_group_attaches(run_store, base_policy)
     seeded_shell_commands: list[list[str]] = []
     seeded_verify_command = ""
@@ -1390,12 +1417,6 @@ def preview_project_setup(
         bindings.append(ProjectBinding(kind="repo_slug", value=repo_slug))
     for template_name in template_names:
         bindings.append(ProjectBinding(kind="template_name", value=template_name))
-    if not bindings:
-        raise HTTPException(
-            status_code=400,
-            detail="project preview requires at least one binding "
-            "(repo_path, repo_slug, or template_names)",
-        )
     base_policy = (
         dict(pack.phase_defaults[phase])
         if pack is not None
@@ -1416,6 +1437,14 @@ def preview_project_setup(
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
+    # v128-F3: after the carry-forward, so an update that sends only
+    # policy_overrides keeps the stored bindings; a new project still needs one.
+    if not bindings:
+        raise HTTPException(
+            status_code=400,
+            detail="project preview requires at least one binding "
+            "(repo_path, repo_slug, or template_names)",
+        )
     _vet_group_attaches(run_store, base_policy)
     seeded_shell_commands: list[list[str]] = []
     seeded_verify_command = ""

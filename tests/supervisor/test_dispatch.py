@@ -54,6 +54,19 @@ def test_run_task_baseline_is_default_branch_not_operator_checkout(
     assert git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip() == "scratch"
 
 
+def test_v128_f2_an_empty_ref_dispatches_from_the_default_branch(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v128-F2: the chat model sends `ref: ""` for "no ref"; that is no ref, not a
+    ref named "" (which died as `fatal: invalid reference:` after the approval)."""
+    default = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config, ref="")
+
+    assert outcome.record.state == "completed"
+    assert outcome.record.ref == default
+
+
 def test_happy_dispatch_produces_verified_run_record(repo: Path, config: SupervisorConfig) -> None:
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
     record = outcome.record

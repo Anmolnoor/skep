@@ -429,6 +429,9 @@ def run_task(
     # the operator's checkout happens to sit on — otherwise a stray `git
     # checkout` silently changes what every future run sees. Detached HEAD
     # (default_branch → None) keeps the old HEAD behavior.
+    # v128-F2: `ref=""` (a chat model's "no ref") is no ref, at the funnel —
+    # else it counts as a caller choice and reaches git as `invalid reference:`.
+    ref = ref or None
     caller_chose_ref = ref is not None
     if ref is None:
         ref = repo_default_branch(repo)

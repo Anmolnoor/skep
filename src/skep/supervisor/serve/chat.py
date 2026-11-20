@@ -54,6 +54,7 @@ from ..policy_write import PolicyWriteRejected
 from . import actions
 from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
+    activates_memory,
     card_summary,
     fold_subject,
     headline,
@@ -109,6 +110,7 @@ from .tools import (
     mutation_execution_decision,
     policy_write_preview,
     proposed_schedule_role,
+    record_denied_landing,
     schedule_role_line,
     search_web_verdict,
     store_write_taint_ask,
@@ -365,6 +367,8 @@ _PROPOSAL_SUBJECT_KEYS: dict[str, tuple[str, ...]] = {
     # five different PRs superseded each other down to one (Aug 9 field test).
     "merge_pr": ("repo", "pr"),
     "close_pr": ("repo", "pr"),
+    # v128-F5: a corrected due date for the same task is the same question
+    "set_task_due": ("task_id",),
 }
 
 
@@ -779,10 +783,14 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     if isinstance(approved, str):
         cap -= len(json.dumps({"approved": approved}, ensure_ascii=True))
     data["truncated"] = True
-    data["note"] = (
+    note = (
         f"result exceeded the replay cap — narrow the query ({hint}); "
         "the full result is in the transcript"
     )
+    data["note"] = note
+    # v128-F9: the counts before any entry drops — a countless note let the
+    # Queen report 2 pending approvals of 4 as the whole list.
+    totals = {key: len(value) for key, value in data.items() if isinstance(value, list)}
 
     def weight(value: Any) -> int:
         return len(json.dumps(value, ensure_ascii=True))
@@ -792,6 +800,12 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
         if not lists:
             break
         max(lists, key=weight).pop()
+        shown = ", ".join(
+            f"{key} {len(data[key])} of {total}"
+            for key, total in totals.items()
+            if len(data[key]) < total
+        )
+        data["note"] = f"{note}; shown: {shown}"
     _trim_longest_text(data, cap)
     droppable = sorted(
         (key for key in data if key not in ("truncated", "note")),
@@ -3255,6 +3269,14 @@ class ChatEngine:
                 chat_id=chat_id,
                 preanswered=preanswered,
             )
+            if activates_memory(tool, card):  # v128-F10: the card said it activates
+                item = self.store.approve_memory_proposal(result["proposal_id"], actor=actor)
+                result = {
+                    **result,
+                    "state": "approved",
+                    "memory_id": item.memory_id,
+                    "note": "approved on its card — active in future prompts",
+                }
             payload: dict[str, Any] = {"ok": True, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
@@ -3365,6 +3387,7 @@ class ChatEngine:
             except ValueError:
                 raise card_taken(self.store, action_id) from None
             log_denied_dispatch_asks(self.store, self.holder, action)
+            record_denied_landing(self.store, action, actor=actor)
             payloads = [payload] * len(items)
         for item, item_payload in zip(items, payloads, strict=True):
             row_id = self.store.add_chat_message(
@@ -4084,6 +4107,7 @@ def add_chat_routes(
             except ValueError:
                 raise card_taken(run_store, action_id) from None
             log_denied_dispatch_asks(run_store, holder, action)
+            record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")

@@ -240,3 +240,65 @@ def test_v126_f10_propose_from_a_note_classifies_when_no_class_is_given(
     assert proposal.status_code == 201
     assert proposal.json()["memory_class"] == "not_to_do"
     assert proposal.json()["state"] == "pending_review"
+
+
+@pytest.fixture()
+def utc_minus_8(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    import time
+
+    monkeypatch.setenv("TZ", "Etc/GMT+8")  # UTC-8, no DST
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_v128_f5_a_date_only_due_is_the_end_of_that_local_day(utc_minus_8: None) -> None:
+    """v128-F5: `due_at: "2026-11-20"` was stored raw and compared as a string
+    with UTC now, so the task fell due at 4pm local the day BEFORE."""
+    from skep.supervisor.serve.notes import normalize_due
+
+    assert normalize_due("2026-11-20") == "2026-11-21T07:59:59Z"
+    assert normalize_due(" 2026-11-20T09:30 ") == "2026-11-20T17:30:00Z"  # local, no offset
+    assert normalize_due("2026-11-20T09:30:00+00:00") == "2026-11-20T09:30:00Z"
+    assert normalize_due("2026-11-20T09:30:00Z") == "2026-11-20T09:30:00Z"
+    assert normalize_due("  ") is None
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        normalize_due("tomorrow")
+
+
+def test_v128_f5_a_task_due_today_is_not_due_earlier_today(config: SupervisorConfig) -> None:
+    from datetime import date
+
+    client = _client(config)
+    task_id = client.post("/api/tasks", json={"title": "t"}).json()["task_id"]
+    today = date.today().isoformat()
+
+    task = client.patch(f"/api/tasks/{task_id}", json={"due_at": today}).json()
+
+    assert task["due_at"].endswith("Z") and task["due"] is False
+    refused = client.post("/api/tasks", json={"title": "u", "due_at": "next friday"})
+    assert refused.status_code == 400 and "YYYY-MM-DD" in refused.text
+
+
+def test_v128_f5_the_chat_tool_normalizes_and_one_card_per_task(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    from skep.supervisor.serve.chat import _proposal_subject
+    from skep.supervisor.serve.notes import normalize_due
+
+    client, chat_id = _chat_client(config, ollama)
+    task_id = client.post("/api/tasks", json={"title": "rotate the token"}).json()["task_id"]
+    ollama.script_tool_call("set_task_due", {"task_id": task_id, "due_at": "2030-01-02"})
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "due jan 2"}).text
+    )
+    (action,) = [d for name, d in events if name == "action"]
+    ollama.script_reply("ok")
+    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
+
+    assert client.get("/api/tasks").json()["tasks"][0]["due_at"] == normalize_due("2030-01-02")
+    # a changed date for the same task is the same question, not a second card
+    assert _proposal_subject("set_task_due", {"task_id": "t1", "due_at": "a"}) == (
+        _proposal_subject("set_task_due", {"task_id": "t1", "due_at": "b"})
+    )

@@ -206,7 +206,7 @@ def create_worktree(repo: Path, root: Path, task_id: str, ref: str | None = None
     root.mkdir(parents=True, exist_ok=True)
     path = root / task_id
     args = ["worktree", "add", "--detach", str(path)]
-    if ref is not None:
+    if ref:
         args.append(_resolve_ref(repo, ref))
     with TREE_LOCK:
         proc = _git(repo, *args)

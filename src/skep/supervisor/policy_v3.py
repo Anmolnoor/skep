@@ -766,13 +766,16 @@ def decide(
                 verdict = Verdict(
                     "allow", "default", READ_ONLY, f"default/{READ_ONLY}", "operator", note
                 )
-    # Only the operator lane's learned grants: exact argv / a URL directory /
-    # exact host / exact tool, human-approved. The run lane's ``grant:`` rules
-    # are worker grants — argv prefixes — and never answer a role.
-    granted = (
-        verdict.verdict == "allow"
-        and verdict.layer in GRANT_LAYERS
-        and verdict.source == "operator"
+    # The operator lane's learned grants (exact argv / a URL directory / exact
+    # host / exact tool, human-approved) answer a role's catch-all ask, and
+    # (v128-F6, operator decision) so does the run lane's ``grant:project``: a
+    # human's "remember" bound to THIS project, which a builder dispatch
+    # otherwise re-asked "this run only" every time and a headless run dropped.
+    # The run lane's ``grant:session`` never does (ES-F16): it is the worker
+    # session tier, a plain approve on a worker card, not a remember.
+    granted = verdict.verdict == "allow" and (
+        (verdict.layer in GRANT_LAYERS and verdict.source == "operator")
+        or (verdict.layer == "grant:project" and verdict.source == "run")
     )
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's

@@ -254,6 +254,20 @@ def run_terminal_text(
             f"work is on no branch){unverified}"
         )
         kind = "action_needed"
+        # v128-F7: the newest landing verdict a human denied (not a failed
+        # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
+        landings = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
+        last = landings[-1] if landings else None
+        if (
+            last is not None
+            and last.status == "denied"
+            and "apply failed:" not in (last.resolution_note or "")
+        ):
+            text = (
+                f"run {task_id[:13]}… completed — landing denied by {last.resolved_by}"
+                f"{files}; the patch is kept: land_run {task_id} still lands it"
+            )
+            kind = "info"
     elif completed_opt_in:
         text = f"run {task_id[:13]}… completed: {run.summary or 'no summary recorded'}"
     else:

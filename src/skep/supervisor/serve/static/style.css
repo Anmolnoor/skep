@@ -998,9 +998,9 @@ main.chat-view { padding: 0; max-width: none; }
   background: var(--panel-2); border-radius: var(--radius-sm); padding: 10px;
   margin: 8px 0; display: flex; flex-direction: column; gap: 4px;
 }
-.confirm-card .arg-row { display: flex; gap: 8px; align-items: baseline; }
-.confirm-card .arg-key { color: var(--muted); flex: none; }
-.confirm-card .arg-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+.confirm-card .arg-row, .agent-thread-content .arg-row { display: flex; gap: 8px; align-items: baseline; }
+.confirm-card .arg-key, .agent-thread-content .arg-key { color: var(--muted); flex: none; }
+.confirm-card .arg-value, .agent-thread-content .arg-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .confirm-card.resolved { opacity: .55; }
 /* v54-F2: resolved = verdict instead of buttons, not dimmed buttons. */
 .confirm-card.resolved .actions { display: none; }

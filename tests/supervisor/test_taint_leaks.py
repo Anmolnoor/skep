@@ -130,6 +130,37 @@ def test_memory_filed_from_a_tainted_chat_taints_until_the_operator_approves_it(
     assert env.store.get_chat_taint(chat) == ChatTaint()
 
 
+def test_v128_f10_one_confirm_files_and_activates_a_taint_carded_memory(env: Live) -> None:
+    """v128-F10 (operator decision): in an untrusted chat `remember` cards, and
+    activating it was a second card on the same bytes showing only an id. The
+    one confirm now files AND activates; untainted `remember` is unchanged."""
+    from skep.supervisor.serve.cards import card_summary
+
+    chat = env.chat()
+    set_taint(env.store, chat, "untrusted")
+    env.ollama.script_tool_call("remember", {"content": "the operator likes tea"})
+    card = _action(env.turn(chat, "remember that"))
+    assert card["tool"] == "remember"
+    assert "activates this memory" in card["card"]["purpose"]
+    env.ollama.script_reply("saved")
+    env.confirm(chat, card["action_id"])
+    (proposal,) = env.store.list_memory_proposals()
+    assert proposal.state == "approved"
+    assert [i.content for i in env.store.list_memory_items()] == ["the operator likes tea"]
+
+    clean = env.chat()
+    env.ollama.script_tool_call("remember", {"content": "the operator likes coffee"})
+    env.ollama.script_reply("filed")
+    env.turn(clean, "remember that too")
+    pending = [p for p in env.store.list_memory_proposals() if p.state == "pending_review"]
+    assert [p.content for p in pending] == ["the operator likes coffee"]
+    # the approve card names what it activates, not just an id
+    shown = card_summary(
+        "approve_memory_proposal", {"proposal_id": pending[0].proposal_id}, store=env.store
+    )
+    assert "the operator likes coffee" in shown["headline"]
+
+
 def test_run_reads_set_untrusted(env: Live) -> None:
     """get_run / await_runs / list_runs carry the worker's words (its summary)."""
     from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task

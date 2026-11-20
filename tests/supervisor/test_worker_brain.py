@@ -349,7 +349,8 @@ def test_a_shell_run_edit_is_counted(
     monkeypatch.setattr(CapabilityRegistry, "_git_diff", counted)
     result = _run_tool_plan(repo, tmp_path, monkeypatch, [_shell_write("uv.lock")])
     assert "changed 1 file(s)" in result.summary, result.summary
-    assert result.changed_files == []  # reverify's field stays the tool-write list
+    # v128-F8: a shipped patch's files (reverify reads the claim only when none ships)
+    assert result.changed_files == ["uv.lock"]
     assert len(diffs) == 1  # counted from the patch already written, no second diff
 
 

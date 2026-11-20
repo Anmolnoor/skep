@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, date, datetime, time
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -12,6 +13,36 @@ from ..memory import MemoryError, MemorySource
 from ..store import RunStore
 
 API_ACTOR = "api-user"
+
+DUE_SHAPES = (
+    "YYYY-MM-DD (the end of that day, operator local time) or an ISO-8601 "
+    "datetime such as 2026-11-20T17:00 (operator local) or 2026-11-20T17:00:00Z"
+)
+
+
+def _due_or_400(value: str | None) -> str | None:
+    try:
+        return normalize_due(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def normalize_due(value: str | None) -> str | None:
+    """v128-F5: the one due-date shape the store compares lexically with its
+    UTC now. A date-only due was stored raw, so "2026-11-20" fell due at
+    00:00 UTC — the afternoon BEFORE, operator local. Date-only is the end of
+    that local day; a datetime without an offset is local; blank clears."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10:
+            moment = datetime.combine(date.fromisoformat(text), time(23, 59, 59))
+        else:
+            moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"due date {text!r} not understood; use {DUE_SHAPES}") from exc
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class NoteCreate(BaseModel):
@@ -100,7 +131,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
 
     @app.post("/api/tasks", status_code=201)
     def create_task(body: TaskCreate) -> dict[str, object]:
-        due_at = None if body.due_at is None else body.due_at.strip() or None
+        due_at = _due_or_400(body.due_at)
         return asdict(run_store.create_task(body.title.strip(), actor=API_ACTOR, due_at=due_at))
 
     @app.patch("/api/tasks/{task_id}")
@@ -110,7 +141,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
             raise HTTPException(status_code=404, detail=f"no task {task_id!r}")
         due_at = current.due_at
         if "due_at" in body.model_fields_set:
-            due_at = None if body.due_at is None else body.due_at.strip() or None
+            due_at = _due_or_400(body.due_at)
         task = run_store.update_task(
             task_id,
             title=current.title if body.title is None else body.title.strip(),

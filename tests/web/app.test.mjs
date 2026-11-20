@@ -428,3 +428,67 @@ test("memory: a proposal filed from a tainted chat says what that chat read", as
   assert.doesNotMatch(subtitle, /nothing becomes durable without approval/);
   assert.match(subtitle, /skep memory add/);
 });
+
+// ---------- v128-F11: /workon moves the chat to the new project ----------
+
+test("projectAfterCommand: a confirmed workon names its project; nothing else does", () => {
+  const app = loadApp();
+  const confirmed = { action_id: "a1", tool: "workon", ok: true,
+    result: { path: "/tmp/deck", project: { project_id: "deck", name: "deck" } } };
+  assert.equal(app.projectAfterCommand("workon", confirmed), "deck");
+  // A canceled or failed workon, or any other verb, leaves the binding alone.
+  assert.equal(app.projectAfterCommand("workon", { ok: false, denied: true }), null);
+  assert.equal(app.projectAfterCommand("workon", { ok: false, error: "boom" }), null);
+  assert.equal(app.projectAfterCommand("land_run", { ok: true, result: { project: { project_id: "x" } } }), null);
+  assert.equal(app.projectAfterCommand("workon", null), null);
+});
+
+// ---------- v128-F12: command and card results read as lines, not JSON ----------
+
+const LANDED = { action_id: "a1", tool: "land_run", ok: true,
+  result: { action: "applied", branch: "skep/t1", task_id: "t1" } };
+
+test("toolLine summarizes a confirmed land_run through its {ok, result} wrapper", () => {
+  const app = loadApp();
+  assert.equal(app.toolLine("land_run", LANDED), "landed patch on skep/t1");
+  assert.equal(app.toolLine("mystery", { ok: true }), "tool: mystery");
+});
+
+test("commandSummary: a command result says what happened, not 'land_run: result'", () => {
+  const app = loadApp();
+  assert.equal(app.commandSummary("land_run: result", "land_run", LANDED), "landed patch on skep/t1");
+  // No deterministic line for the verb (or no verb, as for /repos): the title stays.
+  assert.equal(app.commandSummary("workon: result", "workon", { ok: true, result: {} }), "workon: result");
+  assert.equal(app.commandSummary("/repos", null, { repos: [] }), "/repos");
+});
+
+test("renderToolEvent draws an object result as labeled rows, other results as text", () => {
+  const app = loadApp();
+  const log = app.el("div", {});
+  app.renderToolEvent(log, "land_run: result", LANDED, { summary: "landed" });
+  assert.deepEqual(texts(log, "arg-key"), ["action:", "branch:", "task_id:"]);
+  assert.deepEqual(texts(log, "arg-value"), ["applied", "skep/t1", "t1"]);
+  assert.ok(!log.textContent.includes("{"));
+  const list = app.el("div", {});
+  app.renderToolEvent(list, "/runs 5", [{ task_id: "t1" }]);
+  assert.equal(list.querySelectorAll(".arg-row").length, 0);
+  assert.match(texts(list, "agent-thread-content")[0], /"task_id": "t1"/);
+});
+
+test("renderToolEvent keeps the keys beside a wrapped result (a kept grant)", () => {
+  const app = loadApp();
+  const log = app.el("div", {});
+  app.renderToolEvent(log, "land_run: result", { ...LANDED, grant: "session" }, { summary: "landed" });
+  assert.deepEqual(texts(log, "arg-key"), ["action:", "branch:", "task_id:", "grant:"]);
+});
+
+// ---------- v128-F13: skep's own nudge is a note, not your bubble ----------
+
+test("isInternalNudge: only a user row skep wrote itself (provenance queen)", () => {
+  const app = loadApp();
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "queen", content: "Continue…" }), true);
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "operator", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "user", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "webhook:ci", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "assistant", provenance: "queen", content: "ok" }), false);
+});

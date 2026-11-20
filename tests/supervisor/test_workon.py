@@ -8,7 +8,10 @@ filesystem mode — that is a different, worse product.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from skep.supervisor import SupervisorConfig
 from skep.supervisor.serve.tools import COMMAND_TOOL_NAMES, MUTATING_TOOL_NAMES
@@ -233,3 +236,63 @@ def test_the_workon_card_says_it_adds_a_weekly_schedule(
     assert any(name in line for name in names)
     again = client.post("/api/workon/preview", json={"path": str(repo)}).json()
     assert not [w for w in again["warnings"] if "schedule" in w]
+
+
+def test_v128_f4_unregister_removes_the_workon_pack_seeds(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v128-F4: /unregister removed the policy and bindings and orphaned the
+    pack's seeded template and schedule. A same-named template the operator
+    made themselves (other provenance) stays."""
+    from skep.supervisor import RunStore
+
+    workdir = tmp_path / "seeded"
+    workdir.mkdir()
+    client = serve_client(config)
+    project = client.post("/api/workon", json={"path": str(workdir)}).json()["project"]
+    templates = [t["name"] for t in project["seeded_templates"]]
+    schedules = [s["name"] for s in project["seeded_schedules"]]
+    assert templates and schedules, project
+    store = RunStore(config.db_path)
+    try:  # the operator re-made the second template as their own
+        seeded = store.get_template(templates[-1])
+        assert seeded is not None
+        kept = replace(seeded, provenance="operator")
+        store.remove_template(kept.name)
+        store.add_template(kept)
+    finally:
+        store.close()
+
+    removed = client.delete("/api/projects/seeded")
+
+    assert removed.status_code == 200, removed.text
+    assert sorted(removed.json()["removed_seeds"]) == sorted(
+        [f"template:{n}" for n in templates[:-1]] + [f"schedule:{n}" for n in schedules]
+    )
+    store = RunStore(config.db_path)
+    try:
+        assert [n for n in templates if store.get_template(n)] == [kept.name]
+        assert [n for n in schedules if store.get_schedule(n)] == []
+    finally:
+        store.close()
+
+
+def test_v128_f4_unregister_survives_a_pack_an_upgrade_dropped(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 (S4): a stored pack name no longer known must not make
+    /unregister fail — its seeds just can't be named any more."""
+    from skep.supervisor.serve import registry
+
+    workdir = tmp_path / "dropped"
+    workdir.mkdir()
+    client = serve_client(config)
+    assert client.post("/api/workon", json={"path": str(workdir)}).is_success
+
+    def gone(name: str, **_: object) -> None:
+        raise ValueError(f"unknown policy pack {name!r}")
+
+    monkeypatch.setattr(registry, "get_policy_pack", gone)
+    removed = client.delete("/api/projects/dropped")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["removed_seeds"] == []

@@ -492,7 +492,7 @@ def test_the_web_face_renders_the_chain_on_every_run_view() -> None:
     card = source.split("function buildRunCard(run)")[1].split("async function viewRuns")[0]
     assert "delegationText(run.dispatch_decision.delegation)" in card
     assert 'kv("delegated"' in source
-    tool_line = source.split("const toolLine = (tool, raw = null) => {")[1][:2000]
+    tool_line = source.split("function toolLine(tool, raw = null) {")[1][:2000]
     assert "delegationText(result.delegation)" in tool_line
     assert 'tool === "batch_dispatch" && result.team' in tool_line
 

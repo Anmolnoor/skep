@@ -532,7 +532,7 @@ def test_project_registry_crud_and_binding_validation(repo: Path, config: Superv
     assert invalid_policy.status_code == 400
     assert "unknown project policy fields" in invalid_policy.json()["detail"]
 
-    assert client.delete("/api/projects/acme").json() == {"removed": True}
+    assert client.delete("/api/projects/acme").json() == {"removed": True, "removed_seeds": []}
     assert client.get("/api/projects/acme").status_code == 404
 
 
@@ -1028,6 +1028,31 @@ def test_repeated_project_setup_never_reseeds(repo: Path, config: SupervisorConf
         store.close()
     assert before is not None and after is not None
     assert after.next_run_at == before.next_run_at, "re-setup must not reset the timer"
+
+
+@pytest.mark.parametrize("route", ["setup", "preview"])
+def test_v128_f3_an_update_without_a_binding_keeps_the_stored_one(
+    repo: Path, config: SupervisorConfig, route: str
+) -> None:
+    """v128-F3: `setup_project` with only `policy_overrides` refused with
+    "requires at least one binding" before the stored bindings were carried
+    forward. An update keeps them; a NEW project with none is still refused."""
+    client = _client(config)
+    base = {"project_id": "upd", "name": "Upd", "pack": "trusted_local_dev", "phase": "build"}
+    assert client.post("/api/projects/setup", json={**base, "repo_path": str(repo)}).is_success
+    pin = {"verify_command": "python3 -m pytest -q"}
+
+    updated = client.post(f"/api/projects/{route}", json={**base, "policy_overrides": pin})
+
+    assert updated.status_code in (200, 201), updated.text
+    project = updated.json().get("project") or updated.json()
+    assert project["policy"]["verify_command"] == "python3 -m pytest -q"
+    assert {"kind": "repo_path", "value": str(repo)} in [
+        {"kind": b["kind"], "value": b["value"]} for b in project["bindings"]
+    ]
+    fresh = client.post(f"/api/projects/{route}", json={**base, "project_id": "new-one"})
+    assert fresh.status_code == 400
+    assert "requires at least one binding" in fresh.text
 
 
 def test_register_repo_pushes_baseline_when_origin_is_empty(tmp_path: Path) -> None:
