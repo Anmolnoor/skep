@@ -869,6 +869,31 @@ def _pack_provenance(pack: PolicyPack) -> str:
     return f"pack:{pack.name}@{pack.version}"
 
 
+def remove_pack_seeds(run_store: RunStore, project_id: str) -> list[str]:
+    """v128-F4: what `setup_project_record` seeded from the project's pack —
+    its schedules by name, its templates only while their provenance is still
+    that pack's (any version), so a same-named one the operator made stays."""
+    stored = run_store.get_project_policy(project_id)
+    if stored is None or stored.pack_name is None:
+        return []
+    try:
+        pack = get_policy_pack(stored.pack_name, include_draft=True)
+    except ValueError:
+        return []  # a pack an upgrade dropped: its seeds can't be named, unregister still works
+    removed: list[str] = []
+    for schedule_seed in pack.schedules:
+        name = _pack_template_name(project_id, schedule_seed.name)
+        if run_store.remove_schedule(name):
+            removed.append(f"schedule:{name}")
+    for template_seed in pack.templates:
+        name = _pack_template_name(project_id, template_seed.name)
+        template = run_store.get_template(name)
+        if template is not None and template.provenance.startswith(f"pack:{pack.name}@"):
+            run_store.remove_template(name, actor="remove_project")
+            removed.append(f"template:{name}")
+    return removed
+
+
 def _pack_template(project_id: str, pack: PolicyPack, seed: Any) -> WorkflowTemplate:
     return WorkflowTemplate(
         name=_pack_template_name(project_id, seed.name),

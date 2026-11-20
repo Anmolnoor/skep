@@ -147,6 +147,7 @@ from .registry import (
     is_git_url,
     known_repos,
     preview_project_setup,
+    remove_pack_seeds,
     repos_root,
     resolve_repo_arg,
     setup_project_record,
@@ -1026,8 +1027,9 @@ def repo_state_view(
 
 def remove_project(store: RunStore, project_id: str) -> dict[str, Any]:
     """ES-F235 (ADR 0050): unregister a project — its policy row and bindings,
-    nothing more. The folder, its worktrees and its runs stay where they are
-    (I6: what is on disk is the operator's). One verb for the REST DELETE,
+    and (v128-F4) the schedules and templates its pack seeded, nothing more.
+    The folder, its worktrees and its runs stay where they are (I6: what is on
+    disk is the operator's). One verb for the REST DELETE,
     `skep project remove` and the command deck's /unregister card.
 
     Refuses while a run on its repo is in flight, like repo removal (v57-F8):
@@ -1050,9 +1052,10 @@ def remove_project(store: RunStore, project_id: str) -> dict[str, Any]:
             detail=f"project {project_id!r} has runs in flight ({sample}) — wait for them "
             "to finish, then remove it",
         )
+    seeds = remove_pack_seeds(store, project_id)  # v128-F4: not left orphaned
     if not store.remove_project_policy(project_id):
         raise HTTPException(status_code=404, detail=f"no project named {project_id!r}")
-    return {"removed": True}
+    return {"removed": True, "removed_seeds": seeds}
 
 
 def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any]:

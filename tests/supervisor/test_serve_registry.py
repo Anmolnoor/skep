@@ -532,7 +532,7 @@ def test_project_registry_crud_and_binding_validation(repo: Path, config: Superv
     assert invalid_policy.status_code == 400
     assert "unknown project policy fields" in invalid_policy.json()["detail"]
 
-    assert client.delete("/api/projects/acme").json() == {"removed": True}
+    assert client.delete("/api/projects/acme").json() == {"removed": True, "removed_seeds": []}
     assert client.get("/api/projects/acme").status_code == 404
 
 
