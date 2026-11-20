@@ -393,8 +393,13 @@ class TelegramPoller(threading.Thread):
             if isinstance(callback, dict):
                 self._handle_callback(callback, config, secret)
                 handled += 1
-        for message in telegram_adapter.poll_updates(updates, config):
-            if message.text == "/update":
+        for update in updates:
+            message = telegram_adapter.normalize_inbound(update, config).message
+            if message is None:
+                continue  # fail closed, as poll_updates drops it
+            raw = update.get("message")
+            forwarded = isinstance(raw, dict) and ("forward_origin" in raw or "forward_date" in raw)
+            if message.text == "/update" and not forwarded:  # v130: typed, not forwarded
                 self._handle_update(message.identity.identity_id, config, secret)
                 handled += 1
                 continue

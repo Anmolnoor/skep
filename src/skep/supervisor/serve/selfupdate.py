@@ -115,7 +115,7 @@ def _run(run: Run, argv: list[str], expect: str = "") -> str | None:
         done = run(
             argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS, check=False
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:  # ValueError: undecodable
         return str(exc)
     if done.returncode == 0 and done.stdout.startswith(expect):
         return None

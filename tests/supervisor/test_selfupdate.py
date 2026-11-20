@@ -182,6 +182,21 @@ def test_a_new_copy_still_reporting_the_old_version_is_rolled_back(
     assert f"skep {__version__} (worker contract" in said[-1]
 
 
+def test_undecodable_check_output_still_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(selfupdate, "current_spec", lambda: "skep==1.0.0")
+    inner = _Runner()
+
+    def garbled(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if argv[-1] == "--version":
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return inner(argv, **kw)
+
+    restarted, said, restarts = _update(_Store(), garbled)  # type: ignore[arg-type]
+    assert "invalid start byte" in said[-1]
+    assert not restarted and restarts == []
+    assert inner.calls[-1] == [*PIPX_INSTALL, "skep==1.0.0"]
+
+
 def test_a_failed_put_back_names_the_command_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(selfupdate, "current_spec", lambda: "skep==1.0.0")
     runner = _Runner(fail=(f"skep=={NEWER}", "skep==1.0.0"))
@@ -443,6 +458,10 @@ def test_telegram_update_addressed_to_another_bot_is_not_ours(
         for text in ("/update@OtherBot", "/update now", "please /update"):
             harness.updates.append([_message(text)])
             harness.poller.poll_once()
+        forwarded = _message("/update")
+        forwarded["message"]["forward_origin"] = {"type": "user"}  # type: ignore[index]
+        harness.updates.append([forwarded])
+        harness.poller.poll_once()
         assert started == []
     finally:
         harness.close()
