@@ -97,6 +97,17 @@ The trade (ADR 0067): a stolen admin messenger account can approve what the
 admin can. Name an admin only on an account with its own second factor.
 A fold too long to show whole on a phone stays web-UI-only for everyone.
 
+## Updating skep from your phone (v130)
+
+`/update` on Telegram is the one install your phone can authorize, and it
+is deliberately narrow. It takes no arguments: it installs only the newest
+plain release of `skep` on PyPI, with the tool that installed this copy
+(pipx or uv tool), so a hijacked account cannot choose what runs. It needs
+`channel_can_confirm`, waits until no run is in progress, checks the new copy
+starts, and puts the old copy back if it does not. A copy installed any other
+way (a git checkout, a container) refuses and says so. skep announces each new
+release once; it never installs one on its own.
+
 ## What comes to you unasked (v72-F3)
 
 With a bound channel, the phone also receives pushes: run failures with

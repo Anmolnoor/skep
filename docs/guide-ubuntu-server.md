@@ -165,6 +165,11 @@ Pinning a commit makes the install reproducible. To upgrade, run the same
 command with a newer commit and `--force`, since pipx won't replace an
 existing install without it.
 
+After that, skep keeps itself current. Every 12 hours it checks PyPI and tells
+you about a new release once, in your Telegram chat. Send `/update` and it
+installs the release with pipx, waits for any run in progress to finish, and
+restarts (section 9).
+
 The Codex CLI goes in a user-owned npm prefix, so it needs no sudo:
 
 ```sh
@@ -309,6 +314,11 @@ A running skep keeps the timezone it started with, so restart it afterwards
    ```
 
    You should see `telegram  enabled ...; secret: present; ... can_confirm: on`.
+6. To update skep from your phone, send `/update` (it needs `can_confirm: on`).
+   skep installs the newest PyPI release with the same tool that installed it
+   (pipx or uv tool), checks that the new copy starts, and restarts on it. If
+   the new copy does not start, skep puts the old one back and keeps running.
+   After the restart it sends `skep updated: <old> → <new>`.
 
 ## 10. Check the lockdown
 

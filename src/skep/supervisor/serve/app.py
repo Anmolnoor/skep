@@ -548,6 +548,9 @@ def create_app(
                 status_ops=TELEGRAM_STATUS_OPS,  # v130-F6
                 typing=_default_telegram_typing,
                 set_commands=_default_telegram_set_commands,  # v130-F14
+                # v130: set by serve_cmds before the server starts; absent
+                # under a test client, where /update refuses.
+                request_restart=getattr(started.state, "request_restart", None),
             )
             if channels_on and chat_engine is not None
             else None

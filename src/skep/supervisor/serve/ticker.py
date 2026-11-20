@@ -92,6 +92,8 @@ class Ticker(threading.Thread):
         self._presence_blocked: set[int] = set()
         # ES B27: the in-flight schedule pass (see run()).
         self._pass: threading.Thread | None = None
+        # v130: 0.0 -> the first pass checks PyPI for a new release.
+        self._last_update_check = 0.0
 
     def _interval(self) -> float:
         value = self._store.get_setting(TICKER_INTERVAL_SECONDS)
@@ -224,6 +226,27 @@ class Ticker(threading.Thread):
         else:  # no messenger has ever bound a chat — the durable note is the record
             self._store.create_note(text, actor="provider-health")
 
+    def _say_in_channel(self, text: str, *, actor: str) -> None:
+        """A line in the newest messenger chat plus its push; no such chat ->
+        a durable note is the record (the provider-health shape)."""
+        chat_id = self._store.latest_channel_chat()
+        if chat_id is not None:
+            self._store.add_chat_message(chat_id, role="assistant", content=text)
+            self._notify(chat_id, text, kind="action_needed")
+        else:
+            self._store.create_note(text, actor=actor)
+
+    def _check_for_update(self) -> None:
+        """v130: announce a newer skep release, once per version. Installing
+        waits for the operator's /update (selfupdate.py)."""
+        from .selfupdate import UPDATE_CHECK_INTERVAL, check_for_update
+
+        now = time.monotonic()
+        if self._last_update_check and now - self._last_update_check < UPDATE_CHECK_INTERVAL:
+            return
+        self._last_update_check = now
+        check_for_update(self._store, lambda text: self._say_in_channel(text, actor="self-update"))
+
     def _push_presence_blocked(self) -> None:
         """first-run L1: an agent turning ``blocked`` is "come to me" news, so
         it rides the gate's channel — a chat line plus the outbound push with
@@ -280,6 +303,14 @@ class Ticker(threading.Thread):
                 logger.warning("schedule %r was interrupted mid-script by a restart", name)
         except Exception:
             logger.exception("interrupted-script reconcile failed")
+        try:
+            from .selfupdate import restart_report
+
+            report = restart_report(self._store)
+            if report is not None:  # v130: this start finished a self-update
+                self._say_in_channel(report, actor="self-update")
+        except Exception:
+            logger.exception("self-update restart report failed")
         # wait() doubles as the kill switch: it returns True the moment stop()
         # sets the event, so shutdown never waits out a full interval.
         while not self._stop_event.wait(self._interval()):
@@ -311,6 +342,10 @@ class Ticker(threading.Thread):
             self._push_presence_blocked()
         except Exception:
             logger.exception("agent presence sweep failed")
+        try:
+            self._check_for_update()
+        except Exception:
+            logger.exception("release check failed")
         try:
             # v71-F5: observations expire on the tick — the fluid memory
             # lane earns its no-proposal write by never outliving its TTL.

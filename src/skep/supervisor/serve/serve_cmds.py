@@ -22,6 +22,8 @@ SERVE_ENV_FILE = "serve.env"
 # One serve per home: two supervisors over one store double-resume follow-ups
 # and re-adopt each other's workers.
 SERVE_LOCK_FILE = "serve.lock"
+# v130: _serve's return code when a self-update asked for a restart.
+RESTART_AFTER_UPDATE = -1
 
 
 def take_serve_lock(home: Path, port: int) -> tuple[IO[str] | None, str | None]:
@@ -161,9 +163,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        return _serve(args, config, loaded_env)
+        code = _serve(args, config, loaded_env)
     finally:
         lock.close()  # the OS would release it anyway; a test's next serve needs it now
+    if code == RESTART_AFTER_UPDATE:
+        # v130: the freshly installed code takes over this process. Same pid,
+        # so systemd (or the shell that started it) keeps tracking it.
+        os.execv(sys.executable, [sys.executable, "-m", "skep", *sys.argv[1:]])
+    return code
 
 
 def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
@@ -192,7 +199,17 @@ def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
         log_level="info",
         log_config=serve_log_config(log_path),
     )
+
+    def request_restart() -> None:
+        # v130: a graceful shutdown (lifespan stops the ticker and channels),
+        # then cmd_serve re-executes into the new install.
+        app.state.restart_requested = True
+        server.should_exit = True
+
+    app.state.request_restart = request_restart
     server.run()
+    if getattr(app.state, "restart_requested", False):
+        return RESTART_AFTER_UPDATE
     return 0 if server.started else 3  # uvicorn.run's startup-failure code
 
 

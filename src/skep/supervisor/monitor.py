@@ -62,6 +62,12 @@ class AdoptedWorker:
 
     @property
     def exited(self) -> bool:
+        # v130: a self-update re-executes serve in the same pid, so a worker
+        # spawned just before it is still our child. Reap it here, or its
+        # zombie keeps the owner pair "alive" forever.
+        with contextlib.suppress(ChildProcessError):
+            if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
+                return True
         return not owner_alive(self._owner)
 
 
