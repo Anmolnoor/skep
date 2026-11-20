@@ -2247,7 +2247,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the user states a durable preference, project fact, or standing "
         "instruction ('always X', 'I prefer Y', 'this repo uses Z'). Not "
         "for chit-chat or things the transcript already keeps — memory is "
-        "for what future conversations need. Tell the user you filed it.",
+        "for what future conversations need. Tell the user you filed it. In a "
+        "chat holding outside content it cards instead, and the user's confirm "
+        "also activates it.",
         {
             "content": {"type": "string", "description": "the fact, stated plainly"},
             "memory_class": {

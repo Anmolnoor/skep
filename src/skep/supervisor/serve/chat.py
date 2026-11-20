@@ -54,6 +54,7 @@ from ..policy_write import PolicyWriteRejected
 from . import actions
 from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
+    activates_memory,
     card_summary,
     fold_subject,
     headline,
@@ -3268,6 +3269,14 @@ class ChatEngine:
                 chat_id=chat_id,
                 preanswered=preanswered,
             )
+            if activates_memory(tool, card):  # v128-F10: the card said it activates
+                item = self.store.approve_memory_proposal(result["proposal_id"], actor=actor)
+                result = {
+                    **result,
+                    "state": "approved",
+                    "memory_id": item.memory_id,
+                    "note": "approved on its card — active in future prompts",
+                }
             payload: dict[str, Any] = {"ok": True, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the

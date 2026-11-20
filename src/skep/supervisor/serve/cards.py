@@ -598,6 +598,15 @@ def unreadable_under_deny(recorded: dict[str, Any] | None) -> bool:
     return decision.get("reason") == "shell.require_approval.unreadable_under_deny"
 
 
+def activates_memory(tool: str, recorded: dict[str, Any] | None) -> bool:
+    """v128-F10 (operator decision): a `remember` the chat's taint carded —
+    confirming it files AND activates the memory, one card instead of a
+    second one on the same bytes. Read from the decision recorded when the
+    card was proposed, so the card and the confirm agree (I8)."""
+    reason = str(((recorded or {}).get("decision") or {}).get("reason") or "")
+    return tool == "remember" and reason.startswith("taint.")
+
+
 def card_summary(
     tool: str,
     args: Any,
@@ -630,6 +639,8 @@ def card_summary(
     folded = [safe_args] + [item.get("args") or {} for item in (recorded or {}).get("items") or []]
     summary: dict[str, Any] = {"headline": headline(tool, safe_args)}
     why = purpose(description)
+    if activates_memory(tool, recorded):
+        why = "Approve files and activates this memory: it reaches future prompts."
     if why is not None:
         summary["purpose"] = why
     held = None
@@ -649,6 +660,10 @@ def card_summary(
 
         proposal = store.get_memory_proposal(str(safe_args.get("proposal_id") or ""))
         filed = taint_phrase(proposal.taint) if proposal is not None else None
+        if proposal is not None:  # v128-F10: what it activates, not just an id
+            content = " ".join(proposal.content.split())
+            content = content if len(content) <= 160 else f"{content[:157]}…"
+            summary["headline"] = f"{tool} — {content}"
         if filed:
             danger = filed if danger is None else f"{danger}; {filed}"
     if danger is not None:
