@@ -215,6 +215,8 @@ class ChannelConfigRequest(BaseModel):
     allowed_users: list[str] | None = None
     # v78-F1: delivery volume — can only silence pushes, never allow anything.
     notification_level: str | None = None
+    # v130-F5 (ADR 0067): who may confirm every card from this channel.
+    admin_users: list[str] | None = None
 
 
 def repos_root(holder: ConfigHolder) -> Path:
@@ -2183,38 +2185,46 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 detail=(f"notification_level must be one of {', '.join(NOTIFICATION_LEVELS)}"),
             )
         current = run_store.get_channel_config(channel) or ChannelConfig(channel=channel)
-        run_store.upsert_channel_config(
-            ChannelConfig(
-                channel=channel,
-                enabled=current.enabled if body.enabled is None else body.enabled,
-                channel_can_confirm=(
-                    current.channel_can_confirm
-                    if body.channel_can_confirm is None
-                    else body.channel_can_confirm
-                ),
-                allowed_identities=(
-                    current.allowed_identities
-                    if body.allowed_identities is None
-                    else tuple(body.allowed_identities)
-                ),
-                require_mention=(
-                    current.require_mention
-                    if body.require_mention is None
-                    else body.require_mention
-                ),
-                auto_thread=(current.auto_thread if body.auto_thread is None else body.auto_thread),
-                allowed_users=(
-                    current.allowed_users
-                    if body.allowed_users is None
-                    else tuple(body.allowed_users)
-                ),
-                notification_level=(
-                    current.notification_level
-                    if body.notification_level is None
-                    else body.notification_level
-                ),
-            )
+        updated = ChannelConfig(
+            channel=channel,
+            enabled=current.enabled if body.enabled is None else body.enabled,
+            channel_can_confirm=(
+                current.channel_can_confirm
+                if body.channel_can_confirm is None
+                else body.channel_can_confirm
+            ),
+            allowed_identities=(
+                current.allowed_identities
+                if body.allowed_identities is None
+                else tuple(body.allowed_identities)
+            ),
+            require_mention=(
+                current.require_mention if body.require_mention is None else body.require_mention
+            ),
+            auto_thread=(current.auto_thread if body.auto_thread is None else body.auto_thread),
+            allowed_users=(
+                current.allowed_users if body.allowed_users is None else tuple(body.allowed_users)
+            ),
+            notification_level=(
+                current.notification_level
+                if body.notification_level is None
+                else body.notification_level
+            ),
+            admin_users=current.admin_users,
         )
+        from .channels import with_admins
+
+        try:
+            # v130-F5: re-checked on every write, so trimming allowed_users
+            # can never leave a stale admin behind.
+            updated = with_admins(
+                updated,
+                updated.admin_users if body.admin_users is None else body.admin_users,
+                naming=body.admin_users is not None and body.channel_can_confirm is None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        run_store.upsert_channel_config(updated)
         if body.secret is not None:
             store_channel_secret(secrets_home, channel, body.secret)
         if body.signing_secret is not None:

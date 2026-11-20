@@ -62,10 +62,11 @@ If a published image is available, this is the simplest container path:
 docker run -d --name skep -p 8765:8765 -v skep-data:/data \
   -e GH_TOKEN="$GH_TOKEN" \
   ghcr.io/anmolnoor/skep:latest
-docker logs skep
+docker exec skep cat /data/skep/supervisor/serve-token
 ```
 
-Copy the printed access token and open `http://127.0.0.1:8765`. Container state
+Copy that access token and open `http://127.0.0.1:8765`. skep prints the token
+only to a terminal, so `docker logs` shows where it lives, not its value. Container state
 lives in the `skep-data` volume.
 
 The checked-in `docker-compose.yml` can also use the published image:
@@ -73,7 +74,7 @@ The checked-in `docker-compose.yml` can also use the published image:
 ```sh
 docker compose pull skep
 docker compose up -d --no-build
-docker compose logs skep
+docker compose exec skep cat /data/skep/supervisor/serve-token
 ```
 
 Local image builds use this checkout as the build context.

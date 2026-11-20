@@ -53,6 +53,9 @@ class ChannelMessage:
     # v44-F9: raw image payloads the transport already downloaded (size/type
     # gated at ingest); run_channel_turn persists them onto the user message.
     attachments: tuple[bytes, ...] = ()
+    # v130-F7: the platform-authenticated sender (already in allowed_users);
+    # channel commands use it (/whoami, the admin check).
+    user_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,20 +98,50 @@ def user_allowlisted(user_id: str, config: ChannelConfig) -> bool:
     return bool(user_id) and user_id in set(config.allowed_users)
 
 
+def channel_admin(user_id: str, config: ChannelConfig) -> bool:
+    """v130-F5 (ADR 0067): the person the operator named as this channel's
+    admin — listed in ``admin_users`` AND still in ``allowed_users``."""
+    return user_allowlisted(user_id, config) and user_id in set(config.admin_users)
+
+
+def with_admins(
+    config: ChannelConfig, users: Sequence[str], *, naming: bool = False
+) -> ChannelConfig:
+    """v130-F5: ``config`` with these admins — each must already be an allowed
+    user (I9: the refusal names the list). ``naming`` (the operator is naming
+    admins in this very request) turns confirming on, since an admin who
+    cannot confirm is no admin; an explicit switch-off later is respected.
+    Shared by the REST and CLI faces; the model has no face for it (an admin
+    is the operator's own act, like ``trust``)."""
+    from dataclasses import replace
+
+    admins = tuple(dict.fromkeys(u.strip() for u in users if u.strip()))
+    outside = [u for u in admins if u not in set(config.allowed_users)]
+    if outside:
+        raise ValueError(
+            f"admin users must be allowed users first: {', '.join(outside)} not in allowed_users "
+            f"({', '.join(config.allowed_users) or 'empty'})"
+        )
+    can_confirm = config.channel_can_confirm or (naming and bool(admins))
+    return replace(config, admin_users=admins, channel_can_confirm=can_confirm)
+
+
 def channel_confirmation_decision(
     *,
     action_class: str,
     channel_can_confirm: bool,
     identity_allowlisted: bool,
+    admin: bool = False,
 ) -> ChannelConfirmationDecision:
     """Whether a pending action may be confirmed from a channel.
 
     Fail-closed allow-list: the action class must be one of the low-risk classes,
     the channel must be configured to confirm, and the identity must be
     allow-listed. Shell/policy/patch approvals are never in the allow-list, so
-    they are never confirmable from a channel — they route to the web UI.
+    they route to the web UI — unless the presser is the channel's admin
+    (v130-F5, ADR 0067), who may confirm any class.
     """
-    if action_class not in CHANNEL_CONFIRMABLE_ACTIONS:
+    if action_class not in CHANNEL_CONFIRMABLE_ACTIONS and not admin:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.web_ui_only_action_class")
     if not channel_can_confirm:
         return ChannelConfirmationDecision(
@@ -116,6 +149,8 @@ def channel_confirmation_decision(
         )
     if not identity_allowlisted:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.identity_not_allowlisted")
+    if action_class not in CHANNEL_CONFIRMABLE_ACTIONS:
+        return ChannelConfirmationDecision(True, "channel.confirm.allowed.admin")
     return ChannelConfirmationDecision(True, "channel.confirm.allowed.low_risk_action")
 
 
@@ -128,6 +163,7 @@ class ConfirmCard:
     # "needs the web UI" and why, the chat's taint, every folded item.
     notes: tuple[str, ...] = ()
     high: bool = False
+    too_long: bool = False  # a fold no messenger can show whole: web UI for everyone
 
 
 # A messenger lists a folded card's items in full or not at all — Discord caps
@@ -148,7 +184,9 @@ def fold_fits_a_messenger(items: Sequence[str]) -> bool:
     )
 
 
-def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tuple[str, ...]:
+def card_notes(
+    card: Mapping[str, Any] | None, *, messenger: bool = True, admin: bool = False
+) -> tuple[str, ...]:
     """The lines a messenger shows from the server's card (``card_summary``):
     a HIGH card says it needs the web UI and why, then the taint line; a
     folded card lists every item it would approve — on a messenger only when
@@ -157,7 +195,12 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
     if not card:
         return ()
     notes: list[str] = []
-    if card.get("tier") == "high":
+    if card.get("tier") == "high" and admin:  # v130-F5
+        notes.append(
+            f"HIGH risk: {card.get('high') or 'see the web UI'}. Only this channel's admin "
+            "can confirm it here."
+        )
+    elif card.get("tier") == "high":
         notes.append(
             f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
             "this: open the skep web UI or the CLI."
@@ -293,18 +336,24 @@ def render_confirm_card(
     action_class: str,
     commands: Sequence[Sequence[str]] = (),
     card: Mapping[str, Any] | None = None,
+    *,
+    admin: bool = False,
 ) -> ConfirmCard:
     """A platform-neutral confirm-card view. Renders the v19-F1 multi-command
     payload as a LIST of command strings (never a single joined string).
     P4-2: a HIGH ``card`` is web-UI-only whatever its class (the server
-    refuses a channel confirm of it too: ``chat.verdict_events``)."""
+    refuses a channel confirm of it too: ``chat.verdict_events``). v130-F5:
+    on a channel with an admin (``admin``) every class and HIGH card carries
+    buttons — the gate and the server let only the admin's press through."""
     from shlex import join as _join
 
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
     too_long = len(items) > 1 and not fold_fits_a_messenger(items)
-    web_ui_only = action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long
+    web_ui_only = too_long or (
+        not admin and (action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high)
+    )
     headline = (card or {}).get("headline")
     # v129-F5: a card the phone may confirm shows what it acts on (a
     # read_url's target): no blind approvals. A web-only card keeps its
@@ -314,8 +363,9 @@ def render_confirm_card(
         action_class=action_class,
         commands=command_lines,
         web_ui_only=web_ui_only,
-        notes=lead + card_notes(card),
+        notes=lead + card_notes(card, admin=admin),
         high=high,
+        too_long=too_long,
     )
 
 
@@ -328,6 +378,18 @@ def confirm_off_line(channel: str, view: ConfirmCard, config: ChannelConfig) -> 
     return (
         f"Confirming from {channel.capitalize()} is off for this channel (channel_can_confirm). "
         "Turn it on in the web UI's channel settings to confirm cards like this here."
+    )
+
+
+def admin_nudge_line(channel: str, view: ConfirmCard, config: ChannelConfig) -> str | None:
+    """v130-F5 (I9): a web-only card on a channel with no admin says how to get
+    every card here — named once, set only from the desk (never the channel)."""
+    if not view.web_ui_only or view.too_long or config.admin_users:
+        return None
+    who = config.allowed_users[0] if len(config.allowed_users) == 1 else "<your user id>"
+    return (
+        f"To approve every card from {channel.capitalize()}, make yourself this channel's "
+        f"admin: `skep channel admin {channel} {who}` or Settings, Channels, Admin users."
     )
 
 
@@ -378,6 +440,9 @@ class ChannelConfig:
     allowed_users: tuple[str, ...] = ()
     # v78-F1: "all" preserves pre-v78 behavior byte-for-byte.
     notification_level: str = "all"
+    # v130-F5 (ADR 0067): people (a subset of allowed_users) who may confirm
+    # every card from this channel. Set only from the web UI, REST or CLI.
+    admin_users: tuple[str, ...] = ()
 
 
 # -- secrets (v16 Step 2): 0600 files beside the serve token, never in GET -----
@@ -428,11 +493,23 @@ def adapter_ready(config: ChannelConfig, secret: str | None) -> bool:
     return config.enabled and bool(secret)
 
 
-def channel_actor(identity: ChannelIdentity) -> str:
+def channel_actor(identity: ChannelIdentity, admin_user: str | None = None) -> str:
     """The audit actor string for an action confirmed from a channel — the
     approval records WHO (which channel identity) confirmed it, not a generic
-    'channel' (v16 Step 6)."""
-    return f"channel:{identity.channel}:{identity.identity_id}"
+    'channel' (v16 Step 6). v130-F5: an admin's press names the admin."""
+    actor = f"channel:{identity.channel}:{identity.identity_id}"
+    return f"{actor}:admin:{admin_user}" if admin_user else actor
+
+
+def channel_admin_actor(actor: str, config_for: Any) -> bool:
+    """v130-F5: does ``actor`` name a person who is this channel's admin NOW?
+    The server re-asks on every confirm (``config_for(channel)`` reads the
+    stored config), so a name removed since the press counts for nothing."""
+    parts = actor.split(":")
+    if len(parts) != 5 or parts[0] != "channel" or parts[3] != "admin":
+        return False
+    config = config_for(parts[1])
+    return config is not None and channel_admin(parts[4], config)
 
 
 def channel_origin_metadata(message: ChannelMessage) -> dict[str, str]:

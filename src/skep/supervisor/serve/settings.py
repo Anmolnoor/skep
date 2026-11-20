@@ -144,6 +144,7 @@ def channel_config_view(store: RunStore, home: Path) -> dict[str, Any]:
             "auto_thread": config.auto_thread,
             "allowed_users": list(config.allowed_users),
             "notification_level": config.notification_level,
+            "admin_users": list(config.admin_users),
             "secret_configured": resolve_channel_secret(home, channel) is not None,
             "live": channel in LIVE_CHANNELS,
             # v87-F3: "never configured" must be stated in those words — an

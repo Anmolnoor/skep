@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import hmac
 import json
@@ -31,7 +32,6 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from ...codex_login import QUEEN_LOGIN_NAME
-from ...roles import ROLE_LESS_CHAT_ROLE
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
     TURN_BUSY,
@@ -46,6 +46,7 @@ from . import (
     ChannelMessage,
     adapter_ready,
     channel_actor,
+    channel_admin,
     channel_confirmation_decision,
     identity_allowlisted,
     resolve_channel_secret,
@@ -59,6 +60,16 @@ from . import (
 )
 from . import (
     telegram as telegram_adapter,
+)
+from .commands import (
+    COMMANDS,
+    CommandContext,
+    answered_inline,
+    discord_subcommands,
+    new_channel_chat,
+    parse_command,
+    run_command,
+    telegram_menu,
 )
 
 logger = logging.getLogger("skep.serve")
@@ -89,6 +100,17 @@ class SendText(Protocol):
 AnswerCallback = Callable[[str, str, str], bool]
 
 
+@dataclasses.dataclass(frozen=True)
+class StatusOps:
+    """One platform's status-message calls: ``post(token, chat, text)`` returns
+    the new message's id (None when the platform gave none), ``edit(token,
+    chat, id, text)`` and ``delete(token, chat, id)``."""
+
+    post: Callable[[str, str, str], str | None]
+    edit: Callable[[str, str, str, str], object]
+    delete: Callable[[str, str, str], object]
+
+
 def _default_fetch(token: str, offset: int) -> list[dict[str, object]]:
     response = httpx.get(
         f"{TELEGRAM_API}/bot{token}/getUpdates",
@@ -99,6 +121,26 @@ def _default_fetch(token: str, offset: int) -> list[dict[str, object]]:
     payload = response.json()
     results = payload.get("result") if isinstance(payload, dict) else None
     return list(results) if isinstance(results, list) else []
+
+
+def _default_fetch_telegram_file(token: str, file_id: str) -> bytes | None:
+    """v130-F15: getFile, then the download. Both URLs hold the bot token, so
+    nothing here logs or raises with them: any failure is just None."""
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    try:
+        meta = httpx.get(
+            f"{TELEGRAM_API}/bot{token}/getFile", params={"file_id": file_id}, timeout=timeout
+        )
+        result = meta.json().get("result") if meta.status_code == 200 else None
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not path:
+            return None
+        response = httpx.get(f"{TELEGRAM_API}/file/bot{token}/{path}", timeout=timeout)
+    except (httpx.HTTPError, ValueError):
+        return None
+    if response.status_code != 200 or len(response.content) > ATTACHMENT_MAX_BYTES:
+        return None
+    return response.content
 
 
 def _default_send(
@@ -130,22 +172,30 @@ def _default_send(
 # under it so MarkdownV2 escaping usually still fits.
 TELEGRAM_MAX_CHARS = 4096
 TELEGRAM_CHUNK_CHARS = 3500
+# v130-F3: Discord rejects a message over 2000 characters, Slack a section
+# over 3000 — the same split, each under its own platform's cap.
+DISCORD_CHUNK_CHARS = 1900
+SLACK_CHUNK_CHARS = 2900
 
 
-def _telegram_chunks(text: str) -> list[str]:
-    """Cut ``text`` into chunks of at most TELEGRAM_CHUNK_CHARS, on a paragraph
+def chunk_text(text: str, limit: int) -> list[str]:
+    """Cut ``text`` into chunks of at most ``limit`` characters, on a paragraph
     break, else a line break, else hard."""
     chunks: list[str] = []
-    while len(text) > TELEGRAM_CHUNK_CHARS:
-        cut = text.rfind("\n\n", 0, TELEGRAM_CHUNK_CHARS)
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
         if cut <= 0:
-            cut = text.rfind("\n", 0, TELEGRAM_CHUNK_CHARS)
+            cut = text.rfind("\n", 0, limit)
         if cut <= 0:
-            cut = TELEGRAM_CHUNK_CHARS
+            cut = limit
         chunks.append(text[:cut])
         text = text[cut:].lstrip("\n")
     chunks.append(text)
     return chunks
+
+
+def _telegram_chunks(text: str) -> list[str]:
+    return chunk_text(text, TELEGRAM_CHUNK_CHARS)
 
 
 def send_telegram_markdown(
@@ -198,6 +248,50 @@ def _default_answer_callback(token: str, callback_query_id: str, text: str) -> b
     return response.status_code == 200
 
 
+def _telegram_call(token: str, method: str, payload: dict[str, object]) -> Any:
+    return httpx.post(
+        f"{TELEGRAM_API}/bot{token}/{method}",
+        json=payload,
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+
+
+def _default_telegram_set_commands(token: str, commands: list[dict[str, str]]) -> bool:
+    # v130-F14: the "/" menu in the Telegram client, from the deck.
+    return bool(_telegram_call(token, "setMyCommands", {"commands": commands}).status_code == 200)
+
+
+def _telegram_status_post(token: str, chat_id: str, text: str) -> str | None:
+    # v130-F6: silent — a status line must not buzz the phone.
+    response = _telegram_call(
+        token, "sendMessage", {"chat_id": chat_id, "text": text, "disable_notification": True}
+    )
+    result = response.json().get("result") if response.status_code == 200 else None
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    return str(message_id) if message_id else None
+
+
+def _telegram_status_edit(token: str, chat_id: str, message_id: str, text: str) -> bool:
+    payload = {"chat_id": chat_id, "message_id": int(message_id), "text": text}
+    return bool(_telegram_call(token, "editMessageText", payload).status_code == 200)
+
+
+def _telegram_status_delete(token: str, chat_id: str, message_id: str) -> bool:
+    payload = {"chat_id": chat_id, "message_id": int(message_id)}
+    return bool(_telegram_call(token, "deleteMessage", payload).status_code == 200)
+
+
+def _default_telegram_typing(token: str, chat_id: str) -> bool:
+    # v130-F6: "typing…" — Telegram shows it for ~5s per call.
+    payload: dict[str, object] = {"chat_id": chat_id, "action": "typing"}
+    return bool(_telegram_call(token, "sendChatAction", payload).status_code == 200)
+
+
+TELEGRAM_STATUS_OPS = StatusOps(
+    post=_telegram_status_post, edit=_telegram_status_edit, delete=_telegram_status_delete
+)
+
+
 def _telegram_action_keyboard(keyboard: dict[str, object], action_id: str) -> dict[str, object]:
     """The adapter's inline keyboard with the chat-action id stamped onto each
     button's callback_data so the callback knows what it is resolving — the
@@ -212,8 +306,152 @@ def _telegram_action_keyboard(keyboard: dict[str, object], action_id: str) -> di
     return keyboard
 
 
+# -- v130-F6: live status — "thinking / working" while a turn runs ------------
+
+
+def status_line(event: str | None, data: dict[str, Any]) -> str | None:
+    """The phone's line for a turn event — the web UI's working line (v87-F7
+    ``turn_status``) in a messenger's words. None for every other event."""
+    if event != "turn_status":
+        return None
+    if data.get("state") == "tool":
+        return f"🔧 working: {data.get('tool') or 'a tool'}…"
+    return "🤔 thinking…"
+
+
+class LiveStatus:
+    """One status message per turn: posted at the first line, edited as the
+    turn moves (at most once per ``min_interval`` seconds — Telegram and
+    Discord rate-limit edits), deleted when the reply lands. Cosmetic by
+    contract, like the typing pulse: every failure is swallowed, and with no
+    ``ops`` it does nothing at all."""
+
+    def __init__(
+        self,
+        ops: StatusOps | None,
+        token: str,
+        chat_id: str,
+        *,
+        min_interval: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ops = ops
+        self._token = token
+        self._chat = chat_id
+        self._interval = min_interval
+        self._clock = clock
+        self._id: str | None = None
+        self._shown = ""
+        self._at = 0.0
+
+    def update(self, text: str) -> None:
+        if self._ops is None or text == self._shown:
+            return
+        try:
+            if self._id is None:
+                self._id = self._ops.post(self._token, self._chat, text)
+            elif self._clock() - self._at >= self._interval:
+                self._ops.edit(self._token, self._chat, self._id, text)
+            else:
+                return  # ponytail: a skipped edit is just a missed frame
+            self._shown, self._at = text, self._clock()
+        except Exception:
+            logger.debug("channel status update failed", exc_info=True)
+
+    def close(self) -> None:
+        if self._ops is None or self._id is None:
+            return
+        message_id, self._id = self._id, None
+        try:
+            self._ops.delete(self._token, self._chat, message_id)
+        except Exception:
+            logger.debug("channel status delete failed", exc_info=True)
+
+
+CARD_OF_ANOTHER_CONVERSATION = "skep: that card belongs to another conversation."
+
+
+def card_in_bound_chat(store: Any, session_key: str, action: Any) -> bool:
+    """v129-F3, v130-F2 (all three transports): a press names its card by an
+    id from the client, so it resolves only a card of the chat its own
+    conversation is bound to — an allow-listed room is not a pass for every
+    card in the store."""
+    binding = store.channel_session(session_key)
+    return binding is not None and binding.chat_id == action.chat_id
+
+
+def resolve_channel_verdict(
+    engine: ChatEngine,
+    action_id: str,
+    *,
+    confirm: bool,
+    identity: ChannelIdentity,
+    user_id: str,
+    web_ui_url: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Resolve a pending card through the shared gate; returns the reply text
+    and any card the continuation raised (v130-F4). Discord's buttons,
+    reactions and /skep verdicts and every channel's typed /approve|/deny
+    (v130-F11) run this one core."""
+    store = engine.store
+    action = store.get_chat_action(action_id) if action_id else None
+    if action is None or action.status != "proposed":
+        return "skep: that card is gone or resolved.", []
+    config = store.get_channel_config(identity.channel) or ChannelConfig(channel=identity.channel)
+    # v66-F1: auto_thread (v44-F1) re-homes conversations into threads the
+    # allowlist has never heard of — a session binding to the card's OWN
+    # chat is as good as the allowlist (skep created that thread under an
+    # allow-listed parent). A binding to a different chat stays rejected.
+    session_key = f"{identity.channel}:{identity.identity_id}"
+    own_card = card_in_bound_chat(store, session_key, action)
+    identity_ok = own_card or identity_allowlisted(identity, config.allowed_identities)
+    # ES (B114): the room is not the operator — the person must be listed
+    # too, for buttons, reactions and typed verdicts alike.
+    identity_ok = identity_ok and user_allowlisted(user_id, config)
+    admin = channel_admin(user_id, config)  # v130-F5
+    decision = channel_confirmation_decision(
+        action_class=action.tool,
+        channel_can_confirm=config.channel_can_confirm,
+        identity_allowlisted=identity_ok,
+        admin=admin,
+    )
+    if not decision.allowed:
+        return (
+            f"skep: not confirmable from {identity.channel.capitalize()} ({decision.reason}). "
+            f"Review it in the web UI: {web_ui_url}"
+        ), []
+    if not own_card:  # v130-F2: an allow-listed room is not a pass for every card
+        return CARD_OF_ANOTHER_CONVERSATION, []
+    chat = store.get_chat(action.chat_id)
+    if chat is None:
+        return "skep: the chat behind that card is gone.", []
+    parts: list[str] = []
+    chained: list[dict[str, object]] = []
+    try:
+        for event, data in engine.verdict_events(
+            action.chat_id,
+            chat,
+            action_id,
+            confirm=confirm,
+            actor=channel_actor(identity, user_id if admin else None),
+        ):
+            if event is None and data.get("content"):
+                parts.append(str(data["content"]))
+            elif event == "action":  # v130-F4: a chained card keeps its buttons
+                chained.append(dict(data))
+    except HTTPException as exc:
+        return f"skep: {exc.detail}", []
+    verdict = "confirmed" if confirm else "denied"
+    return "".join(parts).strip() or f"skep: {verdict}.", chained
+
+
 def run_channel_turn(
-    engine: ChatEngine, message: ChannelMessage, *, web_ui_url: str
+    engine: ChatEngine,
+    message: ChannelMessage,
+    *,
+    web_ui_url: str,
+    status: LiveStatus | None = None,
+    read_only: bool = False,
 ) -> tuple[str, list[dict[str, object]]]:
     """One channel message → one Queen turn. Returns (reply text, action events).
 
@@ -223,22 +461,19 @@ def run_channel_turn(
     the caller renders each returned action event per its channel's posture.
     """
     store = engine.store
+    # v130-F13: a /btw question is taken literally — never a command again
+    command = None if read_only else parse_command(message.text)
+    if command is not None:  # v130-F7: the deck answers; the model never sees it
+        config = store.get_channel_config(message.channel) or ChannelConfig(channel=message.channel)
+        ctx = CommandContext(
+            engine=engine, message=message, config=config, web_ui_url=web_ui_url, status=status
+        )
+        return run_command(ctx, *command)
     binding = store.channel_session(message.session_key)
     chat = store.get_chat(binding.chat_id) if binding is not None else None
     if chat is None:
         # First contact (or the web operator deleted the old chat): new session.
-        chat = store.create_chat(
-            title=f"{message.channel} {message.identity.identity_id}",
-            model=None,
-            source=message.channel,
-            role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
-        )
-        store.bind_channel_session(
-            session_key=message.session_key,
-            channel=message.channel,
-            identity_id=message.identity.identity_id,
-            chat_id=chat.chat_id,
-        )
+        chat = new_channel_chat(store, message)
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
     except HTTPException as exc:
@@ -255,9 +490,17 @@ def run_channel_turn(
         return (f"skep: {TURN_BUSY}", [])
     try:
         return _channel_turn(
-            engine, chat, message, (base_url, api_key, model, protocol), web_ui_url=web_ui_url
+            engine,
+            chat,
+            message,
+            (base_url, api_key, model, protocol),
+            web_ui_url=web_ui_url,
+            status=status,
+            read_only=read_only,
         )
     finally:
+        if status is not None:
+            status.close()  # v130-F6: the reply replaces the status line
         lock.release()
 
 
@@ -268,11 +511,15 @@ def _channel_turn(
     llm: tuple[str, str | None, str, Any],
     *,
     web_ui_url: str,
+    status: LiveStatus | None = None,
+    read_only: bool = False,
 ) -> tuple[str, list[dict[str, object]]]:
     store = engine.store
     base_url, api_key, model, protocol = llm
     pending = blocking_cards(store, chat.chat_id)
-    if pending:  # ES-F5: a gate never holds the chat
+    # v67-F3/v130-F13: a read-only /btw may run beside a pending card, as on
+    # the web — safe precisely because nothing it does can need confirmation.
+    if pending and not read_only:  # ES-F5: a gate never holds the chat
         if store.get_chat_taint(chat.chat_id).private is not None:
             # v129-F4: a card's headline can quote what the chat read
             return (
@@ -320,8 +567,11 @@ def _channel_turn(
     errors: list[str] = []
     for event, data in engine.turn_events(
         chat.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
-        channel=True,  # D16: the chat's session keeps are the web UI's
+        read_only=read_only, channel=True,  # D16: the chat's session keeps are the web UI's
     ):  # fmt: skip
+        line = status_line(event, data) if status is not None else None
+        if line is not None and status is not None:
+            status.update(line)
         if event is None:
             content = data.get("content")
             if content:
@@ -335,6 +585,39 @@ def _channel_turn(
         error_line = f"skep error: {errors[0]}"
         text = f"{text}\n{error_line}" if text else error_line
     return text, actions
+
+
+class ConversationTurns:
+    """v130-F10: Queen turns run off the inbound loop — one worker per
+    conversation draining its turns in arrival order — so the loop keeps
+    reading and a /stop for a running turn is answered at once, not after it."""
+
+    def __init__(self, spawn: SpawnVerdict) -> None:
+        self._spawn = spawn
+        self._queues: dict[str, list[Callable[[], None]]] = {}
+        self._guard = threading.Lock()
+
+    def submit(self, key: str, work: Callable[[], None]) -> None:
+        with self._guard:
+            queue = self._queues.get(key)
+            if queue is not None:  # this conversation's worker is draining
+                queue.append(work)
+                return
+            self._queues[key] = [work]
+        self._spawn(lambda: self._drain(key))
+
+    def _drain(self, key: str) -> None:
+        while True:
+            with self._guard:
+                queue = self._queues[key]
+                if not queue:
+                    del self._queues[key]
+                    return
+                work = queue.pop(0)
+            try:
+                work()
+            except Exception:  # one broken turn never strands the queue
+                logger.exception("channel turn failed")
 
 
 class TelegramPoller(threading.Thread):
@@ -355,9 +638,23 @@ class TelegramPoller(threading.Thread):
         send: SendText | None = None,
         answer: AnswerCallback | None = None,
         idle_seconds: float = 2.0,
+        status_ops: StatusOps | None = None,
+        typing: Callable[[str, str], object] | None = None,
+        spawn: SpawnVerdict | None = None,
+        set_commands: Callable[[str, list[dict[str, str]]], object] | None = None,
+        fetch_file: Callable[[str, str], bytes | None] | None = None,
         request_restart: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
+        self._turns = ConversationTurns(spawn if spawn is not None else _spawn_daemon_thread)
+        # v130-F14: None = no menu call (the suite); serve wires the real one.
+        self._set_commands = set_commands
+        self._menu_set = False
+        # v130-F6: None = no status line / no typing (the suite); serve wires
+        # the real calls (app.py) — no test ever reaches api.telegram.org.
+        self._status_ops = status_ops
+        self._status_interval = 1.0
+        self._typing = typing
         self._engine = engine
         self._store = engine.store
         self._home = engine.home
@@ -365,6 +662,7 @@ class TelegramPoller(threading.Thread):
         self._fetch = fetch if fetch is not None else _default_fetch
         self._send = send if send is not None else _default_send
         self._answer = answer if answer is not None else _default_answer_callback
+        self._fetch_file = fetch_file if fetch_file is not None else _default_fetch_telegram_file
         self._idle = idle_seconds
         # v130: how /update restarts serve; None (tests, no server) refuses.
         self._request_restart = request_restart
@@ -379,6 +677,9 @@ class TelegramPoller(threading.Thread):
         secret = resolve_channel_secret(self._home, telegram_adapter.CHANNEL)
         if not adapter_ready(config, secret) or secret is None:
             return 0
+        if not self._menu_set:
+            self._menu_set = True  # once per start, success or not
+            self._register_menu(secret)
         updates = self._fetch(secret, self._offset)
         for update in updates:
             update_id = update.get("update_id")
@@ -391,38 +692,52 @@ class TelegramPoller(threading.Thread):
             # v41-F2: inline button presses arrive as callback_query updates.
             callback = update.get("callback_query")
             if isinstance(callback, dict):
-                self._handle_callback(callback, config, secret)
-                handled += 1
-        for update in updates:
-            message = telegram_adapter.normalize_inbound(update, config).message
-            if message is None:
-                continue  # fail closed, as poll_updates drops it
-            raw = update.get("message")
-            forwarded = isinstance(raw, dict) and ("forward_origin" in raw or "forward_date" in raw)
-            if message.text == "/update" and not forwarded:  # v130: typed, not forwarded
-                self._handle_update(message.identity.identity_id, config, secret)
-                handled += 1
-                continue
-            text, actions = run_channel_turn(self._engine, message, web_ui_url=self._web_ui_url)
-            replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
-            replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
-            for reply, markup in replies:
-
-                def send_with_markup(
-                    cid: str, body: str, markup: dict[str, object] | None = markup
-                ) -> bool:
-                    # v78-F5: Queen markdown renders; a rejected parse resends plain.
-                    return send_telegram_markdown(self._send, secret, cid, body, markup)
-
-                result = telegram_adapter.deliver(
-                    reply,
-                    chat_id=message.identity.identity_id,
-                    send=send_with_markup,
+                # Review S3: a verdict runs the model's continuation — off the
+                # poll loop, in its conversation's queue, like a typed /approve.
+                pressed = telegram_adapter.normalize_callback(callback)
+                key = f"{telegram_adapter.CHANNEL}:{pressed[0] if pressed else ''}"
+                self._turns.submit(
+                    key, functools.partial(self._handle_callback, callback, config, secret)
                 )
-                if not result.ok:
-                    logger.warning("telegram delivery failed: %s", result.detail)
+                handled += 1
+        # v130 (#118): a typed, not forwarded, /update is the decision (I7).
+        routed: list[dict[str, object]] = []
+        for update in updates:
+            update_chat = self._typed_update(update, config)
+            if update_chat is None:
+                routed.append(update)
+            else:
+                self._handle_update(update_chat, config, secret)
+                handled += 1
+        for message in self._inbound(routed, config, secret):
+            if answered_inline(message.text):
+                self._reply(message, config, secret)  # v130-F10: never behind a turn
+            else:
+                self._turns.submit(
+                    message.session_key, functools.partial(self._reply, message, config, secret)
+                )
             handled += 1
         return handled
+
+    def _reply(self, message: ChannelMessage, config: ChannelConfig, secret: str) -> None:
+        text, actions = self._turn_with_status(message, secret)
+        replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
+        replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
+        for reply, markup in replies:
+
+            def send_with_markup(
+                cid: str, body: str, markup: dict[str, object] | None = markup
+            ) -> bool:
+                # v78-F5: Queen markdown renders; a rejected parse resends plain.
+                return send_telegram_markdown(self._send, secret, cid, body, markup)
+
+            result = telegram_adapter.deliver(
+                reply,
+                chat_id=message.identity.identity_id,
+                send=send_with_markup,
+            )
+            if not result.ok:
+                logger.warning("telegram delivery failed: %s", result.detail)
 
     def _handle_update(self, chat_id: str, config: ChannelConfig, token: str) -> None:
         """v130: the admitted operator's typed /update IS the decision (I7), so
@@ -448,6 +763,81 @@ class TelegramPoller(threading.Thread):
         from ..selfupdate import start_update
 
         start_update(self._store, say, self._request_restart)
+
+    @staticmethod
+    def _typed_update(update: dict[str, object], config: ChannelConfig) -> str | None:
+        """The chat id of an admitted, typed (not forwarded) ``/update``."""
+        message = telegram_adapter.normalize_inbound(update, config).message
+        raw = update.get("message")
+        forwarded = isinstance(raw, dict) and ("forward_origin" in raw or "forward_date" in raw)
+        if message is None or message.text != "/update" or forwarded:
+            return None
+        return message.identity.identity_id
+
+    def _inbound(
+        self, updates: list[dict[str, object]], config: ChannelConfig, token: str
+    ) -> list[ChannelMessage]:
+        """The admitted messages, each photo fetched only AFTER admission
+        (v130-F15, Discord's v44-F9 path). A failed fetch keeps the caption;
+        a bare photo that cannot be fetched has nothing left to say."""
+        routed: list[ChannelMessage] = []
+        for update in updates:
+            message = telegram_adapter.normalize_inbound(update, config).message
+            raw = update.get("message")
+            file_id = (
+                telegram_adapter.image_file_id(raw, ATTACHMENT_MAX_BYTES)
+                if message is not None and isinstance(raw, dict)
+                else None
+            )
+            if message is not None and file_id:
+                try:
+                    blob, why = self._fetch_file(token, file_id), "no file"
+                except Exception as exc:  # the file URL holds the token: type only
+                    blob, why = None, exc.__class__.__name__
+                if blob:
+                    message = dataclasses.replace(message, attachments=(blob,))
+                else:
+                    logger.warning("telegram photo fetch failed (%s)", why)
+                    if not message.text:
+                        continue
+            if message is not None:
+                routed.append(message)
+        return routed
+
+    def _register_menu(self, token: str) -> None:
+        """v130-F14: a failed menu call costs the menu, never the poll."""
+        if self._set_commands is None:
+            return
+        try:
+            ok = self._set_commands(token, telegram_menu())
+        except Exception as exc:  # the URL holds the token: log the type only
+            ok, detail = False, exc.__class__.__name__
+        else:
+            detail = "rejected"
+        if not ok:
+            logger.warning("telegram setMyCommands failed (%s); the / menu is stale", detail)
+
+    def _turn_with_status(
+        self, message: ChannelMessage, token: str
+    ) -> tuple[str, list[dict[str, object]]]:
+        """v130-F6: typing plus one live status line for the whole turn."""
+        chat_id = message.identity.identity_id
+        typing = self._typing
+        pulse = (
+            _TypingPulse(lambda: typing(token, chat_id), interval=4.0, name="telegram-typing")
+            if typing is not None
+            else None
+        )
+        if pulse is not None:
+            pulse.start()
+        status = LiveStatus(self._status_ops, token, chat_id, min_interval=self._status_interval)
+        try:
+            return run_channel_turn(
+                self._engine, message, web_ui_url=self._web_ui_url, status=status
+            )
+        finally:
+            if pulse is not None:
+                pulse.stop()
 
     def _handle_callback(
         self, callback: dict[str, object], config: ChannelConfig, token: str
@@ -479,11 +869,8 @@ class TelegramPoller(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}"
             )
             return
-        # v129-F3: callback data is client-supplied — a press resolves only a
-        # card of the chat its own conversation is bound to.
-        binding = self._store.channel_session(f"{telegram_adapter.CHANNEL}:{chat_id}")
-        if binding is None or binding.chat_id != action.chat_id:
-            answer("skep: that card belongs to another conversation.")
+        if not card_in_bound_chat(self._store, f"{telegram_adapter.CHANNEL}:{chat_id}", action):
+            answer(CARD_OF_ANOTHER_CONVERSATION)
             return
         chat = self._store.get_chat(action.chat_id)
         if chat is None:
@@ -499,7 +886,7 @@ class TelegramPoller(threading.Thread):
                 chat,
                 action.action_id,
                 confirm=verb == "confirm",
-                actor=channel_actor(identity),
+                actor=channel_actor(identity, from_id if channel_admin(from_id, config) else None),
             ):
                 if event is None and payload.get("content"):
                     parts.append(str(payload["content"]))
@@ -619,8 +1006,43 @@ def _default_slack_send(
     return isinstance(payload, dict) and payload.get("ok") is True
 
 
+def _slack_call(token: str, method: str, payload: dict[str, object]) -> Any:
+    response = httpx.post(
+        f"{SLACK_API}/{method}",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+    return response.json() if response.status_code == 200 else {}
+
+
+def _slack_status_post(token: str, channel_id: str, text: str) -> str | None:
+    answer = _slack_call(token, "chat.postMessage", {"channel": channel_id, "text": text})
+    ts = answer.get("ts") if answer.get("ok") else None
+    return str(ts) if ts else None
+
+
+def _slack_status_edit(token: str, channel_id: str, ts: str, text: str) -> bool:
+    return bool(_slack_call(token, "chat.update", {"channel": channel_id, "ts": ts, "text": text}))
+
+
+def _slack_status_delete(token: str, channel_id: str, ts: str) -> bool:
+    return bool(_slack_call(token, "chat.delete", {"channel": channel_id, "ts": ts}))
+
+
+# v130-F6: Slack bots have no typing indicator in the Web API — the status
+# line is the whole signal there.
+SLACK_STATUS_OPS = StatusOps(
+    post=_slack_status_post, edit=_slack_status_edit, delete=_slack_status_delete
+)
+
+
 def _text_blocks(text: str) -> list[dict[str, object]]:
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    """v130-F3: one section per chunk, all in one message (Slack allows 50)."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in chunk_text(text, SLACK_CHUNK_CHARS)
+    ]
 
 
 def _telegram_card_replies(
@@ -670,6 +1092,8 @@ def add_slack_routes(
     web_ui_url: str,
     send: SendBlocks | None = None,
     now: Callable[[], float] = time.time,
+    status_ops: StatusOps | None = None,
+    status_interval: float = 1.0,
 ) -> None:
     """The Slack transport: two routes authenticated by SIGNATURE (auth.py
     exempts exactly these paths from the serve token — Slack cannot present
@@ -721,7 +1145,14 @@ def add_slack_routes(
         bot_token: str | None,
         thread_ref: str = "",
     ) -> None:
-        text, actions = run_channel_turn(engine, message, web_ui_url=web_ui_url)
+        status = (
+            LiveStatus(
+                status_ops, bot_token, message.identity.identity_id, min_interval=status_interval
+            )
+            if bot_token is not None
+            else None
+        )
+        text, actions = run_channel_turn(engine, message, web_ui_url=web_ui_url, status=status)
         # v78-F6: the binding is guaranteed to exist after the turn — store
         # the event's thread anchor so outbound pushes reply under the
         # operator's latest message. Conversational replies stay top-level
@@ -792,6 +1223,9 @@ def add_slack_routes(
                 ),
             )
             return
+        if not card_in_bound_chat(store, f"{slack_adapter.CHANNEL}:{channel_id}", action):
+            _deliver(bot_token, channel_id, _text_blocks(CARD_OF_ANOTHER_CONVERSATION))
+            return
         chat = store.get_chat(action.chat_id)
         if chat is None:
             _deliver(
@@ -799,22 +1233,32 @@ def add_slack_routes(
             )
             return
         parts: list[str] = []
+        chained: list[dict[str, object]] = []
+        presser = str(user.get("id") or "") if isinstance(user, dict) else ""
+        admin_user = presser if channel_admin(presser, config) else None  # v130-F5
         try:
             for event, data in engine.verdict_events(
                 action.chat_id,
                 chat,
                 chat_action_id,
                 confirm=click == "confirm",
-                actor=channel_actor(identity),
+                actor=channel_actor(identity, admin_user),
             ):
                 if event is None and data.get("content"):
                     parts.append(str(data["content"]))
+                elif event == "action":  # v130-F4: a chained card keeps its buttons
+                    chained.append(dict(data))
         except HTTPException as exc:
             _deliver(bot_token, channel_id, _text_blocks(f"skep: {exc.detail}"))
             return
         verdict = "confirmed" if click == "confirm" else "denied"
         text = "".join(parts).strip() or f"skep: {verdict}."
         _deliver(bot_token, channel_id, _text_blocks(text))
+        for card in chained:
+            blocks = _slack_action_blocks(
+                str(card.get("action_id")), str(card.get("tool")), config, _card_of(card)
+            )
+            _deliver(bot_token, channel_id, blocks)
 
     @app.post("/api/channels/slack/interact")
     async def slack_interact(request: Request, background: BackgroundTasks) -> dict[str, Any]:
@@ -849,6 +1293,8 @@ DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 DISCORD_INTENTS = (1 << 9) | (1 << 10) | (1 << 12) | (1 << 13) | (1 << 15)
 
 SendDiscordPayload = Callable[[str, str, dict[str, object]], bool]
+# v130-F4: a verdict's reply text and the cards its continuation raised.
+Verdict = tuple[str, list[dict[str, object]]]
 AckInteraction = Callable[[str, str, str], bool]
 # v106-F13: (interaction_id, interaction_token) -> acked. Type 5, sent BEFORE
 # any verdict work — Discord invalidates an unacknowledged interaction in 3s.
@@ -893,6 +1339,41 @@ def _default_discord_send(token: str, channel_id: str, payload: dict[str, object
     return response.status_code == 200
 
 
+def _discord_status_post(token: str, channel_id: str, text: str) -> str | None:
+    response = httpx.post(
+        f"{DISCORD_API}/channels/{channel_id}/messages",
+        headers={"Authorization": f"Bot {token}"},
+        json={"content": text, "flags": _DISCORD_SUPPRESS_EMBEDS},
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+    message_id = response.json().get("id") if response.status_code == 200 else None
+    return str(message_id) if message_id else None
+
+
+def _discord_status_edit(token: str, channel_id: str, message_id: str, text: str) -> bool:
+    response = httpx.patch(
+        f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}",
+        headers={"Authorization": f"Bot {token}"},
+        json={"content": text},
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+    return bool(response.status_code == 200)
+
+
+def _discord_status_delete(token: str, channel_id: str, message_id: str) -> bool:
+    response = httpx.delete(
+        f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}",
+        headers={"Authorization": f"Bot {token}"},
+        timeout=httpx.Timeout(10.0, connect=5.0),
+    )
+    return bool(response.status_code == 204)
+
+
+DISCORD_STATUS_OPS = StatusOps(
+    post=_discord_status_post, edit=_discord_status_edit, delete=_discord_status_delete
+)
+
+
 def _default_discord_send_file(token: str, channel_id: str, path: Path) -> bool:
     # v53-F6 (ADR 0031): voice-message delivery — one multipart upload to the
     # same messages endpoint the text send uses.
@@ -921,9 +1402,12 @@ class _TypingPulse(threading.Thread):
     indicator lasts ~10s). Cosmetic by contract: every failure is swallowed —
     typing must never break or delay a reply."""
 
-    def __init__(self, fire: Callable[[], object]) -> None:
-        super().__init__(name="discord-typing", daemon=True)
+    def __init__(
+        self, fire: Callable[[], object], *, interval: float = 8.0, name: str = "discord-typing"
+    ) -> None:
+        super().__init__(name=name, daemon=True)
         self._fire = fire
+        self._interval = interval
         self._done = threading.Event()
 
     def run(self) -> None:
@@ -932,7 +1416,7 @@ class _TypingPulse(threading.Thread):
                 self._fire()
             except Exception:
                 logger.debug("discord typing indicator failed", exc_info=True)
-            if self._done.wait(8.0):
+            if self._done.wait(self._interval):
                 return
 
     def stop(self) -> None:
@@ -974,23 +1458,16 @@ def _default_discord_followup(application_id: str, interaction_token: str, text:
     return response.status_code in (200, 204)
 
 
-# v78-F4: the /skep command tree — deterministic store reads plus the two
-# verdict spellings. Bulk-overwritten via Discord's idempotent PUT form, so
-# re-registering on every reconnect is a server-side no-op.
+# v78-F4: the two verdict spellings Discord had before the deck; v130-F14:
+# only while the deck lacks an entry of the same name.
+# v78-F4, v130-F14: the /skep tree, generated from the deck. Bulk-overwritten
+# via Discord's idempotent PUT form, so re-registering on every reconnect is a
+# server-side no-op.
 SKEP_COMMAND_TREE: list[dict[str, object]] = [
     {
         "name": "skep",
         "description": "the skep supervisor",
-        "options": [
-            {"type": 1, "name": "status", "description": "running runs + what waits on you"},
-            {"type": 1, "name": "runs", "description": "the 5 most recent runs"},
-            {
-                "type": 1,
-                "name": "approve",
-                "description": "confirm this chat's pending card",
-            },
-            {"type": 1, "name": "deny", "description": "deny this chat's pending card"},
-        ],
+        "options": discord_subcommands(),
     }
 ]
 
@@ -1097,7 +1574,7 @@ def _interaction_user(data: dict[str, Any]) -> str:
 
 
 def _spawn_daemon_thread(work: Callable[[], None]) -> None:
-    threading.Thread(target=work, name="discord-verdict", daemon=True).start()
+    threading.Thread(target=work, name="skep-channel-work", daemon=True).start()
 
 
 class DiscordGateway(threading.Thread):
@@ -1127,8 +1604,12 @@ class DiscordGateway(threading.Thread):
         typing: Callable[[str, str], bool] | None = None,
         gateway_url: str = DISCORD_GATEWAY_URL,
         idle_seconds: float = 2.0,
+        status_ops: StatusOps | None = None,
     ) -> None:
         super().__init__(name="serve-discord", daemon=True)
+        # v130-F6: None = no status line (the suite); serve wires the real one.
+        self._status_ops = status_ops
+        self._status_interval = 1.0
         self._engine = engine
         self._store = engine.store
         self._home = engine.home
@@ -1141,6 +1622,7 @@ class DiscordGateway(threading.Thread):
         )
         self._followup = followup if followup is not None else _default_discord_followup
         self._spawn = spawn if spawn is not None else _spawn_daemon_thread
+        self._turns = ConversationTurns(self._spawn)  # v130-F10
         self._register = register if register is not None else _default_register_commands
         self._typing = typing if typing is not None else _default_discord_typing
         self._create_thread = (
@@ -1323,13 +1805,15 @@ class DiscordGateway(threading.Thread):
         return False
 
     def _deliver(self, token: str, channel_id: str, text: str) -> None:
-        result = discord_adapter.deliver(
-            text,
-            channel_id=channel_id,
-            send=lambda cid, payload: self._send(token, cid, payload),
-        )
-        if not result.ok:
-            logger.warning("discord delivery failed: %s", result.detail)
+        for chunk in chunk_text(text, DISCORD_CHUNK_CHARS):  # v130-F3
+            result = discord_adapter.deliver(
+                chunk,
+                channel_id=channel_id,
+                send=lambda cid, payload: self._send(token, cid, payload),
+            )
+            if not result.ok:
+                logger.warning("discord delivery failed: %s", result.detail)
+                return
 
     def _handle_message(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         author = data.get("author")
@@ -1367,16 +1851,34 @@ class DiscordGateway(threading.Thread):
         blobs = self._image_attachments(data)
         if blobs:
             message = dataclasses.replace(message, attachments=tuple(blobs))
+        if answered_inline(message.text):
+            self._turn_and_reply(message, token)  # v130-F10: never behind a turn
+        else:
+            self._turns.submit(
+                message.session_key, functools.partial(self._turn_and_reply, message, token)
+            )
+
+    def _turn_and_reply(self, message: ChannelMessage, token: str) -> None:
         channel_id = message.identity.identity_id
         # v47-F8: show "skep is typing…" for the whole turn, not just 10s.
         pulse = _TypingPulse(lambda: self._typing(token, channel_id))
         pulse.start()
+        status = LiveStatus(self._status_ops, token, channel_id, min_interval=self._status_interval)
         try:
-            text, actions = run_channel_turn(self._engine, message, web_ui_url=self._web_ui_url)
+            text, actions = run_channel_turn(
+                self._engine, message, web_ui_url=self._web_ui_url, status=status
+            )
         finally:
             pulse.stop()
         if text:
             self._deliver(token, channel_id, text)
+        self._send_cards(token, channel_id, actions)
+
+    def _send_cards(self, token: str, channel_id: str, actions: list[dict[str, object]]) -> None:
+        """Each action event as a Discord card; a turn's and a verdict's alike."""
+        config = self._store.get_channel_config(discord_adapter.CHANNEL) or ChannelConfig(
+            channel=discord_adapter.CHANNEL
+        )
         for action in actions:
             payload = _discord_action_payload(
                 str(action.get("action_id")),
@@ -1441,60 +1943,22 @@ class DiscordGateway(threading.Thread):
             identity=ChannelIdentity(channel=message.channel, identity_id=thread_id),
             text=message.text,
             session_key=f"{discord_adapter.CHANNEL}:{thread_id}",
+            user_id=message.user_id,
         )
 
     def _resolve_verdict(
         self, action_id: str, *, confirm: bool, identity: ChannelIdentity, user_id: str
-    ) -> str:
-        """Resolve a pending card through the shared gate; returns the reply text.
-        Mirrors the Slack ``_resolve_button`` flow — one posture, two transports."""
-        action = self._store.get_chat_action(action_id) if action_id else None
-        if action is None or action.status != "proposed":
-            return "skep: that card is gone or resolved."
-        config = self._store.get_channel_config(discord_adapter.CHANNEL) or ChannelConfig(
-            channel=discord_adapter.CHANNEL
+    ) -> Verdict:
+        """The shared core (``resolve_channel_verdict``) — one posture for
+        buttons, reactions, /skep verdicts and typed /approve|/deny."""
+        return resolve_channel_verdict(
+            self._engine,
+            action_id,
+            confirm=confirm,
+            identity=identity,
+            user_id=user_id,
+            web_ui_url=self._web_ui_url,
         )
-        # v66-F1: auto_thread (v44-F1) re-homes conversations into threads the
-        # allowlist has never heard of — a session binding to the card's OWN
-        # chat is as good as the allowlist (skep created that thread under an
-        # allow-listed parent). A binding to a different chat stays rejected.
-        identity_ok = identity_allowlisted(identity, config.allowed_identities)
-        if not identity_ok:
-            binding = self._store.channel_session(
-                f"{discord_adapter.CHANNEL}:{identity.identity_id}"
-            )
-            identity_ok = binding is not None and binding.chat_id == action.chat_id
-        # ES (B114): the room is not the operator — the person must be listed
-        # too, for buttons, reactions and /skep verdicts alike.
-        identity_ok = identity_ok and user_allowlisted(user_id, config)
-        decision = channel_confirmation_decision(
-            action_class=action.tool,
-            channel_can_confirm=config.channel_can_confirm,
-            identity_allowlisted=identity_ok,
-        )
-        if not decision.allowed:
-            return (
-                f"skep: not confirmable from Discord ({decision.reason}). "
-                f"Review it in the web UI: {self._web_ui_url}"
-            )
-        chat = self._store.get_chat(action.chat_id)
-        if chat is None:
-            return "skep: the chat behind that card is gone."
-        parts: list[str] = []
-        try:
-            for event, data in self._engine.verdict_events(
-                action.chat_id,
-                chat,
-                action_id,
-                confirm=confirm,
-                actor=channel_actor(identity),
-            ):
-                if event is None and data.get("content"):
-                    parts.append(str(data["content"]))
-        except HTTPException as exc:
-            return f"skep: {exc.detail}"
-        verdict = "confirmed" if confirm else "denied"
-        return "".join(parts).strip() or f"skep: {verdict}."
 
     def _handle_interaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         # v78-F4: branch on interaction type — 3 (component) keeps the existing
@@ -1549,7 +2013,7 @@ class DiscordGateway(threading.Thread):
         interaction_token: str,
         channel_id: str,
         token: str,
-        resolve: Callable[[], str],
+        resolve: Callable[[], Verdict],
     ) -> None:
         """v106-F13: the one shape that survives a slow verdict — deferred ack
         inside Discord's 3s window, the work off the gateway loop, the reply
@@ -1559,8 +2023,9 @@ class DiscordGateway(threading.Thread):
             logger.warning("discord deferred ack failed; resolving anyway")
 
         def _finish() -> None:
+            chained: list[dict[str, object]] = []
             try:
-                text = resolve()
+                text, chained = resolve()
             except Exception:
                 logger.exception("discord verdict resolution failed")
                 text = "skep: that verdict crashed mid-resolve — check the web UI."
@@ -1569,6 +2034,8 @@ class DiscordGateway(threading.Thread):
                 delivered = self._followup(self._application_id, interaction_token, text)
             if not delivered and channel_id:
                 self._deliver(token, channel_id, text)
+            if channel_id:
+                self._send_cards(token, channel_id, chained)
 
         self._spawn(_finish)
 
@@ -1603,78 +2070,38 @@ class DiscordGateway(threading.Thread):
         if not isinstance(inner, dict) or str(inner.get("name") or "") != "skep":
             return
         options = inner.get("options")
-        sub = (
-            str(options[0].get("name") or "")
+        option = (
+            options[0]
             if isinstance(options, list) and options and isinstance(options[0], dict)
-            else ""
+            else {}
         )
+        sub = str(option.get("name") or "")
         channel_id = str(data.get("channel_id") or "")
-        if sub in ("approve", "deny"):
-            # v106-F13: a verdict runs a mutation plus a model continuation —
-            # the same 3-second trap the buttons had; same deferred flow.
+        if sub in COMMANDS:  # v130-F14: one deck — Discord's tree never drifts from it
+            args = option.get("options")
+            arg = args[0] if isinstance(args, list) and args and isinstance(args[0], dict) else {}
+            text = str(arg.get("value") or "").strip()
+            user_id = _interaction_user(data)
+            message = ChannelMessage(
+                channel=discord_adapter.CHANNEL,
+                identity=ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id),
+                text=f"/{sub} {text}".strip(),
+                session_key=f"{discord_adapter.CHANNEL}:{channel_id}",
+                user_id=user_id,
+            )
+            ctx = CommandContext(
+                engine=self._engine, message=message, config=config, web_ui_url=self._web_ui_url
+            )
+            # Deferred like a verdict: a deck command may outlast the 3s window.
             self._defer_and_finish(
                 interaction_id=str(data.get("id") or ""),
                 interaction_token=str(data.get("token") or ""),
                 channel_id=channel_id,
                 token=token,
-                resolve=lambda: self._slash_verdict(
-                    channel_id, confirm=sub == "approve", user_id=_interaction_user(data)
-                ),
+                resolve=lambda: run_command(ctx, sub, text),
             )
             return
-        if sub == "status":
-            text = self._slash_status()
-        elif sub == "runs":
-            text = self._slash_runs()
-        else:
-            return  # unknown subcommands resolve nothing
-        if not self._ack(str(data.get("id") or ""), str(data.get("token") or ""), text):
-            logger.warning("discord interaction ack failed")
-
-    def _slash_status(self) -> str:
-        from . import state_emoji
-
-        runs = self._store.recent_runs(50)
-        active = [r for r in runs if r.state in ("running", "dispatched")]
-        approvals = self._store.pending_approvals()
-        lines = [f"skep: {len(active)} running · {len(approvals)} approval(s) waiting"]
-        for record in [r for r in runs if r.state == "pending_approval"][:3]:
-            lines.append(
-                f"{state_emoji(record.state)} run {record.task_id[:13]}… needs your approval"
-            )
-        return "\n".join(lines)
-
-    def _slash_runs(self) -> str:
-        from . import state_emoji
-
-        runs = self._store.recent_runs(5)
-        if not runs:
-            return "skep: no runs yet"
-        lines = []
-        for record in runs:
-            line = f"{state_emoji(record.state)} {record.task_id[:13]}… {record.state}"
-            if record.summary:
-                line += f": {record.summary[:60]}"
-            lines.append(line)
-        return "\n".join(lines)
-
-    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> str:
-        """The typed command IS the decision, asked once (I7): resolve the
-        bound chat's single pending card through the EXACT gate the ✅ button
-        uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
-        argument: the v51 field test showed id-typing is where approvals go to
-        die. W19: one turn can still leave several cards, and then this
-        resolves none (``_several_cards``)."""
-        binding = self._store.channel_session(f"{discord_adapter.CHANNEL}:{channel_id}")
-        pending = self._store.pending_chat_actions(binding.chat_id) if binding else []
-        if not pending:
-            return "skep: no card is waiting in this conversation."
-        if len(pending) > 1:
-            return _several_cards(len(pending), self._web_ui_url)
-        identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
-        return self._resolve_verdict(
-            pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
-        )
+        # unknown subcommands resolve nothing
 
     def _handle_reaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         emoji = data.get("emoji")
@@ -1704,6 +2131,7 @@ class DiscordGateway(threading.Thread):
             # cards were fetched from the bound chat, so the reaction is
             # addressed to its own chat's card by construction.
             session_bound=binding.chat_id == action.chat_id,
+            admin=channel_admin(str(data.get("user_id") or ""), config),  # v130-F5
         )
         if not decision.allowed:
             self._deliver(
@@ -1713,10 +2141,11 @@ class DiscordGateway(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}",
             )
             return
-        text = self._resolve_verdict(
+        text, chained = self._resolve_verdict(
             action.action_id,
             confirm=reaction == "✅",
             identity=identity,
             user_id=str(data.get("user_id") or ""),
         )
         self._deliver(token, channel_id, text)
+        self._send_cards(token, channel_id, chained)

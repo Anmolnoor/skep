@@ -19,6 +19,8 @@ from . import (
     ChannelIdentity,
     ChannelMessage,
     NormalizedInbound,
+    admin_nudge_line,
+    channel_admin,
     channel_confirmation_decision,
     confirm_off_line,
     identity_allowlisted,
@@ -52,7 +54,11 @@ def normalize_inbound(event: dict[str, object], config: ChannelConfig) -> Normal
         )
     return NormalizedInbound(
         ChannelMessage(
-            channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{channel_id}"
+            channel=CHANNEL,
+            identity=identity,
+            text=text,
+            session_key=f"{CHANNEL}:{channel_id}",
+            user_id=user_id,
         )
     )
 
@@ -63,7 +69,7 @@ def confirmation_blocks(
     config: ChannelConfig,
     card: Mapping[str, Any] | None = None,
 ) -> list[dict[str, object]]:
-    view = render_confirm_card(action_class, commands, card)
+    view = render_confirm_card(action_class, commands, card, admin=bool(config.admin_users))
     blocks: list[dict[str, object]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{action_class}*"}}
     ]
@@ -78,9 +84,12 @@ def confirmation_blocks(
                 "text": {"type": "mrkdwn", "text": "Review and confirm in the skep web UI."},
             }
         )
-        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
-        if off:
-            blocks.append({"type": "section", "text": {"type": "plain_text", "text": off}})
+        for extra in (
+            confirm_off_line(CHANNEL, view, config),  # v129-F5
+            admin_nudge_line(CHANNEL, view, config),  # v130-F5
+        ):
+            if extra:
+                blocks.append({"type": "section", "text": {"type": "plain_text", "text": extra}})
         return blocks
     blocks.append(
         {
@@ -120,6 +129,7 @@ def handle_button(
         channel_can_confirm=config.channel_can_confirm,
         identity_allowlisted=identity_allowlisted(identity, config.allowed_identities)
         and user_allowlisted(user_id, config),
+        admin=channel_admin(user_id, config),  # v130-F5
     )
 
 

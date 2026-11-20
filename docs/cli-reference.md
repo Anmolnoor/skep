@@ -258,8 +258,9 @@ exist because a *model* proposed the action, not a human.
 skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--no-readopt]
 ```
 
-`serve` starts the local HTTP API and browser dashboard. It prints the URL and
-access token on startup.
+`serve` starts the local HTTP API and browser dashboard. It prints the URL and,
+when stdout is a terminal, the access token on startup. Otherwise (systemd,
+docker, a redirect) it prints the token file's path instead.
 
 On startup, a run whose worker is still alive from a previous serve is
 re-adopted: serve checks it is the same process (pid and start time),
@@ -332,13 +333,14 @@ commands the model never sees. The first 22 are the same in the web deck:
 | `/browser` | register the built-in Playwright browser under the browse scope (confirm card) |
 | `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); acts at once, never a model tool, never from a channel |
 
-Four more exist only in the terminal:
+Five more exist only in the terminal:
 
 | Command | Purpose |
 |---|---|
 | `/status` | re-print the startup banner: assistant readiness, approvals and cards waiting |
 | `/model [name] [--scope chat\|default]` | show the effective model for this chat; with a name, propose a model change on a card |
 | `/replay` | print the last messages of this chat |
+| `/stop` | stop this chat's running turn at its next step; its cards stay pending and its runs keep running. The REPL is busy while its own turn streams, so type it from another terminal (`skep chat --chat <id> --oneshot /stop`); the web chat has a Stop button on its working line, and a channel answers `/stop` too |
 | `/exit` | leave the REPL; a bare `exit` or `quit` also works |
 
 A typed `/approve` or `/deny` in the terminal is the decision itself and is
@@ -605,6 +607,7 @@ tool, channel or webhook reaches it.
 
 ```sh
 skep channel status
+skep channel admin CHANNEL USER_ID... | --clear
 skep provider list
 skep provider health
 skep provider presets
@@ -618,7 +621,10 @@ skep provider remove ID
 ```
 
 `channel status` prints one honest line per messenger channel: config state,
-secret presence, last delivery. `provider` reads the registered LLM providers
+secret presence, last delivery, whether it can confirm and who its admin is.
+`channel admin` names who may confirm every card from that messenger (ADR
+0067): each must already be an allowed user, naming one turns confirming on,
+and `--clear` removes them all. `provider` reads the registered LLM providers
 and their latest health probes. `presets` prints the built-in catalog (v108,
 Hermes parity: OpenRouter, DeepSeek, GLM, Kimi, MiniMax, Copilot, Bedrock and
 more) with each row's egress truth; `add --preset` fills protocol/endpoint/

@@ -1,0 +1,468 @@
+"""v130-F7: the channel command deck — one table, parsed before the model.
+
+A message whose first word is ``/name`` is answered here with no model turn
+(the v25 web deck's rule, server-side; Discord's ``/skep`` tree routes to the
+same handlers). Only a bare word counts, so a path like ``/home/me/x`` still
+reaches the Queen. Every caller has already passed the channel's admission
+(allow-listed chat AND person), and no handler carries allow-logic of its own
+(I5): verdicts go through ``channel_confirmation_decision`` like a button.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Any
+
+from ...roles import ROLE_LESS_CHAT_ROLE
+from . import ChannelConfig, ChannelMessage, channel_admin, state_emoji
+
+Reply = tuple[str, list[dict[str, object]]]
+
+_COMMAND = re.compile(r"^/([A-Za-z][A-Za-z0-9_-]*)(?:@\S+)?(?:\s+(.*))?$", re.DOTALL)
+
+
+def parse_command(text: str) -> tuple[str, str] | None:
+    """``("name", "args")`` for a leading bare ``/word`` (a Telegram group's
+    ``/word@bot`` too), None for anything else."""
+    match = _COMMAND.match(text.strip())
+    if match is None:
+        return None
+    return match.group(1).lower(), (match.group(2) or "").strip()
+
+
+@dataclass(frozen=True)
+class CommandContext:
+    engine: Any  # ChatEngine (runtime imports this module; avoid the cycle)
+    message: ChannelMessage
+    config: ChannelConfig
+    web_ui_url: str
+    status: Any = None  # LiveStatus for a deck command that runs a turn (/btw)
+
+    @property
+    def store(self) -> Any:
+        return self.engine.store
+
+    def bound_chat_id(self) -> str | None:
+        binding = self.store.channel_session(self.message.session_key)
+        return binding.chat_id if binding is not None else None
+
+
+def new_channel_chat(store: Any, message: ChannelMessage, title: str = "") -> Any:
+    """A fresh chat bound to this conversation — first contact and /new."""
+    chat = store.create_chat(
+        title=title or f"{message.channel} {message.identity.identity_id}",
+        model=None,
+        source=message.channel,
+        role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
+    )
+    store.bind_channel_session(
+        session_key=message.session_key,
+        channel=message.channel,
+        identity_id=message.identity.identity_id,
+        chat_id=chat.chat_id,
+    )
+    return chat
+
+
+def _admin_hint(ctx: CommandContext) -> str | None:
+    if ctx.config.admin_users:
+        return None
+    channel = ctx.message.channel
+    return (
+        f"No admin yet: to approve every card from here, run `skep channel admin {channel} "
+        f"{ctx.message.user_id or '<your user id>'}` at your desk (or Settings, Channels)."
+    )
+
+
+def status_text(store: Any) -> str:
+    """Running runs and what waits on the operator (Discord ``/skep status``)."""
+    runs = store.recent_runs(50)
+    active = [r for r in runs if r.state in ("running", "dispatched")]
+    approvals = store.pending_approvals()
+    lines = [f"skep: {len(active)} running · {len(approvals)} approval(s) waiting"]
+    for record in [r for r in runs if r.state == "pending_approval"][:3]:
+        lines.append(f"{state_emoji(record.state)} run {record.task_id[:13]}… needs your approval")
+    return "\n".join(lines)
+
+
+def runs_text(store: Any, count: int = 5) -> str:
+    runs = store.recent_runs(count)
+    if not runs:
+        return "skep: no runs yet"
+    lines = []
+    for record in runs:
+        line = f"{state_emoji(record.state)} {record.task_id[:13]}… {record.state}"
+        if record.summary:
+            line += f": {record.summary[:60]}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _cards(store: Any, chat_id: str | None) -> list[Any]:
+    """The cards a verdict can resolve here: the Queen's. A run's gate mirror
+    (source "gate") resolves on the run, and operator /command cards at the
+    desk — neither is counted, listed, or picked by a bare /approve."""
+    if chat_id is None:
+        return []
+    return [c for c in store.pending_chat_actions(chat_id) if c.source == "assistant"]
+
+
+def _help(ctx: CommandContext, _args: str) -> Reply:
+    lines = ["skep commands (answered here, no model turn):"]
+    lines += [f"/{name} — {summary}" for name, (summary, _) in COMMANDS.items()]
+    lines.append("Anything else goes to the Queen.")
+    if ctx.message.channel == "slack":  # Slack's client eats an unregistered /word
+        lines.append("On Slack, type a leading space: ' /stop', ' /approve'.")
+    hint = _admin_hint(ctx)
+    return "\n".join([*lines, hint] if hint else lines), []
+
+
+def _status(ctx: CommandContext, _args: str) -> Reply:
+    return status_text(ctx.store), []
+
+
+def _runs(ctx: CommandContext, args: str) -> Reply:
+    count = int(args) if args.isdigit() else 5
+    return runs_text(ctx.store, max(1, min(count, 20))), []
+
+
+def _approvals(ctx: CommandContext, _args: str) -> Reply:
+    chat_id = ctx.bound_chat_id()
+    cards = _cards(ctx.store, chat_id)
+    lines = [f"skep: {len(cards)} card(s) waiting in this conversation"]
+    lines += [f"  {card.action_id[:8]}  {card.tool}" for card in cards]
+    runs = ctx.store.pending_approvals()
+    lines.append(f"{len(runs)} run approval(s) waiting (review them in the web UI)")
+    return "\n".join(lines), []
+
+
+def _whoami(ctx: CommandContext, _args: str) -> Reply:
+    message, config = ctx.message, ctx.config
+    admin = channel_admin(message.user_id, config)
+    lines = [
+        f"channel: {message.channel}, conversation {message.identity.identity_id}",
+        f"you: {message.user_id or 'unknown'} (allowed)",
+        f"admin: {'yes, you can confirm every card here' if admin else 'no'}",
+        f"confirming from here: {'on' if config.channel_can_confirm else 'off'}",
+    ]
+    hint = _admin_hint(ctx)
+    return "\n".join([*lines, hint] if hint else lines), []
+
+
+def _new(ctx: CommandContext, args: str) -> Reply:
+    """v130-F8: start a fresh session here; the old chat stays whole (I8) and
+    its waiting cards stay resolvable from the web UI (I13)."""
+    old = ctx.bound_chat_id()
+    waiting = 0
+    if old is not None:
+        if _turn_running(old):
+            return "skep: a turn is running in this conversation; wait for it, then /new.", []
+        waiting = len(_cards(ctx.store, old))
+    chat = new_channel_chat(ctx.store, ctx.message, args[:80])
+    lines = [f"skep: new session started ({chat.title}). /sessions lists the earlier ones."]
+    if old is not None:
+        lines.append(_LEFT_BEHIND)
+    if waiting:
+        lines.append(f"The previous session keeps its {waiting} card(s) waiting in the web UI.")
+    return "\n".join(lines), []
+
+
+# Review S2: pushes follow a chat's live binding, so the chat left behind
+# reports to the desk only — say so rather than go quiet.
+_LEFT_BEHIND = "Results of runs started there now show in the web UI only (or /resume it)."
+
+
+def _turn_running(chat_id: str) -> bool:
+    from ..chat import chat_turn_lock
+
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return True
+    lock.release()
+    return False
+
+
+def _sessions(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F9: this conversation's chats, latest first — never another's."""
+    chat_ids = ctx.store.channel_session_chats(ctx.message.session_key)[:10]
+    if not chat_ids:
+        return "skep: no sessions in this conversation yet.", []
+    bound = ctx.bound_chat_id()
+    lines = ["skep: sessions in this conversation (/resume <n>):"]
+    for n, chat_id in enumerate(chat_ids, 1):
+        chat = ctx.store.get_chat(chat_id)
+        cards = len(_cards(ctx.store, chat_id))
+        line = f"{n}. {chat.title} · last active {chat.updated_at[:16].replace('T', ' ')}"
+        line += f" · {cards} card(s) · {chat_id[:8]}"
+        lines.append(f"{line} ← current" if chat_id == bound else line)
+    return "\n".join(lines), []
+
+
+def _resume(ctx: CommandContext, args: str) -> Reply:
+    """v130-F9: rebind to a chat from /sessions. Only this conversation's own
+    chats are reachable: a web chat or another conversation's may have read
+    private files the desk mirror withholds from a messenger (I6/I7)."""
+    chat_ids = ctx.store.channel_session_chats(ctx.message.session_key)
+    if args.isdigit():
+        n = int(args)
+        matches = [chat_ids[n - 1]] if 1 <= n <= len(chat_ids) else []
+    else:
+        matches = [c for c in chat_ids if args and c.startswith(args)]
+    if len(matches) != 1:
+        return f"skep: no session {args!r} in this conversation. /sessions lists them.", []
+    target = matches[0]
+    bound = ctx.bound_chat_id()
+    if target == bound:
+        return "skep: that is already the current session.", []
+    if bound is not None and _turn_running(bound):
+        return "skep: a turn is running in this conversation; wait for it, then /resume.", []
+    message = ctx.message
+    ctx.store.bind_channel_session(
+        session_key=message.session_key,
+        channel=message.channel,
+        identity_id=message.identity.identity_id,
+        chat_id=target,
+    )
+    chat = ctx.store.get_chat(target)
+    cards = len(_cards(ctx.store, target))
+    reply = f"skep: resumed {chat.title}; {cards} card(s) waiting there."
+    return (f"{reply}\n{_LEFT_BEHIND}" if bound is not None else reply), []
+
+
+def _title(ctx: CommandContext, args: str) -> Reply:
+    chat_id = ctx.bound_chat_id()
+    chat = ctx.store.get_chat(chat_id) if chat_id else None
+    if chat is None:
+        return "skep: no session here yet; say something first.", []
+    if not args:
+        return f"skep: this session is titled {chat.title}. /title <name> renames it.", []
+    ctx.store.set_chat_title(chat.chat_id, args[:80])
+    return f"skep: renamed this session to {args[:80]}.", []
+
+
+def _btw(ctx: CommandContext, args: str) -> Reply:
+    """v130-F13: the web deck's /btw — a read-only side question through the
+    ordinary channel turn: read tools only, never a card (I5), recorded in the
+    bound chat like the web's, and it may run beside a pending card."""
+    if not args:
+        return "skep: usage: /btw <question> (a read-only side question, no cards).", []
+    from .runtime import run_channel_turn  # runtime imports this module
+
+    return run_channel_turn(
+        ctx.engine,
+        replace(ctx.message, text=args),
+        web_ui_url=ctx.web_ui_url,
+        status=ctx.status,
+        read_only=True,
+    )
+
+
+def _stop(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F10: the running turn ends at its next step — asked without the
+    turn lock; its cards stay pending, dispatched runs keep running."""
+    from ..chat import NOTHING_TO_STOP, request_turn_stop
+
+    chat_id = ctx.bound_chat_id()
+    if chat_id is None or not request_turn_stop(chat_id, ctx.message.channel):
+        return f"skep: {NOTHING_TO_STOP}.", []
+    return "skep: stopping: the turn ends at its next step.", []
+
+
+# An id or its prefix as /approvals shows it — a word like "too" is a reason.
+_CARD_ID = re.compile(r"[0-9a-f-]{6,}")  # 6+: `/deny dead end` is a reason
+
+
+def _verdict(ctx: CommandContext, args: str, *, confirm: bool) -> Reply:
+    """v130-F11: typed /approve [id] and /deny [id] [reason] — the typed
+    command IS the decision, asked once (I7), through the same core every
+    button runs (``resolve_channel_verdict``: the channel gate with the
+    admin, then the card's own conversation), so no allow-logic lives here
+    (I5). The id stays optional (v51: id-typing is where approvals go to
+    die); bare, exactly one waiting card resolves, several resolve none."""
+    from .runtime import resolve_channel_verdict
+
+    chat_id = ctx.bound_chat_id()
+    pending = _cards(ctx.store, chat_id)
+    first, _, rest = args.partition(" ")
+    want = first.lower() if _CARD_ID.fullmatch(first.lower()) else ""
+    reason = rest.strip() if want else args
+    if want:
+        matches = [card for card in pending if card.action_id.startswith(want)]
+        if len(matches) > 1:
+            return f"skep: {want} is ambiguous here; type more of the id.", []
+        if matches:
+            action_id = matches[0].action_id
+        elif ctx.store.get_chat_action(want) is not None:
+            action_id = want  # a full id: the core says whose card it is
+        else:
+            return (
+                f"skep: no card {want} is waiting in this conversation. /approvals lists them.",
+                [],
+            )
+    elif not pending:
+        return "skep: no card is waiting in this conversation.", []
+    elif len(pending) > 1:
+        verb = "approve" if confirm else "deny"
+        lines = [f"skep: {len(pending)} cards are waiting here, nothing was resolved. Name one:"]
+        lines += [f"  /{verb} {card.action_id[:8]}  {card.tool}" for card in pending]
+        return "\n".join(lines), []
+    else:
+        action_id = pending[0].action_id
+    text, cards = resolve_channel_verdict(
+        ctx.engine,
+        action_id,
+        confirm=confirm,
+        identity=ctx.message.identity,
+        user_id=ctx.message.user_id,
+        web_ui_url=ctx.web_ui_url,
+    )
+    if reason and not confirm:  # no verdict field holds one; say so, store nothing
+        text += "\n(Your reason is not recorded: a verdict carries no reason.)"
+    return text, cards
+
+
+def _approve(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=True)
+
+
+def _deny(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=False)
+
+
+def _compact(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: run the ADR 0037 deterministic compaction now. It folds only
+    what overflows the replay budget (no model call; rows never change, I8),
+    so a chat that fits is left alone and says so."""
+    from ..chat import chat_turn_lock
+
+    chat_id = ctx.bound_chat_id()
+    if chat_id is None:
+        return "skep: no session here yet; nothing to compact.", []
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return "skep: a turn is running in this conversation; wait for it, then /compact.", []
+    try:
+        before = ctx.engine.context_view(chat_id)
+        ctx.engine._compact_if_needed(chat_id)
+        after = ctx.engine.context_view(chat_id)
+    finally:
+        lock.release()
+    if after == before:
+        return (
+            f"skep: nothing to compact: the chat fits its replay budget ({before['percent']}% "
+            "of the window). Compaction folds only what overflows.",
+            [],
+        )
+    return (
+        f"skep: compacted. Context {before['percent']}% → {after['percent']}% of the window "
+        f"(replay {before['history_chars']:,} → {after['history_chars']:,} chars, "
+        f"digest {after['digest_chars']:,} chars). Every message stays in the transcript.",
+        [],
+    )
+
+
+def _usage_line(label: str, store: Any, chat_id: str | None = None) -> str:
+    five = store.llm_usage_totals(hours=5, chat_id=chat_id)
+    week = store.llm_usage_totals(hours=24 * 7, chat_id=chat_id)
+    return (
+        f"{label}: 5h {five['total_tokens']:,} tok ({five['requests']} req) · "
+        f"7d {week['total_tokens']:,} tok ({week['requests']} req)"
+    )
+
+
+def _usage(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: the v74 tally (``/api/llm/usage``), this chat's share too."""
+    chat_id = ctx.bound_chat_id()
+    lines = ["skep usage, counted from skep's own requests (other clients are not seen):"]
+    lines.append(_usage_line("all chats", ctx.store))
+    if chat_id is not None:
+        lines.append(_usage_line("this chat", ctx.store, chat_id))
+    return "\n".join(lines), []
+
+
+def _model(ctx: CommandContext, args: str) -> Reply:
+    """v130-F12: show-only — the chat's model or the default. Changing it is a
+    desk act (the composer's model select, ``skep chat`` /model)."""
+    if args:
+        return "skep: /model only shows the model here; change it at the desk.", []
+    from ..llm import llm_config_view
+
+    chat_id = ctx.bound_chat_id()
+    chat = ctx.store.get_chat(chat_id) if chat_id else None
+    if chat is not None and chat.model:
+        return f"skep: this chat: {chat.model} (override)", []
+    default = llm_config_view(ctx.store, ctx.engine.home)["default_model"]
+    return f"skep: default: {default or 'not set (Settings)'}", []
+
+
+Handler = Callable[[CommandContext, str], Reply]
+
+COMMANDS: dict[str, tuple[str, Handler]] = {
+    "help": ("this list", _help),
+    "new": ("start a fresh session here (/new trip planning)", _new),
+    "sessions": ("this conversation's earlier sessions", _sessions),
+    "resume": ("go back to a session from /sessions (/resume 2)", _resume),
+    "title": ("show or rename this session (/title trip planning)", _title),
+    "btw": ("a read-only side question, even beside a pending card (/btw what is X?)", _btw),
+    "status": ("what is running and what waits on you", _status),
+    "runs": ("the latest runs (/runs 10)", _runs),
+    "approvals": ("cards waiting in this conversation", _approvals),
+    "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
+    "stop": ("stop the turn running here (cards stay, runs keep running)", _stop),
+    "approve": ("confirm the waiting card (/approve 1a2b3c4d when several wait)", _approve),
+    "deny": ("deny the waiting card (/deny 1a2b3c4d)", _deny),
+    "compact": ("fold this chat's overflow into its digest now", _compact),
+    "usage": ("tokens skep spent: this chat and all, 5h and 7d", _usage),
+    "model": ("which model answers here (change it at the desk)", _model),
+}
+# Telegram sends /start when someone first opens the bot.
+ALIASES: dict[str, str] = {"start": "help"}
+
+
+# Commands that run the model (a side turn, a verdict's continuation) join the
+# conversation's turn queue; every other command answers on the inbound loop,
+# so a /stop is never stuck behind the turn it means to stop (v130-F10).
+MODEL_COMMANDS = frozenset({"btw", "approve", "deny"})
+
+
+def answered_inline(text: str) -> bool:
+    """True for a deck command the inbound loop answers at once."""
+    command = parse_command(text)
+    return command is not None and ALIASES.get(command[0], command[0]) not in MODEL_COMMANDS
+
+
+_TELEGRAM_NAME = re.compile(r"[a-z0-9_]{1,32}")
+_DISCORD_NAME = re.compile(r"[-_a-z0-9]{1,32}")
+
+
+def telegram_menu() -> list[dict[str, str]]:
+    """v130-F14: Telegram's ``/`` menu (setMyCommands), from the one table."""
+    return [
+        {"command": name, "description": (summary or name)[:256]}
+        for name, (summary, _) in COMMANDS.items()
+        if _TELEGRAM_NAME.fullmatch(name)
+    ]
+
+
+def discord_subcommands() -> list[dict[str, object]]:
+    """v130-F14: Discord ``/skep`` subcommands, from the one table; each takes
+    an optional free-text ``args`` (``/skep runs args:10``)."""
+    return [
+        {
+            "type": 1,  # SUB_COMMAND
+            "name": name,
+            "description": (summary or name)[:100],
+            "options": [{"type": 3, "name": "args", "description": "arguments", "required": False}],
+        }
+        for name, (summary, _) in COMMANDS.items()
+        if _DISCORD_NAME.fullmatch(name)
+    ]
+
+
+def run_command(ctx: CommandContext, name: str, args: str) -> Reply:
+    entry = COMMANDS.get(ALIASES.get(name, name))
+    if entry is None:
+        return f"skep: unknown command /{name}. /help lists them.", []
+    return entry[1](ctx, args)

@@ -87,7 +87,16 @@ from .actions import (
     workon_preview,
 )
 from .auth import annotate_claim, ensure_token, install_auth, principal
-from .channels.runtime import DiscordGateway, TelegramPoller, add_slack_routes
+from .channels.runtime import (
+    DISCORD_STATUS_OPS,
+    SLACK_STATUS_OPS,
+    TELEGRAM_STATUS_OPS,
+    DiscordGateway,
+    TelegramPoller,
+    _default_telegram_set_commands,
+    _default_telegram_typing,
+    add_slack_routes,
+)
 from .chat import (
     GET_RUN_REPEAT_DELAY_SECONDS,
     ChatEngine,
@@ -536,6 +545,9 @@ def create_app(
             TelegramPoller(
                 chat_engine,
                 web_ui_url=web_ui_url,
+                status_ops=TELEGRAM_STATUS_OPS,  # v130-F6
+                typing=_default_telegram_typing,
+                set_commands=_default_telegram_set_commands,  # v130-F14
                 # v130: set by serve_cmds before the server starts; absent
                 # under a test client, where /update refuses.
                 request_restart=getattr(started.state, "request_restart", None),
@@ -548,7 +560,7 @@ def create_app(
         # v37-F4: the Discord gateway thread; idles cheaply (no connection
         # attempted) until the channel is enabled with a bot token.
         gateway = (
-            DiscordGateway(chat_engine, web_ui_url=web_ui_url)
+            DiscordGateway(chat_engine, web_ui_url=web_ui_url, status_ops=DISCORD_STATUS_OPS)
             if channels_on and chat_engine is not None
             else None
         )
@@ -1361,7 +1373,13 @@ def create_app(
         sleep=chat_sleep,
     )
     # v26-F4: signature-authenticated Slack webhooks over the same engine.
-    add_slack_routes(app, chat_engine, web_ui_url=web_ui_url)
+    # v130-F6: the live status line only where channels run for real.
+    add_slack_routes(
+        app,
+        chat_engine,
+        web_ui_url=web_ui_url,
+        status_ops=SLACK_STATUS_OPS if channels_on else None,
+    )
     # v44-F3: inbound event webhooks (GitHub/generic) — signature-authed
     # notifications into a bound chat; /hooks/* sits outside the token gate.
     add_webhook_routes(app, run_store=run_store, holder=holder)

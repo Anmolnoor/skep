@@ -239,7 +239,9 @@ Operate skep from Telegram, Slack, or Discord: enable a channel in Settings,
 allow-list your chat id, paste the bot token, and an allow-listed message runs
 the same Queen turn — with the same approval gates — as the web composer. When
 a channel is confirm-enabled, low-risk actions resolve inline; shell commands,
-policy changes, and landings are never confirmable from a messenger. See
+policy changes, and landings are never confirmable from a messenger, unless you
+name yourself that channel's admin (`skep channel admin`) so every card reaches
+your phone. See
 [`docs/how-it-works.md`](docs/how-it-works.md#messenger-channels).
 
 ## Status

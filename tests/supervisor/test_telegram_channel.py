@@ -10,7 +10,6 @@ from skep.supervisor.serve.channels.telegram import (
     handle_callback,
     normalize_callback,
     normalize_inbound,
-    poll_updates,
 )
 
 _CONFIG = ChannelConfig(
@@ -40,15 +39,13 @@ def test_unknown_chat_fails_closed() -> None:
 
 
 def test_poll_drops_unlisted_updates() -> None:
-    routed = poll_updates(
-        [
-            {"message": {"chat": {"id": 42}, "from": {"id": 42}, "text": "ok"}},
-            {"message": {"chat": {"id": 99}, "text": "blocked"}},
-            {"edited_message": {"chat": {"id": 42}}},  # not a message -> dropped
-        ],
-        _CONFIG,
-    )
-    assert [m.text for m in routed] == ["ok"]
+    updates: list[dict[str, object]] = [
+        {"message": {"chat": {"id": 42}, "from": {"id": 42}, "text": "ok"}},
+        {"message": {"chat": {"id": 99}, "text": "blocked"}},
+        {"edited_message": {"chat": {"id": 42}}},  # not a message -> dropped
+    ]
+    routed = [normalize_inbound(u, _CONFIG).message for u in updates]
+    assert [m.text for m in routed if m is not None] == ["ok"]
 
 
 def test_confirmation_always_points_to_web_ui() -> None:

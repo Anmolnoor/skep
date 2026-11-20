@@ -218,8 +218,12 @@ are live entrances (v26, Discord since v37): an
 allow-listed conversation routes into the exact same Queen chat →
 confirmation → audit flow as the web UI. Unknown identities fail closed. Only
 four low-risk action classes (`dispatch_run`, `scheduled_result_ack`,
-`read_url`, `start_research`) are ever confirmable from a channel — shell commands, policy changes, and patch
-landings always route to the web UI, whatever the channel config says.
+`read_url`, `start_research`) are confirmable from a channel by its allowed
+users — shell commands, policy changes, and patch landings route to the web UI.
+The one exception is a **channel admin** the operator names at the desk
+(`skep channel admin <channel> <user id>` or Settings; ADR 0067): that person
+may confirm every card from the messenger, HIGH ones included, and the server
+re-checks the admin on every confirm.
 When the channel is confirm-enabled and the identity is allow-listed, Slack
 confirms via signed Block Kit buttons, Discord via embed buttons or ✅/❌
 reactions, and Telegram via inline keyboards (v41 — a press is admitted only

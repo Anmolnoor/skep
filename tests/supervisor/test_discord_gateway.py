@@ -86,6 +86,7 @@ class _DiscordHarness:
         self.deferred_acks: list[tuple[str, str]] = []
         self.followups: list[tuple[str, str, str]] = []
         self.spawned_inline = 0
+        self.deferred: list[Any] | None = None
         self.threads: list[tuple[str, str, str, str]] = []
         self.thread_id: str | None = "t-900"
         self.attachment_fetches: list[str] = []
@@ -137,6 +138,9 @@ class _DiscordHarness:
         # ORDER is still honest — _handle_interaction defers the ack before
         # this runs.
         self.spawned_inline += 1
+        if self.deferred is not None:  # v130-F10: a turn still waiting to run
+            self.deferred.append(work)
+            return
         work()
 
     def _register(self, token: str, application_id: str, commands: list[dict[str, object]]) -> int:
@@ -392,6 +396,9 @@ def test_discord_button_confirms_a_low_risk_dispatch(
             chat = store.create_chat(
                 title="discord 42", model=None, role="builder"
             )  # may dispatch (P3-6)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",
@@ -427,6 +434,111 @@ def test_discord_button_confirms_a_low_risk_dispatch(
             assert harness.store.recent_runs(5), "the confirmed dispatch_run must dispatch"
             assert harness.deferred_acks, "the click must be acked before any work"
             assert "dispatched" in harness.followups[-1][2]
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_discord_button_in_an_allowlisted_channel_refuses_another_chats_card(
+    config: SupervisorConfig,
+) -> None:
+    """v130-F2: an allow-listed channel is not a pass for every card — a
+    press resolves only a card of the chat this channel is bound to."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            bound = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=bound.chat_id
+            )
+            other = store.create_chat(title="desk", model=None)
+            action_id = store.add_chat_action(
+                other.chat_id, tool="read_url", args={"url": "https://example.com/b"}
+            )
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            interaction = json.dumps(
+                {
+                    "op": 0,
+                    "t": "INTERACTION_CREATE",
+                    "s": 2,
+                    "d": {
+                        "id": "i-9",
+                        "token": "itok-9",
+                        "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
+                        "data": {"custom_id": f"deny:{action_id}"},
+                    },
+                }
+            )
+            harness.script(HELLO, READY_APP, interaction)
+            assert harness.gateway.session_once() is True
+            assert "belongs to another conversation" in harness.followups[-1][2]
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_a_card_chained_after_a_discord_verdict_keeps_its_buttons(
+    config: SupervisorConfig,
+) -> None:
+    """v130-F4: the continuation of a button verdict raises another card — it
+    reaches Discord as a card with its own stamped buttons, not dropped until
+    the next message re-sends it (the v129-F3 Telegram rule)."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            ollama.script_tool_call("read_url", {"url": "https://example.com/next"})
+            interaction = json.dumps(
+                {
+                    "op": 0,
+                    "t": "INTERACTION_CREATE",
+                    "s": 2,
+                    "d": {
+                        "id": "i-7",
+                        "token": "itok-7",
+                        "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
+                        "data": {"custom_id": f"deny:{action_id}"},
+                    },
+                }
+            )
+            harness.script(HELLO, READY_APP, interaction)
+            harness.gateway.session_once()
+            (chained,) = harness.store.pending_chat_actions(chat.chat_id)
+            assert chained.tool == "read_url"
+            assert f"confirm:{chained.action_id}" in json.dumps(
+                [p.get("components") for _, _, p in harness.sent]
+            )
         finally:
             harness.close()
     finally:
@@ -886,7 +998,7 @@ def _slash(sub: str, channel_id: str = "42", *, user_id: str = "u1", seq: int = 
 
 
 def test_discord_registers_the_skep_tree_once_after_ready(config: SupervisorConfig) -> None:
-    """The bulk-overwrite PUT: four subcommands, once per session; a 403
+    """The bulk-overwrite PUT: the deck's subcommands, once per session; a 403
     teaches the missing invite scope and never breaks the session."""
     import logging as logging_mod
 
@@ -907,7 +1019,8 @@ def test_discord_registers_the_skep_tree_once_after_ready(config: SupervisorConf
             assert root["name"] == "skep"
             options = root["options"]
             assert isinstance(options, list)
-            assert [o["name"] for o in options] == ["status", "runs", "approve", "deny"]
+            # v130-F14: generated from the deck (test_channel_menus pins it).
+            assert {"status", "runs", "approve", "deny"} <= {o["name"] for o in options}
         finally:
             harness.close()
 
@@ -993,9 +1106,10 @@ def test_discord_slash_status_and_runs_answer_without_a_model_turn(
             store.close()
         harness = _DiscordHarness(config)
         try:
-            harness.script(HELLO, READY, _slash("status", seq=2), _slash("runs", seq=3))
+            harness.script(HELLO, READY_APP, _slash("status", seq=2), _slash("runs", seq=3))
             assert harness.gateway.session_once() is True
-            status_ack, runs_ack = harness.acks[0][2], harness.acks[1][2]
+            # v130-F14: deck commands answer via the deferred follow-up.
+            status_ack, runs_ack = harness.followups[0][2], harness.followups[1][2]
             assert "1 approval(s) waiting" in status_ack
             assert "needs your approval" in status_ack and "🟡" in status_ack
             assert "🟢" in runs_ack and done.task_id[:13] in runs_ack
@@ -1203,9 +1317,9 @@ def test_button_click_is_acked_before_the_verdict_runs(
             timeline.append("deferred-ack")
             return real_deferred(interaction_id, interaction_token)
 
-        def verdict(*_a: object, **_k: object) -> str:
+        def verdict(*_a: object, **_k: object) -> tuple[str, list[dict[str, object]]]:
             timeline.append("verdict")
-            return "skep: done."
+            return "skep: done.", []
 
         harness.gateway._ack_deferred = deferred
         harness.gateway._resolve_verdict = verdict  # type: ignore[method-assign]
@@ -1255,7 +1369,7 @@ def test_followup_failure_falls_back_to_a_channel_message(
     harness = _DiscordHarness(config)
     try:
         harness.gateway._resolve_verdict = (  # type: ignore[method-assign]
-            lambda *a, **k: "skep: late but honest."
+            lambda *a, **k: ("skep: late but honest.", [])
         )
         harness.gateway._followup = lambda *a: False
         interaction = json.dumps(
@@ -1399,10 +1513,41 @@ def test_with_two_cards_waiting_a_reaction_or_slash_verdict_resolves_neither(
             reply = str(
                 harness.sent[-1][2]["content"] if path == "reaction" else harness.followups[-1][2]
             )
-            assert "2 cards are waiting" in reply and "buttons" in reply
+            assert "2 cards are waiting" in reply
+            # v130-F11: /skep approve is the deck's — it names each card's id
+            assert ("buttons" if path == "reaction" else f"/approve {ids[0][:8]}") in reply
             for action_id in ids:
                 waiting = harness.store.get_chat_action(action_id)
                 assert waiting is not None and waiting.status == "proposed"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_discord_deck_is_answered_while_a_turn_waits(config: SupervisorConfig) -> None:
+    """v130-F10: turns leave the gateway loop; the deck is answered inline,
+    so a /stop never queues behind the turn it means to stop."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama)
+        harness = _DiscordHarness(config)
+        try:
+            harness.deferred = []
+            ollama.script_reply("hello from the hive")
+            harness.script(
+                HELLO,
+                READY,
+                _message_create("42", "status?"),
+                _message_create("42", "/stop", seq=3),
+            )
+            assert harness.gateway.session_once() is True
+            assert len(harness.deferred) == 1  # the turn has not run yet
+            assert "nothing to stop" in str(harness.sent[-1][2])
+            harness.deferred.pop()()
+            assert harness.sent[-1][2] == {"content": "hello from the hive"}
         finally:
             harness.close()
     finally:

@@ -1,9 +1,9 @@
 # skep in your pocket — the mobile story (v72-F6)
 
-**Can I approve from my phone? Yes** — for exactly four action classes,
-through a messenger binding. Everything else deliberately routes to the
-web UI, and the phone message carries that URL so you always know which
-kind you are holding.
+**Can I approve from my phone? Yes** — four low-risk action classes for
+every allowed user, and **every card** for the channel's admin (v130-F5,
+ADR 0067). Without an admin, everything else routes to the web UI, and the
+phone message carries that URL and how to name an admin.
 
 There is no skep app, on purpose: the Discord and Telegram apps you
 already carry ARE the remote face (I11 — remote channels are outbound
@@ -19,6 +19,31 @@ messenger is a doorway to it.
    as an entrance, never a trigger).
 3. Both the chat AND the pressing user must be allow-listed; a bystander
    in a group chat fails closed (v41-F2).
+4. Away from home a lot? Name yourself the channel's admin so every card
+   reaches you: `skep channel admin telegram <your user id>` (or Settings →
+   channels → admin users). The admin must already be an allowed user, and
+   naming one turns confirming on. `--clear` removes it.
+
+## While skep works (v130-F6)
+
+A message turn shows one status line in the conversation — "🤔 thinking…",
+then "🔧 working: <tool>…" as each tool runs — edited in place and deleted
+when the reply lands. Telegram and Discord also show "typing…" (Slack's Web
+API has no bot typing, so the status line is the signal there). The status
+message is sent silently, and a failing status call never delays the reply.
+
+## The channel deck (v130)
+
+A message that starts with a bare `/word` is answered by skep itself, with
+no model turn (`/help` lists them; Telegram's `/` menu and Discord's
+`/skep` subcommands are generated from the same table). `/stop` ends the
+running turn at its next step (its cards stay, runs keep running).
+`/new`, `/sessions`, `/resume 2` and `/title` manage this conversation's
+own sessions; `/resume` reaches only chats this conversation started.
+`/btw <question>` asks a read-only side question. On Slack, whose client takes
+any `/word` as its own slash command, start the message with a space
+(` /stop`). A photo sent to the
+Telegram bot reaches the model with its caption, as Discord images do.
 
 ## Is it actually working? (v87-F3)
 
@@ -38,8 +63,8 @@ those words, everywhere, instead of presenting as broken.
 
 ## What your phone can confirm
 
-`CHANNEL_CONFIRMABLE_ACTIONS` is a pinned frozen set — these four, no
-setting can widen it:
+`CHANNEL_CONFIRMABLE_ACTIONS` is a pinned frozen set — these four, for
+every allowed user (only naming an admin widens it, for that person alone):
 
 | action | what you're approving |
 |---|---|
@@ -50,17 +75,27 @@ setting can widen it:
 
 Cards arrive as embeds with buttons (Discord) or inline keyboards /
 Block Kit buttons (Telegram/Slack); ✅/❌ reactions work on Discord.
+Typing `/approve` or `/deny` works on every channel too (v130): bare, it
+resolves the one waiting card (several resolve none and list their ids);
+`/approve 1a2b3c4d` names one by the prefix `/approvals` shows. A typed
+verdict passes the same gate as the button. `/help` lists the rest of the
+channel deck (`/compact`, `/usage`, `/model` and more); none of it reaches
+the model.
 Timeouts DENY, never confirm (I6) — an unanswered card on your phone is
 a card that did nothing.
 
-## What your phone can never confirm
+## What only the admin can confirm from a phone
 
 Shell allowlists, policy changes, patch landings, git/PR mutations, the
-forge, moderation verbs — **web UI always**. The Discord embed for such
-a card carries its web-UI URL (v66), so the phone tells you it is
-waiting and where; it just cannot pull that trigger. Discord moderation
-verbs are additionally never confirmable from Discord itself — a
-hijacked account must not approve its own moderation (v44-F5).
+forge, moderation verbs, and any HIGH-risk card — **web UI** for everyone
+except the channel admin. Without an admin, the Discord embed for such a
+card carries its web-UI URL (v66) and the line that names an admin. The
+admin's press is recorded as `channel:<channel>:<chat>:admin:<user>`, and
+the server checks the stored admin list again on every confirm, so
+`skep channel admin <channel> --clear` takes effect on the next press.
+The trade (ADR 0067): a stolen admin messenger account can approve what the
+admin can. Name an admin only on an account with its own second factor.
+A fold too long to show whole on a phone stays web-UI-only for everyone.
 
 ## Updating skep from your phone (v130)
 

@@ -1153,6 +1153,26 @@ class RunStore:
                 "ALTER TABLE channel_configs ADD COLUMN notification_level"
                 " TEXT NOT NULL DEFAULT 'all'"
             )
+        if "admin_users_json" not in channel_columns:
+            # v130-F5 (ADR 0067): who may confirm every card from the channel.
+            self._conn.execute(
+                "ALTER TABLE channel_configs ADD COLUMN admin_users_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        # v130-F8: /sessions lists a conversation's chats; existing bindings
+        # seed it so a pre-v130 conversation lists its current chat too.
+        has_history = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'channel_session_history'"
+        ).fetchone()
+        if has_history is None:  # once: a read-only open must write nothing
+            self._conn.execute(
+                "CREATE TABLE channel_session_history (session_key TEXT NOT NULL,"
+                " chat_id TEXT NOT NULL, bound_at TEXT NOT NULL,"
+                " PRIMARY KEY (session_key, chat_id))"
+            )
+            self._conn.execute(
+                "INSERT INTO channel_session_history (session_key, chat_id, bound_at)"
+                " SELECT session_key, chat_id, created_at FROM channel_sessions"
+            )
         session_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_sessions)")
         }
@@ -3849,11 +3869,13 @@ class RunStore:
             auto_thread=bool(row[5]),
             allowed_users=tuple(json.loads(str(row[6]))),
             notification_level=str(row[7]),
+            admin_users=tuple(json.loads(str(row[8]))),
         )
 
     _CHANNEL_CONFIG_COLUMNS = (
         "channel, enabled, channel_can_confirm, allowed_identities_json,"
-        " require_mention, auto_thread, allowed_users_json, notification_level"
+        " require_mention, auto_thread, allowed_users_json, notification_level,"
+        " admin_users_json"
     )
 
     @_locked
@@ -3870,7 +3892,8 @@ class RunStore:
         self._conn.execute(
             "INSERT INTO channel_configs (channel, enabled, channel_can_confirm,"
             " allowed_identities_json, require_mention, auto_thread, allowed_users_json,"
-            " notification_level, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " notification_level, admin_users_json, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(channel) DO UPDATE SET enabled = excluded.enabled,"
             " channel_can_confirm = excluded.channel_can_confirm,"
             " allowed_identities_json = excluded.allowed_identities_json,"
@@ -3878,6 +3901,7 @@ class RunStore:
             " auto_thread = excluded.auto_thread,"
             " allowed_users_json = excluded.allowed_users_json,"
             " notification_level = excluded.notification_level,"
+            " admin_users_json = excluded.admin_users_json,"
             " updated_at = excluded.updated_at",
             (
                 config.channel,
@@ -3888,6 +3912,7 @@ class RunStore:
                 1 if config.auto_thread else 0,
                 json.dumps(list(config.allowed_users)),
                 config.notification_level,
+                json.dumps(list(config.admin_users)),
                 _now(),
             ),
         )
@@ -4045,14 +4070,35 @@ class RunStore:
     def bind_channel_session(
         self, *, session_key: str, channel: str, identity_id: str, chat_id: str
     ) -> ChannelSessionBinding:
+        now = _now()
         self._conn.execute(
             "INSERT INTO channel_sessions (session_key, channel, identity_id, chat_id,"
             " created_at) VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(session_key) DO UPDATE SET chat_id = excluded.chat_id",
-            (session_key, channel, identity_id, chat_id, _now()),
+            (session_key, channel, identity_id, chat_id, now),
+        )
+        # v130-F8: every chat a conversation was ever bound to, for /sessions.
+        # v130-F9: REPLACE takes a fresh rowid, so a /resume in the same second
+        # as the last bind still lists first (bound_at ties break on rowid).
+        self._conn.execute(
+            "INSERT OR REPLACE INTO channel_session_history (session_key, chat_id, bound_at)"
+            " VALUES (?, ?, ?)",
+            (session_key, chat_id, now),
         )
         self._conn.commit()
         return ChannelSessionBinding(channel=channel, identity_id=identity_id, chat_id=chat_id)
+
+    @_locked
+    def channel_session_chats(self, session_key: str) -> list[str]:
+        """v130-F8: the chats this conversation was bound to, latest first —
+        only those that still exist (a chat deleted in the web UI is gone)."""
+        rows = self._conn.execute(
+            "SELECT h.chat_id FROM channel_session_history h JOIN chats c"
+            " ON c.chat_id = h.chat_id WHERE h.session_key = ?"
+            " ORDER BY h.bound_at DESC, h.rowid DESC",
+            (session_key,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
 
     # -- webhooks (v44-F3): inbound event subscriptions ------------------------
 

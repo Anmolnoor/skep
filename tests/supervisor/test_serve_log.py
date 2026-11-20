@@ -14,6 +14,7 @@ from pathlib import Path
 from skep.supervisor.serve.serve_cmds import (
     SERVE_LOG_BACKUPS,
     SERVE_LOG_MAX_BYTES,
+    access_token_line,
     serve_log_config,
     write_boot_banner,
 )
@@ -66,6 +67,18 @@ def test_boot_banner_lands_in_the_log_and_never_the_token(tmp_path: Path) -> Non
     assert lines == [banner, banner]
     # The token is stdout-only — the log file is not a second credential store.
     assert "access token" not in log_path.read_text(encoding="utf-8")
+
+
+def test_token_prints_only_to_a_terminal(tmp_path: Path) -> None:
+    """stdout is a log under systemd, docker and `>> serve.log`: the operator's
+    real serve.log held six copies of the token. Off a terminal, name the file."""
+    from skep.supervisor.serve.auth import TOKEN_FILE
+
+    piped = access_token_line(tmp_path, interactive=False)
+    token = (tmp_path / TOKEN_FILE).read_text(encoding="utf-8").strip()  # still minted
+    assert token and token not in piped
+    assert str(tmp_path / TOKEN_FILE) in piped
+    assert token in access_token_line(tmp_path, interactive=True)
 
 
 def test_serve_env_loads_names_without_overriding_the_process(tmp_path: Path) -> None:

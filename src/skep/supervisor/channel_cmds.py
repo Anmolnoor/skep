@@ -1,6 +1,7 @@
 """v87-F3: the ``skep channel status`` CLI — one honest line per channel.
 
     skep channel status
+    skep channel admin <channel> <user id>...   (v130-F5; --clear removes)
 
 The 2026-07-23 field test: Discord "did not work at all" — because no
 channel had ever been configured on the machine, and no surface said so.
@@ -48,12 +49,54 @@ def cmd_channel_status(args: argparse.Namespace) -> int:
             line = f"{channel:<9} {state}; secret: {secret}; last delivery: {delivery}"
             if row is not None:  # v122-F3: off = the phone can confirm no card
                 line += f"; can_confirm: {'on' if row.channel_can_confirm else 'off'}"
+                line += f"; admin: {', '.join(row.admin_users) or 'none'}"  # v130-F5
             if channel == "discord":
                 gateway = store.get_setting("channel_gateway_state:discord")
                 line += f"; gateway: {_breadcrumb(gateway, key='state')}"
             print(line)
     finally:
         store.close()
+    return 0
+
+
+def cmd_channel_admin(args: argparse.Namespace) -> int:
+    """v130-F5 (ADR 0067): name who may confirm EVERY card from a channel —
+    the operator's own act, at the desk, so an off-network phone carries all
+    cards. Each admin must already be an allowed user."""
+    from .cli_cmds import build_config
+    from .serve.channels import CHANNELS, with_admins
+    from .store import RunStore
+
+    if args.channel not in CHANNELS:
+        print(f"unknown channel {args.channel!r}; known: {', '.join(sorted(CHANNELS))}")
+        return 1
+    users = [] if args.clear else list(args.users)
+    if not users and not args.clear:
+        print("name at least one user id, or pass --clear to remove every admin")
+        return 1
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        current = store.get_channel_config(args.channel)
+        if current is None:
+            print(f"{args.channel} was never configured — set it up in Settings first")
+            return 1
+        try:
+            updated = with_admins(current, users, naming=bool(users))
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        store.upsert_channel_config(updated)
+    finally:
+        store.close()
+    if users:
+        print(
+            f"{args.channel} admin: {', '.join(updated.admin_users)} — every card in this "
+            "channel now carries buttons; only an admin's press confirms the ones outside the "
+            "low-risk four (confirming is on)"
+        )
+    else:
+        print(f"{args.channel}: no admin — cards outside the low-risk four need the web UI again")
     return 0
 
 
@@ -81,3 +124,12 @@ def register_channel_commands(
         "status", help="one honest line per channel: config, secret, last delivery"
     )
     status_p.set_defaults(func=cmd_channel_status)
+
+    admin_p = channel_sub.add_parser(
+        "admin",
+        help="name who may confirm every card from a channel (v130-F5); --clear removes",
+    )
+    admin_p.add_argument("channel", help="telegram, discord or slack")
+    admin_p.add_argument("users", nargs="*", help="user ids (must be in allowed_users)")
+    admin_p.add_argument("--clear", action="store_true", help="remove every admin")
+    admin_p.set_defaults(func=cmd_channel_admin)

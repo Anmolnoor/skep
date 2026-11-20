@@ -22,6 +22,8 @@ from . import (
     ChannelIdentity,
     ChannelMessage,
     NormalizedInbound,
+    admin_nudge_line,
+    channel_admin,
     channel_confirmation_decision,
     confirm_off_line,
     identity_allowlisted,
@@ -32,15 +34,46 @@ from . import (
 CHANNEL = "telegram"
 
 
+def image_file_id(message: Mapping[str, object], max_bytes: int) -> str | None:
+    """v130-F15: the file to fetch for a photo (the largest size within
+    ``max_bytes``; Telegram sends several) or an image/* document — None for
+    anything else. A missing ``file_size`` passes here; the fetch re-checks."""
+
+    def fits(item: Mapping[str, object]) -> bool:
+        size = item.get("file_size")
+        return not isinstance(size, int) or size <= max_bytes
+
+    photo = message.get("photo")
+    if isinstance(photo, list):
+        sizes = [p for p in photo if isinstance(p, dict) and p.get("file_id") and fits(p)]
+        if sizes:
+            best = max(sizes, key=lambda p: int(p.get("width") or 0) * int(p.get("height") or 0))
+            return str(best["file_id"])
+    document = message.get("document")
+    if (
+        isinstance(document, dict)
+        and str(document.get("mime_type") or "").startswith("image/")
+        and document.get("file_id")
+        and fits(document)
+    ):
+        return str(document["file_id"])
+    return None
+
+
 def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> NormalizedInbound:
     message = update.get("message")
     if not isinstance(message, dict):
         return NormalizedInbound(None, "channel.reject.malformed_payload")
     chat = message.get("chat")
     chat_id = str(chat.get("id")) if isinstance(chat, dict) else ""
-    text = str(message.get("text") or "").strip()
+    # v130-F15: a photo's words ride in caption; a bare photo is still a message.
+    text = str(message.get("text") or message.get("caption") or "").strip()
     identity = ChannelIdentity(channel=CHANNEL, identity_id=chat_id)
-    if not chat_id or not text:
+    document = message.get("document")
+    has_image = bool(message.get("photo")) or (
+        isinstance(document, dict) and str(document.get("mime_type") or "").startswith("image/")
+    )
+    if not chat_id or not (text or has_image):
         return NormalizedInbound(None, "channel.reject.malformed_payload")
     if not identity_allowlisted(identity, config.allowed_identities):
         return NormalizedInbound(
@@ -58,22 +91,13 @@ def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> Norma
         )
     return NormalizedInbound(
         ChannelMessage(
-            channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{chat_id}"
+            channel=CHANNEL,
+            identity=identity,
+            text=text,
+            session_key=f"{CHANNEL}:{chat_id}",
+            user_id=from_id,
         )
     )
-
-
-def poll_updates(
-    updates: Sequence[dict[str, object]], config: ChannelConfig
-) -> list[ChannelMessage]:
-    """Normalize a batch of getUpdates results into routable messages (dropping
-    any that fail the allow-list, fail-closed)."""
-    routed: list[ChannelMessage] = []
-    for update in updates:
-        result = normalize_inbound(update, config)
-        if result.message is not None:
-            routed.append(result.message)
-    return routed
 
 
 def confirmation_text(
@@ -103,11 +127,18 @@ def confirmation_card(
     """v41-F2: the confirm-card text and, only when the shared gate could allow
     an inline verdict, a Confirm/Deny inline keyboard. Web-UI-only action
     classes and channels without ``channel_can_confirm`` keep the v16 text."""
-    view = render_confirm_card(action_class, commands, card)
+    view = render_confirm_card(action_class, commands, card, admin=bool(config.admin_users))
     if view.web_ui_only or not config.channel_can_confirm:
         text = confirmation_text(action_class, commands, web_ui_url, card)
-        off = confirm_off_line(CHANNEL, view, config)  # v129-F5
-        return (f"{text}\n{off}" if off else text), None
+        extra = [
+            line
+            for line in (
+                confirm_off_line(CHANNEL, view, config),  # v129-F5
+                admin_nudge_line(CHANNEL, view, config),  # v130-F5
+            )
+            if line
+        ]
+        return "\n".join([text, *extra]), None
     lines = "\n".join(f"  {line}" for line in view.commands)
     body = f"Action '{action_class}' needs confirmation."
     if lines:
@@ -159,6 +190,7 @@ def handle_callback(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,
         identity_allowlisted=both_listed,
+        admin=channel_admin(from_id, config),  # v130-F5
     )
 
 

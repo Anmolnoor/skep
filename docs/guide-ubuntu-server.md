@@ -248,8 +248,8 @@ grep 'skep serve:' ~/.skep/serve.log | tail -n 1
 
 You should see `active`, then a line starting `skep serve: http://127.0.0.1:8765`.
 If the line is missing, wait a few more seconds and run the `grep` again.
-The service's journal also holds the access token, which skep prints at
-startup, so don't paste `journalctl` output anywhere.
+The access token is not in the journal: skep prints it only to a terminal.
+Read it from `~/.skep/supervisor/serve-token` when you need it.
 
 - **PATH.** The `Environment=PATH` line is what lets workers find `codex`. A
   systemd service doesn't read your shell profile.
