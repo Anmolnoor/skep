@@ -3170,3 +3170,27 @@ Everything merged since 1.4.2 (#102, #104–#114):
   calls tools in parallel on the ChatGPT plan again, `/workon` moves the chat
   onto its new project, and object results in commands and cards show
   labeled fields instead of a raw JSON dump.
+
+## v1.6.0 — your phone runs skep: one conversation, HIGH-risk approvals, /update (2026-11-20)
+
+Everything merged since 1.5.0 (#116–#119):
+
+- **v129 (#116):** a Telegram-bound chat is one conversation. Replies to
+  turns started in the web UI reach Telegram (a chat that has read private
+  files sends only a line saying the reply stayed in the web UI), the Queen's
+  follow-on card after a button press arrives on the phone, and a card that
+  blocks the chat is sent again when you write from the phone; a card the
+  phone can confirm shows what it acts on.
+- **docs (#117):** a guide to running skep always-on on an Ubuntu 24.04
+  server (`docs/guide-ubuntu-server.md`).
+- **self-update (#118):** serve checks PyPI every 12 hours and announces a
+  newer release once; `/update` on Telegram (which needs
+  `channel_can_confirm` on) installs it with the tool that installed skep
+  (pipx or uv tool), checks that `skep --version` reports the new version,
+  and restarts.
+- **v130 (#119):** a person you name as a channel's admin can approve
+  HIGH-risk cards from Telegram, Discord or Slack (a card folding more items
+  than a messenger can show in full still needs the web UI); the chat shows
+  live thinking/working status; the channel deck gains `/stop`, `/btw`,
+  `/approve`, `/deny`, `/compact`, `/usage` and `/model`, with command menus
+  generated from it; Telegram photos reach the model.
