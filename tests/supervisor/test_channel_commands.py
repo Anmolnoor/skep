@@ -50,6 +50,7 @@ def test_commands_answer_without_a_model_turn(config: SupervisorConfig) -> None:
             assert "42" in whoami and "admin: no" in whoami
             assert "skep channel admin telegram 42" in whoami  # the ask (ADR 0067)
             assert "skep channel admin" in _say(harness, "/start", 6).replace("\\", "")
+            assert "nothing to stop" in _say(harness, "/stop", 7)
         finally:
             harness.close()
     finally:
@@ -139,6 +140,34 @@ def test_new_starts_a_fresh_session_and_keeps_the_old_one(config: SupervisorConf
             assert "fresh answer" in _say(harness, "hello again", 4)
             new = [m.content for m in harness.store.chat_messages(second.chat_id)]
             assert new[0] == "hello again"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_stop_asks_the_running_turn_without_taking_its_lock(config: SupervisorConfig) -> None:
+    """v130-F10: /stop is answered while the turn holds the chat's lock."""
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(config)
+        try:
+            ollama.script_reply("hi")
+            _say(harness, "hello")
+            binding = harness.store.channel_session("telegram:42")
+            assert binding is not None
+            lock = chat_turn_lock(binding.chat_id)
+            lock.acquire()  # a turn is running
+            try:
+                assert "stopping" in _say(harness, "/stop", 2)
+            finally:
+                lock.release()
+            assert "nothing to stop" in _say(harness, "/stop", 3)
         finally:
             harness.close()
     finally:

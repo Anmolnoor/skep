@@ -333,13 +333,14 @@ commands the model never sees. The first 22 are the same in the web deck:
 | `/browser` | register the built-in Playwright browser under the browse scope (confirm card) |
 | `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); acts at once, never a model tool, never from a channel |
 
-Four more exist only in the terminal:
+Five more exist only in the terminal:
 
 | Command | Purpose |
 |---|---|
 | `/status` | re-print the startup banner: assistant readiness, approvals and cards waiting |
 | `/model [name] [--scope chat\|default]` | show the effective model for this chat; with a name, propose a model change on a card |
 | `/replay` | print the last messages of this chat |
+| `/stop` | stop this chat's running turn at its next step; its cards stay pending and its runs keep running. The REPL is busy while its own turn streams, so type it from another terminal (`skep chat --chat <id> --oneshot /stop`); the web chat has a Stop button on its working line, and a channel answers `/stop` too |
 | `/exit` | leave the REPL; a bare `exit` or `quit` also works |
 
 A typed `/approve` or `/deny` in the terminal is the decision itself and is

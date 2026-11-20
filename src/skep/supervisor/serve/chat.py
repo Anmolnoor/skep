@@ -35,7 +35,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -518,6 +518,23 @@ def executed_status(payload: dict[str, Any]) -> str:
 _TURN_LOCKS: dict[str, threading.Lock] = {}
 _TURN_LOCKS_GUARD = threading.Lock()
 TURN_BUSY = "a turn is already running in this chat — try again when it finishes"
+# v130-F10: /stop — chat id → the face that asked. The running turn reads it
+# before each tool round and each tool call; asking never takes the turn lock
+# (the turn holds it). Cleared when a turn starts, so a stop that landed as a
+# turn was ending never kills the next one.
+_STOP_REQUESTS: dict[str, str] = {}
+NOTHING_TO_STOP = "nothing to stop"
+
+
+def request_turn_stop(chat_id: str, face: str) -> bool:
+    """Ask the chat's running turn to end at its next step; False when none runs.
+    Cards it already raised stay pending and dispatched runs are untouched."""
+    with _TURN_LOCKS_GUARD:
+        lock = _TURN_LOCKS.get(chat_id)
+        if lock is None or not lock.locked():
+            return False
+        _STOP_REQUESTS[chat_id] = face
+    return True
 
 
 # D18: the cards the turn in flight raised (its round may still be folding into
@@ -1632,6 +1649,12 @@ class MessageRequest(BaseModel):
     read_only: bool = False
 
 
+class StopRequest(BaseModel):
+    """v130-F10: which operator face asked — named in the turn's last line."""
+
+    face: Literal["the web UI", "skep chat"] = "the web UI"
+
+
 class TrustRequest(BaseModel):
     """W20: the bits /trust clears — empty clears both."""
 
@@ -2188,6 +2211,7 @@ class ChatEngine:
         # D16: nor are they for a messenger's members
         marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS if channel else set()
         marks.add(chat_id)
+        _STOP_REQUESTS.pop(chat_id, None)  # v130-F10: a stale stop is not for this turn
         try:
             yield from self._turn_events(
                 chat_id, base_url=base_url, api_key=api_key, model=model,
@@ -2234,6 +2258,10 @@ class ChatEngine:
         shrink_budget: int | None = None  # v73-F1: halved replay after a provider 4xx
         shrink_recorded = False
         for _round in range(MAX_TOOL_ROUNDS):
+            stopped_by = _STOP_REQUESTS.get(chat_id)
+            if stopped_by is not None:
+                yield from self._stopped(chat_id, stopped_by)
+                return
             nudge = pending_nudge
             pending_nudge = None
             parts: list[str] = []
@@ -2385,7 +2413,22 @@ class ChatEngine:
             taint_carded: set[str] = set()
             round_folds: dict[str, str] = {}  # P4-2: fold subject → card id
             round_cards: list[dict[str, Any]] = []
-            for call in tool_calls:
+            for index, call in enumerate(tool_calls):
+                stopped_by = _STOP_REQUESTS.get(chat_id)
+                if stopped_by is not None:
+                    # v130-F10: each call never run says so (I8) — the round
+                    # still replays whole instead of dropping out.
+                    for skipped in tool_calls[index:]:
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=str(skipped.get("function", {}).get("name") or ""),
+                            tool_call_id=str(skipped.get("id") or "") or None,
+                            content=json.dumps(
+                                {"ok": False, "error": f"not run: stopped by {stopped_by}"}
+                            ),
+                        )
+                    break
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
                 shown_args = stream_args(args)
@@ -2953,6 +2996,9 @@ class ChatEngine:
                 record = self.store.get_chat_action(str(action_event["action_id"]))
                 assert record is not None
                 yield ("action", {**action_event, **self.card_fields(chat_id, record)})
+            if stopped_by is not None:
+                yield from self._stopped(chat_id, stopped_by)
+                return
             if paused:
                 # The turn waits for the human; verdict endpoints resume it.
                 yield ("done", {"state": "awaiting_confirmation"})
@@ -2965,6 +3011,13 @@ class ChatEngine:
             chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
             off_menu=hidden,
         )  # fmt: skip
+
+    def _stopped(self, chat_id: str, face: str) -> Iterator[ChatEvent]:
+        """v130-F10: the turn's honest last word (I8)."""
+        line = f"stopped by {face}"
+        self.store.add_chat_message(chat_id, role="assistant", content=line)
+        yield (None, {"content": line})
+        yield ("done", {"state": "stopped"})
 
     def _refused(
         self,
@@ -4073,6 +4126,15 @@ def add_chat_routes(
     # -- the command deck (v25-F1): operator-typed /commands. The model is not
     # in this loop — no transcript writes, no continuation stream. The card +
     # the chat_actions row keep the same audit shape as a Queen proposal.
+
+    @app.post("/api/chats/{chat_id}/stop")
+    def stop_turn(chat_id: str, body: StopRequest | None = None) -> dict[str, Any]:
+        """v130-F10: /stop — the running turn ends at its next step. Never
+        waits on the turn lock; cards stay pending, runs keep running."""
+        _require_chat(chat_id)
+        if not request_turn_stop(chat_id, (body or StopRequest()).face):
+            return {"stopped": False, "detail": NOTHING_TO_STOP}
+        return {"stopped": True, "detail": "stopping: the turn ends at its next step"}
 
     @app.post("/api/chats/{chat_id}/trust")
     def trust(chat_id: str, body: TrustRequest) -> dict[str, Any]:

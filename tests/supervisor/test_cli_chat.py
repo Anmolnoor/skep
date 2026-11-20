@@ -382,7 +382,7 @@ def test_python_deck_matches_the_web_deck() -> None:
     table = source[start : source.index("};", start)]
     web = set(re.findall(r"^  (\w+): \{", table, flags=re.MULTILINE))
     # CLI_ONLY commands are terminal-only; the rest must match exactly.
-    assert {"status", "model", "exit", "replay"} == cli_chat.CLI_ONLY
+    assert {"status", "model", "exit", "replay", "stop"} == cli_chat.CLI_ONLY
     assert set(cli_chat.COMMANDS) - cli_chat.CLI_ONLY == web
 
 
@@ -657,6 +657,36 @@ def test_btw_streams_a_read_only_answer_and_cards_nothing(
     assert "a side question cannot change policy" in capsys.readouterr().out
     assert client.get("/api/policy").json()["auto_approve"] is False
     assert _chat_actions(client) == []
+
+
+# ---------- v130-F10: /stop from a second terminal ----------
+
+
+def test_oneshot_stop_asks_the_running_turn_of_that_chat(
+    config: SupervisorConfig,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The REPL blocks while its own turn streams, so /stop is typed in
+    another terminal: `skep chat --chat <id> --oneshot /stop`."""
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    script_input(monkeypatch, [])
+
+    def stop() -> str:
+        run_chat(home=config.home, url="http://unused", client=client, chat_id=chat_id,
+                 oneshot="/stop")  # fmt: skip
+        return capsys.readouterr().out
+
+    assert "nothing to stop" in stop()
+    lock = chat_turn_lock(chat_id)
+    lock.acquire()
+    try:
+        assert "stopping" in stop()
+    finally:
+        lock.release()
 
 
 # ---------- v63-F1: /approve works across chats and over oneshot ----------

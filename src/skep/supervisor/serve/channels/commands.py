@@ -159,6 +159,17 @@ def _new(ctx: CommandContext, args: str) -> Reply:
     return "\n".join(lines), []
 
 
+def _stop(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F10: the running turn ends at its next step — asked without the
+    turn lock; its cards stay pending, dispatched runs keep running."""
+    from ..chat import NOTHING_TO_STOP, request_turn_stop
+
+    chat_id = ctx.bound_chat_id()
+    if chat_id is None or not request_turn_stop(chat_id, ctx.message.channel):
+        return f"skep: {NOTHING_TO_STOP}.", []
+    return "skep: stopping: the turn ends at its next step.", []
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
@@ -168,6 +179,7 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
     "runs": ("the latest runs (/runs 10)", _runs),
     "approvals": ("cards waiting in this conversation", _approvals),
     "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
+    "stop": ("stop the turn running here (cards stay, runs keep running)", _stop),
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}

@@ -684,6 +684,7 @@ main.chat-view { padding: 0; max-width: none; }
 }
 /* v55-F7: the between-events activity line — same pulse, honest label. */
 .chat-working { padding: 2px 4px 0; }
+.chat-stop { margin-left: var(--space-2); font-size: 12px; padding: 0 var(--space-2); }
 /* v92-F1: the worker loader — one pulsing row per live run, above the composer. */
 .worker-loader { display: flex; flex-direction: column; gap: 2px; padding: 2px 12px; }
 .worker-loader:empty { display: none; }

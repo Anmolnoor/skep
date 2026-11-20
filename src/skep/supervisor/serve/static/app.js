@@ -22,6 +22,19 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// v130-F10: the working line's Stop. A direct POST — typed text queues behind
+// the turn (v103-F1), so a typed /stop would arrive only after it ended.
+function stopButton(chatId) {
+  return el("button", {
+    type: "button",
+    class: "chat-stop",
+    onclick: async () => {
+      try { flash("ok", (await api("POST", `/api/chats/${chatId}/stop`)).detail); }
+      catch (err) { flash("bad", err.message); }
+    },
+  }, "Stop");
+}
+
 function iconButton(label, icon, attrs = {}) {
   return el("button", {
     type: "button",
@@ -3516,7 +3529,7 @@ async function viewChat(main, chatId) {
     // blank exactly while it is busiest. Shown after tool events, hidden the
     // moment real content streams, always the last element in the log.
     const working = el("div", { class: "chat-working", hidden: "" },
-      el("span", { class: "streaming-indicator" }, "Working"));
+      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId));
     log.append(working);
     // v87-F7: the working line carries a local elapsed counter — a 3-minute
     // provider prefill or an await_runs block reads as "Thinking… · 142s",
