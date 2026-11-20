@@ -1158,6 +1158,21 @@ class RunStore:
             self._conn.execute(
                 "ALTER TABLE channel_configs ADD COLUMN admin_users_json TEXT NOT NULL DEFAULT '[]'"
             )
+        # v130-F8: /sessions lists a conversation's chats; existing bindings
+        # seed it so a pre-v130 conversation lists its current chat too.
+        has_history = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'channel_session_history'"
+        ).fetchone()
+        if has_history is None:  # once: a read-only open must write nothing
+            self._conn.execute(
+                "CREATE TABLE channel_session_history (session_key TEXT NOT NULL,"
+                " chat_id TEXT NOT NULL, bound_at TEXT NOT NULL,"
+                " PRIMARY KEY (session_key, chat_id))"
+            )
+            self._conn.execute(
+                "INSERT INTO channel_session_history (session_key, chat_id, bound_at)"
+                " SELECT session_key, chat_id, created_at FROM channel_sessions"
+            )
         session_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_sessions)")
         }
@@ -4055,14 +4070,34 @@ class RunStore:
     def bind_channel_session(
         self, *, session_key: str, channel: str, identity_id: str, chat_id: str
     ) -> ChannelSessionBinding:
+        now = _now()
         self._conn.execute(
             "INSERT INTO channel_sessions (session_key, channel, identity_id, chat_id,"
             " created_at) VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(session_key) DO UPDATE SET chat_id = excluded.chat_id",
-            (session_key, channel, identity_id, chat_id, _now()),
+            (session_key, channel, identity_id, chat_id, now),
+        )
+        # v130-F8: every chat a conversation was ever bound to, for /sessions.
+        self._conn.execute(
+            "INSERT INTO channel_session_history (session_key, chat_id, bound_at)"
+            " VALUES (?, ?, ?) ON CONFLICT(session_key, chat_id) DO UPDATE"
+            " SET bound_at = excluded.bound_at",
+            (session_key, chat_id, now),
         )
         self._conn.commit()
         return ChannelSessionBinding(channel=channel, identity_id=identity_id, chat_id=chat_id)
+
+    @_locked
+    def channel_session_chats(self, session_key: str) -> list[str]:
+        """v130-F8: the chats this conversation was bound to, latest first —
+        only those that still exist (a chat deleted in the web UI is gone)."""
+        rows = self._conn.execute(
+            "SELECT h.chat_id FROM channel_session_history h JOIN chats c"
+            " ON c.chat_id = h.chat_id WHERE h.session_key = ?"
+            " ORDER BY h.bound_at DESC, h.rowid DESC",
+            (session_key,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
 
     # -- webhooks (v44-F3): inbound event subscriptions ------------------------
 

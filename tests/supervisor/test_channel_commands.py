@@ -96,3 +96,50 @@ def test_a_path_still_reaches_the_queen(config: SupervisorConfig) -> None:
             harness.close()
     finally:
         ollama.stop()
+
+
+def test_new_starts_a_fresh_session_and_keeps_the_old_one(config: SupervisorConfig) -> None:
+    """v130-F8: the binding was permanent — the only reset was deleting the
+    chat in the web UI. /new starts a fresh chat; the old one stays whole."""
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(config)
+        try:
+            ollama.script_reply("first answer")
+            _say(harness, "remember the first thing")
+            first = harness.store.channel_session("telegram:42")
+            assert first is not None
+            harness.store.add_chat_action(
+                first.chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+            lock = chat_turn_lock(first.chat_id)
+            lock.acquire()
+            try:
+                assert "running" in _say(harness, "/new", 2)  # refused mid-turn
+            finally:
+                lock.release()
+            reply = _say(harness, "/new trip planning", 3)
+            assert "new session" in reply and "1 card" in reply
+            second = harness.store.channel_session("telegram:42")
+            assert second is not None and second.chat_id != first.chat_id
+            chat = harness.store.get_chat(second.chat_id)
+            assert chat is not None and chat.title == "trip planning" and chat.source == "telegram"
+            assert harness.store.channel_session_chats("telegram:42") == [
+                second.chat_id,
+                first.chat_id,
+            ]
+            old = [m.content for m in harness.store.chat_messages(first.chat_id)]
+            assert "remember the first thing" in old
+            ollama.script_reply("fresh answer")
+            assert "fresh answer" in _say(harness, "hello again", 4)
+            new = [m.content for m in harness.store.chat_messages(second.chat_id)]
+            assert new[0] == "hello again"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()

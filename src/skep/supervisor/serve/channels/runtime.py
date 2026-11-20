@@ -31,7 +31,6 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from ...codex_login import QUEEN_LOGIN_NAME
-from ...roles import ROLE_LESS_CHAT_ROLE
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
     TURN_BUSY,
@@ -61,7 +60,14 @@ from . import (
 from . import (
     telegram as telegram_adapter,
 )
-from .commands import CommandContext, parse_command, run_command, runs_text, status_text
+from .commands import (
+    CommandContext,
+    new_channel_chat,
+    parse_command,
+    run_command,
+    runs_text,
+    status_text,
+)
 
 logger = logging.getLogger("skep.serve")
 
@@ -370,18 +376,7 @@ def run_channel_turn(
     chat = store.get_chat(binding.chat_id) if binding is not None else None
     if chat is None:
         # First contact (or the web operator deleted the old chat): new session.
-        chat = store.create_chat(
-            title=f"{message.channel} {message.identity.identity_id}",
-            model=None,
-            source=message.channel,
-            role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
-        )
-        store.bind_channel_session(
-            session_key=message.session_key,
-            channel=message.channel,
-            identity_id=message.identity.identity_id,
-            chat_id=chat.chat_id,
-        )
+        chat = new_channel_chat(store, message)
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
     except HTTPException as exc:

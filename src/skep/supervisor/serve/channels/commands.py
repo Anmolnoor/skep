@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...roles import ROLE_LESS_CHAT_ROLE
 from . import ChannelConfig, ChannelMessage, channel_admin, state_emoji
 
 Reply = tuple[str, list[dict[str, object]]]
@@ -45,6 +46,23 @@ class CommandContext:
     def bound_chat_id(self) -> str | None:
         binding = self.store.channel_session(self.message.session_key)
         return binding.chat_id if binding is not None else None
+
+
+def new_channel_chat(store: Any, message: ChannelMessage, title: str = "") -> Any:
+    """A fresh chat bound to this conversation — first contact and /new."""
+    chat = store.create_chat(
+        title=title or f"{message.channel} {message.identity.identity_id}",
+        model=None,
+        source=message.channel,
+        role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
+    )
+    store.bind_channel_session(
+        session_key=message.session_key,
+        channel=message.channel,
+        identity_id=message.identity.identity_id,
+        chat_id=chat.chat_id,
+    )
+    return chat
 
 
 def _admin_hint(ctx: CommandContext) -> str | None:
@@ -121,10 +139,31 @@ def _whoami(ctx: CommandContext, _args: str) -> Reply:
     return "\n".join([*lines, hint] if hint else lines), []
 
 
+def _new(ctx: CommandContext, args: str) -> Reply:
+    """v130-F8: start a fresh session here; the old chat stays whole (I8) and
+    its waiting cards stay resolvable from the web UI (I13)."""
+    from ..chat import chat_turn_lock
+
+    old = ctx.bound_chat_id()
+    waiting = 0
+    if old is not None:
+        lock = chat_turn_lock(old)
+        if not lock.acquire(blocking=False):
+            return "skep: a turn is running in this conversation; wait for it, then /new.", []
+        lock.release()
+        waiting = len(ctx.store.pending_chat_actions(old))
+    chat = new_channel_chat(ctx.store, ctx.message, args[:80])
+    lines = [f"skep: new session started ({chat.title}). /sessions lists the earlier ones."]
+    if waiting:
+        lines.append(f"The previous session keeps its {waiting} card(s) waiting in the web UI.")
+    return "\n".join(lines), []
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
     "help": ("this list", _help),
+    "new": ("start a fresh session here (/new trip planning)", _new),
     "status": ("what is running and what waits on you", _status),
     "runs": ("the latest runs (/runs 10)", _runs),
     "approvals": ("cards waiting in this conversation", _approvals),
