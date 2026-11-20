@@ -3140,3 +3140,33 @@ Everything merged since 1.4.1 (#93, #94, #101):
 - **H1, H1-G, Graphite A:** the web UI is thread-first (sidebar, Inbox,
   context panel) in the Graphite look; Policies opens on what agents may do,
   and Settings and Setup are one place each.
+
+## v1.5.0 — the daily driver: alarms, a policy tree, workers that land (2026-11-19)
+
+Everything merged since 1.4.2 (#102, #104–#114):
+
+- **graphite-nav (#102):** the sidebar's bottom links become one Settings
+  gear, with every page inside it.
+- **v121 (#104):** when a scheduled prompt tries an off-menu tool call, an
+  alarm goes to the chat's bound channel; Telegram link previews
+  are off so they can't leak notes; script and chained schedule output is
+  marked private and untrusted when a chat reads it.
+- **v122 (#105):** research, YouTube transcripts and a 16:30 mail summary
+  (`python -m skep.mcp_servers.mail --digest 5`) work from your phone.
+- **v123 (#106):** a schedule can only narrow what its workers may do.
+- **v124 (#107):** Policies gains a browsable tree that explains the shipped
+  rules, and "Test an action" can check a role or a role-bound schedule.
+- **v126 (#108):** unedited seed skills refresh, template grant changes are
+  audited, and worker-written memory stays out of the Queen's automatic
+  context.
+- **v127 (#109, #112):** workers that can do the work they are given;
+  re-verify installs Node dependencies from a supported lockfile for a
+  recognized verify command. `--auto-approve` is retired: it still parses
+  and has no effect; a patch lands without a click only when the project turns
+  on `auto_apply_verified_patch` and pins a real check.
+- **docs-site (#110, #111):** the website is rebuilt on Astro, every claim
+  checked against the code; the hand-written site is gone.
+- **v128 (#113, #114):** fixes from a browser field test of the Queen: it
+  calls tools in parallel on the ChatGPT plan again, `/workon` moves the chat
+  onto its new project, and object results in commands and cards show
+  labeled fields instead of a raw JSON dump.
