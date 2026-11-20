@@ -355,6 +355,7 @@ class TelegramPoller(threading.Thread):
         send: SendText | None = None,
         answer: AnswerCallback | None = None,
         idle_seconds: float = 2.0,
+        request_restart: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
         self._engine = engine
@@ -365,6 +366,8 @@ class TelegramPoller(threading.Thread):
         self._send = send if send is not None else _default_send
         self._answer = answer if answer is not None else _default_answer_callback
         self._idle = idle_seconds
+        # v130: how /update restarts serve; None (tests, no server) refuses.
+        self._request_restart = request_restart
         self._offset = 0
         self._stop_event = threading.Event()
 
@@ -390,7 +393,16 @@ class TelegramPoller(threading.Thread):
             if isinstance(callback, dict):
                 self._handle_callback(callback, config, secret)
                 handled += 1
-        for message in telegram_adapter.poll_updates(updates, config):
+        for update in updates:
+            message = telegram_adapter.normalize_inbound(update, config).message
+            if message is None:
+                continue  # fail closed, as poll_updates drops it
+            raw = update.get("message")
+            forwarded = isinstance(raw, dict) and ("forward_origin" in raw or "forward_date" in raw)
+            if message.text == "/update" and not forwarded:  # v130: typed, not forwarded
+                self._handle_update(message.identity.identity_id, config, secret)
+                handled += 1
+                continue
             text, actions = run_channel_turn(self._engine, message, web_ui_url=self._web_ui_url)
             replies: list[tuple[str, dict[str, object] | None]] = [(text, None)] if text else []
             replies.extend(_telegram_card_replies(actions, config, self._web_ui_url))
@@ -411,6 +423,31 @@ class TelegramPoller(threading.Thread):
                     logger.warning("telegram delivery failed: %s", result.detail)
             handled += 1
         return handled
+
+    def _handle_update(self, chat_id: str, config: ChannelConfig, token: str) -> None:
+        """v130: the admitted operator's typed /update IS the decision (I7), so
+        no model turn and no card. Installing software is at least a confirm,
+        so it needs ``channel_can_confirm`` like a button press does."""
+
+        def say(text: str) -> None:
+            result = telegram_adapter.deliver(
+                text, chat_id=chat_id, send=lambda cid, body: self._send(token, cid, body)
+            )
+            if not result.ok:
+                logger.warning("telegram delivery failed: %s", result.detail)
+
+        if not config.channel_can_confirm:
+            say(
+                "skep: /update needs channel_can_confirm on for Telegram. "
+                f"Turn it on in the web UI: {self._web_ui_url}"
+            )
+            return
+        if self._request_restart is None:
+            say("skep: this serve can't restart itself, so it can't update from here.")
+            return
+        from ..selfupdate import start_update
+
+        start_update(self._store, say, self._request_restart)
 
     def _handle_callback(
         self, callback: dict[str, object], config: ChannelConfig, token: str

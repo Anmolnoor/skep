@@ -945,3 +945,17 @@ def test_a_readopted_relayed_run_still_reaches_its_model_through_its_relay(
         assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"
     finally:
         store.close()
+
+
+def test_an_adopted_worker_that_is_still_our_child_is_reaped() -> None:
+    """v130: a self-update's execv keeps serve's pid, so a worker spawned just
+    before it is adopted while still being serve's child. Its zombie used to
+    pass the owner check forever; the monitor never saw it exit."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.3)"], start_new_session=True
+    )
+    worker = _adopted(child.pid)
+    deadline = time.monotonic() + 10
+    while not worker.exited and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert worker.exited
