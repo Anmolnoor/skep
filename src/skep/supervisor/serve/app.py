@@ -533,7 +533,13 @@ def create_app(
         if ticker is not None:
             ticker.start()
         poller = (
-            TelegramPoller(chat_engine, web_ui_url=web_ui_url)
+            TelegramPoller(
+                chat_engine,
+                web_ui_url=web_ui_url,
+                # v130: set by serve_cmds before the server starts; absent
+                # under a test client, where /update refuses.
+                request_restart=getattr(started.state, "request_restart", None),
+            )
             if channels_on and chat_engine is not None
             else None
         )
