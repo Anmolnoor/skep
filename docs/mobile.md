@@ -62,6 +62,10 @@ every allowed user (only naming an admin widens it, for that person alone):
 
 Cards arrive as embeds with buttons (Discord) or inline keyboards /
 Block Kit buttons (Telegram/Slack); ✅/❌ reactions work on Discord.
+Typing `/approve` or `/deny` works on every channel too (v130): bare, it
+resolves the one waiting card (several resolve none and list their ids);
+`/approve 1a2b3c4d` names one by the prefix `/approvals` shows. A typed
+verdict passes the same gate as the button.
 Timeouts DENY, never confirm (I6) — an unanswered card on your phone is
 a card that did nothing.
 

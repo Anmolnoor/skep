@@ -352,6 +352,71 @@ def card_in_bound_chat(store: Any, session_key: str, action: Any) -> bool:
     return binding is not None and binding.chat_id == action.chat_id
 
 
+def resolve_channel_verdict(
+    engine: ChatEngine,
+    action_id: str,
+    *,
+    confirm: bool,
+    identity: ChannelIdentity,
+    user_id: str,
+    web_ui_url: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Resolve a pending card through the shared gate; returns the reply text
+    and any card the continuation raised (v130-F4). Discord's buttons,
+    reactions and /skep verdicts and every channel's typed /approve|/deny
+    (v130-F11) run this one core."""
+    store = engine.store
+    action = store.get_chat_action(action_id) if action_id else None
+    if action is None or action.status != "proposed":
+        return "skep: that card is gone or resolved.", []
+    config = store.get_channel_config(identity.channel) or ChannelConfig(channel=identity.channel)
+    # v66-F1: auto_thread (v44-F1) re-homes conversations into threads the
+    # allowlist has never heard of — a session binding to the card's OWN
+    # chat is as good as the allowlist (skep created that thread under an
+    # allow-listed parent). A binding to a different chat stays rejected.
+    session_key = f"{identity.channel}:{identity.identity_id}"
+    own_card = card_in_bound_chat(store, session_key, action)
+    identity_ok = own_card or identity_allowlisted(identity, config.allowed_identities)
+    # ES (B114): the room is not the operator — the person must be listed
+    # too, for buttons, reactions and typed verdicts alike.
+    identity_ok = identity_ok and user_allowlisted(user_id, config)
+    admin = channel_admin(user_id, config)  # v130-F5
+    decision = channel_confirmation_decision(
+        action_class=action.tool,
+        channel_can_confirm=config.channel_can_confirm,
+        identity_allowlisted=identity_ok,
+        admin=admin,
+    )
+    if not decision.allowed:
+        return (
+            f"skep: not confirmable from {identity.channel.capitalize()} ({decision.reason}). "
+            f"Review it in the web UI: {web_ui_url}"
+        ), []
+    if not own_card:  # v130-F2: an allow-listed room is not a pass for every card
+        return CARD_OF_ANOTHER_CONVERSATION, []
+    chat = store.get_chat(action.chat_id)
+    if chat is None:
+        return "skep: the chat behind that card is gone.", []
+    parts: list[str] = []
+    chained: list[dict[str, object]] = []
+    try:
+        for event, data in engine.verdict_events(
+            action.chat_id,
+            chat,
+            action_id,
+            confirm=confirm,
+            actor=channel_actor(identity, user_id if admin else None),
+        ):
+            if event is None and data.get("content"):
+                parts.append(str(data["content"]))
+            elif event == "action":  # v130-F4: a chained card keeps its buttons
+                chained.append(dict(data))
+    except HTTPException as exc:
+        return f"skep: {exc.detail}", []
+    verdict = "confirmed" if confirm else "denied"
+    return "".join(parts).strip() or f"skep: {verdict}.", chained
+
+
 def run_channel_turn(
     engine: ChatEngine,
     message: ChannelMessage,
@@ -1698,60 +1763,16 @@ class DiscordGateway(threading.Thread):
     def _resolve_verdict(
         self, action_id: str, *, confirm: bool, identity: ChannelIdentity, user_id: str
     ) -> Verdict:
-        """Resolve a pending card through the shared gate; returns the reply text
-        and any card the continuation raised (v130-F4). Mirrors the Slack
-        ``_resolve_button`` flow — one posture, two transports."""
-        action = self._store.get_chat_action(action_id) if action_id else None
-        if action is None or action.status != "proposed":
-            return "skep: that card is gone or resolved.", []
-        config = self._store.get_channel_config(discord_adapter.CHANNEL) or ChannelConfig(
-            channel=discord_adapter.CHANNEL
+        """The shared core (``resolve_channel_verdict``) — one posture for
+        buttons, reactions, /skep verdicts and typed /approve|/deny."""
+        return resolve_channel_verdict(
+            self._engine,
+            action_id,
+            confirm=confirm,
+            identity=identity,
+            user_id=user_id,
+            web_ui_url=self._web_ui_url,
         )
-        # v66-F1: auto_thread (v44-F1) re-homes conversations into threads the
-        # allowlist has never heard of — a session binding to the card's OWN
-        # chat is as good as the allowlist (skep created that thread under an
-        # allow-listed parent). A binding to a different chat stays rejected.
-        session_key = f"{discord_adapter.CHANNEL}:{identity.identity_id}"
-        own_card = card_in_bound_chat(self._store, session_key, action)
-        identity_ok = own_card or identity_allowlisted(identity, config.allowed_identities)
-        # ES (B114): the room is not the operator — the person must be listed
-        # too, for buttons, reactions and /skep verdicts alike.
-        identity_ok = identity_ok and user_allowlisted(user_id, config)
-        admin = channel_admin(user_id, config)  # v130-F5
-        decision = channel_confirmation_decision(
-            action_class=action.tool,
-            channel_can_confirm=config.channel_can_confirm,
-            identity_allowlisted=identity_ok,
-            admin=admin,
-        )
-        if not decision.allowed:
-            return (
-                f"skep: not confirmable from Discord ({decision.reason}). "
-                f"Review it in the web UI: {self._web_ui_url}"
-            ), []
-        if not own_card:  # v130-F2: an allow-listed room is not a pass for every card
-            return CARD_OF_ANOTHER_CONVERSATION, []
-        chat = self._store.get_chat(action.chat_id)
-        if chat is None:
-            return "skep: the chat behind that card is gone.", []
-        parts: list[str] = []
-        chained: list[dict[str, object]] = []
-        try:
-            for event, data in self._engine.verdict_events(
-                action.chat_id,
-                chat,
-                action_id,
-                confirm=confirm,
-                actor=channel_actor(identity, user_id if admin else None),
-            ):
-                if event is None and data.get("content"):
-                    parts.append(str(data["content"]))
-                elif event == "action":  # v130-F4: a chained card keeps its buttons
-                    chained.append(dict(data))
-        except HTTPException as exc:
-            return f"skep: {exc.detail}", []
-        verdict = "confirmed" if confirm else "denied"
-        return "".join(parts).strip() or f"skep: {verdict}.", chained
 
     def _handle_interaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         # v78-F4: branch on interaction type — 3 (component) keeps the existing

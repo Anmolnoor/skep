@@ -159,6 +159,67 @@ def _new(ctx: CommandContext, args: str) -> Reply:
     return "\n".join(lines), []
 
 
+# An id or its prefix as /approvals shows it — a word like "too" is a reason.
+_CARD_ID = re.compile(r"[0-9a-f-]{4,}")
+
+
+def _verdict(ctx: CommandContext, args: str, *, confirm: bool) -> Reply:
+    """v130-F11: typed /approve [id] and /deny [id] [reason] — the typed
+    command IS the decision, asked once (I7), through the same core every
+    button runs (``resolve_channel_verdict``: the channel gate with the
+    admin, then the card's own conversation), so no allow-logic lives here
+    (I5). The id stays optional (v51: id-typing is where approvals go to
+    die); bare, exactly one waiting card resolves, several resolve none."""
+    from .runtime import resolve_channel_verdict
+
+    chat_id = ctx.bound_chat_id()
+    pending = ctx.store.pending_chat_actions(chat_id) if chat_id else []
+    first, _, rest = args.partition(" ")
+    want = first.lower() if _CARD_ID.fullmatch(first.lower()) else ""
+    reason = rest.strip() if want else args
+    if want:
+        matches = [card for card in pending if card.action_id.startswith(want)]
+        if len(matches) > 1:
+            return f"skep: {want} is ambiguous here; type more of the id.", []
+        if matches:
+            action_id = matches[0].action_id
+        elif ctx.store.get_chat_action(want) is not None:
+            action_id = want  # a full id: the core says whose card it is
+        else:
+            return (
+                f"skep: no card {want} is waiting in this conversation. /approvals lists them.",
+                [],
+            )
+    elif not pending:
+        return "skep: no card is waiting in this conversation.", []
+    elif len(pending) > 1:
+        verb = "approve" if confirm else "deny"
+        lines = [f"skep: {len(pending)} cards are waiting here, nothing was resolved. Name one:"]
+        lines += [f"  /{verb} {card.action_id[:8]}  {card.tool}" for card in pending]
+        return "\n".join(lines), []
+    else:
+        action_id = pending[0].action_id
+    text, cards = resolve_channel_verdict(
+        ctx.engine,
+        action_id,
+        confirm=confirm,
+        identity=ctx.message.identity,
+        user_id=ctx.message.user_id,
+        web_ui_url=ctx.web_ui_url,
+    )
+    if reason and not confirm:  # no verdict field holds one; say so, store nothing
+        text += "\n(Your reason is not recorded: a verdict carries no reason.)"
+    return text, cards
+
+
+def _approve(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=True)
+
+
+def _deny(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=False)
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
@@ -168,6 +229,8 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
     "runs": ("the latest runs (/runs 10)", _runs),
     "approvals": ("cards waiting in this conversation", _approvals),
     "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
+    "approve": ("confirm the waiting card (/approve 1a2b3c4d when several wait)", _approve),
+    "deny": ("deny the waiting card (/deny 1a2b3c4d)", _deny),
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}
