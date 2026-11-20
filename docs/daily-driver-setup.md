@@ -131,7 +131,7 @@ the web UI is the record.
 The channel's `notification_level` is the dial: `all` mirrors desk turns,
 `approvals` or `none` keeps them at the desk. A chat that has read private
 files never sends a desk reply out; the phone gets one line saying a reply
-stayed in the web UI. A conversation removed from `allowed_identities` hears
-nothing. A group, or a Slack or Discord channel, has several readers, and all
+stayed in the web UI. A conversation removed from `allowed_identities` stops
+hearing desk turns. A group, or a Slack or Discord channel, has several readers, and all
 of them see the mirrored replies, just as they already see the replies to
 messages sent there. An unbound web chat is never pushed anywhere.

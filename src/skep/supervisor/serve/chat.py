@@ -568,10 +568,12 @@ def _queue_follow_up(
                 if event is None
             ]  # fmt: skip
             # v129-F2: a desk click's reply is the turn's committed rows
-            desk = _committed_reply(
-                engine.store, chat_id, note, _last_message_id(engine.store, chat_id)
-            )
-            private = engine.store.get_chat_taint(chat_id).private is not None
+            desk, private = "", False
+            if actor == CHAT_ACTOR:
+                desk = _committed_reply(
+                    engine.store, chat_id, note, _last_message_id(engine.store, chat_id)
+                )
+                private = engine.store.get_chat_taint(chat_id).private is not None
         text = "".join(parts).strip()
         binding = engine.store.channel_binding_for_chat(chat_id)
         if text and binding is not None and actor.startswith("channel:"):
@@ -649,6 +651,9 @@ def _mirror_desk_turn(
     awaiting-confirmation verdict carries none, and its follow-up owns the
     reply (F2). Nothing pushes on a dropped stream. Known limit: a lock-free
     ticker/scheduler row landing mid-turn can be pushed twice."""
+    if store.channel_binding_for_chat(chat_id) is None:
+        yield from events  # an unbound chat: nothing to mirror, nothing read
+        return
     note = _last_message_id(store, chat_id)
     spoke = False
     for event, data in events:
