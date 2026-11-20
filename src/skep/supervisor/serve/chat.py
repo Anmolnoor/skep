@@ -109,6 +109,7 @@ from .tools import (
     mutation_execution_decision,
     policy_write_preview,
     proposed_schedule_role,
+    record_denied_landing,
     schedule_role_line,
     search_web_verdict,
     store_write_taint_ask,
@@ -3367,6 +3368,7 @@ class ChatEngine:
             except ValueError:
                 raise card_taken(self.store, action_id) from None
             log_denied_dispatch_asks(self.store, self.holder, action)
+            record_denied_landing(self.store, action, actor=actor)
             payloads = [payload] * len(items)
         for item, item_payload in zip(items, payloads, strict=True):
             row_id = self.store.add_chat_message(
@@ -4086,6 +4088,7 @@ def add_chat_routes(
             except ValueError:
                 raise card_taken(run_store, action_id) from None
             log_denied_dispatch_asks(run_store, holder, action)
+            record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")

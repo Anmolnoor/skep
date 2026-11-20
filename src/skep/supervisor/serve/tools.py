@@ -11,6 +11,7 @@ verbs as the buttons in the Approvals/Policies views, under actor
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import re
@@ -2956,6 +2957,40 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
         return False
     channel = store.get_channel_config(chat.source) if chat.source else None
     return channel is None or channel.channel_can_confirm
+
+
+def record_denied_landing(store: RunStore, action: Any, *, actor: str) -> None:
+    """v128-F7 (I13): a human Deny on a land_run card is a landing verdict —
+    a denied apply_patch review, as a failed landing records (v81-F2). The
+    review was only made on confirm, so a deny left no trace and the run still
+    read "ready to land". The run is untouched; a later land_run enqueues anew.
+    Call it after the denial is stored, so a raced card records nothing."""
+    if action.tool != "land_run":
+        return
+    for item in action.fold_items():
+        try:
+            run = actions.require_run(store, str(item["args"].get("task_id") or ""))
+        except HTTPException:
+            continue  # an unknown task: its confirm would have refused too
+        task_id = str(run["task_id"])
+        if run.get("state") != "completed" or actions.applied_branch_for(store, task_id):
+            continue  # paused or already landed: no landing was on offer (land_run refuses too)
+        review_id = store.pending_or_enqueue_approval(
+            task_id,
+            action="apply_patch",
+            reason=actions.landing_reason(str(run.get("instructions") or ""), None),
+            create=actions.patch_path(store, task_id) is not None,
+        )
+        review = store.get_approval(review_id) if review_id is not None else None
+        if review is None or review.action != "apply_patch":
+            continue  # no patch, or another open review: not this card's to answer
+        with contextlib.suppress(ValueError):  # mid-landing by another face: it decides
+            store.resolve_approval(
+                review.review_id,
+                approved=False,
+                actor=actor,
+                note=f"land denied on card {action.action_id}",
+            )
 
 
 # P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
