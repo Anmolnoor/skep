@@ -29,6 +29,9 @@ what goes wrong.
   command that proves the work, and read the four re-verification results
 - [`guide-auto-landing.md`](guide-auto-landing.md) — let confirmed runs land
   on a `skep/*` branch by themselves, and what that still refuses
+- [`guide-ubuntu-server.md`](guide-ubuntu-server.md) — run skep always-on on
+  an Ubuntu 24.04 server or home lab VM: bubblewrap under AppArmor, a systemd
+  user service, a service account without sudo, and Telegram
 
 ## Concepts
 

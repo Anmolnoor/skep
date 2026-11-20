@@ -327,6 +327,9 @@ Common causes:
 
 - `bwrap` is missing on Linux.
 - Bubblewrap is installed but user namespaces are disabled by host policy.
+  On Ubuntu 24.04 this is AppArmor's unprivileged userns restriction; a
+  profile for `/usr/bin/bwrap` alone fixes it (see
+  [`guide-ubuntu-server.md`](guide-ubuntu-server.md), section 3).
 - `sandbox-exec` exists on macOS but the parent process is not allowed to apply
   Seatbelt profiles.
 
