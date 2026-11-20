@@ -481,3 +481,14 @@ test("renderToolEvent keeps the keys beside a wrapped result (a kept grant)", ()
   app.renderToolEvent(log, "land_run: result", { ...LANDED, grant: "session" }, { summary: "landed" });
   assert.deepEqual(texts(log, "arg-key"), ["action:", "branch:", "task_id:", "grant:"]);
 });
+
+// ---------- v128-F13: skep's own nudge is a note, not your bubble ----------
+
+test("isInternalNudge: only a user row skep wrote itself (provenance queen)", () => {
+  const app = loadApp();
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "queen", content: "Continue…" }), true);
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "operator", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "user", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "user", provenance: "webhook:ci", content: "hi" }), false);
+  assert.equal(app.isInternalNudge({ role: "assistant", provenance: "queen", content: "ok" }), false);
+});

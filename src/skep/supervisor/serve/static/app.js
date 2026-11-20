@@ -423,6 +423,13 @@ function authorLabel(message, fallback) {
   return author === "queen" ? "skep" : `from ${author}`;
 }
 
+// v128-F13: a user row skep wrote itself ("This is the run we were working
+// on. Continue…") explains what woke the Queen — shown, but as a muted note,
+// never as the operator's own bubble.
+function isInternalNudge(message) {
+  return message.role === "user" && message.provenance === "queen";
+}
+
 // What a keep would allow (card.keep_covers): each command of a compound line
 // on its own, or a whole URL directory — said on the card, not only "always".
 function keepCovers(card) {
@@ -3622,6 +3629,7 @@ async function viewChat(main, chatId) {
     // tool call) — an empty bubble reads as a rendering bug.
     else if ((message.content && message.content.trim()) || message.thinking) {
       replayGroup = null;
+      if (isInternalNudge(message)) { noteLine(`skep: ${message.content}`); continue; }
       const own = message.role === "user" && authorLabel(message, null) === null;
       renderChatMessage(log, message.role, message.content, {
         label: authorLabel(message,
