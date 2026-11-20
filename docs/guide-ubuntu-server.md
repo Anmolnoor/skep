@@ -236,12 +236,13 @@ WantedBy=default.target
 EOF
 systemctl --user daemon-reload
 systemctl --user enable --now skep.service
+sleep 5
 systemctl --user is-active skep.service
 grep 'skep serve:' ~/.skep/serve.log | tail -n 1
 ```
 
-You should see `active`, then a line starting `skep serve: http://127.0.0.1:8765`
-(give it a few seconds after starting).
+You should see `active`, then a line starting `skep serve: http://127.0.0.1:8765`.
+If the line is missing, wait a few more seconds and run the `grep` again.
 The service's journal also holds the access token, which skep prints at
 startup, so don't paste `journalctl` output anywhere.
 
