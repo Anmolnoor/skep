@@ -24,6 +24,14 @@ messenger is a doorway to it.
    channels → admin users). The admin must already be an allowed user, and
    naming one turns confirming on. `--clear` removes it.
 
+## While skep works (v130-F6)
+
+A message turn shows one status line in the conversation — "🤔 thinking…",
+then "🔧 working: <tool>…" as each tool runs — edited in place and deleted
+when the reply lands. Telegram and Discord also show "typing…" (Slack's Web
+API has no bot typing, so the status line is the signal there). The status
+message is sent silently, and a failing status call never delays the reply.
+
 ## Is it actually working? (v87-F3)
 
 "Nothing arrives on Discord" has one honest answer, not a guess:
