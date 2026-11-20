@@ -32,6 +32,17 @@ when the reply lands. Telegram and Discord also show "typing…" (Slack's Web
 API has no bot typing, so the status line is the signal there). The status
 message is sent silently, and a failing status call never delays the reply.
 
+## The channel deck (v130)
+
+A message that starts with a bare `/word` is answered by skep itself, with
+no model turn (`/help` lists them; Telegram's `/` menu and Discord's
+`/skep` subcommands are generated from the same table). `/stop` ends the
+running turn at its next step (its cards stay, runs keep running).
+`/new`, `/sessions`, `/resume 2` and `/title` manage this conversation's
+own sessions; `/resume` reaches only chats this conversation started.
+`/btw <question>` asks a read-only side question. A photo sent to the
+Telegram bot reaches the model with its caption, as Discord images do.
+
 ## Is it actually working? (v87-F3)
 
 "Nothing arrives on Discord" has one honest answer, not a guess:
