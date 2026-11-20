@@ -100,10 +100,21 @@ def runs_text(store: Any, count: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _cards(store: Any, chat_id: str | None) -> list[Any]:
+    """The cards a verdict can resolve here: the Queen's. A run's gate mirror
+    (source "gate") resolves on the run, and operator /command cards at the
+    desk — neither is counted, listed, or picked by a bare /approve."""
+    if chat_id is None:
+        return []
+    return [c for c in store.pending_chat_actions(chat_id) if c.source == "assistant"]
+
+
 def _help(ctx: CommandContext, _args: str) -> Reply:
     lines = ["skep commands (answered here, no model turn):"]
     lines += [f"/{name} — {summary}" for name, (summary, _) in COMMANDS.items()]
     lines.append("Anything else goes to the Queen.")
+    if ctx.message.channel == "slack":  # Slack's client eats an unregistered /word
+        lines.append("On Slack, type a leading space: ' /stop', ' /approve'.")
     hint = _admin_hint(ctx)
     return "\n".join([*lines, hint] if hint else lines), []
 
@@ -119,7 +130,7 @@ def _runs(ctx: CommandContext, args: str) -> Reply:
 
 def _approvals(ctx: CommandContext, _args: str) -> Reply:
     chat_id = ctx.bound_chat_id()
-    cards = ctx.store.pending_chat_actions(chat_id) if chat_id else []
+    cards = _cards(ctx.store, chat_id)
     lines = [f"skep: {len(cards)} card(s) waiting in this conversation"]
     lines += [f"  {card.action_id[:8]}  {card.tool}" for card in cards]
     runs = ctx.store.pending_approvals()
@@ -148,12 +159,19 @@ def _new(ctx: CommandContext, args: str) -> Reply:
     if old is not None:
         if _turn_running(old):
             return "skep: a turn is running in this conversation; wait for it, then /new.", []
-        waiting = len(ctx.store.pending_chat_actions(old))
+        waiting = len(_cards(ctx.store, old))
     chat = new_channel_chat(ctx.store, ctx.message, args[:80])
     lines = [f"skep: new session started ({chat.title}). /sessions lists the earlier ones."]
+    if old is not None:
+        lines.append(_LEFT_BEHIND)
     if waiting:
         lines.append(f"The previous session keeps its {waiting} card(s) waiting in the web UI.")
     return "\n".join(lines), []
+
+
+# Review S2: pushes follow a chat's live binding, so the chat left behind
+# reports to the desk only — say so rather than go quiet.
+_LEFT_BEHIND = "Results of runs started there now show in the web UI only (or /resume it)."
 
 
 def _turn_running(chat_id: str) -> bool:
@@ -175,7 +193,7 @@ def _sessions(ctx: CommandContext, _args: str) -> Reply:
     lines = ["skep: sessions in this conversation (/resume <n>):"]
     for n, chat_id in enumerate(chat_ids, 1):
         chat = ctx.store.get_chat(chat_id)
-        cards = len(ctx.store.pending_chat_actions(chat_id))
+        cards = len(_cards(ctx.store, chat_id))
         line = f"{n}. {chat.title} · last active {chat.updated_at[:16].replace('T', ' ')}"
         line += f" · {cards} card(s) · {chat_id[:8]}"
         lines.append(f"{line} ← current" if chat_id == bound else line)
@@ -208,8 +226,9 @@ def _resume(ctx: CommandContext, args: str) -> Reply:
         chat_id=target,
     )
     chat = ctx.store.get_chat(target)
-    cards = len(ctx.store.pending_chat_actions(target))
-    return f"skep: resumed {chat.title}; {cards} card(s) waiting there.", []
+    cards = len(_cards(ctx.store, target))
+    reply = f"skep: resumed {chat.title}; {cards} card(s) waiting there."
+    return (f"{reply}\n{_LEFT_BEHIND}" if bound is not None else reply), []
 
 
 def _title(ctx: CommandContext, args: str) -> Reply:
@@ -252,7 +271,7 @@ def _stop(ctx: CommandContext, _args: str) -> Reply:
 
 
 # An id or its prefix as /approvals shows it — a word like "too" is a reason.
-_CARD_ID = re.compile(r"[0-9a-f-]{4,}")
+_CARD_ID = re.compile(r"[0-9a-f-]{6,}")  # 6+: `/deny dead end` is a reason
 
 
 def _verdict(ctx: CommandContext, args: str, *, confirm: bool) -> Reply:
@@ -265,7 +284,7 @@ def _verdict(ctx: CommandContext, args: str, *, confirm: bool) -> Reply:
     from .runtime import resolve_channel_verdict
 
     chat_id = ctx.bound_chat_id()
-    pending = ctx.store.pending_chat_actions(chat_id) if chat_id else []
+    pending = _cards(ctx.store, chat_id)
     first, _, rest = args.partition(" ")
     want = first.lower() if _CARD_ID.fullmatch(first.lower()) else ""
     reason = rest.strip() if want else args

@@ -133,6 +133,8 @@ def test_new_starts_a_fresh_session_and_keeps_the_old_one(config: SupervisorConf
                 lock.release()
             reply = _say(harness, "/new trip planning", 3)
             assert "new session" in reply and "1 card" in reply
+            # review S2: the old chat's run results no longer reach this phone
+            assert "Results of runs started there" in reply
             second = harness.store.channel_session("telegram:42")
             assert second is not None and second.chat_id != first.chat_id
             chat = harness.store.get_chat(second.chat_id)
@@ -406,3 +408,77 @@ def test_a_btw_side_turn_runs_off_the_poll_loop(
             harness.close()
     finally:
         ollama.stop()
+
+
+def test_a_telegram_button_continuation_runs_off_the_poll_loop(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review S3: a button press runs the verdict's model continuation; on the
+    poll loop it stalled every conversation and the /stop meant for it."""
+    from skep.supervisor.serve import chat as chat_mod
+
+    from .fake_ollama import FakeOllama
+    from .test_channels_live import _telegram_callback
+
+    entered, release = threading.Event(), threading.Event()
+    real = chat_mod.execute_read_tool  # type: ignore[attr-defined]
+
+    def tool(name: str, args: dict[str, Any], **kw: Any) -> Any:
+        if name == "list_runs":
+            entered.set()
+            assert release.wait(10)
+        return real(name, args, **kw)
+
+    monkeypatch.setattr(chat_mod, "execute_read_tool", tool)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(
+            config, spawn=lambda work: threading.Thread(target=work, daemon=True).start()
+        )
+        try:
+            chat_id = _bind(harness, "telegram:42", "42", "telegram 42")
+            card = harness.store.add_chat_action(
+                chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+            ollama.script_tool_calls(("list_runs", {}), ("list_runs", {"limit": 2}))
+            harness.updates.append([_telegram_callback(1, "42", "42", f"confirm:{card}")])
+            polled = threading.Thread(target=harness.poller.poll_once, daemon=True)
+            polled.start()
+            assert entered.wait(10)
+            polled.join(3)
+            assert not polled.is_alive(), "a button continuation blocked the poll loop"
+            assert "stopping" in _say(harness, "/stop", 2)
+        finally:
+            release.set()
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_help_on_slack_says_to_lead_with_a_space() -> None:
+    """Review S4: Slack's client eats an unregistered /word, so the deck is
+    reached there as ' /help' — /help (and the docs) must say so."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.channels import ChannelConfig, ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.commands import CommandContext, run_command
+
+    def help_on(channel: str) -> str:
+        message = ChannelMessage(
+            channel=channel,
+            identity=ChannelIdentity(channel=channel, identity_id="C1"),
+            text=" /help",
+            session_key=f"{channel}:C1",
+            user_id="U1",
+        )
+        ctx = CommandContext(
+            engine=SimpleNamespace(store=None),
+            message=message,
+            config=ChannelConfig(channel=channel, admin_users=("U1",)),
+            web_ui_url="http://ui.test/",
+        )
+        return run_command(ctx, "help", "")[0]
+
+    assert "leading space" in help_on("slack")
+    assert "leading space" not in help_on("telegram")

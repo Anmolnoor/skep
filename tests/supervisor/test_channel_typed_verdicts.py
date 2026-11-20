@@ -94,8 +94,8 @@ def test_a_bare_verdict_with_two_cards_resolves_neither_and_lists_them(
 
     ids = iter(
         [
-            uuid.UUID("abcd1111-0000-4000-8000-000000000000"),
-            uuid.UUID("abcd2222-0000-4000-8000-000000000000"),
+            uuid.UUID("abcdef11-0000-4000-8000-000000000000"),
+            uuid.UUID("abcdef22-0000-4000-8000-000000000000"),
         ]
     )
     ollama = _ollama()
@@ -113,12 +113,12 @@ def test_a_bare_verdict_with_two_cards_resolves_neither_and_lists_them(
             )
             monkeypatch.undo()  # type: ignore[attr-defined]
             reply = _say(harness, "/approve")
-            assert "2 cards" in reply and "abcd1111" in reply and "abcd2222" in reply
-            assert "ambiguous" in _say(harness, "/approve abcd", 2)
+            assert "2 cards" in reply and "abcdef11" in reply and "abcdef22" in reply
+            assert "ambiguous" in _say(harness, "/approve abcdef", 2)
             assert "no card" in _say(harness, "/approve ffff0000", 3)
             assert {_status(harness, first), _status(harness, second)} == {"proposed"}
             ollama.script_reply("read it")
-            _say(harness, "/approve abcd2", 4)
+            _say(harness, "/approve abcdef2", 4)
             assert _status(harness, second) == "confirmed"
             assert _status(harness, first) == "proposed"
         finally:
@@ -250,6 +250,53 @@ def test_discord_takes_a_typed_approve(config: SupervisorConfig) -> None:
             assert f"confirm:{chained.action_id}" in json.dumps(
                 [p.get("components") for _, _, p in harness.sent]
             )
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_a_run_gate_mirror_never_counts_as_a_card_here(config: SupervisorConfig) -> None:
+    """Review S1: a run's gate mirror (source="gate") is resolved on the run,
+    never by a verdict — it must not break the bare single-card rule, be
+    listed as an id, or be counted twice by /approvals."""
+    ollama = _ollama()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            chat = _bound(harness)
+            gate = harness.store.add_chat_action(chat, tool="approve_run", args={}, source="gate")
+            card = harness.store.add_chat_action(
+                chat, tool="read_url", args={"url": "https://example.com/a"}
+            )
+            assert "1 card(s) waiting" in _say(harness, "/approvals", 1)
+            ollama.script_reply("read it")
+            reply = _say(harness, "/approve", 2)
+            assert gate[:8] not in reply
+            assert _status(harness, card) == "confirmed"
+            assert _status(harness, gate) == "proposed"
+            assert "no card is waiting" in _say(harness, "/approve", 3)
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_a_word_is_a_reason_not_an_id(config: SupervisorConfig) -> None:
+    """Review S6: `/deny dead end` reads 'dead' as the reason, not a card id."""
+    ollama = _ollama()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            chat = _bound(harness)
+            card = harness.store.add_chat_action(
+                chat, tool="read_url", args={"url": "https://example.com/a"}
+            )
+            ollama.script_reply("ok")
+            assert "no card dead" not in _say(harness, "/deny dead end")
+            assert _status(harness, card) == "denied"
         finally:
             harness.close()
     finally:

@@ -689,7 +689,13 @@ class TelegramPoller(threading.Thread):
             # v41-F2: inline button presses arrive as callback_query updates.
             callback = update.get("callback_query")
             if isinstance(callback, dict):
-                self._handle_callback(callback, config, secret)
+                # Review S3: a verdict runs the model's continuation — off the
+                # poll loop, in its conversation's queue, like a typed /approve.
+                pressed = telegram_adapter.normalize_callback(callback)
+                key = f"{telegram_adapter.CHANNEL}:{pressed[0] if pressed else ''}"
+                self._turns.submit(
+                    key, functools.partial(self._handle_callback, callback, config, secret)
+                )
                 handled += 1
         for message in self._inbound(updates, config, secret):
             if answered_inline(message.text):

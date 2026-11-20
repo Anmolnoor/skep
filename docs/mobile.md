@@ -40,7 +40,9 @@ no model turn (`/help` lists them; Telegram's `/` menu and Discord's
 running turn at its next step (its cards stay, runs keep running).
 `/new`, `/sessions`, `/resume 2` and `/title` manage this conversation's
 own sessions; `/resume` reaches only chats this conversation started.
-`/btw <question>` asks a read-only side question. A photo sent to the
+`/btw <question>` asks a read-only side question. On Slack, whose client takes
+any `/word` as its own slash command, start the message with a space
+(` /stop`). A photo sent to the
 Telegram bot reaches the model with its caption, as Discord images do.
 
 ## Is it actually working? (v87-F3)

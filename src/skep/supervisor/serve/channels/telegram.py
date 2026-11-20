@@ -100,19 +100,6 @@ def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> Norma
     )
 
 
-def poll_updates(
-    updates: Sequence[dict[str, object]], config: ChannelConfig
-) -> list[ChannelMessage]:
-    """Normalize a batch of getUpdates results into routable messages (dropping
-    any that fail the allow-list, fail-closed)."""
-    routed: list[ChannelMessage] = []
-    for update in updates:
-        result = normalize_inbound(update, config)
-        if result.message is not None:
-            routed.append(result.message)
-    return routed
-
-
 def confirmation_text(
     action_class: str,
     commands: Sequence[Sequence[str]],
