@@ -60,7 +60,11 @@ def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> Norma
         )
     return NormalizedInbound(
         ChannelMessage(
-            channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{chat_id}"
+            channel=CHANNEL,
+            identity=identity,
+            text=text,
+            session_key=f"{CHANNEL}:{chat_id}",
+            user_id=from_id,
         )
     )
 

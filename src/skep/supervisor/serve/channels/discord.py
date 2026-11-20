@@ -88,6 +88,7 @@ def normalize_inbound(payload: dict[str, object], config: ChannelConfig) -> Norm
             identity=identity,
             text=content,
             session_key=f"{CHANNEL}:{channel_id}",
+            user_id=author_id,
         )
     )
 

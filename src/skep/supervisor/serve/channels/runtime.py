@@ -61,6 +61,7 @@ from . import (
 from . import (
     telegram as telegram_adapter,
 )
+from .commands import CommandContext, parse_command, run_command, runs_text, status_text
 
 logger = logging.getLogger("skep.serve")
 
@@ -360,6 +361,11 @@ def run_channel_turn(
     the caller renders each returned action event per its channel's posture.
     """
     store = engine.store
+    command = parse_command(message.text)
+    if command is not None:  # v130-F7: the deck answers; the model never sees it
+        config = store.get_channel_config(message.channel) or ChannelConfig(channel=message.channel)
+        ctx = CommandContext(engine=engine, message=message, config=config, web_ui_url=web_ui_url)
+        return run_command(ctx, *command)
     binding = store.channel_session(message.session_key)
     chat = store.get_chat(binding.chat_id) if binding is not None else None
     if chat is None:
@@ -1691,6 +1697,7 @@ class DiscordGateway(threading.Thread):
             identity=ChannelIdentity(channel=message.channel, identity_id=thread_id),
             text=message.text,
             session_key=f"{discord_adapter.CHANNEL}:{thread_id}",
+            user_id=message.user_id,
         )
 
     def _resolve_verdict(
@@ -1890,31 +1897,10 @@ class DiscordGateway(threading.Thread):
             logger.warning("discord interaction ack failed")
 
     def _slash_status(self) -> str:
-        from . import state_emoji
-
-        runs = self._store.recent_runs(50)
-        active = [r for r in runs if r.state in ("running", "dispatched")]
-        approvals = self._store.pending_approvals()
-        lines = [f"skep: {len(active)} running · {len(approvals)} approval(s) waiting"]
-        for record in [r for r in runs if r.state == "pending_approval"][:3]:
-            lines.append(
-                f"{state_emoji(record.state)} run {record.task_id[:13]}… needs your approval"
-            )
-        return "\n".join(lines)
+        return status_text(self._store)  # v130-F7: one deck, every channel
 
     def _slash_runs(self) -> str:
-        from . import state_emoji
-
-        runs = self._store.recent_runs(5)
-        if not runs:
-            return "skep: no runs yet"
-        lines = []
-        for record in runs:
-            line = f"{state_emoji(record.state)} {record.task_id[:13]}… {record.state}"
-            if record.summary:
-                line += f": {record.summary[:60]}"
-            lines.append(line)
-        return "\n".join(lines)
+        return runs_text(self._store)
 
     def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> Verdict:
         """The typed command IS the decision, asked once (I7): resolve the

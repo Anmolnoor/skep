@@ -54,7 +54,11 @@ def normalize_inbound(event: dict[str, object], config: ChannelConfig) -> Normal
         )
     return NormalizedInbound(
         ChannelMessage(
-            channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{channel_id}"
+            channel=CHANNEL,
+            identity=identity,
+            text=text,
+            session_key=f"{CHANNEL}:{channel_id}",
+            user_id=user_id,
         )
     )
 

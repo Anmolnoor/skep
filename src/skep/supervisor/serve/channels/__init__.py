@@ -53,6 +53,9 @@ class ChannelMessage:
     # v44-F9: raw image payloads the transport already downloaded (size/type
     # gated at ingest); run_channel_turn persists them onto the user message.
     attachments: tuple[bytes, ...] = ()
+    # v130-F7: the platform-authenticated sender (already in allowed_users);
+    # channel commands use it (/whoami, the admin check).
+    user_id: str = ""
 
 
 @dataclass(frozen=True)
