@@ -360,3 +360,49 @@ def test_conversation_turns_keep_order_and_never_block_another_conversation() ->
     gate.set()
     assert done.wait(10)
     assert log == ["a1", "a2"]
+
+
+def test_a_btw_side_turn_runs_off_the_poll_loop(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v130 integration: /btw runs a model turn, so answered on the poll loop
+    it would block the loop — every other conversation and the /stop meant
+    for it — until it ended."""
+    from skep.supervisor.serve import chat as chat_mod
+
+    from .fake_ollama import FakeOllama
+
+    entered, release = threading.Event(), threading.Event()
+    real = chat_mod.execute_read_tool  # type: ignore[attr-defined]
+
+    def tool(name: str, args: dict[str, Any], **kw: Any) -> Any:
+        entered.set()
+        assert release.wait(10)
+        return real(name, args, **kw)
+
+    monkeypatch.setattr(chat_mod, "execute_read_tool", tool)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(
+            config, spawn=lambda work: threading.Thread(target=work, daemon=True).start()
+        )
+        try:
+            ollama.script_tool_calls(("list_runs", {}), ("list_runs", {"limit": 2}))
+            harness.updates.append([_telegram_update(1, "42", "/btw what runs?")])
+            polled = threading.Thread(target=harness.poller.poll_once, daemon=True)
+            polled.start()
+            assert entered.wait(10)
+            polled.join(3)
+            assert not polled.is_alive(), "/btw blocked the poll loop"
+            assert "stopping" in _say(harness, "/stop", 2)
+            release.set()
+            deadline = time.monotonic() + 10
+            while not any("stopped by telegram" in s[2] for s in list(harness.sent)):
+                assert time.monotonic() < deadline, harness.sent
+                time.sleep(0.02)
+        finally:
+            release.set()
+            harness.close()
+    finally:
+        ollama.stop()

@@ -402,6 +402,18 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
 ALIASES: dict[str, str] = {"start": "help"}
 
 
+# Commands that run the model (a side turn, a verdict's continuation) join the
+# conversation's turn queue; every other command answers on the inbound loop,
+# so a /stop is never stuck behind the turn it means to stop (v130-F10).
+MODEL_COMMANDS = frozenset({"btw", "approve", "deny"})
+
+
+def answered_inline(text: str) -> bool:
+    """True for a deck command the inbound loop answers at once."""
+    command = parse_command(text)
+    return command is not None and ALIASES.get(command[0], command[0]) not in MODEL_COMMANDS
+
+
 def run_command(ctx: CommandContext, name: str, args: str) -> Reply:
     entry = COMMANDS.get(ALIASES.get(name, name))
     if entry is None:

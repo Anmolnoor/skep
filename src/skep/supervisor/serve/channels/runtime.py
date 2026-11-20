@@ -63,6 +63,7 @@ from . import (
 )
 from .commands import (
     CommandContext,
+    answered_inline,
     new_channel_chat,
     parse_command,
     run_command,
@@ -656,7 +657,7 @@ class TelegramPoller(threading.Thread):
                 self._handle_callback(callback, config, secret)
                 handled += 1
         for message in telegram_adapter.poll_updates(updates, config):
-            if parse_command(message.text) is not None:
+            if answered_inline(message.text):
                 self._reply(message, config, secret)  # v130-F10: never behind a turn
             else:
                 self._turns.submit(
@@ -1726,7 +1727,7 @@ class DiscordGateway(threading.Thread):
         blobs = self._image_attachments(data)
         if blobs:
             message = dataclasses.replace(message, attachments=tuple(blobs))
-        if parse_command(message.text) is not None:
+        if answered_inline(message.text):
             self._turn_and_reply(message, token)  # v130-F10: never behind a turn
         else:
             self._turns.submit(
