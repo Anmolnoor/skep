@@ -1028,6 +1028,11 @@ def test_telegram_never_confirms_a_high_card(repo: object, config: SupervisorCon
         harness = _TelegramHarness(config)
         try:
             chat = harness.store.create_chat(title="telegram 42", model=None)
+            # v129-F3: a press resolves only its own conversation's card
+            harness.store.bind_channel_session(
+                session_key="telegram:42", channel="telegram", identity_id="42",
+                chat_id=chat.chat_id,
+            )  # fmt: skip
             action_id = harness.store.add_chat_action(
                 chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
             )
@@ -1344,6 +1349,95 @@ def test_desk_turn_push_honors_level_taint_and_unbound(
             assert r.status_code == 200
             _wait_desk_pushes()
             assert len(sent) == 2
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def _builder_bound_to_telegram(harness: _TelegramHarness) -> str:
+    builder = harness.store.create_chat(
+        title="telegram 42", model=None, source="telegram", role="builder"
+    )
+    harness.store.bind_channel_session(
+        session_key="telegram:42", channel="telegram", identity_id="42", chat_id=builder.chat_id
+    )
+    return builder.chat_id
+
+
+def test_a_card_chained_after_a_telegram_confirm_reaches_telegram(
+    repo: object, config: SupervisorConfig
+) -> None:
+    """v129-F3: the continuation of a button confirm raises another card —
+    it reaches the phone with its own buttons, or as the pointer when the
+    class is web-only, never dropped."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            chat = _builder_bound_to_telegram(harness)
+            ollama.script_tool_call(
+                "dispatch_run",
+                {"repo": str(repo), "instructions": "Fix. MODE:happy", "execution_mode": "sandbox"},
+            )
+            harness.updates.append([_telegram_update(1, "42", "fix the bug")])
+            harness.poller.poll_once()
+            (action,) = harness.store.pending_chat_actions(chat)
+            ollama.script_tool_call("read_url", {"url": "https://example.com/next"})
+            n = len(harness.sent)
+            harness.updates.append(
+                [_telegram_callback(2, "42", "42", f"confirm:{action.action_id}")]
+            )
+            harness.poller.poll_once()
+            (chained,) = harness.store.pending_chat_actions(chat)
+            assert chained.tool == "read_url"
+            stamped = [
+                b["callback_data"]
+                for m in harness.markups[n:]
+                if m
+                for b in m["inline_keyboard"][0]  # type: ignore[index]
+            ]
+            assert stamped == [f"confirm:{chained.action_id}", f"deny:{chained.action_id}"]
+
+            ollama.script_tool_call("set_policy", {"default_execution_mode": "workspace"})
+            n = len(harness.sent)
+            harness.updates.append([_telegram_callback(3, "42", "42", f"deny:{chained.action_id}")])
+            harness.poller.poll_once()
+            (web_only,) = harness.store.pending_chat_actions(chat)
+            assert web_only.tool == "set_policy"
+            assert any("set\\_policy" in s[2] for s in harness.sent[n:])
+            assert harness.markups[n:] and all(m is None for m in harness.markups[n:])
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_a_telegram_callback_for_another_chats_card_is_refused(config: SupervisorConfig) -> None:
+    """v129-F3: callback data is client-supplied — a button press resolves
+    only a card of the chat its own conversation is bound to."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            _builder_bound_to_telegram(harness)
+            other = harness.store.create_chat(title="desk", model=None)
+            action_id = harness.store.add_chat_action(
+                other.chat_id, tool="read_url", args={"url": "https://example.com/b"}
+            )
+            ollama.script_reply("denied it")
+            harness.updates.append([_telegram_callback(1, "42", "42", f"deny:{action_id}")])
+            harness.poller.poll_once()
+            assert harness.answers[-1][2] == "skep: that card belongs to another conversation."
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert harness.sent == []
         finally:
             harness.close()
     finally:
