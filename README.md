@@ -244,7 +244,7 @@ policy changes, and landings are never confirmable from a messenger. See
 
 ## Status
 
-As of 1.4.2:
+As of 1.5.0:
 
 | Works today | Being wired up | Opinions pending code |
 |---|---|---|
