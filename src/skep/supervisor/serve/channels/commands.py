@@ -251,6 +251,133 @@ def _stop(ctx: CommandContext, _args: str) -> Reply:
     return "skep: stopping: the turn ends at its next step.", []
 
 
+# An id or its prefix as /approvals shows it — a word like "too" is a reason.
+_CARD_ID = re.compile(r"[0-9a-f-]{4,}")
+
+
+def _verdict(ctx: CommandContext, args: str, *, confirm: bool) -> Reply:
+    """v130-F11: typed /approve [id] and /deny [id] [reason] — the typed
+    command IS the decision, asked once (I7), through the same core every
+    button runs (``resolve_channel_verdict``: the channel gate with the
+    admin, then the card's own conversation), so no allow-logic lives here
+    (I5). The id stays optional (v51: id-typing is where approvals go to
+    die); bare, exactly one waiting card resolves, several resolve none."""
+    from .runtime import resolve_channel_verdict
+
+    chat_id = ctx.bound_chat_id()
+    pending = ctx.store.pending_chat_actions(chat_id) if chat_id else []
+    first, _, rest = args.partition(" ")
+    want = first.lower() if _CARD_ID.fullmatch(first.lower()) else ""
+    reason = rest.strip() if want else args
+    if want:
+        matches = [card for card in pending if card.action_id.startswith(want)]
+        if len(matches) > 1:
+            return f"skep: {want} is ambiguous here; type more of the id.", []
+        if matches:
+            action_id = matches[0].action_id
+        elif ctx.store.get_chat_action(want) is not None:
+            action_id = want  # a full id: the core says whose card it is
+        else:
+            return (
+                f"skep: no card {want} is waiting in this conversation. /approvals lists them.",
+                [],
+            )
+    elif not pending:
+        return "skep: no card is waiting in this conversation.", []
+    elif len(pending) > 1:
+        verb = "approve" if confirm else "deny"
+        lines = [f"skep: {len(pending)} cards are waiting here, nothing was resolved. Name one:"]
+        lines += [f"  /{verb} {card.action_id[:8]}  {card.tool}" for card in pending]
+        return "\n".join(lines), []
+    else:
+        action_id = pending[0].action_id
+    text, cards = resolve_channel_verdict(
+        ctx.engine,
+        action_id,
+        confirm=confirm,
+        identity=ctx.message.identity,
+        user_id=ctx.message.user_id,
+        web_ui_url=ctx.web_ui_url,
+    )
+    if reason and not confirm:  # no verdict field holds one; say so, store nothing
+        text += "\n(Your reason is not recorded: a verdict carries no reason.)"
+    return text, cards
+
+
+def _approve(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=True)
+
+
+def _deny(ctx: CommandContext, args: str) -> Reply:
+    return _verdict(ctx, args, confirm=False)
+
+
+def _compact(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: run the ADR 0037 deterministic compaction now. It folds only
+    what overflows the replay budget (no model call; rows never change, I8),
+    so a chat that fits is left alone and says so."""
+    from ..chat import chat_turn_lock
+
+    chat_id = ctx.bound_chat_id()
+    if chat_id is None:
+        return "skep: no session here yet; nothing to compact.", []
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return "skep: a turn is running in this conversation; wait for it, then /compact.", []
+    try:
+        before = ctx.engine.context_view(chat_id)
+        ctx.engine._compact_if_needed(chat_id)
+        after = ctx.engine.context_view(chat_id)
+    finally:
+        lock.release()
+    if after == before:
+        return (
+            f"skep: nothing to compact: the chat fits its replay budget ({before['percent']}% "
+            "of the window). Compaction folds only what overflows.",
+            [],
+        )
+    return (
+        f"skep: compacted. Context {before['percent']}% → {after['percent']}% of the window "
+        f"(replay {before['history_chars']:,} → {after['history_chars']:,} chars, "
+        f"digest {after['digest_chars']:,} chars). Every message stays in the transcript.",
+        [],
+    )
+
+
+def _usage_line(label: str, store: Any, chat_id: str | None = None) -> str:
+    five = store.llm_usage_totals(hours=5, chat_id=chat_id)
+    week = store.llm_usage_totals(hours=24 * 7, chat_id=chat_id)
+    return (
+        f"{label}: 5h {five['total_tokens']:,} tok ({five['requests']} req) · "
+        f"7d {week['total_tokens']:,} tok ({week['requests']} req)"
+    )
+
+
+def _usage(ctx: CommandContext, _args: str) -> Reply:
+    """v130-F12: the v74 tally (``/api/llm/usage``), this chat's share too."""
+    chat_id = ctx.bound_chat_id()
+    lines = ["skep usage, counted from skep's own requests (other clients are not seen):"]
+    lines.append(_usage_line("all chats", ctx.store))
+    if chat_id is not None:
+        lines.append(_usage_line("this chat", ctx.store, chat_id))
+    return "\n".join(lines), []
+
+
+def _model(ctx: CommandContext, args: str) -> Reply:
+    """v130-F12: show-only — the chat's model or the default. Changing it is a
+    desk act (the composer's model select, ``skep chat`` /model)."""
+    if args:
+        return "skep: /model only shows the model here; change it at the desk.", []
+    from ..llm import llm_config_view
+
+    chat_id = ctx.bound_chat_id()
+    chat = ctx.store.get_chat(chat_id) if chat_id else None
+    if chat is not None and chat.model:
+        return f"skep: this chat: {chat.model} (override)", []
+    default = llm_config_view(ctx.store, ctx.engine.home)["default_model"]
+    return f"skep: default: {default or 'not set (Settings)'}", []
+
+
 Handler = Callable[[CommandContext, str], Reply]
 
 COMMANDS: dict[str, tuple[str, Handler]] = {
@@ -265,6 +392,11 @@ COMMANDS: dict[str, tuple[str, Handler]] = {
     "approvals": ("cards waiting in this conversation", _approvals),
     "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
     "stop": ("stop the turn running here (cards stay, runs keep running)", _stop),
+    "approve": ("confirm the waiting card (/approve 1a2b3c4d when several wait)", _approve),
+    "deny": ("deny the waiting card (/deny 1a2b3c4d)", _deny),
+    "compact": ("fold this chat's overflow into its digest now", _compact),
+    "usage": ("tokens skep spent: this chat and all, 5h and 7d", _usage),
+    "model": ("which model answers here (change it at the desk)", _model),
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}
