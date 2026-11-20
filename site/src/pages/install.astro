@@ -85,8 +85,8 @@ $ skep doctor
 const compose = `
 $ git clone ${GH_URL}.git && cd skep
 $ docker compose up -d
-# the access token is printed in the log
-$ docker compose logs skep
+# the access token (kept out of the log)
+$ docker compose exec skep cat /data/skep/supervisor/serve-token
 `;
 ---
 

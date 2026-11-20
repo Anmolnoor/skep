@@ -4,7 +4,8 @@
 #
 # State (SQLite, audit evidence, cloned repos, and the access token)
 # all live in the named volume — the container itself is disposable. The access
-# token prints in the boot log: `docker compose logs skep`.
+# token stays out of the log (no terminal); read it with
+# `docker compose exec skep cat /data/skep/supervisor/serve-token`.
 services:
   skep:
     image: ghcr.io/anmolnoor/skep:latest

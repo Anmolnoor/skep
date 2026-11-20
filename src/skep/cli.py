@@ -248,7 +248,7 @@ def _setup(args: argparse.Namespace) -> int:
     print(format_doctor_report(build_status(args.home)))
     # v27-F5: setup ends by saying what comes next, not just what happened.
     print("next steps:")
-    print("  skep serve     # the daemon + web UI; the access token prints in the boot log")
+    print("  skep serve     # the daemon + web UI; the access token prints on the terminal")
     print("  open http://127.0.0.1:8765/ and finish setup in the browser")
     print("  skep chat      # talk to the Queen right here in the terminal")
     print("  skep doctor    # re-check readiness any time")

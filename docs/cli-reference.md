@@ -258,8 +258,9 @@ exist because a *model* proposed the action, not a human.
 skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--no-readopt]
 ```
 
-`serve` starts the local HTTP API and browser dashboard. It prints the URL and
-access token on startup.
+`serve` starts the local HTTP API and browser dashboard. It prints the URL and,
+when stdout is a terminal, the access token on startup. Otherwise (systemd,
+docker, a redirect) it prints the token file's path instead.
 
 On startup, a run whose worker is still alive from a previous serve is
 re-adopted: serve checks it is the same process (pid and start time),

@@ -114,11 +114,26 @@ def write_boot_banner(log_path: Path, banner: str) -> None:
     """Append the boot banner to the serve log (stdout keeps it too).
 
     The access token is deliberately NOT part of the banner written here —
-    the log file must never become a second credential store; the token stays
-    stdout-only (the odysseus pattern).
+    the log file must never become a second credential store; the token goes
+    to stdout, and only when stdout is a terminal (``access_token_line``).
     """
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(banner + "\n")
+
+
+def access_token_line(home: Path, interactive: bool) -> str:
+    """The boot line that hands the operator the access token.
+
+    Only a terminal gets the value. Off one, stdout IS a log (the systemd
+    journal, ``docker logs``, a ``>> serve.log`` redirect) and the log is not
+    a second credential store, so the line names the 0600 file instead.
+    """
+    from .auth import TOKEN_FILE, ensure_token
+
+    token = ensure_token(home)  # mint on first boot either way
+    if interactive:
+        return f"  access token: {token}"
+    return f"  access token: in {home / TOKEN_FILE} (not printed: stdout is not a terminal)"
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -154,7 +169,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
     from ..netproxy import record_serve_port
     from .app import create_app
-    from .auth import ensure_token
 
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
@@ -164,9 +178,8 @@ def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
         # Names only, stdout only — the log file is not a second credential
         # store and neither is this line.
         print(f"  serve.env: loaded {', '.join(loaded_env)}", flush=True)
-    # The odysseus pattern: the token reaches the operator via the boot log.
-    # flush, or block-buffered stdout holds the token hostage in container logs.
-    print(f"  access token: {ensure_token(config.home)}", flush=True)
+    # flush, or block-buffered stdout holds the line hostage in container logs.
+    print(access_token_line(config.home, sys.stdout.isatty()), flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
     # ES-F6 (B05) + #58 ES-F4: every run's proxy and every Seatbelt profile for
