@@ -786,6 +786,7 @@ def add_slack_routes(
             )
             return
         parts: list[str] = []
+        chained: list[dict[str, object]] = []
         try:
             for event, data in engine.verdict_events(
                 action.chat_id,
@@ -796,12 +797,19 @@ def add_slack_routes(
             ):
                 if event is None and data.get("content"):
                     parts.append(str(data["content"]))
+                elif event == "action":  # v130-F4: a chained card keeps its buttons
+                    chained.append(dict(data))
         except HTTPException as exc:
             _deliver(bot_token, channel_id, _text_blocks(f"skep: {exc.detail}"))
             return
         verdict = "confirmed" if click == "confirm" else "denied"
         text = "".join(parts).strip() or f"skep: {verdict}."
         _deliver(bot_token, channel_id, _text_blocks(text))
+        for card in chained:
+            blocks = _slack_action_blocks(
+                str(card.get("action_id")), str(card.get("tool")), config, _card_of(card)
+            )
+            _deliver(bot_token, channel_id, blocks)
 
     @app.post("/api/channels/slack/interact")
     async def slack_interact(request: Request, background: BackgroundTasks) -> dict[str, Any]:
@@ -836,6 +844,8 @@ DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 DISCORD_INTENTS = (1 << 9) | (1 << 10) | (1 << 12) | (1 << 13) | (1 << 15)
 
 SendDiscordPayload = Callable[[str, str, dict[str, object]], bool]
+# v130-F4: a verdict's reply text and the cards its continuation raised.
+Verdict = tuple[str, list[dict[str, object]]]
 AckInteraction = Callable[[str, str, str], bool]
 # v106-F13: (interaction_id, interaction_token) -> acked. Type 5, sent BEFORE
 # any verdict work — Discord invalidates an unacknowledged interaction in 3s.
@@ -1366,6 +1376,13 @@ class DiscordGateway(threading.Thread):
             pulse.stop()
         if text:
             self._deliver(token, channel_id, text)
+        self._send_cards(token, channel_id, actions)
+
+    def _send_cards(self, token: str, channel_id: str, actions: list[dict[str, object]]) -> None:
+        """Each action event as a Discord card; a turn's and a verdict's alike."""
+        config = self._store.get_channel_config(discord_adapter.CHANNEL) or ChannelConfig(
+            channel=discord_adapter.CHANNEL
+        )
         for action in actions:
             payload = _discord_action_payload(
                 str(action.get("action_id")),
@@ -1434,12 +1451,13 @@ class DiscordGateway(threading.Thread):
 
     def _resolve_verdict(
         self, action_id: str, *, confirm: bool, identity: ChannelIdentity, user_id: str
-    ) -> str:
-        """Resolve a pending card through the shared gate; returns the reply text.
-        Mirrors the Slack ``_resolve_button`` flow — one posture, two transports."""
+    ) -> Verdict:
+        """Resolve a pending card through the shared gate; returns the reply text
+        and any card the continuation raised (v130-F4). Mirrors the Slack
+        ``_resolve_button`` flow — one posture, two transports."""
         action = self._store.get_chat_action(action_id) if action_id else None
         if action is None or action.status != "proposed":
-            return "skep: that card is gone or resolved."
+            return "skep: that card is gone or resolved.", []
         config = self._store.get_channel_config(discord_adapter.CHANNEL) or ChannelConfig(
             channel=discord_adapter.CHANNEL
         )
@@ -1462,13 +1480,14 @@ class DiscordGateway(threading.Thread):
             return (
                 f"skep: not confirmable from Discord ({decision.reason}). "
                 f"Review it in the web UI: {self._web_ui_url}"
-            )
+            ), []
         if not own_card:  # v130-F2: an allow-listed room is not a pass for every card
-            return CARD_OF_ANOTHER_CONVERSATION
+            return CARD_OF_ANOTHER_CONVERSATION, []
         chat = self._store.get_chat(action.chat_id)
         if chat is None:
-            return "skep: the chat behind that card is gone."
+            return "skep: the chat behind that card is gone.", []
         parts: list[str] = []
+        chained: list[dict[str, object]] = []
         try:
             for event, data in self._engine.verdict_events(
                 action.chat_id,
@@ -1479,10 +1498,12 @@ class DiscordGateway(threading.Thread):
             ):
                 if event is None and data.get("content"):
                     parts.append(str(data["content"]))
+                elif event == "action":  # v130-F4: a chained card keeps its buttons
+                    chained.append(dict(data))
         except HTTPException as exc:
-            return f"skep: {exc.detail}"
+            return f"skep: {exc.detail}", []
         verdict = "confirmed" if confirm else "denied"
-        return "".join(parts).strip() or f"skep: {verdict}."
+        return "".join(parts).strip() or f"skep: {verdict}.", chained
 
     def _handle_interaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         # v78-F4: branch on interaction type — 3 (component) keeps the existing
@@ -1537,7 +1558,7 @@ class DiscordGateway(threading.Thread):
         interaction_token: str,
         channel_id: str,
         token: str,
-        resolve: Callable[[], str],
+        resolve: Callable[[], Verdict],
     ) -> None:
         """v106-F13: the one shape that survives a slow verdict — deferred ack
         inside Discord's 3s window, the work off the gateway loop, the reply
@@ -1547,8 +1568,9 @@ class DiscordGateway(threading.Thread):
             logger.warning("discord deferred ack failed; resolving anyway")
 
         def _finish() -> None:
+            chained: list[dict[str, object]] = []
             try:
-                text = resolve()
+                text, chained = resolve()
             except Exception:
                 logger.exception("discord verdict resolution failed")
                 text = "skep: that verdict crashed mid-resolve — check the web UI."
@@ -1557,6 +1579,8 @@ class DiscordGateway(threading.Thread):
                 delivered = self._followup(self._application_id, interaction_token, text)
             if not delivered and channel_id:
                 self._deliver(token, channel_id, text)
+            if channel_id:
+                self._send_cards(token, channel_id, chained)
 
         self._spawn(_finish)
 
@@ -1646,7 +1670,7 @@ class DiscordGateway(threading.Thread):
             lines.append(line)
         return "\n".join(lines)
 
-    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> str:
+    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> Verdict:
         """The typed command IS the decision, asked once (I7): resolve the
         bound chat's single pending card through the EXACT gate the ✅ button
         uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
@@ -1656,9 +1680,9 @@ class DiscordGateway(threading.Thread):
         binding = self._store.channel_session(f"{discord_adapter.CHANNEL}:{channel_id}")
         pending = self._store.pending_chat_actions(binding.chat_id) if binding else []
         if not pending:
-            return "skep: no card is waiting in this conversation."
+            return "skep: no card is waiting in this conversation.", []
         if len(pending) > 1:
-            return _several_cards(len(pending), self._web_ui_url)
+            return _several_cards(len(pending), self._web_ui_url), []
         identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
         return self._resolve_verdict(
             pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
@@ -1701,10 +1725,11 @@ class DiscordGateway(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}",
             )
             return
-        text = self._resolve_verdict(
+        text, chained = self._resolve_verdict(
             action.action_id,
             confirm=reaction == "✅",
             identity=identity,
             user_id=str(data.get("user_id") or ""),
         )
         self._deliver(token, channel_id, text)
+        self._send_cards(token, channel_id, chained)

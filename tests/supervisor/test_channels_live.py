@@ -837,6 +837,61 @@ def test_a_slack_button_for_another_chats_card_is_refused(
         ollama.stop()
 
 
+def test_a_card_chained_after_a_slack_verdict_keeps_its_buttons(
+    config: SupervisorConfig, monkeypatch: object
+) -> None:
+    """v130-F4: the Slack spelling of the v129-F3 chained-card rule."""
+    import json as _json
+    from urllib.parse import quote_plus
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve.channels import runtime
+
+    from .fake_ollama import FakeOllama
+
+    sent: list[tuple[str, str, list[dict[str, object]]]] = []
+
+    def fake_send(token: str, channel_id: str, blocks: list[dict[str, object]]) -> bool:
+        sent.append((token, channel_id, blocks))
+        return True
+
+    monkeypatch.setattr(runtime, "_default_slack_send", fake_send)  # type: ignore[attr-defined]
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_slack(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="slack C1", model=None)
+            store.bind_channel_session(
+                session_key="slack:C1", channel="slack", identity_id="C1", chat_id=chat.chat_id
+            )
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+        finally:
+            store.close()
+        ollama.script_tool_call("read_url", {"url": "https://example.com/next"})
+        webhook = _slack_app_client(config)
+        payload = {
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"action_id": "deny", "value": action_id}],
+        }
+        body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
+        webhook.post(  # type: ignore[attr-defined]
+            "/api/channels/slack/interact", content=body, headers=_slack_headers("signing-1", body)
+        )
+        check = RunStore(config.db_path)
+        try:
+            (chained,) = check.pending_chat_actions(chat.chat_id)
+        finally:
+            check.close()
+        buttons = [b for _, _, blocks in sent for b in blocks if b.get("type") == "actions"]
+        assert chained.action_id in _json.dumps(buttons)
+    finally:
+        ollama.stop()
+
+
 def test_docs_describe_the_channel_posture() -> None:
     """F5 (updated v37-F4): what is live, what is confirmable, and the
     Discord gateway note — docs track the build, never the aspiration."""

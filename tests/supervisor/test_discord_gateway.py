@@ -487,6 +487,60 @@ def test_discord_button_in_an_allowlisted_channel_refuses_another_chats_card(
         ollama.stop()
 
 
+def test_a_card_chained_after_a_discord_verdict_keeps_its_buttons(
+    config: SupervisorConfig,
+) -> None:
+    """v130-F4: the continuation of a button verdict raises another card — it
+    reaches Discord as a card with its own stamped buttons, not dropped until
+    the next message re-sends it (the v129-F3 Telegram rule)."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="read_url", args={"url": "https://example.com/a"}
+            )
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            ollama.script_tool_call("read_url", {"url": "https://example.com/next"})
+            interaction = json.dumps(
+                {
+                    "op": 0,
+                    "t": "INTERACTION_CREATE",
+                    "s": 2,
+                    "d": {
+                        "id": "i-7",
+                        "token": "itok-7",
+                        "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
+                        "data": {"custom_id": f"deny:{action_id}"},
+                    },
+                }
+            )
+            harness.script(HELLO, READY_APP, interaction)
+            harness.gateway.session_once()
+            (chained,) = harness.store.pending_chat_actions(chat.chat_id)
+            assert chained.tool == "read_url"
+            assert f"confirm:{chained.action_id}" in json.dumps(
+                [p.get("components") for _, _, p in harness.sent]
+            )
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
 def test_discord_button_from_a_session_bound_thread_confirms_its_own_card(
     repo: object, config: SupervisorConfig
 ) -> None:
@@ -1257,9 +1311,9 @@ def test_button_click_is_acked_before_the_verdict_runs(
             timeline.append("deferred-ack")
             return real_deferred(interaction_id, interaction_token)
 
-        def verdict(*_a: object, **_k: object) -> str:
+        def verdict(*_a: object, **_k: object) -> tuple[str, list[dict[str, object]]]:
             timeline.append("verdict")
-            return "skep: done."
+            return "skep: done.", []
 
         harness.gateway._ack_deferred = deferred
         harness.gateway._resolve_verdict = verdict  # type: ignore[method-assign]
@@ -1309,7 +1363,7 @@ def test_followup_failure_falls_back_to_a_channel_message(
     harness = _DiscordHarness(config)
     try:
         harness.gateway._resolve_verdict = (  # type: ignore[method-assign]
-            lambda *a, **k: "skep: late but honest."
+            lambda *a, **k: ("skep: late but honest.", [])
         )
         harness.gateway._followup = lambda *a: False
         interaction = json.dumps(
