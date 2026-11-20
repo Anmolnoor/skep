@@ -782,10 +782,14 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     if isinstance(approved, str):
         cap -= len(json.dumps({"approved": approved}, ensure_ascii=True))
     data["truncated"] = True
-    data["note"] = (
+    note = (
         f"result exceeded the replay cap — narrow the query ({hint}); "
         "the full result is in the transcript"
     )
+    data["note"] = note
+    # v128-F9: the counts before any entry drops — a countless note let the
+    # Queen report 2 pending approvals of 4 as the whole list.
+    totals = {key: len(value) for key, value in data.items() if isinstance(value, list)}
 
     def weight(value: Any) -> int:
         return len(json.dumps(value, ensure_ascii=True))
@@ -795,6 +799,12 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
         if not lists:
             break
         max(lists, key=weight).pop()
+        shown = ", ".join(
+            f"{key} {len(data[key])} of {total}"
+            for key, total in totals.items()
+            if len(data[key]) < total
+        )
+        data["note"] = f"{note}; shown: {shown}"
     _trim_longest_text(data, cap)
     droppable = sorted(
         (key for key in data if key not in ("truncated", "note")),

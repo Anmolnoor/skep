@@ -105,6 +105,20 @@ def test_json_safe_chop_yields_parseable_json_with_the_marker() -> None:
     assert chopped == _truncate_tool_result(payload, CURRENT_TOOL_REPLAY_CAP, "list_schedules")
 
 
+def test_v128_f9_the_note_counts_what_a_cut_list_still_shows() -> None:
+    """v128-F9: 4 pending approvals replayed as 2 with a countless "truncated"
+    note, and the Queen told the user there were 2 (later 0)."""
+    approvals = [{"review_id": f"r{i}", "reason": "x" * 3000} for i in range(4)]
+    payload = json.dumps({"approvals": approvals, "count": 4})
+
+    data = json.loads(
+        _truncate_tool_result(payload, CURRENT_TOOL_REPLAY_CAP, "list_pending_approvals")
+    )
+
+    assert len(data["approvals"]) == 2
+    assert "shown: approvals 2 of 4" in data["note"]
+
+
 def test_json_safe_chop_trims_a_long_string_instead_of_dropping_it() -> None:
     payload = json.dumps({"log": "y" * 5000, "state": "completed"})
     chopped = _truncate_tool_result(payload, TOOL_REPLAY_CAP, "get_run")
