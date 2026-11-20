@@ -271,7 +271,30 @@ def _channel_turn(
 ) -> tuple[str, list[dict[str, object]]]:
     store = engine.store
     base_url, api_key, model, protocol = llm
-    if blocking_cards(store, chat.chat_id):  # ES-F5: a gate never holds the chat
+    pending = blocking_cards(store, chat.chat_id)
+    if pending:  # ES-F5: a gate never holds the chat
+        if store.get_chat_taint(chat.chat_id).private is not None:
+            # v129-F4: a card's headline can quote what the chat read
+            return (
+                "skep: a confirmation is pending in this chat; it read private files, "
+                f"so review it in the web UI: {web_ui_url}",
+                [],
+            )
+        # v129-F4: the card may never have reached this phone (raised at the
+        # desk, by a queued follow-up, a run's completion turn, or a chained
+        # verdict) — re-send the Queen's cards; each transport renders them
+        # under its own posture. Operator /command cards resolve elsewhere.
+        cards: list[dict[str, object]] = [
+            {"action_id": r.action_id, "tool": r.tool, **engine.card_fields(chat.chat_id, r)}
+            for r in pending
+            if r.source == "assistant"
+        ]
+        if cards:
+            return (
+                "skep: a confirmation is pending: here it is again (or review it in "
+                f"the web UI: {web_ui_url}).",
+                cards,
+            )
         # v66-F3: buttons can resolve low-risk cards in-channel now — say so.
         return (
             "skep: a confirmation is pending for this conversation — confirm or "

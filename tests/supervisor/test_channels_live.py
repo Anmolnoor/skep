@@ -315,7 +315,9 @@ def test_telegram_mutation_points_at_the_web_ui(config: SupervisorConfig) -> Non
             # While the card waits, the channel refuses to talk past it.
             harness.updates.append([_telegram_update(2, "42", "do it anyway")])
             assert harness.poller.poll_once() == 1
-            assert "review it in the web UI" in harness.sent[-1][2]
+            # v129-F4: the pending card is re-sent after the blocking text
+            assert "review it in the web UI" in harness.sent[-2][2]
+            assert "set\\_policy" in harness.sent[-1][2]
             assert len(ollama.chat_bodies()) == 1  # no second model turn
         finally:
             harness.close()
@@ -1438,6 +1440,83 @@ def test_a_telegram_callback_for_another_chats_card_is_refused(config: Superviso
             refreshed = harness.store.get_chat_action(action_id)
             assert refreshed is not None and refreshed.status == "proposed"
             assert harness.sent == []
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_a_pending_card_is_resent_when_the_phone_speaks(
+    repo: object, config: SupervisorConfig, monkeypatch: object
+) -> None:
+    """v129-F4: a card that reached the chat but not the phone (here: raised
+    by a desk turn) is re-sent, under the channel's posture, the moment the
+    phone speaks — no model turn runs past it."""
+    from .fake_ollama import FakeOllama
+
+    _desk_sends(monkeypatch)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            client = serve_client(config)
+            ollama.script_reply("phone turn")
+            harness.updates.append([_telegram_update(1, "42", "hello")])
+            harness.poller.poll_once()
+            binding = harness.store.channel_session("telegram:42")
+            assert binding is not None
+            chat = binding.chat_id
+            ollama.script_tool_call("read_url", {"url": "https://example.com/desk"})
+            r = client.post(f"/api/chats/{chat}/messages", json={"content": "read it"})
+            assert r.status_code == 200
+            _wait_desk_pushes()
+            (card,) = harness.store.pending_chat_actions(chat)
+            turns = len(ollama.chat_bodies())
+
+            def phone(update_id: int) -> tuple[list[str], list[dict[str, object] | None]]:
+                n = len(harness.sent)
+                harness.updates.append([_telegram_update(update_id, "42", "and?")])
+                harness.poller.poll_once()
+                return [s[2] for s in harness.sent[n:]], harness.markups[n:]
+
+            def resolve(action_id: str) -> None:
+                harness.store.resolve_chat_action(action_id, status="denied", result={})
+
+            texts, markups = phone(2)
+            assert "here it is again" in texts[0]
+            assert markups[-1] is not None
+            assert [b["callback_data"] for b in markups[-1]["inline_keyboard"][0]] == [  # type: ignore[index]
+                f"confirm:{card.action_id}",
+                f"deny:{card.action_id}",
+            ]
+            assert len(ollama.chat_bodies()) == turns  # no model turn
+            resolve(card.action_id)
+
+            high = harness.store.add_chat_action(
+                chat, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+            texts, markups = phone(3)
+            assert all(m is None for m in markups)
+            assert "HIGH risk" in texts[-1]
+            resolve(high)
+
+            operator = harness.store.add_chat_action(
+                chat, tool="set_policy", args={"default_execution_mode": "workspace"},
+                source="operator",
+            )  # fmt: skip
+            texts, markups = phone(4)
+            assert len(texts) == 1 and "here it is again" not in texts[0]
+            assert markups == [None]
+            resolve(operator)
+
+            harness.store.add_chat_action(
+                chat, tool="read_url", args={"url": "https://example.com/secret-name"}
+            )
+            harness.store.add_chat_taint(chat, private=1)
+            texts, markups = phone(5)
+            assert len(texts) == 1 and markups == [None]
+            assert "private files" in texts[0] and "secret" not in texts[0]
         finally:
             harness.close()
     finally:
