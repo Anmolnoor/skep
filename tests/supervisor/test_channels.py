@@ -253,13 +253,14 @@ def _render(adapter: str, tool: str, can_confirm: bool) -> tuple[str, bool]:
 
 @pytest.mark.parametrize("adapter", ["telegram", "slack", "discord"])
 def test_the_phone_sees_what_it_would_confirm_and_why_it_cannot(adapter: str) -> None:
-    """v129-F5: every adapter shows the card's headline (the read_url
-    target), and a pointer that is only a setting away says which one."""
+    """v129-F5: every adapter shows a phone-confirmable card's headline (the
+    read_url target), and a pointer that is only a setting away says which one."""
     text, buttons = _render(adapter, "read_url", can_confirm=False)
     assert "https://example.com/the-target" in text
     assert "channel_can_confirm" in text and not buttons
     text, buttons = _render(adapter, "set_policy", can_confirm=False)
     assert "channel_can_confirm" not in text and not buttons  # web-only by design
+    assert "set_policy — -" not in text  # a web-only card keeps its headline at the desk
     text, buttons = _render(adapter, "read_url", can_confirm=True)
     assert "https://example.com/the-target" in text and buttons
     assert "channel_can_confirm" not in text

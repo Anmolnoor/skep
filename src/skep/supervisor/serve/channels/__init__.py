@@ -157,12 +157,6 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
     if not card:
         return ()
     notes: list[str] = []
-    items = card.get("items")
-    folded = isinstance(items, list) and len(items) > 1
-    if messenger and card.get("headline") and not folded:
-        # v129-F5: what the card acts on (a read_url's target) — the CLI
-        # prints the args themselves; a fold lists its items below.
-        notes.append(str(card["headline"]))
     if card.get("tier") == "high":
         notes.append(
             f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
@@ -178,7 +172,8 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
     schedule = card.get("schedule")
     if isinstance(schedule, Mapping):  # P4-2: what a script schedule really does
         notes.extend(schedule_lines(schedule))
-    if isinstance(items, list) and folded:
+    items = card.get("items")
+    if isinstance(items, list) and len(items) > 1:
         lines = [str(item) for item in items]
         if messenger and not fold_fits_a_messenger(lines):
             notes.append(
@@ -309,11 +304,17 @@ def render_confirm_card(
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
     too_long = len(items) > 1 and not fold_fits_a_messenger(items)
+    web_ui_only = action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long
+    headline = (card or {}).get("headline")
+    # v129-F5: a card the phone may confirm shows what it acts on (a
+    # read_url's target): no blind approvals. A web-only card keeps its
+    # headline at the desk; a fold lists its items in the notes.
+    lead = (str(headline),) if headline and not web_ui_only and len(items) <= 1 else ()
     return ConfirmCard(
         action_class=action_class,
         commands=command_lines,
-        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long,
-        notes=card_notes(card),
+        web_ui_only=web_ui_only,
+        notes=lead + card_notes(card),
         high=high,
     )
 
