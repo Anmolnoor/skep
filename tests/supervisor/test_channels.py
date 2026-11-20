@@ -246,7 +246,9 @@ def _render(adapter: str, tool: str, can_confirm: bool) -> tuple[str, bool]:
         return text, keyboard is not None
     if adapter == "slack":
         blocks = _slack.confirmation_blocks(tool, (), config, card)
-        return json.dumps(blocks, ensure_ascii=False), any(b.get("type") == "actions" for b in blocks)
+        return json.dumps(blocks, ensure_ascii=False), any(
+            b.get("type") == "actions" for b in blocks
+        )
     payload = _discord.confirmation_embed(tool, (), config, "http://ui/", card)
     return json.dumps(payload, ensure_ascii=False), "components" in payload
 
