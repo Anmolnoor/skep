@@ -672,6 +672,49 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
         store.close()
 
 
+@pytest.mark.parametrize("kind", ["legacy", "builder", "assistant"])
+def test_v128_f6_a_project_grant_answers_a_roles_catch_all_ask(kind: str, tmp_path: Path) -> None:
+    """v128-F6 (operator decision): a project-tier allow ("remember" on a
+    worker card, bound to this project) answers a role's catch-all ask. It
+    showed as "also approved, this run only" on every builder dispatch and was
+    dropped from scheduled (headless) runs. The session tier still never does
+    (the test above)."""
+    from skep.supervisor.policy_resolver import resolve_run_policy
+    from skep.supervisor.serve.actions import delegate_permissions, persist_remembered_command
+
+    home, repo = build_home(tmp_path, kind)
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(project_id="p", name="p", strategy="trusted_local_dev",
+                                 phase="build", policy={})  # fmt: skip
+        store.add_project_binding(project_id="p", binding_kind="repo_path",
+                                  binding_value=str(repo.resolve()))  # fmt: skip
+        holder = ConfigHolder(config, store)
+        command = ["python3", "-m", "pytest", "-q"]
+        persist_remembered_command(store, holder, repo, command)
+        resolved = resolve_run_policy(
+            store=store, config=config, repo=repo, caste="coding", network=None,
+            env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+            max_actions=None, max_provider_calls=None, execution_mode="sandbox",
+            binding_candidates=[], engine=None,
+        )  # fmt: skip
+        assert resolved.shell_grants == {"python3 -m pytest -q": "grant:project"}
+        held = policy_decide(holder, store, scope="shell", action="run",
+                             value="python3 -m pytest -q", repo=str(repo),
+                             role="builder")  # fmt: skip
+        assert held["verdict"] == "allow", held
+        for deferred in (False, True):
+            narrowed = delegate_permissions(
+                holder, store, repo, resolved.permissions, role=None,
+                delegation_chain=["queen@builder"], deferred_asks=deferred,
+            )[0]  # fmt: skip
+            assert command in narrowed.shell_allowlist, deferred
+            assert command not in narrowed.shell_ask, deferred
+    finally:
+        store.close()
+
+
 def test_a_fetch_grant_answers_a_roles_ask_on_read_url_and_rest_alike(tmp_path: Path) -> None:
     """P3-3 moved read_url: a fetch grant answers a role's `net-fetch-gated *`
     ask (decision #1, B56) in the Queen's own lane and in REST alike (V1)."""
