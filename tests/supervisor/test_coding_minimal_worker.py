@@ -2481,6 +2481,31 @@ def test_default_coding_worker_recovers_from_a_failed_verify_step(
     assert _plan_created_count(config, outcome.record.task_id) == 2
 
 
+def test_v128_f8_changed_files_after_a_replan_are_the_patch_files(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v128-F8 (I8): the recovery replan restarted the tool-write list, so
+    result.json named 1 file while the patch changed 2 — the first attempt's
+    write stays in the worktree and in the patch."""
+    first_attempt = json.loads(_VERIFY_FAILING_TOOL_PLAN)
+    first_attempt["steps"][0]["args"]["path"] = "first.py"
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        server.script_reply(json.dumps(first_attempt))
+        server.script_reply(_recovery_good_plan())
+        outcome = run_task(repo, "Create generated.py.", config=config, permissions=permissions)
+    finally:
+        server.stop()
+
+    assert outcome.record.state == "completed"
+    result = json.loads(
+        (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
+    )
+    assert sorted(result["changed_files"]) == ["first.py", "generated.py"]
+
+
 def test_default_coding_worker_recovers_from_a_failed_edit_plan_verify(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
