@@ -119,7 +119,8 @@ EOF
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
-Run the test again. You should see `BWRAP_OK`.
+If you edited an existing profile, reload that file with `apparmor_parser -r`
+instead. Run the test again. You should see `BWRAP_OK`.
 
 Don't turn the restriction off for the whole machine
 (`sysctl kernel.apparmor_restrict_unprivileged_userns=0`). That would give every
@@ -177,7 +178,9 @@ Ubuntu's Node 18 was new enough for the tested Codex version. To sign Codex in
 to your ChatGPT plan on a machine with no browser, run
 `~/.npm-global/bin/codex login --device-auth` and approve the code it prints in
 any browser. The device code expires after a few minutes, so approve it
-promptly. [`codex-chatgpt-login.md`](codex-chatgpt-login.md) explains how runs
+promptly. If it says device code sign-in is disabled, turn it on in your
+ChatGPT security settings (or ask your workspace admin), then retry.
+[`codex-chatgpt-login.md`](codex-chatgpt-login.md) explains how runs
 use that login.
 
 ## 6. Onboard (as `skep`)
@@ -237,7 +240,8 @@ systemctl --user is-active skep.service
 grep 'skep serve:' ~/.skep/serve.log | tail -n 1
 ```
 
-You should see `active`, then a line starting `skep serve: http://127.0.0.1:8765`.
+You should see `active`, then a line starting `skep serve: http://127.0.0.1:8765`
+(give it a few seconds after starting).
 The service's journal also holds the access token, which skep prints at
 startup, so don't paste `journalctl` output anywhere.
 
@@ -268,6 +272,9 @@ at 9 am" into a UTC start time. On a UTC server, "9 am" means 9 am UTC:
 sudo timedatectl set-timezone Europe/Berlin   # your zone; list them with: timedatectl list-timezones
 ```
 
+A running skep keeps the timezone it started with, so restart it afterwards
+(as `skep`: `systemctl --user restart skep.service`).
+
 ## 9. Connect Telegram (optional)
 
 1. Create a bot with @BotFather and store its token as the channel secret. Use
@@ -279,7 +286,8 @@ sudo timedatectl set-timezone Europe/Berlin   # your zone; list them with: timed
    written): send the bot a message, then read `message.from.id` from
    `https://api.telegram.org/bot<token>/getUpdates`.
 3. Enable the channel for you alone. Both lists are needed, and an empty
-   `allowed_users` lets nobody in:
+   `allowed_users` lets nobody in. (These commands use `127.0.0.1`; if you bound
+   another address in section 7, use that.)
 
    ```sh
    printf 'Authorization: Bearer %s\n' "$(cat ~/.skep/supervisor/serve-token)" |
