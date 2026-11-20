@@ -62,13 +62,14 @@ from . import (
     telegram as telegram_adapter,
 )
 from .commands import (
+    COMMANDS,
     CommandContext,
     answered_inline,
+    discord_subcommands,
     new_channel_chat,
     parse_command,
     run_command,
-    runs_text,
-    status_text,
+    telegram_menu,
 )
 
 logger = logging.getLogger("skep.serve")
@@ -120,6 +121,26 @@ def _default_fetch(token: str, offset: int) -> list[dict[str, object]]:
     payload = response.json()
     results = payload.get("result") if isinstance(payload, dict) else None
     return list(results) if isinstance(results, list) else []
+
+
+def _default_fetch_telegram_file(token: str, file_id: str) -> bytes | None:
+    """v130-F15: getFile, then the download. Both URLs hold the bot token, so
+    nothing here logs or raises with them: any failure is just None."""
+    timeout = httpx.Timeout(15.0, connect=10.0)
+    try:
+        meta = httpx.get(
+            f"{TELEGRAM_API}/bot{token}/getFile", params={"file_id": file_id}, timeout=timeout
+        )
+        result = meta.json().get("result") if meta.status_code == 200 else None
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not path:
+            return None
+        response = httpx.get(f"{TELEGRAM_API}/file/bot{token}/{path}", timeout=timeout)
+    except (httpx.HTTPError, ValueError):
+        return None
+    if response.status_code != 200 or len(response.content) > ATTACHMENT_MAX_BYTES:
+        return None
+    return response.content
 
 
 def _default_send(
@@ -233,6 +254,11 @@ def _telegram_call(token: str, method: str, payload: dict[str, object]) -> Any:
         json=payload,
         timeout=httpx.Timeout(10.0, connect=5.0),
     )
+
+
+def _default_telegram_set_commands(token: str, commands: list[dict[str, str]]) -> bool:
+    # v130-F14: the "/" menu in the Telegram client, from the deck.
+    return bool(_telegram_call(token, "setMyCommands", {"commands": commands}).status_code == 200)
 
 
 def _telegram_status_post(token: str, chat_id: str, text: str) -> str | None:
@@ -615,9 +641,14 @@ class TelegramPoller(threading.Thread):
         status_ops: StatusOps | None = None,
         typing: Callable[[str, str], object] | None = None,
         spawn: SpawnVerdict | None = None,
+        set_commands: Callable[[str, list[dict[str, str]]], object] | None = None,
+        fetch_file: Callable[[str, str], bytes | None] | None = None,
     ) -> None:
         super().__init__(name="serve-telegram", daemon=True)
         self._turns = ConversationTurns(spawn if spawn is not None else _spawn_daemon_thread)
+        # v130-F14: None = no menu call (the suite); serve wires the real one.
+        self._set_commands = set_commands
+        self._menu_set = False
         # v130-F6: None = no status line / no typing (the suite); serve wires
         # the real calls (app.py) — no test ever reaches api.telegram.org.
         self._status_ops = status_ops
@@ -630,6 +661,7 @@ class TelegramPoller(threading.Thread):
         self._fetch = fetch if fetch is not None else _default_fetch
         self._send = send if send is not None else _default_send
         self._answer = answer if answer is not None else _default_answer_callback
+        self._fetch_file = fetch_file if fetch_file is not None else _default_fetch_telegram_file
         self._idle = idle_seconds
         self._offset = 0
         self._stop_event = threading.Event()
@@ -642,6 +674,9 @@ class TelegramPoller(threading.Thread):
         secret = resolve_channel_secret(self._home, telegram_adapter.CHANNEL)
         if not adapter_ready(config, secret) or secret is None:
             return 0
+        if not self._menu_set:
+            self._menu_set = True  # once per start, success or not
+            self._register_menu(secret)
         updates = self._fetch(secret, self._offset)
         for update in updates:
             update_id = update.get("update_id")
@@ -656,7 +691,7 @@ class TelegramPoller(threading.Thread):
             if isinstance(callback, dict):
                 self._handle_callback(callback, config, secret)
                 handled += 1
-        for message in telegram_adapter.poll_updates(updates, config):
+        for message in self._inbound(updates, config, secret):
             if answered_inline(message.text):
                 self._reply(message, config, secret)  # v130-F10: never behind a turn
             else:
@@ -685,6 +720,49 @@ class TelegramPoller(threading.Thread):
             )
             if not result.ok:
                 logger.warning("telegram delivery failed: %s", result.detail)
+
+    def _inbound(
+        self, updates: list[dict[str, object]], config: ChannelConfig, token: str
+    ) -> list[ChannelMessage]:
+        """The admitted messages, each photo fetched only AFTER admission
+        (v130-F15, Discord's v44-F9 path). A failed fetch keeps the caption;
+        a bare photo that cannot be fetched has nothing left to say."""
+        routed: list[ChannelMessage] = []
+        for update in updates:
+            message = telegram_adapter.normalize_inbound(update, config).message
+            raw = update.get("message")
+            file_id = (
+                telegram_adapter.image_file_id(raw, ATTACHMENT_MAX_BYTES)
+                if message is not None and isinstance(raw, dict)
+                else None
+            )
+            if message is not None and file_id:
+                try:
+                    blob, why = self._fetch_file(token, file_id), "no file"
+                except Exception as exc:  # the file URL holds the token: type only
+                    blob, why = None, exc.__class__.__name__
+                if blob:
+                    message = dataclasses.replace(message, attachments=(blob,))
+                else:
+                    logger.warning("telegram photo fetch failed (%s)", why)
+                    if not message.text:
+                        continue
+            if message is not None:
+                routed.append(message)
+        return routed
+
+    def _register_menu(self, token: str) -> None:
+        """v130-F14: a failed menu call costs the menu, never the poll."""
+        if self._set_commands is None:
+            return
+        try:
+            ok = self._set_commands(token, telegram_menu())
+        except Exception as exc:  # the URL holds the token: log the type only
+            ok, detail = False, exc.__class__.__name__
+        else:
+            detail = "rejected"
+        if not ok:
+            logger.warning("telegram setMyCommands failed (%s); the / menu is stale", detail)
 
     def _turn_with_status(
         self, message: ChannelMessage, token: str
@@ -1327,23 +1405,16 @@ def _default_discord_followup(application_id: str, interaction_token: str, text:
     return response.status_code in (200, 204)
 
 
-# v78-F4: the /skep command tree — deterministic store reads plus the two
-# verdict spellings. Bulk-overwritten via Discord's idempotent PUT form, so
-# re-registering on every reconnect is a server-side no-op.
+# v78-F4: the two verdict spellings Discord had before the deck; v130-F14:
+# only while the deck lacks an entry of the same name.
+# v78-F4, v130-F14: the /skep tree, generated from the deck. Bulk-overwritten
+# via Discord's idempotent PUT form, so re-registering on every reconnect is a
+# server-side no-op.
 SKEP_COMMAND_TREE: list[dict[str, object]] = [
     {
         "name": "skep",
         "description": "the skep supervisor",
-        "options": [
-            {"type": 1, "name": "status", "description": "running runs + what waits on you"},
-            {"type": 1, "name": "runs", "description": "the 5 most recent runs"},
-            {
-                "type": 1,
-                "name": "approve",
-                "description": "confirm this chat's pending card",
-            },
-            {"type": 1, "name": "deny", "description": "deny this chat's pending card"},
-        ],
+        "options": discord_subcommands(),
     }
 ]
 
@@ -1946,57 +2017,38 @@ class DiscordGateway(threading.Thread):
         if not isinstance(inner, dict) or str(inner.get("name") or "") != "skep":
             return
         options = inner.get("options")
-        sub = (
-            str(options[0].get("name") or "")
+        option = (
+            options[0]
             if isinstance(options, list) and options and isinstance(options[0], dict)
-            else ""
+            else {}
         )
+        sub = str(option.get("name") or "")
         channel_id = str(data.get("channel_id") or "")
-        if sub in ("approve", "deny"):
-            # v106-F13: a verdict runs a mutation plus a model continuation —
-            # the same 3-second trap the buttons had; same deferred flow.
+        if sub in COMMANDS:  # v130-F14: one deck — Discord's tree never drifts from it
+            args = option.get("options")
+            arg = args[0] if isinstance(args, list) and args and isinstance(args[0], dict) else {}
+            text = str(arg.get("value") or "").strip()
+            user_id = _interaction_user(data)
+            message = ChannelMessage(
+                channel=discord_adapter.CHANNEL,
+                identity=ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id),
+                text=f"/{sub} {text}".strip(),
+                session_key=f"{discord_adapter.CHANNEL}:{channel_id}",
+                user_id=user_id,
+            )
+            ctx = CommandContext(
+                engine=self._engine, message=message, config=config, web_ui_url=self._web_ui_url
+            )
+            # Deferred like a verdict: a deck command may outlast the 3s window.
             self._defer_and_finish(
                 interaction_id=str(data.get("id") or ""),
                 interaction_token=str(data.get("token") or ""),
                 channel_id=channel_id,
                 token=token,
-                resolve=lambda: self._slash_verdict(
-                    channel_id, confirm=sub == "approve", user_id=_interaction_user(data)
-                ),
+                resolve=lambda: run_command(ctx, sub, text),
             )
             return
-        if sub == "status":
-            text = self._slash_status()
-        elif sub == "runs":
-            text = self._slash_runs()
-        else:
-            return  # unknown subcommands resolve nothing
-        if not self._ack(str(data.get("id") or ""), str(data.get("token") or ""), text):
-            logger.warning("discord interaction ack failed")
-
-    def _slash_status(self) -> str:
-        return status_text(self._store)  # v130-F7: one deck, every channel
-
-    def _slash_runs(self) -> str:
-        return runs_text(self._store)
-
-    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> Verdict:
-        """The typed command IS the decision, asked once (I7): resolve the
-        bound chat's single pending card through the EXACT gate the ✅ button
-        uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
-        argument: the v51 field test showed id-typing is where approvals go to
-        die. W19: one turn can still leave several cards, and then this
-        resolves none (``_several_cards``)."""
-        binding = self._store.channel_session(f"{discord_adapter.CHANNEL}:{channel_id}")
-        pending = self._store.pending_chat_actions(binding.chat_id) if binding else []
-        if not pending:
-            return "skep: no card is waiting in this conversation.", []
-        if len(pending) > 1:
-            return _several_cards(len(pending), self._web_ui_url), []
-        identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
-        return self._resolve_verdict(
-            pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
-        )
+        # unknown subcommands resolve nothing
 
     def _handle_reaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         emoji = data.get("emoji")

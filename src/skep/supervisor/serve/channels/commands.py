@@ -414,6 +414,34 @@ def answered_inline(text: str) -> bool:
     return command is not None and ALIASES.get(command[0], command[0]) not in MODEL_COMMANDS
 
 
+_TELEGRAM_NAME = re.compile(r"[a-z0-9_]{1,32}")
+_DISCORD_NAME = re.compile(r"[-_a-z0-9]{1,32}")
+
+
+def telegram_menu() -> list[dict[str, str]]:
+    """v130-F14: Telegram's ``/`` menu (setMyCommands), from the one table."""
+    return [
+        {"command": name, "description": (summary or name)[:256]}
+        for name, (summary, _) in COMMANDS.items()
+        if _TELEGRAM_NAME.fullmatch(name)
+    ]
+
+
+def discord_subcommands() -> list[dict[str, object]]:
+    """v130-F14: Discord ``/skep`` subcommands, from the one table; each takes
+    an optional free-text ``args`` (``/skep runs args:10``)."""
+    return [
+        {
+            "type": 1,  # SUB_COMMAND
+            "name": name,
+            "description": (summary or name)[:100],
+            "options": [{"type": 3, "name": "args", "description": "arguments", "required": False}],
+        }
+        for name, (summary, _) in COMMANDS.items()
+        if _DISCORD_NAME.fullmatch(name)
+    ]
+
+
 def run_command(ctx: CommandContext, name: str, args: str) -> Reply:
     entry = COMMANDS.get(ALIASES.get(name, name))
     if entry is None:

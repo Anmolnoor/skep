@@ -34,15 +34,46 @@ from . import (
 CHANNEL = "telegram"
 
 
+def image_file_id(message: Mapping[str, object], max_bytes: int) -> str | None:
+    """v130-F15: the file to fetch for a photo (the largest size within
+    ``max_bytes``; Telegram sends several) or an image/* document — None for
+    anything else. A missing ``file_size`` passes here; the fetch re-checks."""
+
+    def fits(item: Mapping[str, object]) -> bool:
+        size = item.get("file_size")
+        return not isinstance(size, int) or size <= max_bytes
+
+    photo = message.get("photo")
+    if isinstance(photo, list):
+        sizes = [p for p in photo if isinstance(p, dict) and p.get("file_id") and fits(p)]
+        if sizes:
+            best = max(sizes, key=lambda p: int(p.get("width") or 0) * int(p.get("height") or 0))
+            return str(best["file_id"])
+    document = message.get("document")
+    if (
+        isinstance(document, dict)
+        and str(document.get("mime_type") or "").startswith("image/")
+        and document.get("file_id")
+        and fits(document)
+    ):
+        return str(document["file_id"])
+    return None
+
+
 def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> NormalizedInbound:
     message = update.get("message")
     if not isinstance(message, dict):
         return NormalizedInbound(None, "channel.reject.malformed_payload")
     chat = message.get("chat")
     chat_id = str(chat.get("id")) if isinstance(chat, dict) else ""
-    text = str(message.get("text") or "").strip()
+    # v130-F15: a photo's words ride in caption; a bare photo is still a message.
+    text = str(message.get("text") or message.get("caption") or "").strip()
     identity = ChannelIdentity(channel=CHANNEL, identity_id=chat_id)
-    if not chat_id or not text:
+    document = message.get("document")
+    has_image = bool(message.get("photo")) or (
+        isinstance(document, dict) and str(document.get("mime_type") or "").startswith("image/")
+    )
+    if not chat_id or not (text or has_image):
         return NormalizedInbound(None, "channel.reject.malformed_payload")
     if not identity_allowlisted(identity, config.allowed_identities):
         return NormalizedInbound(

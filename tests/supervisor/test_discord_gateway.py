@@ -998,7 +998,7 @@ def _slash(sub: str, channel_id: str = "42", *, user_id: str = "u1", seq: int = 
 
 
 def test_discord_registers_the_skep_tree_once_after_ready(config: SupervisorConfig) -> None:
-    """The bulk-overwrite PUT: four subcommands, once per session; a 403
+    """The bulk-overwrite PUT: the deck's subcommands, once per session; a 403
     teaches the missing invite scope and never breaks the session."""
     import logging as logging_mod
 
@@ -1019,7 +1019,8 @@ def test_discord_registers_the_skep_tree_once_after_ready(config: SupervisorConf
             assert root["name"] == "skep"
             options = root["options"]
             assert isinstance(options, list)
-            assert [o["name"] for o in options] == ["status", "runs", "approve", "deny"]
+            # v130-F14: generated from the deck (test_channel_menus pins it).
+            assert {"status", "runs", "approve", "deny"} <= {o["name"] for o in options}
         finally:
             harness.close()
 
@@ -1105,9 +1106,10 @@ def test_discord_slash_status_and_runs_answer_without_a_model_turn(
             store.close()
         harness = _DiscordHarness(config)
         try:
-            harness.script(HELLO, READY, _slash("status", seq=2), _slash("runs", seq=3))
+            harness.script(HELLO, READY_APP, _slash("status", seq=2), _slash("runs", seq=3))
             assert harness.gateway.session_once() is True
-            status_ack, runs_ack = harness.acks[0][2], harness.acks[1][2]
+            # v130-F14: deck commands answer via the deferred follow-up.
+            status_ack, runs_ack = harness.followups[0][2], harness.followups[1][2]
             assert "1 approval(s) waiting" in status_ack
             assert "needs your approval" in status_ack and "🟡" in status_ack
             assert "🟢" in runs_ack and done.task_id[:13] in runs_ack
@@ -1511,7 +1513,9 @@ def test_with_two_cards_waiting_a_reaction_or_slash_verdict_resolves_neither(
             reply = str(
                 harness.sent[-1][2]["content"] if path == "reaction" else harness.followups[-1][2]
             )
-            assert "2 cards are waiting" in reply and "buttons" in reply
+            assert "2 cards are waiting" in reply
+            # v130-F11: /skep approve is the deck's — it names each card's id
+            assert ("buttons" if path == "reaction" else f"/approve {ids[0][:8]}") in reply
             for action_id in ids:
                 waiting = harness.store.get_chat_action(action_id)
                 assert waiting is not None and waiting.status == "proposed"
