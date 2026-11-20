@@ -20,12 +20,15 @@ from pathlib import Path
 from ...store import RunStore
 from . import resolve_channel_secret
 from .runtime import (
+    DISCORD_CHUNK_CHARS,
     SendBlocks,
     SendText,
     _default_discord_send,
     _default_discord_send_file,
     _default_send,
     _default_slack_send,
+    _text_blocks,
+    chunk_text,
     send_telegram_markdown,
 )
 
@@ -165,12 +168,15 @@ def push_outcome(
             # the honest text line — content + embed in ONE payload, so a
             # client that drops the embed still shows the text (no fallback
             # path to get wrong). A missing run degrades to text-only.
-            payload: dict[str, object] = {"content": text}
+            # v130-F3: a long text goes in pieces; the embed rides the last.
+            *leading, last = chunk_text(text, DISCORD_CHUNK_CHARS)
+            delivered = all(send(token, binding.identity_id, {"content": c}) for c in leading)
+            payload: dict[str, object] = {"content": last}
             if run_ref:
                 embed = _run_embed(store, run_ref, web_ui_url)
                 if embed is not None:
                     payload["embeds"] = [embed]
-            delivered = send(token, binding.identity_id, payload)
+            delivered = delivered and send(token, binding.identity_id, payload)
             if delivered:
                 # v53-F6 (ADR 0031): the voice garnish — rendered AFTER the
                 # text landed, config-gated, best-effort like everything here.
@@ -185,9 +191,7 @@ def push_outcome(
             return _finish(send_telegram_markdown(tg, token, binding.identity_id, text))
         if binding.channel == "slack":
             sl = send_slack if send_slack is not None else _default_slack_send
-            blocks: list[dict[str, object]] = [
-                {"type": "section", "text": {"type": "mrkdwn", "text": text}}
-            ]
+            blocks = _text_blocks(text)  # v130-F3: one section per chunk
             # v78-F6: a terminal run's push carries the rich summary (header +
             # summary + a URL button — a link, never a verb) beside the honest
             # text section; pushes thread under the operator's latest message.

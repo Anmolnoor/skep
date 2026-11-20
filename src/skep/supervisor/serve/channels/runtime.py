@@ -130,22 +130,30 @@ def _default_send(
 # under it so MarkdownV2 escaping usually still fits.
 TELEGRAM_MAX_CHARS = 4096
 TELEGRAM_CHUNK_CHARS = 3500
+# v130-F3: Discord rejects a message over 2000 characters, Slack a section
+# over 3000 — the same split, each under its own platform's cap.
+DISCORD_CHUNK_CHARS = 1900
+SLACK_CHUNK_CHARS = 2900
 
 
-def _telegram_chunks(text: str) -> list[str]:
-    """Cut ``text`` into chunks of at most TELEGRAM_CHUNK_CHARS, on a paragraph
+def chunk_text(text: str, limit: int) -> list[str]:
+    """Cut ``text`` into chunks of at most ``limit`` characters, on a paragraph
     break, else a line break, else hard."""
     chunks: list[str] = []
-    while len(text) > TELEGRAM_CHUNK_CHARS:
-        cut = text.rfind("\n\n", 0, TELEGRAM_CHUNK_CHARS)
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
         if cut <= 0:
-            cut = text.rfind("\n", 0, TELEGRAM_CHUNK_CHARS)
+            cut = text.rfind("\n", 0, limit)
         if cut <= 0:
-            cut = TELEGRAM_CHUNK_CHARS
+            cut = limit
         chunks.append(text[:cut])
         text = text[cut:].lstrip("\n")
     chunks.append(text)
     return chunks
+
+
+def _telegram_chunks(text: str) -> list[str]:
+    return chunk_text(text, TELEGRAM_CHUNK_CHARS)
 
 
 def send_telegram_markdown(
@@ -592,7 +600,11 @@ def _default_slack_send(
 
 
 def _text_blocks(text: str) -> list[dict[str, object]]:
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    """v130-F3: one section per chunk, all in one message (Slack allows 50)."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
+        for chunk in chunk_text(text, SLACK_CHUNK_CHARS)
+    ]
 
 
 def _telegram_card_replies(
@@ -1298,13 +1310,15 @@ class DiscordGateway(threading.Thread):
         return False
 
     def _deliver(self, token: str, channel_id: str, text: str) -> None:
-        result = discord_adapter.deliver(
-            text,
-            channel_id=channel_id,
-            send=lambda cid, payload: self._send(token, cid, payload),
-        )
-        if not result.ok:
-            logger.warning("discord delivery failed: %s", result.detail)
+        for chunk in chunk_text(text, DISCORD_CHUNK_CHARS):  # v130-F3
+            result = discord_adapter.deliver(
+                chunk,
+                channel_id=channel_id,
+                send=lambda cid, payload: self._send(token, cid, payload),
+            )
+            if not result.ok:
+                logger.warning("discord delivery failed: %s", result.detail)
+                return
 
     def _handle_message(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         author = data.get("author")
