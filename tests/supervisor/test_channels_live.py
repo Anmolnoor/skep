@@ -738,6 +738,9 @@ def test_slack_button_confirms_a_low_risk_dispatch(
             chat = store.create_chat(
                 title="slack C1", model=None, role="builder"
             )  # may dispatch (P3-6)
+            store.bind_channel_session(
+                session_key="slack:C1", channel="slack", identity_id="C1", chat_id=chat.chat_id
+            )
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",
@@ -774,6 +777,62 @@ def test_slack_button_confirms_a_low_risk_dispatch(
         assert resolved is not None and resolved.status == "confirmed"
         assert dispatched, "the confirmed dispatch_run must have dispatched a run"
         assert "dispatched" in str(sent[-1][2])
+    finally:
+        ollama.stop()
+
+
+def test_a_slack_button_for_another_chats_card_is_refused(
+    config: SupervisorConfig, monkeypatch: object
+) -> None:
+    """v130-F2: the v129-F3 rule, Slack spelling — a press names its card by
+    id, and resolves only a card of the chat its own channel is bound to."""
+    import json as _json
+    from urllib.parse import quote_plus
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve.channels import runtime
+
+    from .fake_ollama import FakeOllama
+
+    sent: list[tuple[str, str, list[dict[str, object]]]] = []
+
+    def fake_send(token: str, channel_id: str, blocks: list[dict[str, object]]) -> bool:
+        sent.append((token, channel_id, blocks))
+        return True
+
+    monkeypatch.setattr(runtime, "_default_slack_send", fake_send)  # type: ignore[attr-defined]
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_slack(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            bound = store.create_chat(title="slack C1", model=None)
+            store.bind_channel_session(
+                session_key="slack:C1", channel="slack", identity_id="C1", chat_id=bound.chat_id
+            )
+            other = store.create_chat(title="desk", model=None)
+            action_id = store.add_chat_action(
+                other.chat_id, tool="read_url", args={"url": "https://example.com/b"}
+            )
+        finally:
+            store.close()
+        webhook = _slack_app_client(config)
+        payload = {
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"action_id": "deny", "value": action_id}],
+        }
+        body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
+        webhook.post(  # type: ignore[attr-defined]
+            "/api/channels/slack/interact", content=body, headers=_slack_headers("signing-1", body)
+        )
+        assert "belongs to another conversation" in str(sent[-1][2])
+        check = RunStore(config.db_path)
+        try:
+            refreshed = check.get_chat_action(action_id)
+        finally:
+            check.close()
+        assert refreshed is not None and refreshed.status == "proposed"
     finally:
         ollama.stop()
 
@@ -1075,6 +1134,9 @@ def test_slack_never_confirms_a_high_card(
         store = RunStore(config.db_path)
         try:
             chat = store.create_chat(title="slack C1", model=None)
+            store.bind_channel_session(
+                session_key="slack:C1", channel="slack", identity_id="C1", chat_id=chat.chat_id
+            )
             action_id = store.add_chat_action(
                 chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
             )

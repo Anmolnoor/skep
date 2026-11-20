@@ -392,6 +392,9 @@ def test_discord_button_confirms_a_low_risk_dispatch(
             chat = store.create_chat(
                 title="discord 42", model=None, role="builder"
             )  # may dispatch (P3-6)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",
@@ -427,6 +430,57 @@ def test_discord_button_confirms_a_low_risk_dispatch(
             assert harness.store.recent_runs(5), "the confirmed dispatch_run must dispatch"
             assert harness.deferred_acks, "the click must be acked before any work"
             assert "dispatched" in harness.followups[-1][2]
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_discord_button_in_an_allowlisted_channel_refuses_another_chats_card(
+    config: SupervisorConfig,
+) -> None:
+    """v130-F2: an allow-listed channel is not a pass for every card — a
+    press resolves only a card of the chat this channel is bound to."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            bound = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=bound.chat_id
+            )
+            other = store.create_chat(title="desk", model=None)
+            action_id = store.add_chat_action(
+                other.chat_id, tool="read_url", args={"url": "https://example.com/b"}
+            )
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            interaction = json.dumps(
+                {
+                    "op": 0,
+                    "t": "INTERACTION_CREATE",
+                    "s": 2,
+                    "d": {
+                        "id": "i-9",
+                        "token": "itok-9",
+                        "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
+                        "data": {"custom_id": f"deny:{action_id}"},
+                    },
+                }
+            )
+            harness.script(HELLO, READY_APP, interaction)
+            assert harness.gateway.session_once() is True
+            assert "belongs to another conversation" in harness.followups[-1][2]
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
         finally:
             harness.close()
     finally:

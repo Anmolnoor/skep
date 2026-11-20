@@ -212,6 +212,18 @@ def _telegram_action_keyboard(keyboard: dict[str, object], action_id: str) -> di
     return keyboard
 
 
+CARD_OF_ANOTHER_CONVERSATION = "skep: that card belongs to another conversation."
+
+
+def card_in_bound_chat(store: Any, session_key: str, action: Any) -> bool:
+    """v129-F3, v130-F2 (all three transports): a press names its card by an
+    id from the client, so it resolves only a card of the chat its own
+    conversation is bound to — an allow-listed room is not a pass for every
+    card in the store."""
+    binding = store.channel_session(session_key)
+    return binding is not None and binding.chat_id == action.chat_id
+
+
 def run_channel_turn(
     engine: ChatEngine, message: ChannelMessage, *, web_ui_url: str
 ) -> tuple[str, list[dict[str, object]]]:
@@ -442,11 +454,8 @@ class TelegramPoller(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}"
             )
             return
-        # v129-F3: callback data is client-supplied — a press resolves only a
-        # card of the chat its own conversation is bound to.
-        binding = self._store.channel_session(f"{telegram_adapter.CHANNEL}:{chat_id}")
-        if binding is None or binding.chat_id != action.chat_id:
-            answer("skep: that card belongs to another conversation.")
+        if not card_in_bound_chat(self._store, f"{telegram_adapter.CHANNEL}:{chat_id}", action):
+            answer(CARD_OF_ANOTHER_CONVERSATION)
             return
         chat = self._store.get_chat(action.chat_id)
         if chat is None:
@@ -754,6 +763,9 @@ def add_slack_routes(
                     f"Review it in the web UI: {web_ui_url}"
                 ),
             )
+            return
+        if not card_in_bound_chat(store, f"{slack_adapter.CHANNEL}:{channel_id}", action):
+            _deliver(bot_token, channel_id, _text_blocks(CARD_OF_ANOTHER_CONVERSATION))
             return
         chat = store.get_chat(action.chat_id)
         if chat is None:
@@ -1421,12 +1433,9 @@ class DiscordGateway(threading.Thread):
         # allowlist has never heard of — a session binding to the card's OWN
         # chat is as good as the allowlist (skep created that thread under an
         # allow-listed parent). A binding to a different chat stays rejected.
-        identity_ok = identity_allowlisted(identity, config.allowed_identities)
-        if not identity_ok:
-            binding = self._store.channel_session(
-                f"{discord_adapter.CHANNEL}:{identity.identity_id}"
-            )
-            identity_ok = binding is not None and binding.chat_id == action.chat_id
+        session_key = f"{discord_adapter.CHANNEL}:{identity.identity_id}"
+        own_card = card_in_bound_chat(self._store, session_key, action)
+        identity_ok = own_card or identity_allowlisted(identity, config.allowed_identities)
         # ES (B114): the room is not the operator — the person must be listed
         # too, for buttons, reactions and /skep verdicts alike.
         identity_ok = identity_ok and user_allowlisted(user_id, config)
@@ -1440,6 +1449,8 @@ class DiscordGateway(threading.Thread):
                 f"skep: not confirmable from Discord ({decision.reason}). "
                 f"Review it in the web UI: {self._web_ui_url}"
             )
+        if not own_card:  # v130-F2: an allow-listed room is not a pass for every card
+            return CARD_OF_ANOTHER_CONVERSATION
         chat = self._store.get_chat(action.chat_id)
         if chat is None:
             return "skep: the chat behind that card is gone."
