@@ -239,21 +239,10 @@ class Ticker(threading.Thread):
     def _check_for_update(self) -> None:
         """v130: announce a newer skep release, once per version. Installing
         waits for the operator's /update (selfupdate.py)."""
-        from .selfupdate import (
-            DEFAULT_UPDATE_CHECK_INTERVAL,
-            UPDATE_CHECK_INTERVAL_SECONDS,
-            check_for_update,
-        )
+        from .selfupdate import UPDATE_CHECK_INTERVAL, check_for_update
 
-        interval = _stored_int(
-            self._store.get_setting(UPDATE_CHECK_INTERVAL_SECONDS),
-            DEFAULT_UPDATE_CHECK_INTERVAL,
-            minimum=0,
-        )
-        if interval <= 0:
-            return
         now = time.monotonic()
-        if self._last_update_check and now - self._last_update_check < interval:
+        if self._last_update_check and now - self._last_update_check < UPDATE_CHECK_INTERVAL:
             return
         self._last_update_check = now
         check_for_update(self._store, lambda text: self._say_in_channel(text, actor="self-update"))

@@ -394,7 +394,7 @@ class TelegramPoller(threading.Thread):
                 self._handle_callback(callback, config, secret)
                 handled += 1
         for message in telegram_adapter.poll_updates(updates, config):
-            if message.text.split("@", 1)[0].lower() == "/update":
+            if message.text == "/update":
                 self._handle_update(message.identity.identity_id, config, secret)
                 handled += 1
                 continue

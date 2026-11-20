@@ -68,16 +68,19 @@ def _pypi(version: str) -> Any:
 
 
 class _Runner:
-    """Records argv; fails the commands whose first or last word is listed."""
+    """Records argv; fails the commands whose first or last word is listed;
+    ``skep --version`` reports ``reports``."""
 
-    def __init__(self, fail: tuple[str, ...] = ()) -> None:
+    def __init__(self, fail: tuple[str, ...] = (), reports: str = NEWER) -> None:
         self.calls: list[list[str]] = []
         self._fail = fail
+        self._reports = reports
 
     def __call__(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(argv)
         failed = argv[-1] in self._fail or Path(argv[0]).name in self._fail
-        return subprocess.CompletedProcess(argv, 1 if failed else 0, "", "boom" if failed else "")
+        out = f"skep {self._reports} (worker contract 0.3.8)\n" if argv[-1] == "--version" else ""
+        return subprocess.CompletedProcess(argv, 1 if failed else 0, out, "boom" if failed else "")
 
 
 def _update(store: _Store, runner: _Runner, version: str = NEWER, prefix: Path = PIPX) -> Any:
@@ -166,6 +169,17 @@ def test_a_failed_install_puts_the_old_copy_back(monkeypatch: pytest.MonkeyPatch
     assert runner.calls[-1] == [*PIPX_INSTALL, "git+https://x/skep.git@abc"]
     assert UPDATED_FROM not in store.settings
     assert "did not install (boom)" in said[-1] and "nothing changed" in said[-1]
+
+
+def test_a_new_copy_still_reporting_the_old_version_is_rolled_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(selfupdate, "current_spec", lambda: "skep==1.0.0")
+    runner = _Runner(reports=__version__)  # exit 0, but the install did not take
+    restarted, said, restarts = _update(_Store(), runner)
+    assert not restarted and restarts == []
+    assert runner.calls[-1] == [*PIPX_INSTALL, "skep==1.0.0"]
+    assert f"skep {__version__} (worker contract" in said[-1]
 
 
 def test_a_failed_put_back_names_the_command_to_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,7 +278,7 @@ def test_telegram_update_starts_the_update_without_a_model_turn(
     restarts: list[int] = []
     harness.poller._request_restart = lambda: restarts.append(1)
     try:
-        harness.updates.append([_message("/update@Alfinskepbot")])
+        harness.updates.append([_message("/update")])
         assert harness.poller.poll_once() == 1
         assert len(started) == 1  # no LLM is configured: a model turn would have failed
         _, say, restart = started[0]
@@ -279,7 +293,7 @@ def test_telegram_update_starts_the_update_without_a_model_turn(
 # -- the ticker's release check ---------------------------------------------
 
 
-def test_ticker_checks_every_interval_and_zero_turns_it_off(
+def test_ticker_checks_once_per_interval(
     config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from skep.supervisor import RunStore
@@ -301,10 +315,9 @@ def test_ticker_checks_every_interval_and_zero_turns_it_off(
         assert checks == [1]
         # no messenger chat yet: the announcement is a durable note
         assert [note.content for note in store.list_notes()] == ["skep 9.9.9 is out"]
-        store.set_setting(selfupdate.UPDATE_CHECK_INTERVAL_SECONDS, 0)
-        ticker._last_update_check = 0.0
+        ticker._last_update_check -= selfupdate.UPDATE_CHECK_INTERVAL  # 12 h later
         ticker._check_for_update()
-        assert checks == [1]
+        assert checks == [1, 1]
     finally:
         store.close()
 
@@ -414,3 +427,22 @@ def test_the_update_lines_reach_the_messenger_chat(config: SupervisorConfig) -> 
         assert store.chat_messages(chat.chat_id)[-1].content == line
     finally:
         store.close()
+
+
+def test_telegram_update_addressed_to_another_bot_is_not_ours(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[object] = []
+    monkeypatch.setattr(selfupdate, "start_update", lambda *a: started.append(a))
+    monkeypatch.setattr(
+        "skep.supervisor.serve.channels.runtime.run_channel_turn", lambda *a, **k: ("", [])
+    )
+    harness = _telegram(config, can_confirm=True)
+    harness.poller._request_restart = lambda: None
+    try:
+        for text in ("/update@OtherBot", "/update now", "please /update"):
+            harness.updates.append([_message(text)])
+            harness.poller.poll_once()
+        assert started == []
+    finally:
+        harness.close()

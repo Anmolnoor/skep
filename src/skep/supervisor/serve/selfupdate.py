@@ -1,7 +1,7 @@
 """v130: skep tells the operator about a new release and updates itself on /update.
 
-The ticker asks PyPI every 12 hours (``update_check_interval_seconds``; 0 turns
-it off) and announces each newer version ONCE in the newest messenger chat.
+The ticker asks PyPI every 12 hours and announces each newer version ONCE in
+the newest messenger chat.
 Nothing installs on its own: the operator's typed ``/update`` is the decision
 (I7). The update waits until no run is in flight, installs with the tool that
 installed skep (pipx or uv tool), checks the new copy starts, puts the old copy
@@ -30,8 +30,7 @@ logger = logging.getLogger("skep.serve")
 
 PYPI_URL = "https://pypi.org/pypi/skep/json"
 RELEASE_URL = "https://github.com/Anmolnoor/skep/releases/tag/v{version}"
-UPDATE_CHECK_INTERVAL_SECONDS = "update_check_interval_seconds"
-DEFAULT_UPDATE_CHECK_INTERVAL = 12 * 60 * 60
+UPDATE_CHECK_INTERVAL = 12 * 60 * 60
 ANNOUNCED_VERSION = "update_announced_version"
 # The version a restart came from, so the new serve can say it updated.
 UPDATED_FROM = "update_restarted_from"
@@ -109,15 +108,16 @@ def check_for_update(store: RunStore, announce: Say, *, get: Get = httpx.get) ->
     return latest
 
 
-def _run(run: Run, argv: list[str]) -> str | None:
-    """None when the command succeeds, else the tail of what it printed."""
+def _run(run: Run, argv: list[str], expect: str = "") -> str | None:
+    """None when the command succeeds (and its output starts with ``expect``),
+    else the tail of what it printed."""
     try:
         done = run(
             argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return str(exc)
-    if done.returncode == 0:
+    if done.returncode == 0 and done.stdout.startswith(expect):
         return None
     return (done.stderr or done.stdout or f"exit {done.returncode}").strip()[-500:]
 
@@ -154,7 +154,7 @@ def run_update(
     previous = current_spec()
     say(f"Installing skep {latest}…")
     failure = _run(run, [*installer, f"skep=={latest}"]) or _run(
-        run, [str(prefix / "bin" / "skep"), "--version"]
+        run, [str(prefix / "bin" / "skep"), "--version"], expect=f"skep {latest} "
     )
     if failure is None:
         store.set_setting(UPDATED_FROM, __version__)

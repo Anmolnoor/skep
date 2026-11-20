@@ -168,8 +168,7 @@ existing install without it.
 After that, skep keeps itself current. Every 12 hours it checks PyPI and tells
 you about a new release once, in your Telegram chat. Send `/update` and it
 installs the release with pipx, waits for any run in progress to finish, and
-restarts (section 9). Set the stored setting `update_check_interval_seconds` to
-`0` to turn the check off.
+restarts (section 9).
 
 The Codex CLI goes in a user-owned npm prefix, so it needs no sudo:
 
