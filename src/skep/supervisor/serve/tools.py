@@ -34,6 +34,7 @@ from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
 from .llm import LLMProtocol
+from .notes import DUE_SHAPES, normalize_due
 from .registry import (
     known_repos,
     register_repo,
@@ -2203,7 +2204,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "set_task_due",
         "PROPOSE setting or changing a task due date (requires user confirmation).",
-        {"task_id": {"type": "string"}, "due_at": {"type": "string"}},
+        {"task_id": {"type": "string"}, "due_at": {"type": "string", "description": DUE_SHAPES}},
         ["task_id", "due_at"],
     ),
     _tool(
@@ -6052,7 +6053,7 @@ def _execute_mutation(
             task_id,
             title=current.title,
             status=current.status,
-            due_at=str(args["due_at"]).strip() or None,
+            due_at=normalize_due(str(args["due_at"])),  # v128-F5
             actor=actor,
             action="due_set",
         )

@@ -365,6 +365,8 @@ _PROPOSAL_SUBJECT_KEYS: dict[str, tuple[str, ...]] = {
     # five different PRs superseded each other down to one (Aug 9 field test).
     "merge_pr": ("repo", "pr"),
     "close_pr": ("repo", "pr"),
+    # v128-F5: a corrected due date for the same task is the same question
+    "set_task_due": ("task_id",),
 }
 
 
