@@ -605,6 +605,68 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     return len(queued) + len(owed)
 
 
+def _committed_reply(store: RunStore, chat_id: str, after_id: int, upto_id: int) -> str:
+    """v129-F1: the assistant text a turn committed (``after_id < id <= upto_id``)
+    — the stored rows, never the raw stream deltas."""
+    return "\n\n".join(
+        m.content.strip()
+        for m in store.chat_messages(chat_id)
+        if m.role == "assistant" and after_id < m.id <= upto_id and m.content.strip()
+    )
+
+
+def _last_message_id(store: RunStore, chat_id: str) -> int:
+    rows = store.chat_messages(chat_id)
+    return rows[-1].id if rows else 0
+
+
+def _mirror_desk_turn(
+    store: RunStore,
+    home: Path,
+    chat_id: str,
+    events: Iterator[ChatEvent],
+    *,
+    said: str | None = None,
+) -> Iterator[ChatEvent]:
+    """v129-F1: a desk turn in a messenger-bound chat is heard there too.
+
+    Wrapped OUTSIDE ``held_turn``, so the terminal event arrives while the
+    turn still holds the lock: the committed rows and the taint are read then,
+    and the push runs on its own thread, off the lock and off the stream. Only
+    a stream that carried content (or an error) pushes — a queued or
+    awaiting-confirmation verdict carries none, and its follow-up owns the
+    reply (F2). Nothing pushes on a dropped stream. Known limit: a lock-free
+    ticker/scheduler row landing mid-turn can be pushed twice."""
+    note = _last_message_id(store, chat_id)
+    spoke = False
+    for event, data in events:
+        if event is None and data.get("content"):
+            spoke = True
+        if event in ("done", "error"):
+            if spoke or event == "error":
+                text = _committed_reply(store, chat_id, note, _last_message_id(store, chat_id))
+                if event == "error":
+                    text = f"{text}\nskep error: {data.get('detail')}".strip()
+                if said is not None:
+                    text = f"(web) you: {said[:300]}\n\n{text}"
+                if data.get("state") == "awaiting_confirmation":
+                    text += "\n(a card is waiting in the web UI)"
+                private = store.get_chat_taint(chat_id).private is not None
+                from .channels.outbound import push_desk_turn
+
+                threading.Thread(
+                    target=push_desk_turn,
+                    args=(store, home, chat_id, text),
+                    kwargs={"private": private},
+                    name=f"skep-desk-{chat_id[:8]}",
+                    daemon=True,
+                ).start()
+            yield event, data
+            yield from events
+            return
+        yield event, data
+
+
 def chat_turn_lock(chat_id: str) -> threading.Lock:
     with _TURN_LOCKS_GUARD:
         return _TURN_LOCKS.setdefault(chat_id, threading.Lock())
@@ -3961,16 +4023,22 @@ def add_chat_routes(
         )
         return StreamingResponse(
             _as_sse(
-                held_turn(
-                    lock,
-                    engine.turn_events(
-                        chat_id,
-                        base_url=base_url,
-                        api_key=api_key,
-                        model=model,
-                        protocol=protocol,
-                        read_only=body.read_only,
+                _mirror_desk_turn(  # v129-F1: heard in the bound messenger too
+                    run_store,
+                    home,
+                    chat_id,
+                    held_turn(
+                        lock,
+                        engine.turn_events(
+                            chat_id,
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            protocol=protocol,
+                            read_only=body.read_only,
+                        ),
                     ),
+                    said=body.content,
                 )
             ),
             media_type="text/event-stream",
@@ -4125,7 +4193,14 @@ def add_chat_routes(
         chat = _require_chat(chat_id)
         keep = body.keep if body is not None else None
         return StreamingResponse(
-            _as_sse(engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep)),
+            _as_sse(
+                _mirror_desk_turn(  # v129-F1
+                    run_store,
+                    home,
+                    chat_id,
+                    engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep),
+                )
+            ),
             media_type="text/event-stream",
         )
 
@@ -4133,7 +4208,14 @@ def add_chat_routes(
     def deny_action(chat_id: str, action_id: str) -> StreamingResponse:
         chat = _require_chat(chat_id)
         return StreamingResponse(
-            _as_sse(engine.verdict_events(chat_id, chat, action_id, confirm=False)),
+            _as_sse(
+                _mirror_desk_turn(  # v129-F1
+                    run_store,
+                    home,
+                    chat_id,
+                    engine.verdict_events(chat_id, chat, action_id, confirm=False),
+                )
+            ),
             media_type="text/event-stream",
         )
 

@@ -67,6 +67,21 @@ def push_to_chat_channel(
     return outcome == "delivered"
 
 
+DESK_WITHHELD = (
+    "skep: a reply in this chat stayed in the web UI because the chat has read private files."
+)
+
+
+def push_desk_turn(store: RunStore, home: Path, chat_id: str, text: str, *, private: bool) -> str:
+    """v129-F1: the one door for desk-origin text — a turn started in the web
+    UI of a messenger-bound chat is heard in that conversation too. ``info``,
+    so ``notification_level`` is the dial; a ``private`` chat (its taint at
+    the end of the turn) sends only that the reply was withheld."""
+    if store.channel_binding_for_chat(chat_id) is None:
+        return "no channel"
+    return push_outcome(store, home, chat_id, DESK_WITHHELD if private else text, kind="info")
+
+
 def push_outcome(
     store: RunStore,
     home: Path,
