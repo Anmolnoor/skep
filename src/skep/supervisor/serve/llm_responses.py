@@ -235,6 +235,12 @@ def responses_chat_stream(
                 index = int(payload.get("output_index") or 0)
                 if index in pending_calls:
                     pending_calls[index]["arguments"] += str(payload.get("delta") or "")
+            elif kind == "response.function_call_arguments.done":
+                # chatgpt.com sends parallel calls with no deltas, only this
+                # event; its arguments are the whole string, so it replaces.
+                index = int(payload.get("output_index") or 0)
+                if index in pending_calls and payload.get("arguments"):
+                    pending_calls[index]["arguments"] = str(payload["arguments"])
             elif kind in ("response.failed", "error"):
                 raise _stream_error(payload)
             elif kind == "response.completed":
