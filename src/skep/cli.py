@@ -569,7 +569,7 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
     if offer["on"]:
         print(f"work without asking: on for {path}")
     elif args.unlocked:
-        onboard.onboard_unlocked(holder, store, on=True)
+        onboard.onboard_unlocked(holder, store, on=True, path=path)
         print(f"work without asking: on for {path}")
     elif offer["reason"] is not None:
         print(f"work without asking: not offered — {offer['reason']}")
@@ -588,7 +588,7 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
         except EOFError:
             answer = ""
         on = answer.strip().lower() in ("y", "yes")
-        onboard.onboard_unlocked(holder, store, on=on)
+        onboard.onboard_unlocked(holder, store, on=on, path=path)
         print(f"  {'on' if on else 'off'}")
 
     # ⑤ role

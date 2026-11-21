@@ -315,6 +315,13 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
         ensure_repo_baseline(repo)
     config = holder.current
     project_id = _project_id_from_repo(repo)
+    # D47 review: the id is the folder's basename, so a different folder with
+    # the same name re-points the stored project — never carry an unlock to
+    # a repo the operator did not answer for.
+    elsewhere = any(
+        b.binding_kind == "repo_path" and b.binding_value != str(repo)
+        for b in store.project_bindings(project_id)
+    )
     project = setup_project_record(
         run_store=store,
         root=_project_root(config),
@@ -326,6 +333,7 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
         repo_path=str(repo),
         repo_slug=_managed_repo_slug(repo, config),
         template_names=[],
+        policy_overrides={"unlocked": False} if elsewhere else None,
         seed_default_schedules=False,
     )
     return _record(
@@ -507,14 +515,18 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     state = _read(_personal_home(holder) / STATE_FILE)
     workdir = state.get("workdir") or {}
     project = project_from_store(store, str(workdir.get("project_id") or ""))
+    answer = state.get(UNLOCKED_STATE) or {}
     view: dict[str, Any] = {
         "path": workdir.get("path"),
         "project_id": workdir.get("project_id"),
         "on": project is not None and project.policy.get("unlocked") is True,
-        "asked": state.get(UNLOCKED_STATE) is not None,
+        # an answer holds for the folder it was given for, not the next one
+        "asked": bool(workdir) and answer.get("path") == workdir.get("path"),
     }
     if project is None:
         reason: str | None = "register a work directory first (step ②)"
+    elif onboard_status(holder.current.home)["steps"]["template"] is None:
+        reason = "lock a policy baseline first (step ④)"
     elif (state.get("sandbox") or {}).get("backend") == "none":
         reason = "step ③ chose no sandbox, and unlocked runs are sandboxed"
     else:
@@ -522,15 +534,25 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     return {**view, "reason": reason, "offer": not view["on"] and reason is None}
 
 
-def onboard_unlocked(holder: ConfigHolder, store: RunStore, *, on: bool) -> dict[str, Any]:
+def onboard_unlocked(
+    holder: ConfigHolder, store: RunStore, *, on: bool, path: str | None
+) -> dict[str, Any]:
     """Record the answer; ``on`` turns unlocked on for the work directory's
     project through project setup (the same write as
-    ``skep project setup <dir> --unlocked``, under the same guard)."""
+    ``skep project setup <dir> --unlocked``, under the same guard). ``path``
+    is the folder the operator was shown: a work directory changed since is
+    refused, so a yes never lands on a project nobody asked about."""
     from .cli_cmds import _project_root
     from .projects import project_from_store
     from .serve.registry import setup_project_record
 
     offer = unlocked_offer(holder, store)
+    if offer["path"] is None:
+        raise ValueError(f"cannot work without asking yet: {offer['reason']}")
+    if path != offer["path"]:
+        raise ValueError(
+            f"the work directory is now {offer['path']}, not {path}: reload and answer again"
+        )
     if on and not offer["on"]:
         if offer["reason"] is not None:
             raise ValueError(f"cannot work without asking yet: {offer['reason']}")
@@ -551,7 +573,7 @@ def onboard_unlocked(holder: ConfigHolder, store: RunStore, *, on: bool) -> dict
     return _record(
         _personal_home(holder),
         UNLOCKED_STATE,
-        {"project_id": offer["project_id"], "on": on or offer["on"]},
+        {"path": offer["path"], "project_id": offer["project_id"], "on": on or offer["on"]},
     )
 
 

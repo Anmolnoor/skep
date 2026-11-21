@@ -136,7 +136,7 @@ test("checklist: work without asking is one click when offered, and says why whe
   const list = await app.onboardChecklist();
   await byText(list, "button", "Turn on").click();
   assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(([m]) => m === "POST"))),
-    [["POST", "/api/onboard/unlocked", { on: true }]]);
+    [["POST", "/api/onboard/unlocked", { on: true, path: "/w" }]]);
 
   const refused = { ...OFFER, offer: false, reason: "register a work directory first (step ②)" };
   const blocked = await onboardApp({ relock: null, steps: {} }, [], refused).onboardChecklist();

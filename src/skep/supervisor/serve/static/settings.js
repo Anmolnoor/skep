@@ -286,7 +286,9 @@ export async function onboardChecklist() {
         + "still ask you."
         : `not offered: ${unlocked.reason}`;
     const turnOn = unlocked.offer ? el("button", { class: "primary" }, "Turn on") : null;
-    turnOn?.addEventListener("click", () => post("unlocked", { on: true }, turnOn));
+    // The path rides the click: a work folder changed since this page loaded
+    // is refused, so the yes lands only on the folder it names (D47 review).
+    turnOn?.addEventListener("click", () => post("unlocked", { on: true, path: unlocked.path }, turnOn));
     return el("div", { class: "setup-step" },
       el("div", { class: "setup-row" },
         el("span", { class: `setup-mark ${unlocked.on ? "done" : "open"}`, "aria-hidden": "true" },

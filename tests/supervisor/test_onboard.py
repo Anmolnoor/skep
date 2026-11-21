@@ -1022,5 +1022,37 @@ def test_the_rest_face_offers_and_turns_on_work_without_asking(
     body = {"template": "builder", "expect_sha256": preview["sha256"]}
     assert post("/api/onboard/template", json=body).status_code == 200
     assert client.get("/api/onboard/unlocked").json()["offer"] is True
-    assert post("/api/onboard/unlocked", json={"on": True}).json()["on"] is True
+    # the yes names the folder it was shown; a different one is refused
+    stale = post("/api/onboard/unlocked", json={"on": True, "path": str(tmp_path / "other")})
+    assert stale.status_code == 400 and "reload and answer again" in stale.json()["detail"]
+    assert client.get("/api/onboard/unlocked").json()["on"] is False
+    assert post("/api/onboard/unlocked", json={"on": True, "path": str(work)}).json()["on"]
     assert client.get("/api/onboard/unlocked").json()["on"] is True
+
+
+def test_an_unlock_never_follows_the_name_to_another_folder_or_skips_the_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D47 review: the project id is the folder's basename. Re-pointing step ②
+    at another folder named the same carries nothing the operator answered
+    for the first one — and before step ④ is done nothing is offered."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main([*argv, "--unlocked"]) == 0
+    assert _unlocked(home) is True
+    twin = tmp_path / "elsewhere" / "work"
+    (twin / "tests").mkdir(parents=True)
+    (twin / "pyproject.toml").write_text('[project]\nname = "work"\nversion = "0"\n')
+    (twin / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    argv[argv.index("--workdir") + 1] = str(twin)
+    capsys.readouterr()
+    assert main(argv) == 0  # --yes: the new folder is not unlocked
+    assert "--yes never turns it on" in capsys.readouterr().out
+    assert _unlocked(home) is False
+
+    from skep.supervisor import onboard
+
+    with _holder(tmp_path / "fresh") as (holder, store):
+        onboard_model(holder, store, provider="mock", model="stub")
+        onboard_workdir(holder, store, path=str(twin))
+        offer = onboard.unlocked_offer(holder, store)
+        assert offer["reason"] == "lock a policy baseline first (step ④)"

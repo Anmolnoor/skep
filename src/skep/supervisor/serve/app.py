@@ -900,7 +900,7 @@ def create_app(
             if step == "role":
                 return onboard.onboard_role(holder, role=body.role or "")
             if step == "unlocked":
-                return onboard.onboard_unlocked(holder, run_store, on=body.on)
+                return onboard.onboard_unlocked(holder, run_store, on=body.on, path=body.path)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(

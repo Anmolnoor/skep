@@ -369,6 +369,10 @@ UNLOCKED_CELLS = [
     ("shell", "run", "env", "require_approval", "default/unmatched"),
     ("shell", "run", "timeout 5", "require_approval", "default/unmatched"),
     ("shell", "run", "make lint", "allow", "unlocked:app/zero-ask"),
+    # ... and a bare-flag VARIANT (v93-F1): an approved `make -k deploy` also
+    # runs `make deploy`, which the baseline names (D46 review)
+    ("shell", "run", "make -k deploy", "require_approval", "default/unmatched"),
+    ("shell", "run", "make -k lint", "allow", "unlocked:app/zero-ask"),
     ("shell", "run", "echo $(cat x)", "require_approval", "default/unmatched"),
     ("shell", "run", "sleep 9 &", "require_approval", "default/unmatched"),
     ("filesystem", "write", "/etc/x", None, None),  # not the layer's: as before
