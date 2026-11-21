@@ -663,13 +663,16 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
     named ask binds a line that grant covers: the rule's own words extend
     ``part``, or ``part`` launches them. The worker also accepts a bare-flag
     variant (v93-F1: same positional skeleton), so ``make -k deploy`` covers
-    ``make deploy`` — a rule whose skeleton starts ``part``'s binds too."""
+    ``make deploy`` — a rule whose skeleton starts ``part``'s binds too.
+    Through a launcher (``env``, ``timeout -s KILL 5``) a variant can move
+    which word is the program, so any binding rule keeps the ask there."""
     from ..workers.runtime_plugins import _FLAG_SENSITIVE_BINARIES, _positional_skeleton
 
     policy = scopes.get("shell")
     got = shell_tokens(part)
     skeleton = _positional_skeleton(got)
     variants = bool(got) and got[0] not in _FLAG_SENSITIVE_BINARIES
+    launched = command_line_segments(part, exact=True) != [got]
     for rule in policy.rules if policy else ():
         if not (
             _binding(rule.verdict, rule.pattern)
@@ -683,6 +686,8 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
         # Flag-stripped on both sides, through the policy's own matcher, so
         # its basename and launcher reading (W5) covers the variants too.
         named = _positional_skeleton(shell_tokens(rule.pattern))
+        if variants and launched:
+            return True
         if (
             variants
             and named

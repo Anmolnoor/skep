@@ -318,9 +318,9 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     # D47 review: the id is the folder's basename, so a different folder with
     # the same name re-points the stored project — an unlock carries over only
     # when the project already binds THIS folder.
-    bindings = store.project_bindings(project_id)
-    elsewhere = bool(bindings) and not any(
-        b.binding_kind == "repo_path" and b.binding_value == str(repo) for b in bindings
+    elsewhere = store.get_project_policy(project_id) is not None and not any(
+        b.binding_kind == "repo_path" and b.binding_value == str(repo)
+        for b in store.project_bindings(project_id)
     )
     project = setup_project_record(
         run_store=store,
@@ -570,6 +570,7 @@ def onboard_unlocked(
             strategy=project.strategy,
             phase=project.phase,
             pack_name=project.pack_name,
+            repo_path=str(offer["path"]),  # the write binds the folder shown, nothing else
             policy_overrides={"unlocked": True},
             seed_default_schedules=False,
             seed_shell_commands=False,

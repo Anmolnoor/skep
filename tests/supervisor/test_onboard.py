@@ -1053,7 +1053,11 @@ def test_an_unlock_never_follows_the_name_to_another_folder_or_skips_the_baselin
     from skep.supervisor import onboard
 
     with _holder(tmp_path / "fresh") as (holder, store):
+        # a stored unlocked project bound to nothing at all: still not carried
+        store.add_project_policy(project_id="work", name="work", strategy="trusted_local_dev",
+                                 phase="build", policy={"unlocked": True})  # fmt: skip
         onboard_model(holder, store, provider="mock", model="stub")
         onboard_workdir(holder, store, path=str(twin))
+        assert list_projects(store)[0].policy.get("unlocked") is False
         offer = onboard.unlocked_offer(holder, store)
         assert offer["reason"] == "lock a policy baseline first (step ④)"

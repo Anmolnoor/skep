@@ -375,6 +375,8 @@ UNLOCKED_CELLS = [
     ("shell", "run", "make -k lint", "allow", "unlocked:app/zero-ask"),
     ("shell", "run", "/usr/bin/make -k deploy", "require_approval", "default/unmatched"),
     ("shell", "run", "env make -k deploy", "require_approval", "default/unmatched"),
+    ("shell", "run", "timeout -s KILL 5 make -k deploy", "require_approval", "default/unmatched"),
+    ("shell", "run", "timeout 60 make lint", "require_approval", "default/unmatched"),
     ("shell", "run", "echo $(cat x)", "require_approval", "default/unmatched"),
     ("shell", "run", "sleep 9 &", "require_approval", "default/unmatched"),
     ("filesystem", "write", "/etc/x", None, None),  # not the layer's: as before
