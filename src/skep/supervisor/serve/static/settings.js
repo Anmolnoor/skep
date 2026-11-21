@@ -280,10 +280,10 @@ export async function onboardChecklist() {
   // with a click, once per project — never a default, never the model's.
   const unlockedRow = () => {
     const state = unlocked.on ? `on for ${unlocked.path}`
-      : unlocked.offer ? "off: say yes and, inside the sandbox, skep starts runs, answers routine "
-        + "command questions and lands patches its own re-run of your tests confirmed, on skep/* "
-        + "branches. Merging to main, pushes, PRs, messages, policy changes and new network hosts "
-        + "still ask you."
+      : unlocked.offer ? `off${unlocked.declined ? " (you said no)" : ""}: say yes and, in `
+        + `${unlocked.path}, inside the sandbox, skep starts runs, answers routine command `
+        + "questions and lands patches its own re-run of your tests confirmed, on skep/* branches. "
+        + "Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask you."
         : `not offered: ${unlocked.reason}`;
     const turnOn = unlocked.offer ? el("button", { class: "primary" }, "Turn on") : null;
     // The path rides the click: a work folder changed since this page loaded

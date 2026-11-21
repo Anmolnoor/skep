@@ -316,11 +316,11 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     config = holder.current
     project_id = _project_id_from_repo(repo)
     # D47 review: the id is the folder's basename, so a different folder with
-    # the same name re-points the stored project — never carry an unlock to
-    # a repo the operator did not answer for.
-    elsewhere = any(
-        b.binding_kind == "repo_path" and b.binding_value != str(repo)
-        for b in store.project_bindings(project_id)
+    # the same name re-points the stored project — an unlock carries over only
+    # when the project already binds THIS folder.
+    bindings = store.project_bindings(project_id)
+    elsewhere = bool(bindings) and not any(
+        b.binding_kind == "repo_path" and b.binding_value == str(repo) for b in bindings
     )
     project = setup_project_record(
         run_store=store,
@@ -515,13 +515,14 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     state = _read(_personal_home(holder) / STATE_FILE)
     workdir = state.get("workdir") or {}
     project = project_from_store(store, str(workdir.get("project_id") or ""))
-    answer = state.get(UNLOCKED_STATE) or {}
+    answers = (state.get(UNLOCKED_STATE) or {}).get("answers") or {}
     view: dict[str, Any] = {
         "path": workdir.get("path"),
         "project_id": workdir.get("project_id"),
         "on": project is not None and project.policy.get("unlocked") is True,
         # an answer holds for the folder it was given for, not the next one
-        "asked": bool(workdir) and answer.get("path") == workdir.get("path"),
+        "asked": workdir.get("path") in answers,
+        "declined": answers.get(workdir.get("path")) is False,
     }
     if project is None:
         reason: str | None = "register a work directory first (step ②)"
@@ -558,6 +559,9 @@ def onboard_unlocked(
             raise ValueError(f"cannot work without asking yet: {offer['reason']}")
         project = project_from_store(store, str(offer["project_id"]))
         assert project is not None  # no reason means the project loaded
+        bound = store.project_for_binding("repo_path", str(offer["path"]))
+        if bound is None or bound.project_id != project.project_id:
+            raise ValueError(f"{path} is no longer project {project.project_id}: answer again")
         setup_project_record(
             run_store=store,
             root=_project_root(holder.current),
@@ -570,11 +574,11 @@ def onboard_unlocked(
             seed_default_schedules=False,
             seed_shell_commands=False,
         )
-    return _record(
-        _personal_home(holder),
-        UNLOCKED_STATE,
-        {"path": offer["path"], "project_id": offer["project_id"], "on": on or offer["on"]},
-    )
+    home = _personal_home(holder)
+    answers = (_read(home / STATE_FILE).get(UNLOCKED_STATE) or {}).get("answers") or {}
+    value = on or offer["on"]
+    record = _record(home, UNLOCKED_STATE, {"answers": {**answers, offer["path"]: value}})
+    return {**record, "path": offer["path"], "on": value}
 
 
 # --- ⑤ role ----------------------------------------------------------------------------

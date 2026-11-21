@@ -33,6 +33,7 @@ face — ``taint_verdict``).
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import glob
 import json
@@ -679,8 +680,16 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
             rule, "shell", f"{part} {rule.pattern}"
         ):
             return True
+        # Flag-stripped on both sides, through the policy's own matcher, so
+        # its basename and launcher reading (W5) covers the variants too.
         named = _positional_skeleton(shell_tokens(rule.pattern))
-        if variants and named and skeleton[: len(named)] == named:
+        if (
+            variants
+            and named
+            and rule_matches(
+                dataclasses.replace(rule, pattern=shlex.join(named)), "shell", shlex.join(skeleton)
+            )
+        ):
             return True
     return False
 

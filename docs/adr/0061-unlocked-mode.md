@@ -233,10 +233,16 @@ D47:
   name; the sandbox, not the template, is what contains a worker.
 - After step ④, onboarding asks once, in plain words, whether skep may work
   in the work directory without asking. A typed `y` (or the web's Turn on
-  button, `POST /api/onboard/unlocked {"on": true}`) turns `unlocked` on for
-  that one project through project setup, under the same save-time guard
-  (pinned non-vacuous `verify_command`, usable sandbox, approved baseline).
-  Enter means no; the answer is kept in `onboard.json` and not asked again.
+  button, `POST /api/onboard/unlocked {"on": true, "path": <the path GET
+  /api/onboard/unlocked returned>}`) turns `unlocked` on for that one
+  project through project setup, under the same save-time guard (pinned
+  non-vacuous `verify_command`, usable sandbox, approved baseline). The
+  answer names the folder it was shown: a work directory or binding changed
+  since is refused. Enter means no; each folder's answer is kept in
+  `onboard.json` and not asked again for that folder.
+- Nothing is offered before step ④ is locked, and step ② re-pointing a
+  project id (a folder's basename) at a folder it does not already bind
+  drops the project's unlock.
 - `--yes` never answers it: it takes defaults, and working without asking is
   not one. `skep onboard --unlocked` is the explicit flag.
 - It is not offered when step ③ chose no sandbox or the guard would refuse;

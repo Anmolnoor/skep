@@ -49,9 +49,9 @@ test("checklist: five rows in order, done steps show their record, open steps sa
     "not done yet",
     "done: builder locked, sha256 0123456789ab",
     "not done yet",
-    "off: say yes and, inside the sandbox, skep starts runs, answers routine command questions "
-      + "and lands patches its own re-run of your tests confirmed, on skep/* branches. Merging to "
-      + "main, pushes, PRs, messages, policy changes and new network hosts still ask you.",
+    "off: say yes and, in /w, inside the sandbox, skep starts runs, answers routine command "
+      + "questions and lands patches its own re-run of your tests confirmed, on skep/* branches. "
+      + "Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask you.",
   ]);
   // Status is never colour alone: the row's word says it, the mark is decoration.
   const marks = list.querySelectorAll(".setup-mark");
@@ -146,6 +146,10 @@ test("checklist: work without asking is one click when offered, and says why whe
   const on = await onboardApp({ relock: null, steps: {} }, [], { ...OFFER, on: true, offer: false })
     .onboardChecklist();
   assert.equal(texts(on, "setup-state").at(-1), "on for /w");
+  const no = await onboardApp({ relock: null, steps: {} }, [], { ...OFFER, asked: true, declined: true })
+    .onboardChecklist();
+  assert.ok(texts(no, "setup-state").at(-1).startsWith("off (you said no): say yes and, in /w,"));
+  assert.ok(byText(no, "button", "Turn on")); // a later opt-in stays one click
 });
 
 test("checklist: Check everything runs the onboard check and shows its report", async () => {

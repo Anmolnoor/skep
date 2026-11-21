@@ -947,7 +947,8 @@ def test_a_typed_y_lets_skep_work_without_asking_and_is_asked_once(
     out = capsys.readouterr().out
     assert "Merging to main, pushes, PRs, messages, policy changes and new" in out
     assert _unlocked(home) is True
-    assert json.loads((home / "onboard.json").read_text())["unlocked"]["on"] is True
+    answers = json.loads((home / "onboard.json").read_text())["unlocked"]["answers"]
+    assert answers == {str((tmp_path / "work").resolve()): True}  # kept per folder
 
     _answers(monkeypatch)  # a re-run asks nothing more
     assert main(argv) == 0
