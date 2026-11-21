@@ -406,13 +406,25 @@ def test_the_unlocked_step_holds_the_role_the_chain_and_the_baseline_guard(
 
     req = Request("shell", "run", "rm -rf build")
     stack, config = _unlocked_stack(tmp_path / "b", "builder")
-    # a delegated run: the builder role would itself ask, so a human answers
+    # ADR 0061 open item 1, decided 2026-11-21: a role's catch-all ask is a
+    # default, and the operator's unlock answers defaults — a run dispatched
+    # from a builder chat (the chain) or in the builder role no longer cards
     chain = parse_delegation_chain(["queen@builder"], config.home)
-    held = decide(req, stack=stack, chain=chain, sandboxed=True)
-    assert (held.verdict, held.deferred) == ("require_approval", True)
-    # a worker role's catch-all ask binds (only a human grant answers it, P3-2)
-    roled = decide(req, stack=stack, role=SHIPPED_ROLES["builder"], sandboxed=True)
-    assert roled.verdict == "require_approval"
+    builder = SHIPPED_ROLES["builder"]
+    for kwargs in ({"chain": chain}, {"role": builder}, {"role": builder, "chain": chain}):
+        got = decide(req, stack=stack, sandboxed=True, **kwargs)
+        assert (got.verdict, got.decided_by, got.deferred) == (
+            "allow",
+            "unlocked:app/zero-ask",
+            False,
+        )
+        # not sandboxed (a CLI run, REST, the hook): the role still asks
+        assert decide(req, stack=stack, **kwargs).verdict == "require_approval"
+        # what the operator named still binds under a role and a chain
+        named = decide(
+            Request("shell", "run", "make deploy"), stack=stack, sandboxed=True, **kwargs
+        )
+        assert named.verdict == "require_approval"
     # a zero-state home: the guard asks before any lane
     zero, _ = _unlocked_stack(tmp_path / "z", "zero")
     assert decide(req, stack=zero, sandboxed=True).decided_by == "baseline/no_baseline"

@@ -713,7 +713,9 @@ def decide(
     (never a network host, D42) labelled
     ``unlocked:<project>/zero-ask``, after the floor and the baseline guard
     and before the role, the delegation cap and taint, which all still
-    apply. REST, the CLI, the hook and ACP never pass it."""
+    apply — except a role's catch-all ``*`` ask, which that allow answers
+    like a human's grant (D46), for the run's role and every delegator.
+    REST, the CLI, the hook and ACP never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
@@ -773,9 +775,14 @@ def decide(
     # otherwise re-asked "this run only" every time and a headless run dropped.
     # The run lane's ``grant:session`` never does (ES-F16): it is the worker
     # session tier, a plain approve on a worker card, not a remember.
+    # ADR 0061 D46 (operator decision, 2026-11-21): so does the unlocked
+    # step's allow — the operator's explicit unlock of THIS project answers a
+    # role's catch-all ask too, so a run dispatched from a builder chat stops
+    # carding. A role's deny or named ask still binds.
     granted = verdict.verdict == "allow" and (
         (verdict.layer in GRANT_LAYERS and verdict.source == "operator")
         or (verdict.layer == "grant:project" and verdict.source == "run")
+        or verdict.layer.startswith("unlocked:")
     )
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's
@@ -792,6 +799,7 @@ def decide(
                 face=face,
                 read_only=read_only,
                 url=url,
+                sandboxed=sandboxed,  # the delegator decides the same request
             )
             if role_covers(delegator.role, scope, action, value)
             else None
