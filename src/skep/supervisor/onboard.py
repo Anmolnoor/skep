@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -535,7 +536,7 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
         # the project binds, and the operator was shown one folder.
         reason = (
             f"project {project.project_id} also binds {', '.join(other)}; decide for all of "
-            f"it with skep project setup {workdir['path']} --unlocked"
+            f"it with skep project setup {shlex.quote(str(workdir['path']))} --unlocked"
         )
     elif onboard_status(holder.current.home)["steps"]["template"] is None:
         reason = "lock a policy baseline first (step ④)"

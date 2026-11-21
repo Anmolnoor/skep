@@ -668,14 +668,20 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
     flag turns ``bash x`` into ``bash -c x``) a variant can move which word is
     the program, so any binding rule keeps the ask there."""
     from ..workers.runtime_plugins import _FLAG_SENSITIVE_BINARIES, _positional_skeleton
-    from .shell_prefixes import _BROAD_INTERPRETERS, _INLINE_CODE_FLAGS, _interpreter
+    from .shell_prefixes import (
+        _BROAD_INTERPRETERS,
+        _INLINE_CODE_FLAGS,
+        _WRAPPER_SHELLS,
+        _interpreter,
+    )
 
     policy = scopes.get("shell")
     got = shell_tokens(part)
     skeleton = _positional_skeleton(got)
     variants = bool(got) and got[0] not in _FLAG_SENSITIVE_BINARIES
     launched = command_line_segments(part, exact=True) != [got] or (
-        bool(got) and _interpreter(got[0]) in _BROAD_INTERPRETERS | set(_INLINE_CODE_FLAGS)
+        bool(got)
+        and _interpreter(got[0]) in _BROAD_INTERPRETERS | _WRAPPER_SHELLS | set(_INLINE_CODE_FLAGS)
     )
     for rule in policy.rules if policy else ():
         if not (

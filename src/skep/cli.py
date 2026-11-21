@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -574,7 +575,10 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
     elif offer["reason"] is not None:
         print(f"work without asking: not offered — {offer['reason']}")
     elif offer["asked"]:
-        print(f"work without asking: off (turn it on: skep project setup {path} --unlocked)")
+        print(
+            "work without asking: off "
+            f"(turn it on: skep project setup {shlex.quote(str(path))} --unlocked)"
+        )
     elif args.yes:
         print("work without asking: off — --yes never turns it on; pass --unlocked")
     else:
