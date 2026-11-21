@@ -378,7 +378,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     _knob(
         "card_timeout_seconds",
         type="int",
-        default=300,
+        default=24 * 3600,
         layers=("global",),
         invariant="I6",
         doc="a pending card auto-DENIES after this long; 0 disables the sweep",

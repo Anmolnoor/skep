@@ -1333,7 +1333,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "card_timeout_seconds": {
                 "type": "integer",
                 "description": "seconds before a pending confirmation card "
-                "auto-DENIES (default 300; 0 disables the timeout)",
+                "auto-DENIES (default 86400, a day; 0 disables the timeout)",
             },
             "default_wall_clock_seconds": {"type": "integer"},
             "default_max_iterations": {"type": "integer"},

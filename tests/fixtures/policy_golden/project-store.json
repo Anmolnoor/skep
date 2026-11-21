@@ -160,7 +160,7 @@
     "auto_apply_verified_patch": true,
     "auto_approve": false,
     "auto_dispatch_allowed": true,
-    "card_timeout_seconds": 300,
+    "card_timeout_seconds": 86400,
     "default_env_allowlist": [],
     "default_execution_mode": "workspace",
     "default_max_actions": 100,

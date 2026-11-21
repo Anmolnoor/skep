@@ -27,7 +27,7 @@ from skep.supervisor.serve.channels import slack as slack_adapter
 from skep.supervisor.serve.channels import telegram as telegram_adapter
 from skep.supervisor.serve.chat import ChatEngine
 from skep.supervisor.serve.jobs import Dispatcher
-from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.settings import DEFAULT_CARD_TIMEOUT, ConfigHolder
 from skep.supervisor.serve.ticker import Ticker
 
 from .card_rig import cards, live_fixture  # noqa: F401  (the `live` fixture)
@@ -246,7 +246,9 @@ def test_a_channel_may_deny_a_high_card_and_the_ticker_still_expires_one(
     denied = rig.store.get_chat_action(action_id)
     assert denied is not None and denied.status == "denied"
 
-    stamp = (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = (datetime.now(UTC) - timedelta(seconds=DEFAULT_CARD_TIMEOUT + 3600)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     with monkeypatch.context() as m:
         m.setattr("skep.supervisor.store._now", lambda: stamp)
         old = rig.store.add_chat_action(chat_id, tool="register_mcp_server", args={})

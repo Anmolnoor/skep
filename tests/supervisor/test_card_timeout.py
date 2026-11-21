@@ -15,9 +15,16 @@ from fastapi import HTTPException
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve.actions import update_policy
-from skep.supervisor.serve.settings import CARD_TIMEOUT_SECONDS, ConfigHolder
+from skep.supervisor.serve.settings import (
+    CARD_TIMEOUT_SECONDS,
+    DEFAULT_CARD_TIMEOUT,
+    ConfigHolder,
+)
 from skep.supervisor.serve.ticker import Ticker
 from skep.supervisor.serve.tools import TOOL_SPECS
+
+# Older than the default timeout, by an hour.
+STALE = DEFAULT_CARD_TIMEOUT + 3600
 
 
 class _NotingTicker(Ticker):
@@ -62,7 +69,7 @@ def test_stale_card_is_auto_denied(
     rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ticker, store = rig
-    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=STALE)
 
     ticker._expire_cards()
 
@@ -78,8 +85,26 @@ def test_stale_card_is_auto_denied(
     tool_messages = [m for m in store.chat_messages(chat_id) if m.role == "tool"]
     assert len(tool_messages) == 1 and tool_messages[0].tool_name == "dispatch_run"
     assert json.loads(tool_messages[0].content)["auto"] is True
-    # The bound-channel push mentions the tool and the (default 300s) timeout.
-    assert ticker.notes == [(chat_id, "⏰ card auto-denied: dispatch_run — timed out after 300s")]
+    # The bound-channel push mentions the tool and the (default) timeout.
+    assert ticker.notes == [
+        (chat_id, f"⏰ card auto-denied: dispatch_run — timed out after {DEFAULT_CARD_TIMEOUT}s")
+    ]
+
+
+def test_a_walked_away_card_waits_a_day(
+    rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D48 (council round 2): five minutes killed the work of anyone who
+    stepped away — the card now waits a day for the human, then still DENIES
+    (I6). An hour away, nobody typing, the card is still there to approve."""
+    ticker, store = rig
+    assert DEFAULT_CARD_TIMEOUT == 24 * 3600
+    _, action_id = _card(store, monkeypatch, age_seconds=3600)
+
+    ticker._expire_cards()
+
+    action = store.get_chat_action(action_id)
+    assert action is not None and action.status == "proposed"
 
 
 def test_fresh_card_is_untouched(
@@ -103,7 +128,7 @@ def test_card_survives_while_the_operator_is_present(
     the owning chat — a human who is typing has not walked away (ADR 0032's
     own rationale)."""
     ticker, store = rig
-    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=STALE)
     store.add_chat_message(chat_id, role="user", content="still here — deciding")
 
     ticker._expire_cards()
@@ -120,8 +145,8 @@ def test_model_chatter_does_not_keep_a_card_alive(
     never hold its own trigger open (ADR 0019). A silent chat's card dies with
     the unchanged v54-F1 note even when assistant/tool rows are fresh."""
     ticker, store = rig
-    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
-    stale = (datetime.now(UTC) - timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=STALE)
+    stale = (datetime.now(UTC) - timedelta(seconds=STALE)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with monkeypatch.context() as m:
         m.setattr("skep.supervisor.store._now", lambda: stale)
         store.add_chat_message(chat_id, role="user", content="an hour-old question")
@@ -152,7 +177,7 @@ def test_garbage_setting_falls_back_to_default(
 ) -> None:
     ticker, store = rig
     store.set_setting(CARD_TIMEOUT_SECONDS, "soon")
-    _, action_id = _card(store, monkeypatch, age_seconds=3600)
+    _, action_id = _card(store, monkeypatch, age_seconds=STALE)
 
     ticker._expire_cards()
 
@@ -166,7 +191,7 @@ def test_race_with_a_manual_verdict_keeps_the_manual_one(
     """resolve_chat_action's finality IS the race handling: the sweep's second
     resolution raises and is skipped — no double-resolution, no deny transcript."""
     ticker, store = rig
-    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=STALE)
     store.resolve_chat_action(action_id, status="confirmed", result={"ok": True})
     stale = store.get_chat_action(action_id)
     monkeypatch.setattr(store, "pending_cards_older_than", lambda seconds: [stale])
@@ -182,7 +207,9 @@ def test_operator_cards_time_out_too(
     rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ticker, store = rig
-    _, action_id = _card(store, monkeypatch, tool="set_policy", source="operator", age_seconds=400)
+    _, action_id = _card(
+        store, monkeypatch, tool="set_policy", source="operator", age_seconds=STALE
+    )
 
     ticker._expire_cards()
 
@@ -255,7 +282,7 @@ def test_sweep_records_superseded_not_timed_out_for_resolved_work(
         store,
         monkeypatch,
         tool="approve_review",
-        age_seconds=3600,
+        age_seconds=STALE,
         args={"review_id": review_id},
     )
 
@@ -334,7 +361,7 @@ def test_a_hung_schedule_pass_cannot_freeze_card_expiry(
     try:
         assert entered.wait(5), "the schedule pass never started"
         # The card goes stale only AFTER the schedule pass is stuck.
-        _chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+        _chat_id, action_id = _card(store, monkeypatch, age_seconds=STALE)
         deadline = datetime.now(UTC) + timedelta(seconds=5)
         while datetime.now(UTC) < deadline:
             action = store.get_chat_action(action_id)

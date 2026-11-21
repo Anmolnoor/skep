@@ -20,7 +20,8 @@ indefinitely (observed in the 2026-07-17 field test).
    model never holds the trigger (ADR 0019); a timeout is the human
    failing to pull it, and the safe default is to not execute.
 
-2. **The timeout is an ordinary policy setting.** Default 300 seconds;
+2. **The timeout is an ordinary policy setting.** Default 300 seconds
+   (86400 since D48, below);
    `0` disables the sweep; settable via PUT /api/policy and the carded
    `set_policy` tool, reported by the effective-policy view. Global,
    not per-card — a per-card `timeout_seconds` column is the named
@@ -45,3 +46,15 @@ indefinitely (observed in the 2026-07-17 field test).
   there is no push channel to the web UI; accepted for v1.
 - The audit shape is unchanged: an auto-deny is a recorded resolution
   with `auto: true` in `result_json`, distinguishable from a human deny.
+
+## Amendment: D48 — a day, not five minutes (2026-11-21)
+
+Five minutes is shorter than a meeting or a lunch: a card that timed out
+while the operator was away took its work with it, and phone approvals
+(ADR 0067) made walking away the normal case. Operator decision D48: the default `card_timeout_seconds` is 86400
+(a day). The Inbox (`#/inbox`) lists every card still waiting, across
+chats, so a card that waits is visible rather than lost. A timeout still
+only DENIES (I6), `0` still disables the sweep, the v106-F6 presence rule
+still holds, and a home that set its own value keeps it. A pending card
+still holds its own chat's conversation; Deny frees it at once.
+
