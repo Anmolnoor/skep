@@ -411,8 +411,8 @@ def test_yes_with_no_model_flags_takes_the_local_ollama_or_names_the_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`--yes` takes every default: the first local Ollama model, and the
-    least-privilege template (`assistant`, plan decision #4) with the role
-    following it. No local Ollama: a refusal that names the flags."""
+    `builder` template (ADR 0061 D47 — `assistant` cannot edit code) with the
+    role following it. No local Ollama: a refusal that names the flags."""
     from skep.supervisor import onboard
 
     argv = ["--home", str(tmp_path / "home"), "onboard", "--yes", "--no-chat"]
@@ -435,8 +435,8 @@ def test_yes_with_no_model_flags_takes_the_local_ollama_or_names_the_flags(
         fake.stop()
     steps = onboard_status(tmp_path / "home" / "supervisor")["steps"]
     assert (steps["model"]["provider"], steps["model"]["model"]) == ("ollama", "llama3.2")
-    assert steps["template"]["template"] == "assistant"
-    assert steps["role"]["role"] == "assistant"
+    assert steps["template"]["template"] == "builder"
+    assert steps["role"]["role"] == "builder"
 
 
 def test_an_existing_non_git_workdir_is_registered_but_never_committed(
@@ -907,3 +907,177 @@ def test_quiet_onboard_still_applies_every_setup_flag(
     assert onboard_status(home / "supervisor")["done"]
     assert json.loads((home / "onboard.json").read_text())["model"]["provider"] == "mock"
     assert isinstance(verify(home / "supervisor"), Ok)
+
+
+# --- ADR 0061 D47: "work without asking" — asked once, typed, never a default ---
+
+
+def _unlockable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list[str]]:
+    """A work directory with a test entry point (setup pins `verify_command`),
+    a usable sandbox, and the flags for every step but the answers."""
+    from functools import partial
+
+    from skep.supervisor import onboard
+
+    work = tmp_path / "work"
+    (work / "tests").mkdir(parents=True)
+    (work / "pyproject.toml").write_text('[project]\nname = "work"\nversion = "0"\n')
+    (work / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    monkeypatch.setattr(onboard, "onboard_sandbox", partial(onboard.onboard_sandbox, probe=_usable))
+    monkeypatch.setattr("skep.supervisor.serve.registry.sandbox_availability", _usable)
+    home = tmp_path / "home"
+    argv = _onboard_flags(home, work)
+    argv[argv.index("none")] = "auto"
+    return home, argv
+
+
+def _unlocked(home: Path) -> bool | None:
+    with _holder(home) as (_, store):
+        return list_projects(store)[0].policy.get("unlocked")
+
+
+def test_a_typed_y_lets_skep_work_without_asking_and_is_asked_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    argv.remove("--yes")
+    prompts = _answers(monkeypatch, "yes", "y", "")  # lock, the question, the role
+    assert main(argv) == 0
+    assert prompts[1] == "  let skep work here without asking? [y/N]: "
+    out = capsys.readouterr().out
+    assert "Merging to main, pushes, PRs, messages, policy changes and new" in out
+    assert _unlocked(home) is True
+    answers = json.loads((home / "onboard.json").read_text())["unlocked"]["answers"]
+    assert answers == {str((tmp_path / "work").resolve()): True}  # kept per folder
+
+    _answers(monkeypatch)  # a re-run asks nothing more
+    assert main(argv) == 0
+    assert "work without asking: on for" in capsys.readouterr().out
+
+
+def test_an_unlock_is_not_offered_for_a_project_that_binds_more_than_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D47 review: the unlock is the project's, so a project that also binds
+    another repo (a carried-forward repo_slug) is not unlocked by a question
+    that showed one folder."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main(argv) == 0
+    with _holder(home) as (_, store):
+        store.add_project_binding(
+            project_id="work", binding_kind="repo_slug", binding_value="acme/work"
+        )
+    capsys.readouterr()
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "not offered — project work also binds repo_slug acme/work" in out
+    assert main([*argv, "--unlocked"]) == 1
+    assert _unlocked(home) is not True
+
+
+def test_no_and_yes_leave_it_off_and_only_the_flag_turns_it_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I6: the operator climbs the ramp explicitly — `--yes` takes defaults,
+    and working without asking is not one."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main(argv) == 0
+    assert "work without asking: off — --yes never turns it on" in capsys.readouterr().out
+    assert _unlocked(home) is not True
+    assert main([*argv, "--unlocked"]) == 0
+    assert _unlocked(home) is True
+
+    other, argv = _unlockable(tmp_path / "b", monkeypatch)
+    argv.remove("--yes")
+    _answers(monkeypatch, "yes", "", "")  # Enter is no (then the role)
+    assert main(argv) == 0
+    assert _unlocked(other) is not True
+    _answers(monkeypatch)  # the answer is kept: not asked again
+    assert main(argv) == 0
+    assert "work without asking: off (turn it on: skep project setup" in capsys.readouterr().out
+
+
+def test_work_without_asking_is_not_offered_without_its_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No sandbox, or no pinned check: the question is not asked and the
+    flag is refused with the reason — the save-time guard's own words."""
+    home = tmp_path / "home"
+    assert main(_onboard_flags(home, tmp_path / "work")) == 0
+    out = capsys.readouterr().out
+    assert "work without asking: not offered — step ③ chose no sandbox" in out
+    assert main([*_onboard_flags(home, tmp_path / "work"), "--unlocked"]) == 1
+    assert "cannot work without asking yet: step ③ chose no sandbox" in capsys.readouterr().err
+
+    from functools import partial
+
+    from skep.supervisor import onboard
+
+    monkeypatch.setattr(onboard, "onboard_sandbox", partial(onboard.onboard_sandbox, probe=_usable))
+    monkeypatch.setattr("skep.supervisor.serve.registry.sandbox_availability", _usable)
+    bare = tmp_path / "bare"
+    argv = _onboard_flags(tmp_path / "home2", bare)
+    argv[argv.index("none")] = "auto"
+    assert main(argv) == 0
+    assert "unlocked=true needs a pinned verify_command" in capsys.readouterr().out
+
+
+def test_the_rest_face_offers_and_turns_on_work_without_asking(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = serve_client(config)
+    first = client.get("/api/onboard/unlocked").json()
+    assert first["offer"] is False and "step ②" in first["reason"]
+    refused = client.post("/api/onboard/unlocked", json={"on": True})
+    assert refused.status_code == 400 and "step ②" in refused.json()["detail"]
+
+    work = tmp_path / "w"
+    (work / "tests").mkdir(parents=True)
+    (work / "pyproject.toml").write_text('[project]\nname = "w"\nversion = "0"\n')
+    (work / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    monkeypatch.setattr("skep.supervisor.serve.registry.sandbox_availability", _usable)
+    post = client.post
+    assert post("/api/onboard/model", json={"provider": "mock", "model": "stub"}).status_code == 200
+    assert post("/api/onboard/workdir", json={"path": str(work)}).status_code == 200
+    preview = client.get("/api/onboard/template", params={"template": "builder"}).json()
+    body = {"template": "builder", "expect_sha256": preview["sha256"]}
+    assert post("/api/onboard/template", json=body).status_code == 200
+    assert client.get("/api/onboard/unlocked").json()["offer"] is True
+    # the yes names the folder it was shown; a different one is refused
+    stale = post("/api/onboard/unlocked", json={"on": True, "path": str(tmp_path / "other")})
+    assert stale.status_code == 400 and "reload and answer again" in stale.json()["detail"]
+    assert client.get("/api/onboard/unlocked").json()["on"] is False
+    assert post("/api/onboard/unlocked", json={"on": True, "path": str(work)}).json()["on"]
+    assert client.get("/api/onboard/unlocked").json()["on"] is True
+
+
+def test_an_unlock_never_follows_the_name_to_another_folder_or_skips_the_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D47 review: the project id is the folder's basename. Re-pointing step ②
+    at another folder named the same carries nothing the operator answered
+    for the first one — and before step ④ is done nothing is offered."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main([*argv, "--unlocked"]) == 0
+    assert _unlocked(home) is True
+    twin = tmp_path / "elsewhere" / "work"
+    (twin / "tests").mkdir(parents=True)
+    (twin / "pyproject.toml").write_text('[project]\nname = "work"\nversion = "0"\n')
+    (twin / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    argv[argv.index("--workdir") + 1] = str(twin)
+    capsys.readouterr()
+    assert main(argv) == 0  # --yes: the new folder is not unlocked
+    assert "--yes never turns it on" in capsys.readouterr().out
+    assert _unlocked(home) is False
+
+    from skep.supervisor import onboard
+
+    with _holder(tmp_path / "fresh") as (holder, store):
+        # a stored unlocked project bound to nothing at all: still not carried
+        store.add_project_policy(project_id="work", name="work", strategy="trusted_local_dev",
+                                 phase="build", policy={"unlocked": True})  # fmt: skip
+        onboard_model(holder, store, provider="mock", model="stub")
+        onboard_workdir(holder, store, path=str(twin))
+        assert list_projects(store)[0].policy.get("unlocked") is False
+        offer = onboard.unlocked_offer(holder, store)
+        assert offer["reason"] == "lock a policy baseline first (step ④)"

@@ -145,7 +145,8 @@ const STEP_LABELS = {
 // records these write, and the other way round. Each step is one row — its
 // state and one button — and its form opens in place under the row.
 export async function onboardChecklist() {
-  const { steps, relock } = await api("GET", "/api/onboard");
+  const [{ steps, relock }, unlocked] = await Promise.all(
+    [api("GET", "/api/onboard"), api("GET", "/api/onboard/unlocked")]);
   const summaries = {
     model: r => `${r.provider} ${r.model} — ${r.egress}`,
     workdir: r => `${r.path} (project ${r.project_id})`,
@@ -204,7 +205,8 @@ export async function onboardChecklist() {
   const saveSandbox = el("button", { class: "primary" }, "Save");
   saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
 
-  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "assistant");
+  // ADR 0061 D47: builder is the default — assistant cannot edit code.
+  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "builder");
   const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
   const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
   const lock = el("button", { class: "primary" }, "Lock baseline");
@@ -227,7 +229,7 @@ export async function onboardChecklist() {
   });
 
   const role = select(["assistant", "builder", "operator"],
-    (steps.role || {}).role || (steps.template || {}).template || "assistant");
+    (steps.role || {}).role || (steps.template || {}).template || "builder");
   const saveRole = el("button", { class: "primary" }, "Save");
   saveRole.addEventListener("click", () => post("role", { role: role.value }, saveRole));
 
@@ -274,6 +276,28 @@ export async function onboardChecklist() {
       form);
   };
 
+  // ADR 0061 D47: "work without asking" is a question the operator answers
+  // with a click, once per project — never a default, never the model's.
+  const unlockedRow = () => {
+    const state = unlocked.on ? `on for ${unlocked.path}`
+      : unlocked.offer ? `off${unlocked.declined ? " (you said no)" : ""}: say yes and, in `
+        + `${unlocked.path}, inside the sandbox, skep starts runs, answers routine command `
+        + "questions and lands patches its own re-run of your tests confirmed, on skep/* branches. "
+        + "Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask you."
+        : `not offered: ${unlocked.reason}`;
+    const turnOn = unlocked.offer ? el("button", { class: "primary" }, "Turn on") : null;
+    // The path rides the click: a work folder changed since this page loaded
+    // is refused, so the yes lands only on the folder it names (D47 review).
+    turnOn?.addEventListener("click", () => post("unlocked", { on: true, path: unlocked.path }, turnOn));
+    return el("div", { class: "setup-step" },
+      el("div", { class: "setup-row" },
+        el("span", { class: `setup-mark ${unlocked.on ? "done" : "open"}`, "aria-hidden": "true" },
+          unlocked.on ? "✓" : "○"),
+        el("span", { class: "setup-label" }, "Work without asking"),
+        el("span", { class: "note setup-state", title: state }, state),
+        turnOn));
+  };
+
   const report = el("pre", { class: "mono worker-command-output onboard-table" }, "");
   const check = el("button", { class: "ghost" }, "Check everything");
   check.addEventListener("click", async () => {
@@ -288,6 +312,6 @@ export async function onboardChecklist() {
     el("h3", { class: "settings-block-title" }, "First run"),
     el("p", { class: "field-help" },
       "The same five steps as `skep onboard` in a terminal; either one picks up where the other stopped."),
-    Object.keys(STEP_LABELS).map(row),
+    Object.keys(STEP_LABELS).map(row), unlockedRow(),
     el("div", { class: "row" }, check), report);
 }

@@ -77,7 +77,7 @@ const groups: Group[] = [
     title: 'Get a machine ready',
     lead: 'The guided first run, the manual profile commands it replaces, the health checks and the model provider registry.',
     rows: [
-      ['skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV] [--workdir DIR] [--sandbox auto|podman|none] [--template NAME] [--role NAME] [--yes] [--no-chat]', 'The guided first run: model, work directory, sandbox, policy baseline, role. Run it again and it resumes at the first step that is not done.'],
+      ['skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV] [--workdir DIR] [--sandbox auto|podman|none] [--template NAME] [--unlocked] [--role NAME] [--yes] [--no-chat]', 'The guided first run: model, work directory, sandbox, policy baseline, role. The template defaults to <code>builder</code>. After the baseline it asks once whether skep may work in the work directory without asking; <code>--unlocked</code> says yes, and <code>--yes</code> never does. Run it again and it resumes at the first step that is not done.'],
       ['skep onboard --check', 'Read-only: <code>skep doctor</code> plus the baseline, engine, sandbox, work directory and egress checks. Exits 0 only when all are ready.'],
       ['skep onboard --quiet | --verbose', 'Turn the first-session <code>why:</code> lines and the per-turn tally off, or back on.'],
       ['skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]', 'Create or update the local profile without the guided steps.'],

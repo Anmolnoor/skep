@@ -1,7 +1,9 @@
 # ADR 0061 — unlocked mode on policy v3
 
 **Status:** accepted (ES-F140–ES-F147); amended by D42 (ES-F311): unlocked
-never answers a network host — see "Amendment: D42" at the end.
+never answers a network host — see "Amendment: D42" at the end; and by D46
+and D47 (2026-11-21): unlocked answers a role's catch-all ask, and
+onboarding offers the mode — see the amendments after it.
 **Replaces:** the August `unlocked` branch's ADR (numbered 0052 there; the
 design archive keeps it as accepted ADR 9999). **Builds on:** ADR 0059
 (policy v3), ADR 0048 (policy groups), ADR 0047 (engines), ADR 0044
@@ -166,13 +168,14 @@ worker gate's resolution reads `auto:unlocked`; every auto verdict is a
 
 ## Open for the operator
 
-1. Should unlocked also answer a delegating role's catch-all ask (a builder
+1. ~~Should unlocked also answer a delegating role's catch-all ask (a builder
    chat's dispatch)? Today it does not: P3-2 says only a human's grant
    answers a role's `*` ask, and the operator's HIGH card turning unlocked on
    is a decision about the project, not about the chat's role. The effect: a
    gate on a run dispatched from a builder chat still cards when the builder
    role would itself ask; runs dispatched from the CLI, REST, a `/command` or
-   a schedule (no chain) are fully zero-ask.
+   a schedule (no chain) are fully zero-ask.~~ Decided by D46 (below): it
+   does.
 2. ~~The network-host trade from August stands: a worker can reach any host
    no rule names.~~ Decided by D42 (below): it does not.
 
@@ -194,3 +197,59 @@ unlocked mode never widens the network to them, on any path.
 - The D34 listing of hosts the mode auto-approved (doctor, a run's
   `unlocked_hosts`) can only find rows written before D42, and doctor says
   they are historical.
+
+## Amendment: D46 — unlocked answers a role's catch-all ask (open item 1)
+
+Council round 2 (2026-11-21) read the operator's own store: about ten cards
+per chat, more than 80% confirmed, and a builder chat's dispatches still
+carding on an unlocked project because of open item 1. Operator decision
+D46: the operator's explicit unlock of a project answers a role's catch-all
+`*` ask the way a human's grant does (ADR 0059 decision #1: a catch-all ask
+is a default, not a ceiling).
+
+- In `decide()`, an allow from the unlocked step counts as granted for
+  `catch_all_asks_only`: the run's own role and every delegator in the chain
+  (each decides the same request, still `sandboxed`) let it stand when all
+  they say about the line is a catch-all ask (`shell-learnable`,
+  `shell-gated`).
+- A role's deny or named ask still binds, as do the operator's (`_unlocked`),
+  the floor, the baseline guard and taint. D42 is untouched: a network host
+  is never the step's.
+- Only sandboxed serve-dispatched runs reach the step (unchanged): a CLI
+  run, REST, the hook and ACP never pass `sandboxed`.
+
+I6 holds: the mode is still the per-project ramp the operator climbs with
+an explicit action, and no model ever answers a card.
+
+## Amendment: D47 — onboarding offers the mode, and defaults to `builder`
+
+The same council found that pressing Enter through `skep onboard` locked
+the `assistant` template (plan decision #4, least privilege), which denies
+code edits: a new user's first coding task could not run. Operator decision
+D47:
+
+- `skep onboard`, the web `/setup` page and `POST /api/onboard/template`
+  default to `builder`. `builder` still asks on every command it does not
+  name; the sandbox, not the template, is what contains a worker.
+- After step ④, onboarding asks once, in plain words, whether skep may work
+  in the work directory without asking. A typed `y` (or the web's Turn on
+  button, `POST /api/onboard/unlocked {"on": true, "path": <the path GET
+  /api/onboard/unlocked returned>}`) turns `unlocked` on for that one
+  project through project setup, under the same save-time guard (pinned
+  non-vacuous `verify_command`, usable sandbox, approved baseline). The
+  answer names the folder it was shown: a work directory or binding changed
+  since is refused. Enter means no; each folder's answer is kept in
+  `onboard.json` and not asked again for that folder.
+- Nothing is offered before step ④ is locked, nor for a project that binds
+  anything but the folder shown (another path or any `repo_slug`: the
+  unlock is the project's); `skep project setup --unlocked` decides for all
+  of it. Step ② re-pointing a project id (a folder's basename) at a folder
+  it does not already bind drops the project's unlock.
+- `--yes` never answers it: it takes defaults, and working without asking is
+  not one. `skep onboard --unlocked` is the explicit flag.
+- It is not offered when step ③ chose no sandbox or the guard would refuse;
+  the reason is printed.
+
+This is I6 as written: the operator climbs the per-project ramp explicitly,
+once, at setup. Nothing turns it on for every project or by default.
+

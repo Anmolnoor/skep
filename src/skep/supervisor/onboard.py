@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -28,7 +29,10 @@ from .serve.settings import SANDBOX_BACKEND, SANDBOX_BACKENDS, ConfigHolder
 from .store import RunStore
 
 STEPS: tuple[str, ...] = ("model", "workdir", "sandbox", "template", "role")
-DEFAULT_TEMPLATE = "assistant"  # ADR 0056 D3 / plan decision #4: least privilege
+# ADR 0061 D47 (2026-11-21) reverses plan decision #4: `assistant` denies code
+# edits, so pressing Enter through onboard left a coding supervisor that could
+# not code. `builder` still asks on every command it does not name.
+DEFAULT_TEMPLATE = "builder"
 OLLAMA_LOCAL = "http://localhost:11434"
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 STATE_FILE = "onboard.json"
@@ -312,6 +316,13 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
         ensure_repo_baseline(repo)
     config = holder.current
     project_id = _project_id_from_repo(repo)
+    # D47 review: the id is the folder's basename, so a different folder with
+    # the same name re-points the stored project — an unlock carries over only
+    # when the project already binds THIS folder.
+    elsewhere = store.get_project_policy(project_id) is not None and not any(
+        b.binding_kind == "repo_path" and b.binding_value == str(repo)
+        for b in store.project_bindings(project_id)
+    )
     project = setup_project_record(
         run_store=store,
         root=_project_root(config),
@@ -323,6 +334,7 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
         repo_path=str(repo),
         repo_slug=_managed_repo_slug(repo, config),
         template_names=[],
+        policy_overrides={"unlocked": False} if elsewhere else None,
         seed_default_schedules=False,
     )
     return _record(
@@ -486,6 +498,102 @@ def onboard_template(
             expect_sha256=expect_sha256,
         )
     return _record(home, "template", {"template": view["template"], "sha256": view["sha256"]})
+
+
+# --- ④b work without asking (ADR 0061 D47) ---------------------------------------------
+
+UNLOCKED_STATE = "unlocked"  # the answer's record in onboard.json — not a step
+
+
+def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
+    """Can onboard offer unlocked mode on the work directory's project? The
+    offer is a question the operator answers once (I6: the per-project ramp,
+    climbed explicitly) — never a default, and ``--yes`` never answers it.
+    ``reason`` says why it cannot be offered (the save-time guard's words)."""
+    from .projects import project_from_store
+    from .serve.registry import unlocked_block_reason
+
+    state = _read(_personal_home(holder) / STATE_FILE)
+    workdir = state.get("workdir") or {}
+    project = project_from_store(store, str(workdir.get("project_id") or ""))
+    answers = (state.get(UNLOCKED_STATE) or {}).get("answers") or {}
+    view: dict[str, Any] = {
+        "path": workdir.get("path"),
+        "project_id": workdir.get("project_id"),
+        "on": project is not None and project.policy.get("unlocked") is True,
+        # an answer holds for the folder it was given for, not the next one
+        "asked": workdir.get("path") in answers,
+        "declined": answers.get(workdir.get("path")) is False,
+    }
+    if project is None:
+        reason: str | None = "register a work directory first (step ②)"
+    elif other := sorted(
+        f"{b.binding_kind} {b.binding_value}"
+        for b in store.project_bindings(project.project_id)
+        if (b.binding_kind, b.binding_value) != ("repo_path", workdir["path"])
+    ):
+        # D47 review: the unlock is the project's — it would cover every repo
+        # the project binds, and the operator was shown one folder. A slug
+        # too: the scheduler resolves slugs by basename (scheduler.py), so a
+        # same-named folder elsewhere could inherit it.
+        reason = (
+            f"project {project.project_id} also binds {', '.join(other)}; decide for all of "
+            f"it with skep project setup {shlex.quote(str(workdir['path']))} --unlocked"
+        )
+    elif onboard_status(holder.current.home)["steps"]["template"] is None:
+        reason = "lock a policy baseline first (step ④)"
+    elif (state.get("sandbox") or {}).get("backend") == "none":
+        reason = "step ③ chose no sandbox, and unlocked runs are sandboxed"
+    else:
+        reason = unlocked_block_reason(store, {**project.policy, "unlocked": True})
+    return {**view, "reason": reason, "offer": not view["on"] and reason is None}
+
+
+def onboard_unlocked(
+    holder: ConfigHolder, store: RunStore, *, on: bool, path: str | None
+) -> dict[str, Any]:
+    """Record the answer; ``on`` turns unlocked on for the work directory's
+    project through project setup (the same write as
+    ``skep project setup <dir> --unlocked``, under the same guard). ``path``
+    is the folder the operator was shown: a work directory changed since is
+    refused, so a yes never lands on a project nobody asked about."""
+    from .cli_cmds import _project_root
+    from .projects import project_from_store
+    from .serve.registry import setup_project_record
+
+    offer = unlocked_offer(holder, store)
+    if offer["path"] is None:
+        raise ValueError(f"cannot work without asking yet: {offer['reason']}")
+    if path != offer["path"]:
+        raise ValueError(
+            f"the work directory is now {offer['path']}, not {path}: reload and answer again"
+        )
+    if on and not offer["on"]:
+        if offer["reason"] is not None:
+            raise ValueError(f"cannot work without asking yet: {offer['reason']}")
+        project = project_from_store(store, str(offer["project_id"]))
+        assert project is not None  # no reason means the project loaded
+        bound = store.project_for_binding("repo_path", str(offer["path"]))
+        if bound is None or bound.project_id != project.project_id:
+            raise ValueError(f"{path} is no longer project {project.project_id}: answer again")
+        setup_project_record(
+            run_store=store,
+            root=_project_root(holder.current),
+            project_id=project.project_id,
+            name=project.name,
+            strategy=project.strategy,
+            phase=project.phase,
+            pack_name=project.pack_name,
+            repo_path=str(offer["path"]),  # the write binds the folder shown, nothing else
+            policy_overrides={"unlocked": True},
+            seed_default_schedules=False,
+            seed_shell_commands=False,
+        )
+    home = _personal_home(holder)
+    answers = (_read(home / STATE_FILE).get(UNLOCKED_STATE) or {}).get("answers") or {}
+    value = on or offer["on"]
+    record = _record(home, UNLOCKED_STATE, {"answers": {**answers, offer["path"]: value}})
+    return {**record, "path": offer["path"], "on": value}
 
 
 # --- ⑤ role ----------------------------------------------------------------------------

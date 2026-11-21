@@ -14,11 +14,14 @@ const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise(r 
 
 // ---------- the Setup checklist (moved from app.test.mjs's O3 onboard card) ----------
 
-function onboardApp(onboard, calls = []) {
+const OFFER = { path: "/w", project_id: "w", on: false, asked: false, offer: true, reason: null };
+
+function onboardApp(onboard, calls = [], unlocked = OFFER) {
   const app = loadApp();
   app.api = async (method, path, body) => {
     calls.push([method, path, body]);
     if (method === "GET" && path === "/api/onboard") return onboard;
+    if (method === "GET" && path === "/api/onboard/unlocked") return unlocked;
     if (method === "GET" && path === "/api/onboard/check") return { ready: false, report: "step ② missing" };
     if (method === "GET" && path.startsWith("/api/onboard/template?")) {
       return { locked: false, table: "| rule | verdict |", sha256: "abc123", tightened: [], diff: [] };
@@ -38,13 +41,17 @@ test("checklist: five rows in order, done steps show their record, open steps sa
     },
   });
   const list = await app.onboardChecklist();
-  assert.deepEqual(texts(list, "setup-label"), ["Model", "Work folder", "Sandbox", "Policy baseline", "Role"]);
+  assert.deepEqual(texts(list, "setup-label"),
+    ["Model", "Work folder", "Sandbox", "Policy baseline", "Role", "Work without asking"]);
   assert.deepEqual(texts(list, "setup-state"), [
     "done: ollama qwen3:14b — local only",
     "not done yet",
     "not done yet",
     "done: builder locked, sha256 0123456789ab",
     "not done yet",
+    "off: say yes and, in /w, inside the sandbox, skep starts runs, answers routine command "
+      + "questions and lands patches its own re-run of your tests confirmed, on skep/* branches. "
+      + "Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask you.",
   ]);
   // Status is never colour alone: the row's word says it, the mark is decoration.
   const marks = list.querySelectorAll(".setup-mark");
@@ -62,8 +69,7 @@ test("checklist: a sandbox switch after the lock says why the baseline re-opened
 test("checklist: each row's one button opens that step's form in place, and closes it", async () => {
   const app = onboardApp({ relock: null, steps: { role: { role: "builder" } } });
   const list = await app.onboardChecklist();
-  const steps = list.querySelectorAll(".setup-step");
-  assert.equal(steps.length, 5);
+  const steps = list.querySelectorAll(".setup-step").slice(0, 5);
   for (const step of steps) {
     assert.equal(step.querySelectorAll("button").filter(b => b.classList.contains("setup-toggle")).length, 1);
     assert.ok(step.querySelector(".setup-form").classList.contains("hidden"));
@@ -110,7 +116,7 @@ test("checklist: lock needs a preview and a typed yes, then posts the previewed 
   // JSON round-trip: the bodies were built inside the vm realm.
   const posts = JSON.parse(JSON.stringify(calls.filter(([m]) => m === "POST")));
   assert.deepEqual(posts, [["POST", "/api/onboard/template",
-    { template: "assistant", expect_sha256: "abc123", approved_by: "web" }]]);
+    { template: "builder", expect_sha256: "abc123", approved_by: "web" }]]);
 });
 
 test("checklist: changing the template throws away the preview", async () => {
@@ -118,10 +124,32 @@ test("checklist: changing the template throws away the preview", async () => {
   const card = await app.onboardChecklist();
   const lock = byText(card, "button", "Lock baseline");
   await byText(card, "button", "Preview").click();
-  const template = card.querySelectorAll("select").find(s => s.value === "assistant");
+  const template = card.querySelectorAll("select").find(s => s.value === "builder");
   template.value = "operator";
   for (const fn of template.listeners.change) fn();
   assert.equal(lock.disabled, true);
+});
+
+test("checklist: work without asking is one click when offered, and says why when not (D47)", async () => {
+  const calls = [];
+  const app = onboardApp({ relock: null, steps: {} }, calls);
+  const list = await app.onboardChecklist();
+  await byText(list, "button", "Turn on").click();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(([m]) => m === "POST"))),
+    [["POST", "/api/onboard/unlocked", { on: true, path: "/w" }]]);
+
+  const refused = { ...OFFER, offer: false, reason: "register a work directory first (step ②)" };
+  const blocked = await onboardApp({ relock: null, steps: {} }, [], refused).onboardChecklist();
+  assert.equal(byText(blocked, "button", "Turn on"), undefined);
+  assert.equal(texts(blocked, "setup-state").at(-1),
+    "not offered: register a work directory first (step ②)");
+  const on = await onboardApp({ relock: null, steps: {} }, [], { ...OFFER, on: true, offer: false })
+    .onboardChecklist();
+  assert.equal(texts(on, "setup-state").at(-1), "on for /w");
+  const no = await onboardApp({ relock: null, steps: {} }, [], { ...OFFER, asked: true, declined: true })
+    .onboardChecklist();
+  assert.ok(texts(no, "setup-state").at(-1).startsWith("off (you said no): say yes and, in /w,"));
+  assert.ok(byText(no, "button", "Turn on")); // a later opt-in stays one click
 });
 
 test("checklist: Check everything runs the onboard check and shows its report", async () => {
@@ -159,7 +187,7 @@ test("older flag: complete is one plain line with its date, then the checklist",
   await app.renderSetupTab(panel);
   assert.deepEqual(texts(panel, "setup-flag"), ["The older setup flag: complete since 2026-07-08 09:00:00."]);
   assert.equal(panel.querySelectorAll(".card").length, 0); // no "Ready" card above "not done yet"
-  assert.equal(panel.querySelectorAll(".setup-step").length, 5);
+  assert.equal(panel.querySelectorAll(".setup-step").length, 6); // five steps + work without asking (D47)
   assert.equal(byText(panel, "button", "Finish setup"), undefined);
 });
 
@@ -202,6 +230,7 @@ function settingsApp(extra = {}) {
   const table = {
     "GET /api/setup/status": SETUP,
     "GET /api/onboard": { relock: null, steps: {} },
+    "GET /api/onboard/unlocked": { on: false, offer: false, reason: "register a work directory first (step ②)" },
     "GET /api/llm/config": { configured: false, protocol: "ollama", num_ctx: 8192, num_ctx_source: "default" },
     "GET /api/llm/usage": { last_5h: { total_tokens: 0, requests: 0 }, last_7d: { total_tokens: 0, requests: 0 } },
     "GET /api/provider-presets": { presets: [] },

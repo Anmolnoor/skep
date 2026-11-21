@@ -33,6 +33,7 @@ face — ``taint_verdict``).
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import glob
 import json
@@ -660,9 +661,28 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
     contract's matcher), so ``make`` would also run ``make deploy`` and
     ``env`` / ``timeout 5`` would launch ``curl x``. True when a deny or a
     named ask binds a line that grant covers: the rule's own words extend
-    ``part``, or ``part`` launches them."""
+    ``part``, or ``part`` launches them. The worker also accepts a bare-flag
+    variant (v93-F1: same positional skeleton), so ``make -k deploy`` covers
+    ``make deploy`` — a rule whose skeleton starts ``part``'s binds too.
+    Through a launcher (``env``, ``timeout -s KILL 5``) or an interpreter (a
+    flag turns ``bash x`` into ``bash -c x``) a variant can move which word is
+    the program, so any binding rule keeps the ask there."""
+    from ..workers.runtime_plugins import _FLAG_SENSITIVE_BINARIES, _positional_skeleton
+    from .shell_prefixes import (
+        _BROAD_INTERPRETERS,
+        _INLINE_CODE_FLAGS,
+        _WRAPPER_SHELLS,
+        _interpreter,
+    )
+
     policy = scopes.get("shell")
     got = shell_tokens(part)
+    skeleton = _positional_skeleton(got)
+    variants = bool(got) and got[0] not in _FLAG_SENSITIVE_BINARIES
+    launched = command_line_segments(part, exact=True) != [got] or (
+        bool(got)
+        and _interpreter(got[0]) in _BROAD_INTERPRETERS | _WRAPPER_SHELLS | set(_INLINE_CODE_FLAGS)
+    )
     for rule in policy.rules if policy else ():
         if not (
             _binding(rule.verdict, rule.pattern)
@@ -671,6 +691,19 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
             continue
         if shell_tokens(rule.pattern)[: len(got)] == got or rule_matches(
             rule, "shell", f"{part} {rule.pattern}"
+        ):
+            return True
+        # Flag-stripped on both sides, through the policy's own matcher, so
+        # its basename and launcher reading (W5) covers the variants too.
+        named = _positional_skeleton(shell_tokens(rule.pattern))
+        if variants and launched:
+            return True
+        if (
+            variants
+            and named
+            and rule_matches(
+                dataclasses.replace(rule, pattern=shlex.join(named)), "shell", shlex.join(skeleton)
+            )
         ):
             return True
     return False
@@ -713,7 +746,9 @@ def decide(
     (never a network host, D42) labelled
     ``unlocked:<project>/zero-ask``, after the floor and the baseline guard
     and before the role, the delegation cap and taint, which all still
-    apply. REST, the CLI, the hook and ACP never pass it."""
+    apply — except a role's catch-all ``*`` ask, which that allow answers
+    like a human's grant (D46), for the run's role and every delegator.
+    REST, the CLI, the hook and ACP never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
@@ -773,9 +808,14 @@ def decide(
     # otherwise re-asked "this run only" every time and a headless run dropped.
     # The run lane's ``grant:session`` never does (ES-F16): it is the worker
     # session tier, a plain approve on a worker card, not a remember.
+    # ADR 0061 D46 (operator decision, 2026-11-21): so does the unlocked
+    # step's allow — the operator's explicit unlock of THIS project answers a
+    # role's catch-all ask too, so a run dispatched from a builder chat stops
+    # carding. A role's deny or named ask still binds.
     granted = verdict.verdict == "allow" and (
         (verdict.layer in GRANT_LAYERS and verdict.source == "operator")
         or (verdict.layer == "grant:project" and verdict.source == "run")
+        or verdict.layer.startswith("unlocked:")
     )
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's
@@ -792,6 +832,7 @@ def decide(
                 face=face,
                 read_only=read_only,
                 url=url,
+                sandboxed=sandboxed,  # the delegator decides the same request
             )
             if role_covers(delegator.role, scope, action, value)
             else None

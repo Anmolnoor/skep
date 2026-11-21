@@ -19,7 +19,8 @@ skep [--home HOME] [--version] <command> ...
 ```sh
 skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
              [--workdir DIR] [--sandbox auto|podman|none]
-             [--template builder|operator|assistant] [--role ROLE] [--yes] [--no-chat]
+             [--template builder|operator|assistant] [--unlocked] [--role ROLE]
+             [--yes] [--no-chat]
 skep onboard --check
 skep onboard --quiet | --verbose
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
@@ -32,8 +33,11 @@ skep status [--personal] [--json]
   Ollama, makes a test call, prints where prompts go) → ② work directory
   (created if missing, registered as a project with its inferred
   `verify_command`) → ③ sandbox backend (`none` is a real answer: the baseline
-  then asks on every write) → ④ policy template (default `assistant`, locked
-  through `skep policy approve`'s path after a typed `yes`) → ⑤ role, recorded
+  then asks on every write) → ④ policy template (default `builder`, locked
+  through `skep policy approve`'s path after a typed `yes`), then one question:
+  may skep work in the work directory without asking (a typed `y` or
+  `--unlocked` turns on unlocked mode for that project; `--yes` never does)
+  → ⑤ role, recorded
   in `~/.skep/first_run.json`; then it attaches to (or starts) `skep serve` and
   opens `skep chat` unless `--no-chat`. Re-running resumes at the first
   incomplete step; a flag that differs from a finished step re-runs it.

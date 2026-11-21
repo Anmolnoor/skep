@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from skep.supervisor.serve import chat as chat_module
 from skep.supervisor.serve.cards import fold_subject
+from skep.supervisor.serve.settings import DEFAULT_CARD_TIMEOUT
 from skep.supervisor.serve.ticker import Ticker
 
 from .card_rig import Live, cards, live_fixture  # noqa: F401  (the `live` fixture)
@@ -264,7 +265,7 @@ def test_the_ticker_never_denies_a_folded_card_mid_confirm_and_expires_every_ite
     held = _Held()
     monkeypatch.setattr(chat_module, "execute_mutation", held)
     chat = env.chat()
-    running = _folded_card(env, chat, age_seconds=3600)
+    running = _folded_card(env, chat, age_seconds=DEFAULT_CARD_TIMEOUT + 3600)
     env.ollama.script_reply("done")
     ticker = Ticker(env.holder, env.store)
     monkeypatch.setattr(ticker, "_notify", lambda *a, **k: None)
@@ -281,7 +282,7 @@ def test_the_ticker_never_denies_a_folded_card_mid_confirm_and_expires_every_ite
     assert sorted(held.calls) == [A1, A2]
 
     other = env.chat()
-    idle = _folded_card(env, other, age_seconds=3600)
+    idle = _folded_card(env, other, age_seconds=DEFAULT_CARD_TIMEOUT + 3600)
     ticker._expire_cards()
     expired = env.store.get_chat_action(idle)
     assert expired is not None and expired.status == "denied"

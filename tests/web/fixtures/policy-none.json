@@ -491,7 +491,7 @@
     "type": "int"
    },
    {
-    "default": 300,
+    "default": 86400,
     "doc": "a pending card auto-DENIES after this long; 0 disables the sweep",
     "enforced_at": null,
     "invariant": "I6",
@@ -1024,7 +1024,7 @@
     "overridden": [],
     "source_layer": null,
     "source_name": null,
-    "value": 300
+    "value": 86400
    },
    {
     "key": "codex_chatgpt_login",

@@ -72,7 +72,9 @@ def engine_v2_scopes_from(raw: object) -> list[str]:
 
 
 DEFAULT_TICKER_INTERVAL = 30
-DEFAULT_CARD_TIMEOUT = 300  # v54-F1: 5 minutes, then a pending card auto-DENIES
+# v54-F1: then a pending card auto-DENIES (I6). D48: a day, not 5 minutes — the
+# Inbox holds what waits; five minutes killed the work of anyone who stepped away.
+DEFAULT_CARD_TIMEOUT = 24 * 3600
 EXECUTION_MODES = ("ask", "workspace", "sandbox")
 # One-click allowlist for the everyday git workflow (entries are argv prefixes).
 # v19-F3: push is intentionally absent — the worker denies it, and the
