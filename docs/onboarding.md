@@ -18,7 +18,8 @@ and `skep doctor` says how to approve one.
 | ① model | provider, model, endpoint, and the **name** of the env var that holds the API key (never the key itself). With no provider named it first tests the provider already configured and keeps it when it works; only then does it look for a local Ollama. A switch makes one test call and rolls back to the previous provider if that call fails, and prints where prompts go (`LOCAL … nothing leaves this machine` or `CLOUD … leaves this machine for <host>`) | the provider registry, the assistant settings, `profile.json` |
 | ② work directory | a path (default `~/workspace`), created if missing | a project, with the `verify_command` inferred from the repo |
 | ③ sandbox | `auto` (the native backend: Seatbelt on macOS, bubblewrap on Linux), `podman`, or `none`. Docker is detected but not offered, because skep has no docker backend | the `sandbox_backend` setting |
-| ④ template | `builder`, `operator` or `assistant` (the default), shown as their `skep policy explain` tables | the locked baseline, after you type `yes` |
+| ④ template | `builder` (the default), `operator` or `assistant`, shown as their `skep policy explain` tables. `assistant` cannot edit code | the locked baseline, after you type `yes` |
+| work without asking | once, in plain words: may skep work in the work directory without asking? Inside the sandbox it then starts runs, answers routine command questions and lands patches its own re-run of your tests confirmed, on `skep/*` branches. Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask. Enter means no. Not offered with no sandbox or no pinned test command, and it says why | `unlocked` on that one project ([ADR 0061](adr/0061-unlocked-mode.md)); the answer in `onboard.json` |
 | ⑤ role | one of the same three names | `~/.skep/first_run.json` |
 
 After step ⑤ it connects to `skep serve`, or starts it if it is not
@@ -43,7 +44,8 @@ skep onboard --provider ollama --model qwen3:14b --workdir ~/code/app \
 ```
 
 `--yes` accepts the default for any step you did not pass a flag for and
-skips the typed `yes`. `--provider` takes `mock`, `ollama`,
+skips the typed `yes`. It never turns on working without asking; pass
+`--unlocked` for that. `--provider` takes `mock`, `ollama`,
 `openai-compatible`, or a preset id from `skep provider presets`. A flag
 that differs from a step you already finished runs that step again. For
 example, `--template operator` re-locks the baseline and shows the diff

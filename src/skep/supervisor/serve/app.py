@@ -306,6 +306,7 @@ class OnboardStepRequest(BaseModel):
     expect_sha256: str | None = None
     role: str | None = None
     approved_by: str | None = None  # ES-F1: ignored; the principal is recorded
+    on: bool = False  # ADR 0061 D47: the "work without asking" answer
 
 
 class DefaultWorkspaceRequest(BaseModel):
@@ -854,6 +855,13 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.get("/api/onboard/unlocked")
+    def get_onboard_unlocked() -> dict[str, Any]:
+        """ADR 0061 D47: whether /setup can offer "work without asking"."""
+        from .. import onboard
+
+        return onboard.unlocked_offer(holder, run_store)
+
     @app.post("/api/onboard/transparency")
     def post_onboard_transparency(body: TransparencyRequest) -> dict[str, Any]:
         """first-run O4 (ADR 0056 D6): `skep onboard --quiet | --verbose`."""
@@ -891,6 +899,8 @@ def create_app(
                 )
             if step == "role":
                 return onboard.onboard_role(holder, role=body.role or "")
+            if step == "unlocked":
+                return onboard.onboard_unlocked(holder, run_store, on=body.on)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(

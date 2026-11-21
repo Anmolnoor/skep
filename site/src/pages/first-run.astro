@@ -144,8 +144,13 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
           </tr>
           <tr>
             <th scope="row">④ template</th>
-            <td data-label="It asks"><code>builder</code>, <code>operator</code> or <code>assistant</code> (the default), each shown as an allow / ask / deny table.</td>
+            <td data-label="It asks"><code>builder</code> (the default), <code>operator</code> or <code>assistant</code>, each shown as an allow / ask / deny table. <code>assistant</code> cannot edit code.</td>
             <td data-label="It does">Locks the one you choose as the policy baseline, after you type <code>yes</code>.</td>
+          </tr>
+          <tr>
+            <th scope="row">work without asking</th>
+            <td data-label="It asks">Once: may skep work in the work directory without asking? Enter means no. Not offered with no sandbox or no verify command, and it says why.</td>
+            <td data-label="It does">A typed <code>y</code> turns on unlocked mode for that one project: inside the sandbox, skep starts runs, answers routine command questions and lands patches its own re-run of your tests confirmed, on <code>skep/*</code> branches. Merging to main, pushes, PRs, messages, policy changes and new network hosts still ask.</td>
           </tr>
           <tr>
             <th scope="row">⑤ role</th>
@@ -161,7 +166,8 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
         </p>
         <p>
           Every prompt has a flag, so the whole run can be scripted. <code>--yes</code> takes the
-          default for any step you gave no flag for and skips the typed <code>yes</code>.
+          default for any step you gave no flag for and skips the typed <code>yes</code>. It never
+          turns on working without asking; <code>--unlocked</code> does.
           <code>--provider</code> takes <code>mock</code>, <code>ollama</code>,
           <code>openai-compatible</code>, or a preset id from <code>skep provider presets</code>.
         </p>

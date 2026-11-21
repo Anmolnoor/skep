@@ -33,8 +33,8 @@ its decisions. Say it in their terms:
 
 ## 2. The locked baseline
 
-During onboarding the human picked a template — `builder` (coding),
-`operator` (ops and audits) or `assistant` (least privilege, the default) —
+During onboarding the human picked a template — `builder` (coding, the
+default), `operator` (ops and audits) or `assistant` (least privilege) —
 and locked it. Locking stores its hash; skep checks the hash before every
 decision and refuses if the file changed underneath it.
 

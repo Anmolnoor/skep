@@ -28,7 +28,10 @@ from .serve.settings import SANDBOX_BACKEND, SANDBOX_BACKENDS, ConfigHolder
 from .store import RunStore
 
 STEPS: tuple[str, ...] = ("model", "workdir", "sandbox", "template", "role")
-DEFAULT_TEMPLATE = "assistant"  # ADR 0056 D3 / plan decision #4: least privilege
+# ADR 0061 D47 (2026-11-21) reverses plan decision #4: `assistant` denies code
+# edits, so pressing Enter through onboard left a coding supervisor that could
+# not code. `builder` still asks on every command it does not name.
+DEFAULT_TEMPLATE = "builder"
 OLLAMA_LOCAL = "http://localhost:11434"
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 STATE_FILE = "onboard.json"
@@ -486,6 +489,70 @@ def onboard_template(
             expect_sha256=expect_sha256,
         )
     return _record(home, "template", {"template": view["template"], "sha256": view["sha256"]})
+
+
+# --- ④b work without asking (ADR 0061 D47) ---------------------------------------------
+
+UNLOCKED_STATE = "unlocked"  # the answer's record in onboard.json — not a step
+
+
+def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
+    """Can onboard offer unlocked mode on the work directory's project? The
+    offer is a question the operator answers once (I6: the per-project ramp,
+    climbed explicitly) — never a default, and ``--yes`` never answers it.
+    ``reason`` says why it cannot be offered (the save-time guard's words)."""
+    from .projects import project_from_store
+    from .serve.registry import unlocked_block_reason
+
+    state = _read(_personal_home(holder) / STATE_FILE)
+    workdir = state.get("workdir") or {}
+    project = project_from_store(store, str(workdir.get("project_id") or ""))
+    view: dict[str, Any] = {
+        "path": workdir.get("path"),
+        "project_id": workdir.get("project_id"),
+        "on": project is not None and project.policy.get("unlocked") is True,
+        "asked": state.get(UNLOCKED_STATE) is not None,
+    }
+    if project is None:
+        reason: str | None = "register a work directory first (step ②)"
+    elif (state.get("sandbox") or {}).get("backend") == "none":
+        reason = "step ③ chose no sandbox, and unlocked runs are sandboxed"
+    else:
+        reason = unlocked_block_reason(store, {**project.policy, "unlocked": True})
+    return {**view, "reason": reason, "offer": not view["on"] and reason is None}
+
+
+def onboard_unlocked(holder: ConfigHolder, store: RunStore, *, on: bool) -> dict[str, Any]:
+    """Record the answer; ``on`` turns unlocked on for the work directory's
+    project through project setup (the same write as
+    ``skep project setup <dir> --unlocked``, under the same guard)."""
+    from .cli_cmds import _project_root
+    from .projects import project_from_store
+    from .serve.registry import setup_project_record
+
+    offer = unlocked_offer(holder, store)
+    if on and not offer["on"]:
+        if offer["reason"] is not None:
+            raise ValueError(f"cannot work without asking yet: {offer['reason']}")
+        project = project_from_store(store, str(offer["project_id"]))
+        assert project is not None  # no reason means the project loaded
+        setup_project_record(
+            run_store=store,
+            root=_project_root(holder.current),
+            project_id=project.project_id,
+            name=project.name,
+            strategy=project.strategy,
+            phase=project.phase,
+            pack_name=project.pack_name,
+            policy_overrides={"unlocked": True},
+            seed_default_schedules=False,
+            seed_shell_commands=False,
+        )
+    return _record(
+        _personal_home(holder),
+        UNLOCKED_STATE,
+        {"project_id": offer["project_id"], "on": on or offer["on"]},
+    )
 
 
 # --- ⑤ role ----------------------------------------------------------------------------

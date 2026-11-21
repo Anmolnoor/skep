@@ -106,10 +106,17 @@ def _parser() -> argparse.ArgumentParser:
     onboard.add_argument("--workdir", default=None, help="work directory (created if missing)")
     onboard.add_argument("--sandbox", default=None, help="auto, podman or none")
     onboard.add_argument(
-        "--template", default=None, help="builder, operator or assistant (default: assistant)"
+        "--template", default=None, help="builder, operator or assistant (default: builder)"
     )
     onboard.add_argument(
         "--role", default=None, help="builder, operator or assistant (default: the template)"
+    )
+    onboard.add_argument(
+        "--unlocked",
+        action="store_true",
+        default=None,
+        help="let skep work in the work directory without asking, inside the sandbox "
+        "(ADR 0061); --yes never turns this on",
     )
     onboard.add_argument(
         "--yes", action="store_true", help="take the defaults and skip the typed `yes`"
@@ -367,6 +374,7 @@ def _onboard(args: argparse.Namespace) -> int:
             "workdir",
             "sandbox",
             "template",
+            "unlocked",
             "role",
         )
         if not (args.check or args.yes) and all(getattr(args, key) is None for key in setup_flags):
@@ -554,6 +562,34 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
             expect_sha256=preview["sha256"],
         )
         print(f"  baseline locked: {record['template']} sha256 {record['sha256'][:12]}")
+
+    # ④b work without asking (ADR 0061 D47): asked once, typed — never a default
+    offer = onboard.unlocked_offer(holder, store)
+    path = offer["path"]
+    if offer["on"]:
+        print(f"work without asking: on for {path}")
+    elif args.unlocked:
+        onboard.onboard_unlocked(holder, store, on=True)
+        print(f"work without asking: on for {path}")
+    elif offer["reason"] is not None:
+        print(f"work without asking: not offered — {offer['reason']}")
+    elif offer["asked"]:
+        print(f"work without asking: off (turn it on: skep project setup {path} --unlocked)")
+    elif args.yes:
+        print("work without asking: off — --yes never turns it on; pass --unlocked")
+    else:
+        print("work without asking")
+        print(f"  in {path}, inside the sandbox, skep starts runs, answers routine command")
+        print("  questions and lands patches its own re-run of your tests confirmed, on skep/*")
+        print("  branches. Merging to main, pushes, PRs, messages, policy changes and new")
+        print("  network hosts still ask you. Turn it off: skep project setup <dir> --no-unlocked")
+        try:
+            answer = input("  let skep work here without asking? [y/N]: ")
+        except EOFError:
+            answer = ""
+        on = answer.strip().lower() in ("y", "yes")
+        onboard.onboard_unlocked(holder, store, on=on)
+        print(f"  {'on' if on else 'off'}")
 
     # ⑤ role
     record = records["role"]
