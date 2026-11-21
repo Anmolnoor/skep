@@ -955,6 +955,26 @@ def test_a_typed_y_lets_skep_work_without_asking_and_is_asked_once(
     assert "work without asking: on for" in capsys.readouterr().out
 
 
+def test_an_unlock_is_not_offered_for_a_project_that_binds_more_than_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D47 review: the unlock is the project's, so a project that also binds
+    another repo (a carried-forward repo_slug) is not unlocked by a question
+    that showed one folder."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main(argv) == 0
+    with _holder(home) as (_, store):
+        store.add_project_binding(
+            project_id="work", binding_kind="repo_slug", binding_value="acme/work"
+        )
+    capsys.readouterr()
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "not offered — project work also binds repo_slug acme/work" in out
+    assert main([*argv, "--unlocked"]) == 1
+    assert _unlocked(home) is not True
+
+
 def test_no_and_yes_leave_it_off_and_only_the_flag_turns_it_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

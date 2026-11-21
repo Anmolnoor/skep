@@ -526,6 +526,17 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     }
     if project is None:
         reason: str | None = "register a work directory first (step ②)"
+    elif other := sorted(
+        f"{b.binding_kind} {b.binding_value}"
+        for b in store.project_bindings(project.project_id)
+        if (b.binding_kind, b.binding_value) not in _own_bindings(holder, str(workdir["path"]))
+    ):
+        # D47 review: the unlock is the project's — it would cover every repo
+        # the project binds, and the operator was shown one folder.
+        reason = (
+            f"project {project.project_id} also binds {', '.join(other)}; decide for all of "
+            f"it with skep project setup {workdir['path']} --unlocked"
+        )
     elif onboard_status(holder.current.home)["steps"]["template"] is None:
         reason = "lock a policy baseline first (step ④)"
     elif (state.get("sandbox") or {}).get("backend") == "none":
@@ -533,6 +544,15 @@ def unlocked_offer(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     else:
         reason = unlocked_block_reason(store, {**project.policy, "unlocked": True})
     return {**view, "reason": reason, "offer": not view["on"] and reason is None}
+
+
+def _own_bindings(holder: ConfigHolder, path: str) -> set[tuple[str, str]]:
+    """The bindings step ② writes for ``path``: the folder, and its managed
+    slug when it has one."""
+    from .cli_cmds import _managed_repo_slug
+
+    slug = _managed_repo_slug(Path(path), holder.current)
+    return {("repo_path", path), *((("repo_slug", slug),) if slug else ())}
 
 
 def onboard_unlocked(

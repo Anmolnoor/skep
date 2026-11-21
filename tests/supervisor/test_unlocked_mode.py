@@ -377,6 +377,8 @@ UNLOCKED_CELLS = [
     ("shell", "run", "env make -k deploy", "require_approval", "default/unmatched"),
     ("shell", "run", "timeout -s KILL 5 make -k deploy", "require_approval", "default/unmatched"),
     ("shell", "run", "timeout 60 make lint", "require_approval", "default/unmatched"),
+    ("shell", "run", "bash scripts/lint.sh", "require_approval", "default/unmatched"),
+    ("shell", "run", "node tools/build.js", "require_approval", "default/unmatched"),
     ("shell", "run", "echo $(cat x)", "require_approval", "default/unmatched"),
     ("shell", "run", "sleep 9 &", "require_approval", "default/unmatched"),
     ("filesystem", "write", "/etc/x", None, None),  # not the layer's: as before

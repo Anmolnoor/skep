@@ -664,15 +664,19 @@ def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> b
     ``part``, or ``part`` launches them. The worker also accepts a bare-flag
     variant (v93-F1: same positional skeleton), so ``make -k deploy`` covers
     ``make deploy`` — a rule whose skeleton starts ``part``'s binds too.
-    Through a launcher (``env``, ``timeout -s KILL 5``) a variant can move
-    which word is the program, so any binding rule keeps the ask there."""
+    Through a launcher (``env``, ``timeout -s KILL 5``) or an interpreter (a
+    flag turns ``bash x`` into ``bash -c x``) a variant can move which word is
+    the program, so any binding rule keeps the ask there."""
     from ..workers.runtime_plugins import _FLAG_SENSITIVE_BINARIES, _positional_skeleton
+    from .shell_prefixes import _BROAD_INTERPRETERS, _INLINE_CODE_FLAGS, _interpreter
 
     policy = scopes.get("shell")
     got = shell_tokens(part)
     skeleton = _positional_skeleton(got)
     variants = bool(got) and got[0] not in _FLAG_SENSITIVE_BINARIES
-    launched = command_line_segments(part, exact=True) != [got]
+    launched = command_line_segments(part, exact=True) != [got] or (
+        bool(got) and _interpreter(got[0]) in _BROAD_INTERPRETERS | set(_INLINE_CODE_FLAGS)
+    )
     for rule in policy.rules if policy else ():
         if not (
             _binding(rule.verdict, rule.pattern)
