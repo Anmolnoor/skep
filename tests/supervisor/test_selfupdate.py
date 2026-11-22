@@ -464,7 +464,7 @@ def test_telegram_update_addressed_to_another_bot_is_not_ours(
         harness.poller.poll_once()
         # v132-F7 (I6, I7): a photo's caption is not a typed command
         captioned = _message("")
-        captioned["message"] = {  # type: ignore[index]
+        captioned["message"] = {
             "chat": {"id": 42}, "from": {"id": 42}, "caption": "/update",
             "photo": [{"file_id": "f", "width": 1, "height": 1, "file_size": 1}],
         }  # fmt: skip

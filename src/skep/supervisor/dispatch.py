@@ -612,9 +612,9 @@ def run_task(
         # policy, and reached an external agent on no pin at all.
         from .policy import external_engine_pin_refusal
 
-        refusal = external_engine_pin_refusal(wrapped or engine.name, verify_command)
-        if refusal is not None:
-            raise ValueError(refusal)
+        pin_refusal = external_engine_pin_refusal(wrapped or engine.name, verify_command)
+        if pin_refusal is not None:
+            raise ValueError(pin_refusal)
     # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
     # (v30), so a run that will land there must START there — based on main it
     # never sees the branch's earlier landings, and the second nearby task
