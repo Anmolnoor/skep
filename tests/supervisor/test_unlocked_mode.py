@@ -594,9 +594,7 @@ def test_a_gate_on_an_unlocked_project_answers_itself_once(
 
 @_SANDBOX
 @pytest.mark.parametrize(("mode", "gate"), [("shellgate", "git_push_origin_main"),
-                                             ("shellgate", "echo_$(cat_x)"),
-                                             # D42: an unnamed host is never auto-approved
-                                             ("hostgate", "files.example")])  # fmt: skip
+                                             ("shellgate", "echo_$(cat_x)")])  # fmt: skip
 def test_a_floor_unreadable_or_host_gate_stays_a_human_card(
     repo: Path, config: SupervisorConfig, mode: str, gate: str
 ) -> None:
@@ -606,6 +604,36 @@ def test_a_floor_unreadable_or_host_gate_stays_a_human_card(
     assert detail["run"]["state"] == "pending_approval"
     assert "unlocked_hosts" not in detail
     assert [r["verdict"] for r in _decisions(config)] in (["deny"], ["require_approval"])
+
+
+@_SANDBOX
+def test_a_host_gate_a_standing_rule_allows_still_stays_a_human_card(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v132-F1 (D42): unlocked answers no network host on any path — an
+    unnamed host, or even one an existing rule already allows. Only a shell
+    gate answers itself."""
+    import skep.supervisor.serve.actions as actions
+    from skep.supervisor.policy_v3 import Verdict
+
+    def allow_everything(*_args: Any, **_kwargs: Any) -> Verdict:
+        return Verdict("allow", "project", "allow-host", "project/allow-host", "run")
+
+    monkeypatch.setattr(actions, "decide_v3", allow_everything)
+    import time
+
+    client, first = _gated_run(config, repo, "files.example", mode="hostgate")
+    deadline = time.monotonic() + 3  # the done-callback answers in milliseconds
+    while time.monotonic() < deadline:
+        store = RunStore(config.db_path)
+        try:
+            assert all(a.status == "pending" for a in store.approvals_for(first))
+        finally:
+            store.close()
+        time.sleep(0.05)
+    detail = client.get(f"/api/runs/{first}").json()
+    assert detail["run"]["state"] == "pending_approval"
+    assert _decisions(config) == []  # never even asked decide() on the human's behalf
 
 
 @_SANDBOX

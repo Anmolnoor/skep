@@ -3906,21 +3906,14 @@ def resume_past_gate(
 UNLOCKED_ACTOR = "auto:unlocked"
 
 
-def _gate_requests(store: RunStore, task_id: str, approval: Any) -> list[Request]:
+def _gate_requests(store: RunStore, approval: Any) -> list[Request]:
     """What a worker gate asks, as decide() requests — the shell commands it
-    lists, or the host a network gate names (decided as the run's
-    ``network.connect``). Empty for anything else: that gate is a human's."""
-    if approval.action == "shell.run":
-        commands = store.approval_commands(approval.review_id) or []
-        return [Request("shell", "run", shlex.join(command)) for command in commands]
-    if approval.action in ("network.fetch", "network.read"):
-        decision = approval_decision_for_action(
-            action=approval.action, events=current_events(store, task_id)
-        )
-        host = "" if decision is None or decision.detail is None else str(decision.detail).strip()
-        if host and ASK_HOST_RE.match(host):
-            return [Request("network", "connect", host)]
-    return []
+    lists. Empty for anything else, a network host gate included even when a
+    standing rule allows the host (D42, v132-F1): that gate is a human's."""
+    if approval.action != "shell.run":
+        return []
+    commands = store.approval_commands(approval.review_id) or []
+    return [Request("shell", "run", shlex.join(command)) for command in commands]
 
 
 def auto_answer_unlocked_gate(
@@ -3930,8 +3923,9 @@ def auto_answer_unlocked_gate(
     when ``decide(…, sandboxed=True)`` allows every request it names, under
     the run's own role and chain — the click path (``resume_past_gate``),
     actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
-    A host gate never answers itself (D42: ``decide`` keeps a host's ask), and
-    only the serve's done-callback calls this — a CLI run stops at its gate.
+    A host gate never answers itself, not even for a host a rule allows
+    (D42, v132-F1: it is never put to ``decide`` here), and only the serve's
+    done-callback calls this — a CLI run stops at its gate.
     Returns the resumed task id, or None: the gate stays a human's card."""
     run = store.get_run(task_id)
     if run is None or run.state != "pending_approval":
@@ -3939,7 +3933,7 @@ def auto_answer_unlocked_gate(
     if run.execution_mode != "sandbox" or not holder.current.sandbox:
         return None  # the mode stands on the wall (I12)
     approval = next((a for a in store.pending_approvals() if a.task_id == task_id), None)
-    requests = [] if approval is None else _gate_requests(store, task_id, approval)
+    requests = [] if approval is None else _gate_requests(store, approval)
     if approval is None or not requests:
         return None
     stack = load_stack(holder, store, repo=run.repo)
