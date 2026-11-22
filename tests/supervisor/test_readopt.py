@@ -959,3 +959,27 @@ def test_an_adopted_worker_that_is_still_our_child_is_reaped() -> None:
     while not worker.exited and time.monotonic() < deadline:
         time.sleep(0.05)
     assert worker.exited
+
+
+def test_recovery_reverifies_with_the_pin_the_run_was_minted_with(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v132-F5 (I2): a template-bound project's pin is not found by a repo
+    lookup, so a restart fell back to the worker's own check. Recovery uses
+    the pin the supervisor minted into the run's task."""
+    import skep.supervisor.dispatch as dispatch_module
+    from skep.supervisor.contracts_io import mint_task
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dispatch_module, "reverify_run", lambda **kw: seen.update(kw))
+    monkeypatch.setattr(dispatch_module, "remove_worktree", lambda *_a: None)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="Fix it.", verify_command="make check")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        record = store.get_run(task.task_id)
+        assert record is not None
+        dispatch_module._reverify_after_restart(store, config, record, task, "passed", ())
+    finally:
+        store.close()
+    assert seen["verify_command"] == "make check"

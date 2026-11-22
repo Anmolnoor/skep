@@ -1606,7 +1606,9 @@ def _reverify_after_restart(
         ref=record.ref,
         config=config,
         changed_files=changed_files,
-        verify_command=str(recovery_policy.get("verify_command") or ""),
+        # v132-F5 (I2): the pin the live run minted into its task (a
+        # template-bound project's too, which a repo lookup cannot find).
+        verify_command=task.verify_command or str(recovery_policy.get("verify_command") or ""),
         # D6 (I2): the run's loopback ports, as the worker had them —
         # ES-F252: its local model provider's port included.
         loopback_ports=run_loopback_ports(

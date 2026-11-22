@@ -1015,6 +1015,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 if resolved_policy is not None
                 else (args.engine or "")
             ),
+            # v132-F5 (I2): the pin the resolver found — a template-bound
+            # project's too, which run_task's repo lookup cannot see.
+            verify_command=resolved_policy.verify_command if resolved_policy is not None else "",
         )
     except ValueError as exc:
         # v116-F1: a dispatch refusal (engine absent, no auth env, no usable

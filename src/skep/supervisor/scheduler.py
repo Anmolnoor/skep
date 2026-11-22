@@ -36,7 +36,12 @@ from .dispatch import run_task
 from .engines import external_agent_for_command, resolve_engine
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
-from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
+from .policy_resolver import (
+    PolicyResolutionError,
+    managed_repos_root,
+    resolve_run_policy,
+    run_policy_for_repo,
+)
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
 from .spawner import build_worker_env
 from .store import PROVIDER_BLOCKED_STATE, SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
@@ -747,6 +752,20 @@ def _uses_worker_provider(
     return not resolve_engine(str(policy.get("coding_engine") or "")).external
 
 
+def _slug_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str, str]]:
+    """v132-F5 (I5, I6): a ``repo_slug`` names a managed clone
+    (``<home>/repos/<slug>``) — the policy resolver's rule. A folder elsewhere
+    that shares its basename is not that project."""
+    return [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
+
+
+def _bound_by_slug(store: RunStore, config: SupervisorConfig, repo: Path) -> bool:
+    return any(
+        store.project_for_binding(kind, value) is not None
+        for kind, value in _slug_candidates(config, repo)
+    )
+
+
 def _provider_blocked(reason: str) -> str:
     return (
         f"{PROVIDER_BLOCKED_STATE}: skipped without a run — {reason}. Fix the worker "
@@ -798,6 +817,9 @@ def run_due(
             continue
         try:
             blocked_state: str | None = None
+            # v132-F5 (I2, I8): a bound run is the project's run — its engine
+            # and verify pins reach dispatch (empty = run_task's builtin).
+            verify_command = coding_engine = ""
             if _uses_worker_provider(store, config, schedule):
                 if provider_block is None and not provider_probed:
                     provider_probed = True
@@ -906,7 +928,7 @@ def run_due(
                     store.project_for_binding("template_name", schedule.template_name) is not None
                     or store.project_for_binding("repo_path", str(repo)) is not None
                     # v24-F2: a project bound by repo slug governs ticks too.
-                    or store.project_for_binding("repo_slug", repo.name) is not None
+                    or _bound_by_slug(store, config, repo)
                 )
                 if template_bound:
                     policy = run_policy_for_repo(
@@ -949,6 +971,8 @@ def run_due(
                         budget = resolved.budget
                         execution_mode = resolved.execution_mode
                         project_context = resolved.project_context
+                        verify_command = resolved.verify_command
+                        coding_engine = resolved.coding_engine
                         raw_auto_apply = resolved.policy.get("auto_apply_verified_patch")
                         auto_apply_verified_patch = (
                             raw_auto_apply if isinstance(raw_auto_apply, bool) else None
@@ -986,13 +1010,15 @@ def run_due(
                         ref=instance.ref,
                         store=store,
                         execution_mode=execution_mode,
+                        verify_command=verify_command,
+                        coding_engine=coding_engine,
                     )
             else:
                 repo = Path(schedule.repo).expanduser().resolve()
                 if (
                     store.project_for_binding("repo_path", str(repo)) is not None
                     # v24-F2: a project bound by repo slug governs ticks too.
-                    or store.project_for_binding("repo_slug", repo.name) is not None
+                    or _bound_by_slug(store, config, repo)
                 ):
                     policy = run_policy_for_repo(store, config, repo)
                     try:
@@ -1008,7 +1034,7 @@ def run_due(
                             max_actions=None,
                             max_provider_calls=None,
                             execution_mode=None,
-                            binding_candidates=[("repo_slug", repo.name)],
+                            binding_candidates=_slug_candidates(config, repo),
                         )
                     except PolicyResolutionError as exc:
                         dispatch_decision = project_policy_dispatch_decision(
@@ -1029,6 +1055,8 @@ def run_due(
                         budget = resolved.budget
                         execution_mode = resolved.execution_mode
                         project_context = resolved.project_context
+                        verify_command = resolved.verify_command
+                        coding_engine = resolved.coding_engine
                         raw_auto_apply = resolved.policy.get("auto_apply_verified_patch")
                         auto_apply_verified_patch = (
                             raw_auto_apply if isinstance(raw_auto_apply, bool) else None
@@ -1069,6 +1097,8 @@ def run_due(
                         ref=schedule.ref,
                         store=store,
                         execution_mode=execution_mode,
+                        verify_command=verify_command,
+                        coding_engine=coding_engine,
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state
