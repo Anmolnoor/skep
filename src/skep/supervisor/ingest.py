@@ -130,6 +130,7 @@ SUPERVISOR_AUDIT_FILES = frozenset(
         "result.json",
         "events.ndjson",
         "worker.log",
+        "sandbox.profile.sb",
         "reverify.profile.sb",
         "diagnose.profile.sb",
         "codex-login.json",
@@ -146,7 +147,8 @@ def _copy_artifact(
     claimed_sha256: str,
     audit_task_dir: Path,
 ) -> None:
-    if source.name in SUPERVISOR_AUDIT_FILES:
+    # casefold: a case-insensitive filesystem (macOS) maps TASK.JSON onto it
+    if source.name.casefold() in SUPERVISOR_AUDIT_FILES:
         raise EvidenceIntegrityError(
             f"artifact {kind!r} is named {source.name!r}, a file the supervisor owns in "
             "the audit directory; it is not copied over the supervisor's record."

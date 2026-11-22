@@ -941,3 +941,19 @@ def test_a_worker_artifact_never_overwrites_a_file_the_supervisor_owns(
     assert "evidence integrity" in details and "task.json" in details
     envelope = json.loads((config.audit_dir / outcome.record.task_id / "task.json").read_text())
     assert envelope["verify_command"] == "grep -q value existing.py"
+
+
+@pytest.mark.parametrize("name", ["TASK.JSON", "Result.json", "sandbox.profile.sb"])
+def test_a_supervisor_audit_name_is_refused_in_any_case(tmp_path: Path, name: str) -> None:
+    """sol-loop R2 S1/T2: a case-insensitive filesystem maps TASK.JSON onto
+    task.json, and the spawner writes sandbox.profile.sb there too."""
+    from skep.supervisor.ingest import EvidenceIntegrityError, _copy_artifact
+
+    source = tmp_path / name
+    source.write_text("{}")
+    with pytest.raises(EvidenceIntegrityError, match="supervisor owns"):
+        _copy_artifact(
+            None,  # type: ignore[arg-type]  # refused before the store is touched
+            None,  # type: ignore[arg-type]
+            kind="file", source=source, claimed_sha256="0" * 64, audit_task_dir=tmp_path / "a",
+        )  # fmt: skip

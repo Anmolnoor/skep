@@ -813,3 +813,24 @@ def test_the_chat_face_refuses_an_unlocked_that_is_not_a_boolean(
         assert record is not None and record.policy.get("unlocked") is not True
     finally:
         store.close()
+
+
+def test_a_phase_change_keeps_an_operator_value_over_a_strategy_default(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """sol-loop R2 T1: a public_free project's own default_network survived
+    as far as the merge, then the strategy default ([]) overwrote it."""
+    from skep.supervisor.serve.registry import set_project_phase
+
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="pub", name="pub", strategy="public_free", phase="build",
+            policy={"default_network": ["pypi.org"], "verify_command": PIN},
+        )  # fmt: skip
+        store.add_project_binding(project_id="pub", binding_kind="repo_path",
+                                  binding_value=str(repo.resolve()))  # fmt: skip
+        moved = set_project_phase(store, "pub", "maintain")
+        assert moved["policy"]["default_network"] == ["pypi.org"]
+    finally:
+        store.close()

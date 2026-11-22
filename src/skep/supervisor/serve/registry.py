@@ -39,6 +39,7 @@ from ..projects import (
     first_party_project_policy,
     first_party_schedule_seeds,
     list_projects,
+    phase_default_policy,
     project_from_store,
     project_to_dict,
     validate_project_definition,
@@ -1427,9 +1428,11 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
             strategy = pack.strategy
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        phase_keys = set(policy)
     else:
         try:
             policy = first_party_project_policy(strategy=project.strategy, phase=phase)
+            phase_keys = set(phase_default_policy(strategy=project.strategy, phase=phase))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         strategy = project.strategy
@@ -1437,9 +1440,10 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     # keys the phase owns (v100-F10's rule, as setup applies it). Everything
     # else the operator set — verify_command, coding_engine, groups, shell
     # grants, loopback ports — is carried; ``unlocked`` resets (ADR 0061).
+    owned = _PHASE_OWNED | phase_keys
     policy = {
-        **{key: value for key, value in project.policy.items() if key not in _PHASE_OWNED},
         **policy,
+        **{key: value for key, value in project.policy.items() if key not in owned},
     }
     notes: list[str] = []
     _default_execution_mode(
@@ -2039,6 +2043,12 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/projects", status_code=201)
     def put_project(body: ProjectRequest) -> dict[str, Any]:
+        # sol-loop R2 S3: a binding write, so the setup lock (v132-F14) — an
+        # onboarding unlock's checks never interleave with it.
+        with project_setup_lock(run_store):
+            return _put_project(body)
+
+    def _put_project(body: ProjectRequest) -> dict[str, Any]:
         # v127-F5: the editor re-POSTs the whole policy, so "the request turns
         # auto-apply on" means the stored row did not already have it on.
         stored = run_store.get_project_policy(body.project_id)
