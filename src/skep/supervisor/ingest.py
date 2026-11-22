@@ -120,6 +120,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# v132-F12 (I2, I13): the files the SUPERVISOR writes into
+# ``audit/<task_id>/`` and later reads back as its own record. Artifacts are
+# copied there by basename, so a worker artifact with one of these names would
+# replace it (a forged task envelope — its verify pin — read by recovery).
+SUPERVISOR_AUDIT_FILES = frozenset(
+    {
+        "task.json",
+        "result.json",
+        "events.ndjson",
+        "worker.log",
+        "reverify.profile.sb",
+        "diagnose.profile.sb",
+        "codex-login.json",
+    }
+)
+
+
 def _copy_artifact(
     store: RunStore,
     task: CodingWorkerTask,
@@ -129,6 +146,11 @@ def _copy_artifact(
     claimed_sha256: str,
     audit_task_dir: Path,
 ) -> None:
+    if source.name in SUPERVISOR_AUDIT_FILES:
+        raise EvidenceIntegrityError(
+            f"artifact {kind!r} is named {source.name!r}, a file the supervisor owns in "
+            "the audit directory; it is not copied over the supervisor's record."
+        )
     if not source.is_file():
         raise EvidenceIntegrityError(
             f"artifact {kind!r} missing at {source}; the result claims it exists."

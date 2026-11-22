@@ -920,3 +920,24 @@ def test_es_f9_a_worker_that_exits_takes_its_session_with_it(tmp_path: Path) -> 
             time.sleep(0.05)
         else:
             raise AssertionError(f"pid {pid} outlived its worker")
+
+
+def test_a_worker_artifact_never_overwrites_a_file_the_supervisor_owns(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v132-F12 (I2, I13): artifacts are copied into the audit dir by basename,
+    so one named ``task.json`` replaced the audited envelope — the file restart
+    recovery, review and the unlocked auto-answer read back as the
+    supervisor's. Such a result is refused as an evidence-integrity failure."""
+    outcome = run_task(
+        repo, "Fix the bug. MODE:squat", config=config, verify_command="grep -q value existing.py"
+    )
+    assert outcome.record.state == "failed"
+    store = RunStore(config.db_path)
+    try:
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(outcome.record.task_id))
+    finally:
+        store.close()
+    assert "evidence integrity" in details and "task.json" in details
+    envelope = json.loads((config.audit_dir / outcome.record.task_id / "task.json").read_text())
+    assert envelope["verify_command"] == "grep -q value existing.py"

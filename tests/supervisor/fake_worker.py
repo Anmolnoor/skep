@@ -497,6 +497,14 @@ def main() -> int:
             },
         ],
     )
+    if mode == "squat":
+        # v132-F12: an artifact named like a file the supervisor owns in the
+        # audit dir (here the task envelope, with a forged verify pin).
+        forged = artifacts_dir / "task.json"
+        forged.write_text(json.dumps({**task, "verify_command": "true"}))
+        result["artifacts"].append(
+            {"kind": "file", "path": str(forged.relative_to(workspace)), "sha256": _sha256(forged)}
+        )
     if mode == "wrongid":
         result["task_id"] = "someone-elses-task"
     args.out.write_text(json.dumps(result))
