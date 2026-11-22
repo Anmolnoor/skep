@@ -1400,6 +1400,19 @@ def setup_project_record(
     return result
 
 
+# The keys a phase move re-derives from the new phase's defaults; ``unlocked``
+# is the operator's per-phase decision and never survives a move (ADR 0061).
+_PHASE_OWNED = frozenset(
+    {
+        "default_execution_mode",
+        "auto_dispatch_allowed",
+        "auto_apply_verified_patch",
+        "auto_apply_branch",
+        "unlocked",
+    }
+)
+
+
 def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[str, Any]:
     """Move a project to ``phase``, re-deriving policy from its pack (or the
     first-party defaults) exactly like ``skep project set-phase`` (v25-F1) —
@@ -1420,17 +1433,14 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         strategy = project.strategy
-    # v91-F1 (I2): phase defaults never carry a verify_command, so a plain
-    # re-derive would drop the pin at exactly the wrong moment — the move INTO
-    # maintain is the move into the only lane that lands without a human.
-    pinned_verify = str(project.policy.get("verify_command") or "").strip()
-    if pinned_verify and not policy.get("verify_command"):
-        policy["verify_command"] = pinned_verify
-    # v132-F4 (I2, I8): nor do they name an engine — a phase move must not
-    # silently switch which agent runs the next task.
-    pinned_engine = project.policy.get("coding_engine")
-    if pinned_engine and not policy.get("coding_engine"):
-        policy["coding_engine"] = pinned_engine
+    # v91-F1 / v132-F4 / Neon N4 (I2, I8): a phase move re-derives only the
+    # keys the phase owns (v100-F10's rule, as setup applies it). Everything
+    # else the operator set — verify_command, coding_engine, groups, shell
+    # grants, loopback ports — is carried; ``unlocked`` resets (ADR 0061).
+    policy = {
+        **{key: value for key, value in project.policy.items() if key not in _PHASE_OWNED},
+        **policy,
+    }
     notes: list[str] = []
     _default_execution_mode(
         run_store, project_id=project_id, policy=policy, overrides={}, notes=notes

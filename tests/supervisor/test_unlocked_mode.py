@@ -314,11 +314,19 @@ def test_a_phase_change_keeps_the_coding_engine(repo: Path, config: SupervisorCo
     silently switch which agent runs the next task."""
     from skep.supervisor.serve.registry import set_project_phase
 
-    store = _bound(config, repo, {"verify_command": PIN, "coding_engine": "codex"})
+    store = _bound(
+        config, repo,
+        {"verify_command": PIN, "coding_engine": "codex", "loopback_ports": [5432],
+         "unlocked": True, "auto_apply_branch": "skep/maintain"},
+    )  # fmt: skip
     try:
-        moved = set_project_phase(store, "unlockable", "maintain")
+        moved = set_project_phase(store, "unlockable", "build")
         assert moved["policy"]["coding_engine"] == "codex"
         assert moved["policy"]["verify_command"] == PIN
+        # Neon N4: every operator key is carried; the phase's own keys are not
+        assert moved["policy"]["loopback_ports"] == [5432]
+        assert "unlocked" not in moved["policy"]
+        assert moved["policy"].get("auto_apply_branch") != "skep/maintain"
     finally:
         store.close()
 
