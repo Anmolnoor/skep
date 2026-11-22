@@ -120,7 +120,12 @@ def test_supervisor_can_spawn_claude_code_adapter(
         env_baseline=("PATH", "HOME", "PYTHONPATH"),
     )
 
-    outcome = run_task(workspace, "Create a Python file through Claude Code.", config=config)
+    outcome = run_task(
+        workspace,
+        "Create a Python file through Claude Code.",
+        config=config,
+        verify_command="grep -q target README.md",  # v132-F6: no external agent runs unpinned
+    )
 
     assert outcome.record.state == "completed"
     assert outcome.record.worker_version == "claude-code-adapter-0.1.0"
@@ -177,6 +182,7 @@ def test_supervisor_passes_claude_code_command_env_override(
         permissions=permissions,
         # ES-F255 (D36): asked for workspace, coerced into the sandbox.
         execution_mode="workspace",
+        verify_command="grep -q target README.md",  # v132-F6: no external agent runs unpinned
     )
 
     assert outcome.record.execution_mode == "sandbox"
