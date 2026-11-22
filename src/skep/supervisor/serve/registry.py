@@ -1428,7 +1428,13 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
             strategy = pack.strategy
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        phase_keys = set(policy)
+        # a pack spells its whole policy per phase; the strategy-wide keys
+        # (same value in every phase) are not the phase's (sol-loop R3 U1)
+        phase_keys = {
+            key
+            for key in policy
+            if any(other.get(key) != policy[key] for other in pack.phase_defaults.values())
+        }
     else:
         try:
             policy = first_party_project_policy(strategy=project.strategy, phase=phase)
