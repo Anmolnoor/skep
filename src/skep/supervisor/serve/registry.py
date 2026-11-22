@@ -9,15 +9,20 @@ that makes "zero local dependencies" real: repos come in by URL, cloned under
 from __future__ import annotations
 
 import errno
+import fcntl
+import functools
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -1167,6 +1172,39 @@ def _first_slot(every: str) -> str:
     return next_run_after(now_ts(), parse_interval(every))
 
 
+_SETUP_LOCK_HELD = threading.local()
+
+
+@contextmanager
+def project_setup_lock(run_store: RunStore) -> Iterator[None]:
+    """v132-F3 (I5, I6): one project-setup write at a time per home, across
+    processes (serve, the CLI, onboarding) — so the onboarding unlock's checks
+    and its write see the same bindings. Re-entrant within a thread: the
+    unlock holds it across its checks and its own setup call."""
+    if getattr(_SETUP_LOCK_HELD, "held", False):
+        yield
+        return
+    home = Path(run_store.db_path).parent  # config.db_path is <home>/supervisor.sqlite3
+    home.mkdir(parents=True, exist_ok=True)
+    with open(home / "project-setup.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _SETUP_LOCK_HELD.held = True
+        try:
+            yield
+        finally:
+            _SETUP_LOCK_HELD.held = False
+
+
+def _under_setup_lock[F: Callable[..., Any]](fn: F) -> F:
+    @functools.wraps(fn)
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        with project_setup_lock(kwargs["run_store"]):
+            return fn(*args, **kwargs)
+
+    return cast(F, locked)
+
+
+@_under_setup_lock
 def setup_project_record(
     *,
     run_store: RunStore,

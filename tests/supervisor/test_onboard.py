@@ -1151,13 +1151,30 @@ def test_an_unlock_and_a_workdir_change_never_interleave(
     move = threading.Thread(target=run, args=(onboard.onboard_workdir,),
                             kwargs={"path": str(twin)})  # fmt: skip
     move.start()
+
+    def ordinary_setup() -> None:  # sol-loop R1 S3: `skep project setup` waits too
+        try:
+            from skep.supervisor.templates import WorkflowTemplate
+
+            with _holder(home) as (holder, store):
+                store.add_template(WorkflowTemplate(name="later", instructions="x"))
+                real(run_store=store, root=holder.current.home.parent / "repos",
+                     project_id="work", name="work", strategy=None, phase="build",
+                     template_names=["later"], seed_default_schedules=False)  # fmt: skip
+        except BaseException as exc:
+            errors.append(exc)
+
+    setup = threading.Thread(target=ordinary_setup)
+    setup.start()
     move.join(0.5)
-    assert move.is_alive()  # step ② waits for the answer to land
+    setup.join(0.1)
+    assert move.is_alive() and setup.is_alive()  # both wait for the answer to land
     go.set()
     unlock.join(5)
     move.join(5)
+    setup.join(5)
     assert errors == []
     with _holder(home) as (_, store):
         (project,) = list_projects(store)
-        assert [(b.kind, b.value) for b in project.bindings] == [("repo_path", str(twin))]
+        assert ("repo_path", str(twin)) in [(b.kind, b.value) for b in project.bindings]
         assert project.policy.get("unlocked") is False

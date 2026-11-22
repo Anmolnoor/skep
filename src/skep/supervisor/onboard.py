@@ -12,13 +12,11 @@ routes behind the web ``/setup`` page call these same functions (ADR 0050).
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import shlex
 import shutil
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -295,19 +293,6 @@ def onboard_keep_model(holder: ConfigHolder) -> dict[str, Any]:
     )
 
 
-@contextmanager
-def _onboarding_lock(holder: ConfigHolder) -> Iterator[None]:
-    """v132-F3 (I5, I6): one onboarding write at a time, across processes (the
-    serve's /setup page and `skep onboard` alike) — so the unlock's checks and
-    its write see the same work directory, and a step ② re-pointing the
-    project mid-answer waits for it."""
-    home = holder.current.home
-    home.mkdir(parents=True, exist_ok=True)
-    with open(home / "onboard.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
-
-
 # --- ② work directory ------------------------------------------------------------
 
 
@@ -318,7 +303,7 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     non-git directory is left as it is (nothing of the operator's is
     committed unasked)."""
     from .cli_cmds import _managed_repo_slug, _project_id_from_repo, _project_root
-    from .serve.registry import ensure_repo_baseline, setup_project_record
+    from .serve.registry import ensure_repo_baseline, project_setup_lock, setup_project_record
     from .serve.setup import DEFAULT_WORKSPACE_PACK, DEFAULT_WORKSPACE_PHASE
 
     if not path.strip():
@@ -334,7 +319,7 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     # D47 review: the id is the folder's basename, so a different folder with
     # the same name re-points the stored project — setup leaves an unlock
     # behind when the binding is new (v132-F4).
-    with _onboarding_lock(holder):
+    with project_setup_lock(store):
         project = setup_project_record(
             run_store=store,
             root=_project_root(config),
@@ -568,7 +553,9 @@ def onboard_unlocked(
     ``skep project setup <dir> --unlocked``, under the same guard). ``path``
     is the folder the operator was shown: a work directory changed since is
     refused, so a yes never lands on a project nobody asked about."""
-    with _onboarding_lock(holder):
+    from .serve.registry import project_setup_lock
+
+    with project_setup_lock(store):  # v132-F3: checks and write, one lock
         return _onboard_unlocked(holder, store, on=on, path=path)
 
 
