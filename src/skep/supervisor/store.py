@@ -2464,11 +2464,20 @@ class RunStore:
         so a re-run of project setup never re-seeds it (v132-F8). A project's
         own teardown (``remove_pack_seeds``) is not one."""
         cursor = self._conn.execute("DELETE FROM schedules WHERE name = ?", (name,))
+        removed = cursor.rowcount > 0
+        if removed and by_operator:
+            # one transaction with the delete (sol-loop R1 S5): no window in
+            # which the row is gone and the marker not yet written
+            row = self._conn.execute(
+                "SELECT value_json FROM settings WHERE key = ?", (DELETED_SCHEDULES_KEY,)
+            ).fetchone()
+            deleted = set(json.loads(row[0])) if row is not None else set()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (DELETED_SCHEDULES_KEY, json.dumps(sorted(deleted | {name})), _now()),
+            )
         self._conn.commit()
-        if cursor.rowcount > 0 and by_operator:
-            deleted = set(self.get_setting(DELETED_SCHEDULES_KEY) or ())
-            self.set_setting(DELETED_SCHEDULES_KEY, sorted(deleted | {name}))
-        return cursor.rowcount > 0
+        return removed
 
     def schedule_deleted_by_operator(self, name: str) -> bool:
         return name in (self.get_setting(DELETED_SCHEDULES_KEY) or ())
