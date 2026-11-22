@@ -1114,6 +1114,7 @@ def _carry_forward_existing(
     project_id: str,
     base_policy: dict[str, Any],
     bindings: list[ProjectBinding],
+    overrides: dict[str, Any],
 ) -> tuple[dict[str, Any], list[ProjectBinding]]:
     """v100-F10: a repeated setup is a policy UPDATE, not a re-install.
 
@@ -1137,13 +1138,26 @@ def _carry_forward_existing(
     stored = run_store.get_project_policy(project_id)
     if stored is None:
         return base_policy, bindings
+    records = run_store.project_bindings(project_id)
     kinds = {binding.kind for binding in bindings}
     kept = [
         ProjectBinding(kind=record.binding_kind, value=record.binding_value)
-        for record in run_store.project_bindings(project_id)
+        for record in records
         if record.binding_kind not in kinds
     ]
-    return {**stored.policy, **base_policy}, [*bindings, *kept]
+    merged = {**stored.policy, **base_policy}
+    # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
+    # A binding the project did not have (a same-named folder elsewhere: the
+    # id is the basename) is a new target, so the unlock stays behind unless
+    # this call asks for it.
+    known = {(record.binding_kind, record.binding_value) for record in records}
+    if (
+        merged.get("unlocked") is True
+        and "unlocked" not in overrides
+        and any((binding.kind, binding.value) not in known for binding in bindings)
+    ):
+        merged["unlocked"] = False
+    return merged, [*bindings, *kept]
 
 
 def _first_slot(every: str) -> str:
@@ -1196,7 +1210,11 @@ def setup_project_record(
         notes=notes,
     )
     base_policy, bindings = _carry_forward_existing(
-        run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
+        run_store,
+        project_id=project_id,
+        base_policy=base_policy,
+        bindings=bindings,
+        overrides=policy_overrides or {},
     )
     # v128-F3: after the carry-forward, so an update that sends only
     # policy_overrides keeps the stored bindings; a new project still needs one.
@@ -1437,7 +1455,11 @@ def preview_project_setup(
         notes=notes,
     )
     base_policy, bindings = _carry_forward_existing(
-        run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
+        run_store,
+        project_id=project_id,
+        base_policy=base_policy,
+        bindings=bindings,
+        overrides=policy_overrides,
     )
     # v128-F3: after the carry-forward, so an update that sends only
     # policy_overrides keeps the stored bindings; a new project still needs one.

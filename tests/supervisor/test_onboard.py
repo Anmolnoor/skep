@@ -1081,3 +1081,83 @@ def test_an_unlock_never_follows_the_name_to_another_folder_or_skips_the_baselin
         assert list_projects(store)[0].policy.get("unlocked") is False
         offer = onboard.unlocked_offer(holder, store)
         assert offer["reason"] == "lock a policy baseline first (step ④)"
+
+
+def _twin(tmp_path: Path) -> Path:
+    twin = tmp_path / "elsewhere" / "work"
+    (twin / "tests").mkdir(parents=True)
+    (twin / "pyproject.toml").write_text('[project]\nname = "work"\nversion = "0"\n')
+    (twin / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    return twin
+
+
+def test_ordinary_setup_never_carries_an_unlock_to_a_new_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v132-F4 (I5, I6): the unlock is for the folder it was given for. A
+    plain `skep project setup` on another folder with the same name re-points
+    the project, so it stays locked — unless this setup asks for --unlocked."""
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main([*argv, "--unlocked"]) == 0
+    assert _unlocked(home) is True
+    twin = _twin(tmp_path)
+    assert main(["--home", str(home), "project", "setup", str(twin)]) == 0
+    assert _unlocked(home) is False
+    # a re-run on the folder it now binds keeps whatever was answered for it
+    assert main(["--home", str(home), "project", "setup", str(twin), "--unlocked"]) == 0
+    assert main(["--home", str(home), "project", "setup", str(twin)]) == 0
+    assert _unlocked(home) is True
+
+
+def test_an_unlock_and_a_workdir_change_never_interleave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v132-F3 (I5, I6): the unlock's check and its write hold one onboarding
+    lock, so a step ② that re-points the project mid-answer waits — and the
+    folder it lands on is not unlocked."""
+    import threading
+
+    from skep.supervisor import onboard
+    from skep.supervisor.serve import registry
+
+    home, argv = _unlockable(tmp_path, monkeypatch)
+    assert main(argv) == 0  # --yes: offered, not on
+    twin = _twin(tmp_path)
+    real = registry.setup_project_record
+    checked, go = threading.Event(), threading.Event()
+
+    def paused(**kwargs: Any) -> dict[str, Any]:
+        if (kwargs.get("policy_overrides") or {}).get("unlocked") is True:
+            checked.set()  # past every check, before the write
+            go.wait(5)
+        return real(**kwargs)
+
+    monkeypatch.setattr(registry, "setup_project_record", paused)
+    errors: list[BaseException] = []
+
+    def run(fn: Any, **kwargs: Any) -> None:
+        try:
+            with _holder(home) as (holder, store):
+                fn(holder, store, **kwargs)
+        except BaseException as exc:  # surfaced below
+            errors.append(exc)
+
+    with _holder(home) as (holder, store):
+        shown = onboard.unlocked_offer(holder, store)["path"]
+    unlock = threading.Thread(target=run, args=(onboard.onboard_unlocked,),
+                              kwargs={"on": True, "path": shown})  # fmt: skip
+    unlock.start()
+    assert checked.wait(5)
+    move = threading.Thread(target=run, args=(onboard.onboard_workdir,),
+                            kwargs={"path": str(twin)})  # fmt: skip
+    move.start()
+    move.join(0.5)
+    assert move.is_alive()  # step ② waits for the answer to land
+    go.set()
+    unlock.join(5)
+    move.join(5)
+    assert errors == []
+    with _holder(home) as (_, store):
+        (project,) = list_projects(store)
+        assert [(b.kind, b.value) for b in project.bindings] == [("repo_path", str(twin))]
+        assert project.policy.get("unlocked") is False
