@@ -18,9 +18,9 @@ numbers they touch.
 only as a patch until a human approval applies it. `main` never advances
 automatically; auto-apply lands only on a constrained `skep/` branch,
 only after G10 confirms the project's pinned `verify_command`, and only
-where the operator turned it on for that project — the maintain phase's
-default (v30), or an explicit per-project unlock in any phase (ADR 0061;
-wording amended v132-F10). There is no path from worker output to a
+where the project's policy turns it on (`auto_apply_verified_patch`) — the
+maintain phase's default (v30), an operator's explicit setting, or a
+per-project unlock in any phase (ADR 0061; wording amended v132-F10). There is no path from worker output to a
 default branch that does not pass through a recorded human verdict.
 
 **I2. The supervisor re-verifies; the worker's word is never the verdict

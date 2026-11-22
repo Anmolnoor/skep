@@ -780,7 +780,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
         "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
-        "email/read, everything else as email/send (cards). "
+        "email/read, everything else as email/send (cards every time). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
         "screenshot/console are browse/read; navigation, clicks, typing, and JS "
@@ -1294,8 +1294,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "allow_mcp_tool",
         "PROPOSE always-allowing one MCP tool (requires user confirmation). "
         "Writes a learned allow rule in the server's scope (mcp, or email for "
-        "a mail-bound server); a rule that reaches into denied policy space "
-        "is rejected with the deny's rule id.",
+        "a mail-bound server's reads); a rule that reaches into denied policy space "
+        "is rejected with the deny's rule id. A mail send is never allowed: "
+        "every send cards, once.",
         {"server_id": {"type": "string"}, "tool": {"type": "string"}},
         ["server_id", "tool"],
     ),
