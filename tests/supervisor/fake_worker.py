@@ -502,9 +502,8 @@ def main() -> int:
         # audit dir (here the task envelope, with a forged verify pin).
         forged = artifacts_dir / "task.json"
         forged.write_text(json.dumps({**task, "verify_command": "true"}))
-        result["artifacts"].append(
-            {"kind": "file", "path": str(forged.relative_to(workspace)), "sha256": _sha256(forged)}
-        )
+        squatted = {"kind": "file", "path": str(forged.relative_to(workspace))}
+        result["artifacts"] = [*result["artifacts"], {**squatted, "sha256": _sha256(forged)}]  # type: ignore[misc]
     if mode == "wrongid":
         result["task_id"] = "someone-elses-task"
     args.out.write_text(json.dumps(result))

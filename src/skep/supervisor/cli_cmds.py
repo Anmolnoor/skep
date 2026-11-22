@@ -1018,6 +1018,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             # v132-F5 (I2): the pin the resolver found — a template-bound
             # project's too, which run_task's repo lookup cannot see.
             verify_command=resolved_policy.verify_command if resolved_policy is not None else "",
+            auto_apply_branch=_landing_branch_of(resolved_policy),
         )
     except ValueError as exc:
         # v116-F1: a dispatch refusal (engine absent, no auth env, no usable
@@ -1642,6 +1643,13 @@ def open_pr_for_branch(
         print(f"  PR: {result.url}")
     else:
         print(f"  PR not opened: {result.detail}")
+
+
+def _landing_branch_of(resolved: ResolvedRunPolicy | None) -> str | None:
+    """sol-loop R1 S4: a template-bound project's landing branch, which
+    run_task's repo lookup cannot find (None: run_task resolves it)."""
+    raw = None if resolved is None else resolved.policy.get("auto_apply_branch")
+    return raw if isinstance(raw, str) else None
 
 
 def _auto_apply_blocked(store: RunStore, task_id: str) -> str | None:

@@ -1069,15 +1069,21 @@ def test_a_zero_interval_row_is_a_teaching_value_error() -> None:
 
 
 def _engine_tick(
-    tmp_path: Path, config: SupervisorConfig, *, binding: str, template: bool
+    tmp_path: Path,
+    config: SupervisorConfig,
+    *,
+    binding: str,
+    template: bool,
+    managed: bool = False,
 ) -> dict[str, object]:
     """One tick on a project pinned to codex + a verify command; the dispatch
     kwargs it would run with (captured, then stopped)."""
     from dataclasses import replace
 
+    from skep.supervisor.policy_resolver import managed_repos_root
     from skep.supervisor.templates import WorkflowTemplate
 
-    repo = create_audit_toy_repo(tmp_path / "work")
+    repo = create_audit_toy_repo((managed_repos_root(config) if managed else tmp_path) / "work")
     store = RunStore(config.db_path)
     captured: dict[str, object] = {}
 
@@ -1090,7 +1096,8 @@ def _engine_tick(
         store.add_project_policy(
             project_id="p", name="p", strategy="trusted_local_dev", phase="maintain",
             policy={"coding_engine": "codex", "verify_command": "uv run pytest -q",
-                    "auto_dispatch_allowed": True, "default_execution_mode": "sandbox"},
+                    "auto_dispatch_allowed": True, "default_execution_mode": "sandbox",
+                    "auto_apply_branch": "skep/maintain", "worker_protocol": "react"},
         )  # fmt: skip
         store.add_project_binding(project_id="p", binding_kind=binding, binding_value=value)
         schedule = make_schedule(
@@ -1110,18 +1117,29 @@ def _engine_tick(
 
 
 @pytest.mark.parametrize(
-    ("binding", "template"),
-    [("repo_path", False), ("repo_path", True), ("template_name", True)],
+    ("binding", "template", "managed"),
+    [
+        ("repo_path", False, False),
+        ("repo_path", True, False),
+        ("template_name", True, False),
+        ("repo_slug", False, True),
+        ("repo_slug", True, True),
+    ],
 )
 def test_a_bound_tick_runs_the_projects_engine_and_verify_pin(
-    tmp_path: Path, audit_config: SupervisorConfig, binding: str, template: bool
+    tmp_path: Path, audit_config: SupervisorConfig, binding: str, template: bool, managed: bool
 ) -> None:
     """v132-F5 (I2, I8): a scheduled run is the project's run — its engine pin
-    (it ran builtin) and its verify pin (a template-only binding lost it, so
-    G10 fell back to the worker's own check) reach dispatch."""
-    captured = _engine_tick(tmp_path, audit_config, binding=binding, template=template)
+    (it ran builtin), its verify pin (a template-only binding lost it, so G10
+    fell back to the worker's own check), its landing branch and protocol
+    reach dispatch; a managed clone's slug binds a template tick too."""
+    captured = _engine_tick(
+        tmp_path, audit_config, binding=binding, template=template, managed=managed
+    )
     assert captured.get("coding_engine") == "codex", captured
     assert captured.get("verify_command") == "uv run pytest -q"
+    assert captured.get("auto_apply_branch") == "skep/maintain"
+    assert captured.get("planning_protocol") == "react"
 
 
 @pytest.mark.parametrize("template", [False, True])

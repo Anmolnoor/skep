@@ -741,13 +741,12 @@ def _uses_worker_provider(
         return False
     if worker_kind != "coding":
         return True
+    resolved_repo = Path(repo).expanduser().resolve()
     policy = run_policy_for_repo(
         store,
         config,
-        Path(repo).expanduser().resolve(),
-        binding_candidates=(
-            [("template_name", schedule.template_name)] if schedule.template_name else []
-        ),
+        resolved_repo,
+        binding_candidates=_bound_candidates(config, resolved_repo, schedule),
     )
     return not resolve_engine(str(policy.get("coding_engine") or "")).external
 
@@ -757,6 +756,16 @@ def _slug_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str, st
     (``<home>/repos/<slug>``) — the policy resolver's rule. A folder elsewhere
     that shares its basename is not that project."""
     return [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
+
+
+def _bound_candidates(
+    config: SupervisorConfig, repo: Path, schedule: ScheduleRecord
+) -> list[tuple[str, str]]:
+    """The binding candidates a tick resolves its project by — the same list
+    for binding detection, provider preflight and policy resolution
+    (sol-loop R1 S2): the schedule's template, then a managed clone's slug."""
+    template = [("template_name", schedule.template_name)] if schedule.template_name else []
+    return [*template, *_slug_candidates(config, repo)]
 
 
 def _bound_by_slug(store: RunStore, config: SupervisorConfig, repo: Path) -> bool:
@@ -820,6 +829,8 @@ def run_due(
             # v132-F5 (I2, I8): a bound run is the project's run — its engine
             # and verify pins reach dispatch (empty = run_task's builtin).
             verify_command = coding_engine = ""
+            auto_apply_branch: str | None = None
+            planning_protocol = "plan"
             if _uses_worker_provider(store, config, schedule):
                 if provider_block is None and not provider_probed:
                     provider_probed = True
@@ -931,12 +942,8 @@ def run_due(
                     or _bound_by_slug(store, config, repo)
                 )
                 if template_bound:
-                    policy = run_policy_for_repo(
-                        store,
-                        config,
-                        repo,
-                        binding_candidates=[("template_name", schedule.template_name)],
-                    )
+                    candidates = _bound_candidates(config, repo, schedule)
+                    policy = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
                     try:
                         resolved = resolve_run_policy(
                             store=store,
@@ -950,7 +957,7 @@ def run_due(
                             max_actions=instance.budget.max_actions,
                             max_provider_calls=instance.budget.max_provider_calls,
                             execution_mode=None,
-                            binding_candidates=[("template_name", schedule.template_name)],
+                            binding_candidates=candidates,
                         )
                     except PolicyResolutionError as exc:
                         dispatch_decision = project_policy_dispatch_decision(
@@ -973,6 +980,9 @@ def run_due(
                         project_context = resolved.project_context
                         verify_command = resolved.verify_command
                         coding_engine = resolved.coding_engine
+                        planning_protocol = resolved.worker_protocol
+                        raw_branch = resolved.policy.get("auto_apply_branch")
+                        auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
                         raw_auto_apply = resolved.policy.get("auto_apply_verified_patch")
                         auto_apply_verified_patch = (
                             raw_auto_apply if isinstance(raw_auto_apply, bool) else None
@@ -1012,6 +1022,8 @@ def run_due(
                         execution_mode=execution_mode,
                         verify_command=verify_command,
                         coding_engine=coding_engine,
+                        auto_apply_branch=auto_apply_branch,
+                        planning_protocol=planning_protocol,
                     )
             else:
                 repo = Path(schedule.repo).expanduser().resolve()
@@ -1020,7 +1032,9 @@ def run_due(
                     # v24-F2: a project bound by repo slug governs ticks too.
                     or _bound_by_slug(store, config, repo)
                 ):
-                    policy = run_policy_for_repo(store, config, repo)
+                    policy = run_policy_for_repo(
+                        store, config, repo, binding_candidates=_slug_candidates(config, repo)
+                    )
                     try:
                         resolved = resolve_run_policy(
                             store=store,
@@ -1057,6 +1071,9 @@ def run_due(
                         project_context = resolved.project_context
                         verify_command = resolved.verify_command
                         coding_engine = resolved.coding_engine
+                        planning_protocol = resolved.worker_protocol
+                        raw_branch = resolved.policy.get("auto_apply_branch")
+                        auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
                         raw_auto_apply = resolved.policy.get("auto_apply_verified_patch")
                         auto_apply_verified_patch = (
                             raw_auto_apply if isinstance(raw_auto_apply, bool) else None
@@ -1099,6 +1116,8 @@ def run_due(
                         execution_mode=execution_mode,
                         verify_command=verify_command,
                         coding_engine=coding_engine,
+                        auto_apply_branch=auto_apply_branch,
+                        planning_protocol=planning_protocol,
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state
