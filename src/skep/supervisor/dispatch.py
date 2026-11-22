@@ -606,6 +606,15 @@ def run_task(
             # here, beside the verify pin, so every face lands the same way.
             raw_branch = project_policy.get("auto_apply_branch")
             auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
+    if worker_kind == "coding" and (engine.external or wrapped is not None):
+        # v132-F6 (I2, I9): the resolver's refusal, at the funnel — `skep run
+        # --minimal --engine …` and an unbound template run never resolve a
+        # policy, and reached an external agent on no pin at all.
+        from .policy import external_engine_pin_refusal
+
+        refusal = external_engine_pin_refusal(wrapped or engine.name, verify_command)
+        if refusal is not None:
+            raise ValueError(refusal)
     # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
     # (v30), so a run that will land there must START there — based on main it
     # never sees the branch's earlier landings, and the second nearby task

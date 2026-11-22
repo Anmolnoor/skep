@@ -173,6 +173,23 @@ def cannot_land_on(reason: str) -> str:
     return f"{reason}, so skep can't land a patch on it by itself. {PIN_HINT}"
 
 
+def external_engine_pin_refusal(engine_name: str, verify_command: str) -> str | None:
+    """v90-F1 / v127-F5 (I2): why an external coding agent may not run on this
+    pin, or None. Its own check is ``git diff --check`` — whitespace — so the
+    project must pin a real one. v132-F6: one sentence for the resolver and
+    for run_task's funnel, which every face reaches."""
+    vacuous = known_vacuous_verify(verify_command)
+    if vacuous is None:
+        return None
+    why = f" Your pin is no better: {vacuous}." if verify_command.strip() else ""
+    return (
+        f"coding_engine {engine_name!r} is an external agent whose own "
+        "check is `git diff --check` (whitespace only), which passes whether or not the "
+        f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
+        "(chat: setup_project verify_command=...)."
+    )
+
+
 def known_vacuous_verify(command: str) -> str | None:
     """Why ``command`` is a known-vacuous check, in plain words, or None when
     it is not one."""

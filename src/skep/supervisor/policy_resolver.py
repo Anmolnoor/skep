@@ -735,16 +735,16 @@ def resolve_run_policy(
     # v127-F5: a pin that is itself known-vacuous (`true`, `git diff --check`)
     # buys nothing over the built-in, so it is refused the same way — the
     # reason named only when there IS a pin (an empty one is the plain case).
-    from .policy import PIN_HINT, known_vacuous_verify
+    from .policy import external_engine_pin_refusal
 
-    vacuous = known_vacuous_verify(verify_command or "")
-    if (chosen_engine.external or wrapped is not None) and vacuous:
-        why = f" Your pin is no better: {vacuous}." if (verify_command or "").strip() else ""
+    refusal = (
+        external_engine_pin_refusal(wrapped or chosen_engine.name, verify_command or "")
+        if chosen_engine.external or wrapped is not None
+        else None
+    )
+    if refusal is not None:
         raise PolicyResolutionError(
-            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose own "
-            "check is `git diff --check` (whitespace only), which passes whether or not the "
-            f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
-            "(chat: setup_project verify_command=...).",
+            refusal,
             # v127-T4 (trial V14): never workspace mode — that is the naked host.
             next_command=(
                 f'skep project setup {shlex.quote(str(repo))} --verify-command "<command>"'
