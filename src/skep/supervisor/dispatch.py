@@ -481,6 +481,15 @@ def run_task(
     # (a hand-edited task, a stray caller) loses it here.
     if dispatch_decision is None or dispatch_decision.delegation is None:
         permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
+    if worker_kind == "coding" and engine.external:
+        # v132-F16 (v94-F3, ADR 0047 §3): what an engine cannot work without
+        # is merged on every creation path, like its API host — `skep run
+        # --minimal --engine …` resolves no policy and ran it with none.
+        needed = [name for name in engine.env_vars if name not in permissions.env_allowlist]
+        if needed:
+            permissions = permissions.model_copy(
+                update={"env_allowlist": [*permissions.env_allowlist, *needed]}
+            )
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
@@ -606,6 +615,15 @@ def run_task(
             # here, beside the verify pin, so every face lands the same way.
             raw_branch = project_policy.get("auto_apply_branch")
             auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
+    if worker_kind == "coding" and (engine.external or wrapped is not None):
+        # v132-F6 (I2, I9): the resolver's refusal, at the funnel — `skep run
+        # --minimal --engine …` and an unbound template run never resolve a
+        # policy, and reached an external agent on no pin at all.
+        from .policy import external_engine_pin_refusal
+
+        pin_refusal = external_engine_pin_refusal(wrapped or engine.name, verify_command)
+        if pin_refusal is not None:
+            raise ValueError(pin_refusal)
     # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
     # (v30), so a run that will land there must START there — based on main it
     # never sees the branch's earlier landings, and the second nearby task
@@ -1606,7 +1624,9 @@ def _reverify_after_restart(
         ref=record.ref,
         config=config,
         changed_files=changed_files,
-        verify_command=str(recovery_policy.get("verify_command") or ""),
+        # v132-F5 (I2): the pin the live run minted into its task (a
+        # template-bound project's too, which a repo lookup cannot find).
+        verify_command=task.verify_command or str(recovery_policy.get("verify_command") or ""),
         # D6 (I2): the run's loopback ports, as the worker had them —
         # ES-F252: its local model provider's port included.
         loopback_ports=run_loopback_ports(

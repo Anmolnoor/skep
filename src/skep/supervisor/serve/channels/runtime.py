@@ -769,8 +769,13 @@ class TelegramPoller(threading.Thread):
         """The chat id of an admitted, typed (not forwarded) ``/update``."""
         message = telegram_adapter.normalize_inbound(update, config).message
         raw = update.get("message")
-        forwarded = isinstance(raw, dict) and ("forward_origin" in raw or "forward_date" in raw)
-        if message is None or message.text != "/update" or forwarded:
+        if not isinstance(raw, dict):
+            return None
+        forwarded = "forward_origin" in raw or "forward_date" in raw
+        # v132-F7 (I6, I7): typed means the message's own text — normalize
+        # falls back to a photo's caption, and a caption is not a command.
+        typed = str(raw.get("text") or "").strip() == "/update"
+        if message is None or message.text != "/update" or not typed or forwarded:
             return None
         return message.identity.identity_id
 

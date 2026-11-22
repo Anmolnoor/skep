@@ -303,7 +303,7 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     non-git directory is left as it is (nothing of the operator's is
     committed unasked)."""
     from .cli_cmds import _managed_repo_slug, _project_id_from_repo, _project_root
-    from .serve.registry import ensure_repo_baseline, setup_project_record
+    from .serve.registry import ensure_repo_baseline, project_setup_lock, setup_project_record
     from .serve.setup import DEFAULT_WORKSPACE_PACK, DEFAULT_WORKSPACE_PHASE
 
     if not path.strip():
@@ -317,37 +317,33 @@ def onboard_workdir(holder: ConfigHolder, store: RunStore, *, path: str) -> dict
     config = holder.current
     project_id = _project_id_from_repo(repo)
     # D47 review: the id is the folder's basename, so a different folder with
-    # the same name re-points the stored project — an unlock carries over only
-    # when the project already binds THIS folder.
-    elsewhere = store.get_project_policy(project_id) is not None and not any(
-        b.binding_kind == "repo_path" and b.binding_value == str(repo)
-        for b in store.project_bindings(project_id)
-    )
-    project = setup_project_record(
-        run_store=store,
-        root=_project_root(config),
-        project_id=project_id,
-        name=project_id,
-        strategy=None,
-        phase=DEFAULT_WORKSPACE_PHASE,
-        pack_name=DEFAULT_WORKSPACE_PACK,
-        repo_path=str(repo),
-        repo_slug=_managed_repo_slug(repo, config),
-        template_names=[],
-        policy_overrides={"unlocked": False} if elsewhere else None,
-        seed_default_schedules=False,
-    )
-    return _record(
-        _personal_home(holder),
-        "workdir",
-        {
-            "path": str(repo),
-            "project_id": project["project_id"],
-            "created": created,
-            "git": git,
-            "verify_command": str(project["policy"].get("verify_command") or ""),
-        },
-    )
+    # the same name re-points the stored project — setup leaves an unlock
+    # behind when the binding is new (v132-F4).
+    with project_setup_lock(store):
+        project = setup_project_record(
+            run_store=store,
+            root=_project_root(config),
+            project_id=project_id,
+            name=project_id,
+            strategy=None,
+            phase=DEFAULT_WORKSPACE_PHASE,
+            pack_name=DEFAULT_WORKSPACE_PACK,
+            repo_path=str(repo),
+            repo_slug=_managed_repo_slug(repo, config),
+            template_names=[],
+            seed_default_schedules=False,
+        )
+        return _record(
+            _personal_home(holder),
+            "workdir",
+            {
+                "path": str(repo),
+                "project_id": project["project_id"],
+                "created": created,
+                "git": git,
+                "verify_command": str(project["policy"].get("verify_command") or ""),
+            },
+        )
 
 
 # --- ③ sandbox ---------------------------------------------------------------------
@@ -557,6 +553,15 @@ def onboard_unlocked(
     ``skep project setup <dir> --unlocked``, under the same guard). ``path``
     is the folder the operator was shown: a work directory changed since is
     refused, so a yes never lands on a project nobody asked about."""
+    from .serve.registry import project_setup_lock
+
+    with project_setup_lock(store):  # v132-F3: checks and write, one lock
+        return _onboard_unlocked(holder, store, on=on, path=path)
+
+
+def _onboard_unlocked(
+    holder: ConfigHolder, store: RunStore, *, on: bool, path: str | None
+) -> dict[str, Any]:
     from .cli_cmds import _project_root
     from .projects import project_from_store
     from .serve.registry import setup_project_record

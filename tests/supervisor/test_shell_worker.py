@@ -110,6 +110,7 @@ def test_supervisor_can_spawn_shell_worker(tmp_path: Path, monkeypatch: pytest.M
         permissions=permissions,
         # ES-F255 (D36): asked for workspace, coerced into the sandbox.
         execution_mode="workspace",
+        verify_command="grep -q target README.md",  # v132-F6: no external agent runs unpinned
     )
 
     assert outcome.record.execution_mode == "sandbox"

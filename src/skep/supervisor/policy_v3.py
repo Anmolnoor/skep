@@ -841,7 +841,18 @@ def decide(
         if held["rule_id"] == EXCEEDS_DELEGATOR:
             verdict = replace(_with(verdict, held), deferred=held["verdict"] == "require_approval")
         verdict = replace(verdict, chain=tuple(hop.entry for hop in chain))
-    return taint_verdict(verdict, stack.taint, scope, action, read_only=read_only, value=value)
+    verdict = taint_verdict(verdict, stack.taint, scope, action, read_only=read_only, value=value)
+    if (scope, action) == ("email", "send") and verdict.verdict == "allow":
+        # v132-F2 (I6, docs/assistant-tools.md): no grant or rule answers a
+        # mail send — every send asks, and the log says so (sol-loop R1 S6).
+        return replace(
+            verdict, verdict="require_approval", layer="email", rule_id=EVERY_SEND,
+            decided_by=f"email/{EVERY_SEND}",
+        )  # fmt: skip
+    return verdict
+
+
+EVERY_SEND = "every-send"
 
 
 # P4-1 (ADR 0059 D5): the trifecta guard. Egress that carries model-chosen

@@ -1066,3 +1066,89 @@ def test_a_zero_interval_row_is_a_teaching_value_error() -> None:
 
     with pytest.raises(ValueError, match="interval must be positive"):
         next_run_after("2026-11-18T16:30:00Z", 0, now="2026-11-18T17:00:00Z")
+
+
+def _engine_tick(
+    tmp_path: Path,
+    config: SupervisorConfig,
+    *,
+    binding: str,
+    template: bool,
+    managed: bool = False,
+) -> dict[str, object]:
+    """One tick on a project pinned to codex + a verify command; the dispatch
+    kwargs it would run with (captured, then stopped)."""
+    from dataclasses import replace
+
+    from skep.supervisor.policy_resolver import managed_repos_root
+    from skep.supervisor.templates import WorkflowTemplate
+
+    repo = create_audit_toy_repo((managed_repos_root(config) if managed else tmp_path) / "work")
+    store = RunStore(config.db_path)
+    captured: dict[str, object] = {}
+
+    def _capture(repo_arg, instructions, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    value = {"repo_path": str(repo), "repo_slug": "work", "template_name": "tpl"}[binding]
+    try:
+        store.add_project_policy(
+            project_id="p", name="p", strategy="trusted_local_dev", phase="maintain",
+            policy={"coding_engine": "codex", "verify_command": "uv run pytest -q",
+                    "auto_dispatch_allowed": True, "default_execution_mode": "sandbox",
+                    "auto_apply_branch": "skep/maintain", "worker_protocol": "react"},
+        )  # fmt: skip
+        store.add_project_binding(project_id="p", binding_kind=binding, binding_value=value)
+        schedule = make_schedule(
+            name="tick", repo=repo, instructions="Fix it.", interval_seconds=86400,
+            start_at="2026-06-11T00:00:00Z",
+        )  # fmt: skip
+        if template:
+            store.add_template(WorkflowTemplate(name="tpl", instructions="Fix it."))
+            schedule = replace(schedule, template_name="tpl")
+        store.add_schedule(schedule)
+        captured["results"] = run_due(
+            store=store, config=config, now="2026-06-11T09:00:00Z", dispatch=_capture
+        )
+    finally:
+        store.close()
+    return captured
+
+
+@pytest.mark.parametrize(
+    ("binding", "template", "managed"),
+    [
+        ("repo_path", False, False),
+        ("repo_path", True, False),
+        ("template_name", True, False),
+        ("repo_slug", False, True),
+        ("repo_slug", True, True),
+    ],
+)
+def test_a_bound_tick_runs_the_projects_engine_and_verify_pin(
+    tmp_path: Path, audit_config: SupervisorConfig, binding: str, template: bool, managed: bool
+) -> None:
+    """v132-F5 (I2, I8): a scheduled run is the project's run — its engine pin
+    (it ran builtin), its verify pin (a template-only binding lost it, so G10
+    fell back to the worker's own check), its landing branch and protocol
+    reach dispatch; a managed clone's slug binds a template tick too."""
+    captured = _engine_tick(
+        tmp_path, audit_config, binding=binding, template=template, managed=managed
+    )
+    assert captured.get("coding_engine") == "codex", captured
+    assert captured.get("verify_command") == "uv run pytest -q"
+    assert captured.get("auto_apply_branch") == "skep/maintain"
+    assert captured.get("planning_protocol") == "react"
+
+
+@pytest.mark.parametrize("template", [False, True])
+def test_a_slug_binds_only_the_managed_clone_not_a_same_named_folder(
+    tmp_path: Path, audit_config: SupervisorConfig, template: bool
+) -> None:
+    """v132-F5 (I5, I6): a repo_slug names a managed clone (<home>/repos/<slug>).
+    A folder elsewhere that happens to share its basename is not that project
+    and inherits none of its policy."""
+    captured = _engine_tick(tmp_path, audit_config, binding="repo_slug", template=template)
+    assert captured.get("project_context") is None, captured
+    assert not captured.get("coding_engine")

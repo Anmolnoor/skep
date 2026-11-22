@@ -780,7 +780,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
         "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
-        "email/read, everything else as email/send (cards). "
+        "email/read, everything else as email/send (cards every time). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
         "screenshot/console are browse/read; navigation, clicks, typing, and JS "
@@ -1294,8 +1294,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "allow_mcp_tool",
         "PROPOSE always-allowing one MCP tool (requires user confirmation). "
         "Writes a learned allow rule in the server's scope (mcp, or email for "
-        "a mail-bound server); a rule that reaches into denied policy space "
-        "is rejected with the deny's rule id.",
+        "a mail-bound server's reads); a rule that reaches into denied policy space "
+        "is rejected with the deny's rule id. A mail send is never allowed: "
+        "every send cards, once.",
         {"server_id": {"type": "string"}, "tool": {"type": "string"}},
         ["server_id", "tool"],
     ),
@@ -4347,11 +4348,11 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
         return None
     task_id = str(run["task_id"])
     legal = {f"skep/{task_id}"}
-    repo = Path(str(run["repo"]))
-    for kind, value in (("repo_slug", repo.name), ("repo_path", str(repo))):
-        project = store.project_for_binding(kind, value)
-        if project is not None and project.policy.get("auto_apply_branch"):
-            legal.add(str(project.policy["auto_apply_branch"]))
+    from ..policy_resolver import project_bound_to_repo
+
+    project = project_bound_to_repo(store, Path(str(run["repo"])))
+    if project is not None and project.policy.get("auto_apply_branch"):
+        legal.add(str(project.policy["auto_apply_branch"]))
     if branch not in legal:
         raise HTTPException(
             status_code=400,
@@ -4435,6 +4436,11 @@ def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str
     rule_scope, rule_action = mcp_tool_scope_action(
         store, MCPTool(server_id=server_id, name=tool_name, description="")
     )
+    if (rule_scope, rule_action) == ("email", "send"):
+        from ..mcp_client import MAIL_SEND_NEVER_GRANTED
+        from ..policy_write import PolicyWriteRejected
+
+        raise PolicyWriteRejected(MAIL_SEND_NEVER_GRANTED)  # v132-F2: at proposal
     return {
         "rule_id": f"{rule_scope}:{server_id}:{tool_name}",
         "action": rule_action,
@@ -5898,7 +5904,7 @@ def _execute_mutation(
         return actions.schedule_view(store, schedule)
     if name == "delete_schedule":
         # v47-F1: CRUD honesty — the chat face of DELETE /api/schedules/{name}.
-        if not store.remove_schedule(str(args["name"])):
+        if not store.remove_schedule(str(args["name"]), by_operator=True):
             raise ValueError(f"no schedule named {str(args['name'])!r}")
         return {"removed": str(args["name"])}
     if name == "set_schedule_enabled":

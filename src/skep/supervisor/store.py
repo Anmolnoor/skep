@@ -592,6 +592,8 @@ _SCHEDULE_HEALTH_WINDOW = 20
 # v127-F4: a tick skipped because the worker provider refused (dead key) is a
 # health failure event, but never counts toward auto-disable — fixing the key
 # must resume the schedule, not find it disabled.
+# v132-F8: the schedule names an operator deleted; setup never re-seeds them.
+DELETED_SCHEDULES_KEY = "deleted_schedules"
 PROVIDER_BLOCKED_STATE = "provider_blocked"
 # v111-F5: store files from retired layouts, relative to the skep home. Each
 # migration left its sqlite behind silently; two independent investigations
@@ -2457,10 +2459,28 @@ class RunStore:
         return [self._row_to_schedule(row) for row in rows]
 
     @_locked
-    def remove_schedule(self, name: str) -> bool:
+    def remove_schedule(self, name: str, *, by_operator: bool = False) -> bool:
+        """``by_operator``: an operator's delete (REST, chat, CLI) — remembered,
+        so a re-run of project setup never re-seeds it (v132-F8). A project's
+        own teardown (``remove_pack_seeds``) is not one."""
         cursor = self._conn.execute("DELETE FROM schedules WHERE name = ?", (name,))
+        removed = cursor.rowcount > 0
+        if removed and by_operator:
+            # one transaction with the delete (sol-loop R1 S5): no window in
+            # which the row is gone and the marker not yet written
+            row = self._conn.execute(
+                "SELECT value_json FROM settings WHERE key = ?", (DELETED_SCHEDULES_KEY,)
+            ).fetchone()
+            deleted = set(json.loads(row[0])) if row is not None else set()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (DELETED_SCHEDULES_KEY, json.dumps(sorted(deleted | {name})), _now()),
+            )
         self._conn.commit()
-        return cursor.rowcount > 0
+        return removed
+
+    def schedule_deleted_by_operator(self, name: str) -> bool:
+        return name in (self.get_setting(DELETED_SCHEDULES_KEY) or ())
 
     @_locked
     def set_schedule_enabled(self, name: str, *, enabled: bool) -> bool:

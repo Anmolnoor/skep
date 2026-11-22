@@ -9,15 +9,20 @@ that makes "zero local dependencies" real: repos come in by URL, cloned under
 from __future__ import annotations
 
 import errno
+import fcntl
+import functools
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -34,6 +39,7 @@ from ..projects import (
     first_party_project_policy,
     first_party_schedule_seeds,
     list_projects,
+    phase_default_policy,
     project_from_store,
     project_to_dict,
     validate_project_definition,
@@ -1114,6 +1120,7 @@ def _carry_forward_existing(
     project_id: str,
     base_policy: dict[str, Any],
     bindings: list[ProjectBinding],
+    overrides: dict[str, Any],
 ) -> tuple[dict[str, Any], list[ProjectBinding]]:
     """v100-F10: a repeated setup is a policy UPDATE, not a re-install.
 
@@ -1137,13 +1144,26 @@ def _carry_forward_existing(
     stored = run_store.get_project_policy(project_id)
     if stored is None:
         return base_policy, bindings
+    records = run_store.project_bindings(project_id)
     kinds = {binding.kind for binding in bindings}
     kept = [
         ProjectBinding(kind=record.binding_kind, value=record.binding_value)
-        for record in run_store.project_bindings(project_id)
+        for record in records
         if record.binding_kind not in kinds
     ]
-    return {**stored.policy, **base_policy}, [*bindings, *kept]
+    merged = {**stored.policy, **base_policy}
+    # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
+    # A binding the project did not have (a same-named folder elsewhere: the
+    # id is the basename) is a new target, so the unlock stays behind unless
+    # this call asks for it.
+    known = {(record.binding_kind, record.binding_value) for record in records}
+    if (
+        merged.get("unlocked") is True
+        and "unlocked" not in overrides
+        and any((binding.kind, binding.value) not in known for binding in bindings)
+    ):
+        merged["unlocked"] = False
+    return merged, [*bindings, *kept]
 
 
 def _first_slot(every: str) -> str:
@@ -1153,6 +1173,39 @@ def _first_slot(every: str) -> str:
     return next_run_after(now_ts(), parse_interval(every))
 
 
+_SETUP_LOCK_HELD = threading.local()
+
+
+@contextmanager
+def project_setup_lock(run_store: RunStore) -> Iterator[None]:
+    """v132-F3 (I5, I6): one project-setup write at a time per home, across
+    processes (serve, the CLI, onboarding) — so the onboarding unlock's checks
+    and its write see the same bindings. Re-entrant within a thread: the
+    unlock holds it across its checks and its own setup call."""
+    if getattr(_SETUP_LOCK_HELD, "held", False):
+        yield
+        return
+    home = Path(run_store.db_path).parent  # config.db_path is <home>/supervisor.sqlite3
+    home.mkdir(parents=True, exist_ok=True)
+    with open(home / "project-setup.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _SETUP_LOCK_HELD.held = True
+        try:
+            yield
+        finally:
+            _SETUP_LOCK_HELD.held = False
+
+
+def _under_setup_lock[F: Callable[..., Any]](fn: F) -> F:
+    @functools.wraps(fn)
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        with project_setup_lock(kwargs["run_store"]):
+            return fn(*args, **kwargs)
+
+    return cast(F, locked)
+
+
+@_under_setup_lock
 def setup_project_record(
     *,
     run_store: RunStore,
@@ -1196,7 +1249,11 @@ def setup_project_record(
         notes=notes,
     )
     base_policy, bindings = _carry_forward_existing(
-        run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
+        run_store,
+        project_id=project_id,
+        base_policy=base_policy,
+        bindings=bindings,
+        overrides=policy_overrides or {},
     )
     # v128-F3: after the carry-forward, so an update that sends only
     # policy_overrides keeps the stored bindings; a new project still needs one.
@@ -1267,7 +1324,9 @@ def setup_project_record(
             if pack is not None:
                 for schedule_seed in pack.schedules:
                     schedule_name = _pack_template_name(project.project_id, schedule_seed.name)
-                    if run_store.get_schedule(schedule_name) is not None:
+                    if run_store.get_schedule(
+                        schedule_name
+                    ) is not None or run_store.schedule_deleted_by_operator(schedule_name):
                         seeds_skipped.append(f"schedule:{schedule_name}")
                         continue
                     if schedule_seed.template is not None:
@@ -1307,8 +1366,11 @@ def setup_project_record(
                     strategy=project.strategy,
                     phase=project.phase,
                 ):
-                    if run_store.get_schedule(project_schedule_seed.name) is not None:
-                        seeds_skipped.append(f"schedule:{project_schedule_seed.name}")
+                    name = project_schedule_seed.name
+                    if run_store.get_schedule(
+                        name
+                    ) is not None or run_store.schedule_deleted_by_operator(name):
+                        seeds_skipped.append(f"schedule:{name}")
                         continue
                     schedule = make_schedule(
                         name=project_schedule_seed.name,
@@ -1339,6 +1401,19 @@ def setup_project_record(
     return result
 
 
+# The keys a phase move re-derives from the new phase's defaults; ``unlocked``
+# is the operator's per-phase decision and never survives a move (ADR 0061).
+_PHASE_OWNED = frozenset(
+    {
+        "default_execution_mode",
+        "auto_dispatch_allowed",
+        "auto_apply_verified_patch",
+        "auto_apply_branch",
+        "unlocked",
+    }
+)
+
+
 def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[str, Any]:
     """Move a project to ``phase``, re-deriving policy from its pack (or the
     first-party defaults) exactly like ``skep project set-phase`` (v25-F1) —
@@ -1353,18 +1428,29 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
             strategy = pack.strategy
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # a pack spells its whole policy per phase; the strategy-wide keys
+        # (same value in every phase) are not the phase's (sol-loop R3 U1)
+        phase_keys = {
+            key
+            for key in policy
+            if any(other.get(key) != policy[key] for other in pack.phase_defaults.values())
+        }
     else:
         try:
             policy = first_party_project_policy(strategy=project.strategy, phase=phase)
+            phase_keys = set(phase_default_policy(strategy=project.strategy, phase=phase))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         strategy = project.strategy
-    # v91-F1 (I2): phase defaults never carry a verify_command, so a plain
-    # re-derive would drop the pin at exactly the wrong moment — the move INTO
-    # maintain is the move into the only lane that lands without a human.
-    pinned_verify = str(project.policy.get("verify_command") or "").strip()
-    if pinned_verify and not policy.get("verify_command"):
-        policy["verify_command"] = pinned_verify
+    # v91-F1 / v132-F4 / Neon N4 (I2, I8): a phase move re-derives only the
+    # keys the phase owns (v100-F10's rule, as setup applies it). Everything
+    # else the operator set — verify_command, coding_engine, groups, shell
+    # grants, loopback ports — is carried; ``unlocked`` resets (ADR 0061).
+    owned = _PHASE_OWNED | phase_keys
+    policy = {
+        **policy,
+        **{key: value for key, value in project.policy.items() if key not in owned},
+    }
     notes: list[str] = []
     _default_execution_mode(
         run_store, project_id=project_id, policy=policy, overrides={}, notes=notes
@@ -1437,7 +1523,11 @@ def preview_project_setup(
         notes=notes,
     )
     base_policy, bindings = _carry_forward_existing(
-        run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
+        run_store,
+        project_id=project_id,
+        base_policy=base_policy,
+        bindings=bindings,
+        overrides=policy_overrides,
     )
     # v128-F3: after the carry-forward, so an update that sends only
     # policy_overrides keeps the stored bindings; a new project still needs one.
@@ -1891,7 +1981,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.delete("/api/schedules/{name}")
     def delete_schedule(name: str) -> dict[str, bool]:
-        if not run_store.remove_schedule(name):
+        if not run_store.remove_schedule(name, by_operator=True):
             raise HTTPException(status_code=404, detail=f"no schedule named {name!r}")
         return {"removed": True}
 
@@ -1959,6 +2049,12 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/projects", status_code=201)
     def put_project(body: ProjectRequest) -> dict[str, Any]:
+        # sol-loop R2 S3: a binding write, so the setup lock (v132-F14) — an
+        # onboarding unlock's checks never interleave with it.
+        with project_setup_lock(run_store):
+            return _put_project(body)
+
+    def _put_project(body: ProjectRequest) -> dict[str, Any]:
         # v127-F5: the editor re-POSTs the whole policy, so "the request turns
         # auto-apply on" means the stored row did not already have it on.
         stored = run_store.get_project_policy(body.project_id)

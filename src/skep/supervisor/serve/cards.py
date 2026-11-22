@@ -204,9 +204,11 @@ def high_tier(
             return f"it replaces your script schedule {existing.name!r}"
         return None
     if tool == "call_mcp_tool":
-        from ..mcp_client import mcp_call_is_read
+        from ..mcp_client import mcp_call_is_read, mcp_call_sends_mail
 
         server, name = str(safe.get("server_id") or ""), str(safe.get("tool") or "")
+        if store is not None and mcp_call_sends_mail(store, server, name):
+            return "it sends mail as you: every send needs your verdict, once (I6)"
         if store is not None and (
             mcp_call_is_read(store, server, name) or _named_by_operator(store, server, name)
         ):
