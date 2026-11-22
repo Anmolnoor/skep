@@ -1410,12 +1410,24 @@ def cmd_review(args: argparse.Namespace) -> int:
                     f"  approval:     {approval.status} ({approval.action}) "
                     f"by {approval.resolved_by or '-'} at {approval.resolved_at or '-'}"
                 )
+            # v132-F9 (I8): what happened to the patch, as recorded — not the
+            # posture the dispatch started with.
+            from .serve.actions import applied_branch_for
+
+            landed = applied_branch_for(store, record.task_id)
+            blocked = None if landed else _auto_apply_blocked(store, record.task_id)
+            if landed:
+                lines.append(f"  landed:       {landed}")
+            elif blocked:
+                lines.append(f"  auto-landing: not fired ({blocked})")
             patch_path = artifacts.get("patch")
             if patch_path is not None and patch_path.is_file():
                 lines.append("")
                 lines.append(patch_path.read_text())
                 lines.append(
-                    f"next: skep review {record.task_id} --approve  "
+                    f"next: git -C {shlex.quote(record.repo)} switch {landed}  # landed"
+                    if landed
+                    else f"next: skep review {record.task_id} --approve  "
                     f"# applies the patch on branch skep/{record.task_id}"
                 )
             else:
@@ -1488,6 +1500,18 @@ def cmd_review(args: argparse.Namespace) -> int:
         if record.state == "pending_approval":
             return _resume_pending_approval(config, store, record, actor)
 
+        from .serve.actions import applied_branch_for
+
+        landed = applied_branch_for(store, record.task_id)
+        if landed is not None:
+            # v132-F9 (I13): refused before _pending_or_new, so a second
+            # approve leaves no stray denied review on the run's ledger.
+            return _err(
+                f"task {record.task_id} already landed on {landed}.",
+                state=record.state,
+                evidence=str(audit_dir),
+                next_command=f"git -C {shlex.quote(record.repo)} switch {landed}",
+            )
         patch_path = artifacts.get("patch")
         if patch_path is None or not patch_path.is_file():
             return _err(
@@ -1618,6 +1642,20 @@ def open_pr_for_branch(
         print(f"  PR: {result.url}")
     else:
         print(f"  PR not opened: {result.detail}")
+
+
+def _auto_apply_blocked(store: RunStore, task_id: str) -> str | None:
+    """v132-F9 (I8): the last recorded reason the auto-landing lane did not
+    fire (``policy.maybe_auto_approve``, a restart's D35 note), or None."""
+    for _state, detail, _at in reversed(store.transitions_for(task_id)):
+        try:
+            parsed = json.loads(detail or "")
+        except ValueError:
+            continue
+        reasons = parsed.get("auto_apply_blocked") if isinstance(parsed, dict) else None
+        if isinstance(reasons, dict) and reasons:
+            return "; ".join(f"{rule}: {why}" for rule, why in reasons.items())
+    return None
 
 
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:

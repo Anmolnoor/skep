@@ -254,11 +254,49 @@ def test_run_status_review_approve_full_loop(
     finally:
         store.close()
 
-    # Approving twice fails loudly: the task already landed (ES-F4).
+    # v132-F9 (I8): review of a landed run names the branch, offers no approve
+    assert _run_cli(home, "review", task_id) == 0
+    out = capsys.readouterr().out
+    assert f"landed:       skep/{task_id}" in out
+    assert "--approve" not in out
+
+    # Approving twice fails loudly: the task already landed (ES-F4) — and
+    # leaves no stray denied review behind (v132-F9, I13).
     code = _run_cli(home, "review", task_id, "--approve", "--actor", "tester")
     captured = capsys.readouterr()
     assert code == 2
     assert f"already landed on skep/{task_id}" in captured.err
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["approved"]
+    finally:
+        store.close()
+
+
+def test_review_names_why_auto_landing_did_not_fire(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v132-F9 (I8): the recorded block reason, not the dispatch-time posture."""
+    import json
+
+    home = tmp_path / "home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="land me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        reason = {"auto_apply_blocked": {"verified-patch": "the project pins no verify_command"}}
+        store.transition(task.task_id, "completed", json.dumps(reason))
+        patch = tmp_path / "task.patch"
+        patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    finally:
+        store.close()
+    assert _run_cli(home, "review", task.task_id) == 0
+    out = capsys.readouterr().out
+    assert "auto-landing: not fired (verified-patch: the project pins no verify_command)" in out
+    assert f"next: skep review {task.task_id} --approve" in out
 
 
 def test_review_approve_never_lands_a_review_serve_is_already_applying(
