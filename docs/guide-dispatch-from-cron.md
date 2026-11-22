@@ -217,21 +217,24 @@ deletes one.
 
 Three things to know before choosing this over the wrapper:
 
-- **A scheduled run uses skep's built-in worker, not the project's pinned
-  engine.** On 1.4.2, `calc` above pins `claude_code`, and the scheduled run
-  was still handed to the built-in worker (`--worker-cmd` on `skep tick`
-  changes which worker command that is). The project's verify command and
-  landing policy do apply. To run Claude Code or Codex on a timer, use the
-  wrapper with `skep run`, which honours the pin.
+- **A scheduled run uses the project's pinned engine.** Since v132 a tick on
+  a project that pins `claude_code` or `codex` hands the run to that engine,
+  with the project's verify command and landing policy, as `skep run` does.
+  (Through 1.6.0 a tick always used skep's built-in worker.) A schedule on a
+  folder elsewhere that merely shares a managed clone's name is not that
+  project.
 - **`skep tick` exits 0 whatever the runs did.** The states are in its output
   and in `skep schedule health`, not in the exit code.
 - **Project setup creates a schedule.** `skep project setup` on a
   `trusted_local_dev` repository adds `<project>-maintain-weekly` unless you
   pass `--no-seed-schedules`. The first `skep tick` after it comes due will run
-  it. `skep schedule list` shows what is there.
+  it. `skep schedule list` shows what is there. Once you `skep schedule
+  remove` it, a later setup does not add it back.
 
-<!-- src/skep/supervisor/scheduler.py:958-972 passes no coding_engine to the dispatch;
-     src/skep/supervisor/cli_cmds.py:2262-2281 is `skep tick`, which always returns 0. -->
+<!-- src/skep/supervisor/scheduler.py run_due passes the resolved coding_engine
+     and verify_command to the dispatch (v132-F5); store.remove_schedule
+     remembers an operator's delete (v132-F8);
+     src/skep/supervisor/cli_cmds.py cmd_tick is `skep tick`, which always returns 0. -->
 
 `skep tick --auto-approve` is retired: it is still accepted, prints a note,
 and lands nothing.
