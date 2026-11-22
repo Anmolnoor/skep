@@ -4348,11 +4348,11 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
         return None
     task_id = str(run["task_id"])
     legal = {f"skep/{task_id}"}
-    repo = Path(str(run["repo"]))
-    for kind, value in (("repo_slug", repo.name), ("repo_path", str(repo))):
-        project = store.project_for_binding(kind, value)
-        if project is not None and project.policy.get("auto_apply_branch"):
-            legal.add(str(project.policy["auto_apply_branch"]))
+    from ..policy_resolver import project_bound_to_repo
+
+    project = project_bound_to_repo(store, Path(str(run["repo"])))
+    if project is not None and project.policy.get("auto_apply_branch"):
+        legal.add(str(project.policy["auto_apply_branch"]))
     if branch not in legal:
         raise HTTPException(
             status_code=400,

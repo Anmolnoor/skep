@@ -395,3 +395,30 @@ def test_a_local_profile_on_a_new_host_opens_no_egress(tmp_path: Path, repo: Pat
     finally:
         store.close()
     assert resolved.permissions.provider_hosts == ["localhost:11434"]
+
+
+def test_a_slug_binds_only_its_managed_clone_for_store_only_callers(tmp_path: Path) -> None:
+    """v132-F15 (Neon N1; I5, I6): the landing-branch menu, the stale-base
+    check and read_file's branch fallback found a project by a repo's
+    basename anywhere. A slug names the managed clone; a path binding wins."""
+    from skep.supervisor.policy_resolver import managed_repos_root, project_bound_to_repo
+    from skep.supervisor.serve.fileio import _landing_branch_for_repo
+
+    config = build_config(tmp_path / "home", None)
+    config.home.mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="managed", name="m", strategy="trusted_local_dev", phase="maintain",
+            policy={"auto_apply_branch": "skep/maintain"},
+        )  # fmt: skip
+        store.add_project_binding(
+            project_id="managed", binding_kind="repo_slug", binding_value="app"
+        )
+        clone, stranger = managed_repos_root(config) / "app", tmp_path / "elsewhere" / "app"
+        assert project_bound_to_repo(store, clone) is not None
+        assert project_bound_to_repo(store, stranger) is None
+        assert _landing_branch_for_repo(store, clone) == "skep/maintain"
+        assert _landing_branch_for_repo(store, stranger) is None
+    finally:
+        store.close()

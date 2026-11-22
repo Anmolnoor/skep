@@ -72,6 +72,7 @@ from ..policy_resolver import (
     PolicyResolutionError,
     ResolvedRunPolicy,
     grant_repo,
+    project_bound_to_repo,
     resolve_operator_policy,
     resolve_run_policy,
     resolved_shell_allowlist,
@@ -2715,11 +2716,9 @@ def stale_base_info(store: RunStore, task_id: str) -> dict[str, Any] | None:
         (a.landing_branch for a in store.approvals_for(task_id) if a.landing_branch), None
     )
     if branch is None:
-        for kind, value in (("repo_slug", repo.name), ("repo_path", str(repo))):
-            project = store.project_for_binding(kind, value)
-            if project is not None and project.policy.get("auto_apply_branch"):
-                branch = str(project.policy["auto_apply_branch"])
-                break
+        project = project_bound_to_repo(store, repo)
+        if project is not None and project.policy.get("auto_apply_branch"):
+            branch = str(project.policy["auto_apply_branch"])
     target = branch or f"skep/{task_id}"
     applied_onto = resolve_commit(repo, target) or resolve_commit(repo, repo_default_branch(repo))
     if applied_onto is None or applied_onto == record.base_commit:

@@ -168,6 +168,19 @@ def managed_repos_root(config: SupervisorConfig) -> Path:
     return config.home.parent / "repos"
 
 
+def project_bound_to_repo(store: RunStore, repo: Path) -> ProjectPolicyRecord | None:
+    """The project a repo is bound to, for a caller with a store but no
+    config (v132-F15, Neon N1): its path binding, else — for a managed clone
+    only (``<home>/repos/<slug>``) — its slug. A folder elsewhere that shares a
+    managed clone's basename is not that project."""
+    by_path = store.project_for_binding("repo_path", str(repo))
+    if by_path is not None:
+        return by_path
+    # config.db_path is <home>/supervisor/supervisor.sqlite3; repos sit beside it
+    managed = Path(store.db_path).parent.parent / "repos"
+    return store.project_for_binding("repo_slug", repo.name) if repo.parent == managed else None
+
+
 def _match_project_for_repo(
     store: RunStore,
     repo: Path,

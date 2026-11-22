@@ -122,12 +122,11 @@ def enclosing_git_repo(target: Path) -> Path | None:
 
 def _landing_branch_for_repo(store: RunStore, repo_dir: Path) -> str | None:
     """v79-F3: the repo's configured auto_apply_branch, if a project binds it."""
-    for kind, value in (("repo_slug", repo_dir.name), ("repo_path", str(repo_dir))):
-        project = store.project_for_binding(kind, value)
-        if project is not None:
-            branch = project.policy.get("auto_apply_branch")
-            return str(branch) if branch else None
-    return None
+    from ..policy_resolver import project_bound_to_repo
+
+    project = project_bound_to_repo(store, repo_dir)
+    branch = None if project is None else project.policy.get("auto_apply_branch")
+    return str(branch) if branch else None
 
 
 def read_file_at_ref(
