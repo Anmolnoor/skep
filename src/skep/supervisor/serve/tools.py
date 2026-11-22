@@ -5903,7 +5903,7 @@ def _execute_mutation(
         return actions.schedule_view(store, schedule)
     if name == "delete_schedule":
         # v47-F1: CRUD honesty — the chat face of DELETE /api/schedules/{name}.
-        if not store.remove_schedule(str(args["name"])):
+        if not store.remove_schedule(str(args["name"]), by_operator=True):
             raise ValueError(f"no schedule named {str(args['name'])!r}")
         return {"removed": str(args["name"])}
     if name == "set_schedule_enabled":

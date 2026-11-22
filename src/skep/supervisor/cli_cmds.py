@@ -2038,7 +2038,7 @@ def cmd_schedule_remove(args: argparse.Namespace) -> int:
         return _err(f"no schedule named {args.name!r}.")
     store = RunStore(config.db_path)
     try:
-        removed = store.remove_schedule(args.name)
+        removed = store.remove_schedule(args.name, by_operator=True)
     finally:
         store.close()
     if not removed:

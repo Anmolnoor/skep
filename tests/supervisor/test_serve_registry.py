@@ -994,6 +994,32 @@ def test_project_setup_verify_pin_defers_to_overrides_and_skips_the_undetectable
     assert verify_command_seed(repo) == "npm test"
 
 
+@pytest.mark.parametrize("pack", ["trusted_local_dev", None])
+def test_a_seeded_schedule_the_operator_deleted_stays_deleted(
+    repo: Path, config: SupervisorConfig, pack: str | None
+) -> None:
+    """v132-F8 (I6, I8): a re-run of setup is a policy update — it never
+    brings back an unattended schedule the operator deleted, pack-seeded or
+    first-party."""
+    client = _client(config)
+    body: dict[str, object] = {
+        "project_id": "reseed-proj", "name": "Reseed", "phase": "build",
+        "repo_path": str(repo),
+        **({"pack": pack} if pack else {"strategy": "trusted_local_dev"}),
+    }  # fmt: skip
+    first = client.post("/api/projects/setup", json=body).json()
+    (seeded,) = first["seeded_schedules"]
+    assert client.delete(f"/api/schedules/{seeded['name']}").status_code == 200
+    again = client.post("/api/projects/setup", json=body).json()
+    assert again["seeded_schedules"] == []
+    assert f"schedule:{seeded['name']}" in again["seeds_skipped"]
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_schedule(seeded["name"]) is None
+    finally:
+        store.close()
+
+
 def test_repeated_project_setup_never_reseeds(repo: Path, config: SupervisorConfig) -> None:
     """v24-F4: re-running setup is a policy update — existing templates and
     schedules are skipped, not re-created (which reset their timers and caused

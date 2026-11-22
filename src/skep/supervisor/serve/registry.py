@@ -1285,7 +1285,9 @@ def setup_project_record(
             if pack is not None:
                 for schedule_seed in pack.schedules:
                     schedule_name = _pack_template_name(project.project_id, schedule_seed.name)
-                    if run_store.get_schedule(schedule_name) is not None:
+                    if run_store.get_schedule(
+                        schedule_name
+                    ) is not None or run_store.schedule_deleted_by_operator(schedule_name):
                         seeds_skipped.append(f"schedule:{schedule_name}")
                         continue
                     if schedule_seed.template is not None:
@@ -1325,8 +1327,11 @@ def setup_project_record(
                     strategy=project.strategy,
                     phase=project.phase,
                 ):
-                    if run_store.get_schedule(project_schedule_seed.name) is not None:
-                        seeds_skipped.append(f"schedule:{project_schedule_seed.name}")
+                    name = project_schedule_seed.name
+                    if run_store.get_schedule(
+                        name
+                    ) is not None or run_store.schedule_deleted_by_operator(name):
+                        seeds_skipped.append(f"schedule:{name}")
                         continue
                     schedule = make_schedule(
                         name=project_schedule_seed.name,
@@ -1918,7 +1923,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.delete("/api/schedules/{name}")
     def delete_schedule(name: str) -> dict[str, bool]:
-        if not run_store.remove_schedule(name):
+        if not run_store.remove_schedule(name, by_operator=True):
             raise HTTPException(status_code=404, detail=f"no schedule named {name!r}")
         return {"removed": True}
 
