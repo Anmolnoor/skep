@@ -3194,3 +3194,27 @@ Everything merged since 1.5.0 (#116–#119):
   live thinking/working status; the channel deck gains `/stop`, `/btw`,
   `/approve`, `/deny`, `/compact`, `/usage` and `/model`, with command menus
   generated from it; Telegram photos reach the model.
+
+## v1.6.1 — fewer questions by default, and the holes they could open closed (2026-11-22)
+
+Everything merged since 1.6.0 (#121–#122):
+
+- **v131 (#121):** `skep onboard` sets a project up as `builder` by default
+  and asks once whether to work without asking in that one folder (`--unlocked`
+  on the CLI, the "Work without asking" row on the web); an unlocked project
+  also answers its role's catch-all ask, while launcher, interpreter and
+  wrapper-shell lines still ask (ADR 0061 D46, D47). An unanswered card now
+  waits a day before it auto-denies, not five minutes (ADR 0032 D48).
+- **v132 (#122):** bug fixes from a two-model review. Unlocked mode never
+  auto-answers a worker's network host gate. Every `email.send` asks, once,
+  and can never be remembered as an allow. An unlock stays on the folder it
+  was given for, and concurrent setups are serialized by a per-home lock.
+  Claude Code and Codex refuse to run without a real pinned verify command on
+  every path, including `skep run --minimal --engine` and recovery, and get
+  their declared env everywhere. Scheduled runs use the project's own engine,
+  verify command, landing branch and planning protocol. A project registered
+  by repo name binds only its managed clone. A phase change keeps the keys the
+  operator set. A deleted seeded schedule stays deleted. `skep review` shows
+  where a run landed or why it did not land automatically. A worker can no
+  longer overwrite supervisor audit files with a same-named artifact, and a
+  Telegram photo captioned `/update` no longer triggers an update.
