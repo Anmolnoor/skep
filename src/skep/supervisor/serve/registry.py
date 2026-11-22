@@ -1383,6 +1383,11 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     pinned_verify = str(project.policy.get("verify_command") or "").strip()
     if pinned_verify and not policy.get("verify_command"):
         policy["verify_command"] = pinned_verify
+    # v132-F4 (I2, I8): nor do they name an engine — a phase move must not
+    # silently switch which agent runs the next task.
+    pinned_engine = project.policy.get("coding_engine")
+    if pinned_engine and not policy.get("coding_engine"):
+        policy["coding_engine"] = pinned_engine
     notes: list[str] = []
     _default_execution_mode(
         run_store, project_id=project_id, policy=policy, overrides={}, notes=notes

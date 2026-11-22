@@ -309,6 +309,20 @@ def test_a_phase_change_drops_unlocked(repo: Path, config: SupervisorConfig) -> 
         store.close()
 
 
+def test_a_phase_change_keeps_the_coding_engine(repo: Path, config: SupervisorConfig) -> None:
+    """v132-F4 (I2, I8): phase defaults name no engine, so a move must not
+    silently switch which agent runs the next task."""
+    from skep.supervisor.serve.registry import set_project_phase
+
+    store = _bound(config, repo, {"verify_command": PIN, "coding_engine": "codex"})
+    try:
+        moved = set_project_phase(store, "unlockable", "maintain")
+        assert moved["policy"]["coding_engine"] == "codex"
+        assert moved["policy"]["verify_command"] == PIN
+    finally:
+        store.close()
+
+
 # --- ES-F144: the unlocked step inside decide() --------------------------------
 
 
