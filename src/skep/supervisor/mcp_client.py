@@ -798,13 +798,6 @@ def mcp_scope_decision(
             detail=f"the policy did not load, so {value} is not called: {exc}",
             decided_by="policy/unloadable",
         )
-    if (scope, action) == ("email", "send") and verdict.verdict == "allow":
-        # v132-F2 (I6): no grant answers a send — one stored by an earlier
-        # version, or an operator allow rule. A deny still refuses.
-        return AutonomyDecision(
-            verdict="require_approval", reason="email.require_approval.every_send",
-            detail=value, decided_by=verdict.decided_by,
-        )  # fmt: skip
     if verdict.verdict == "require_approval":
         asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
         reason = f"{scope}.require_approval.{asked}"

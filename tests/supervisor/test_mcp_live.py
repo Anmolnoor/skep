@@ -553,3 +553,29 @@ def test_b122_promote_tool_description_names_seed_tools() -> None:
     from skep.supervisor.serve.tools import tool_description
 
     assert "seed" in tool_description("promote_tool")
+
+
+def test_a_granted_mail_send_is_logged_as_the_ask_it_is(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """v132-F2 / sol-loop R1 S6 (I13): the decision log and the card agree —
+    a send a stored grant would have allowed is logged as an ask."""
+    _seed_email_server(config)
+    store = RunStore(config.db_path)
+    try:
+        learn_policy_rule(
+            store, rule_id="email:mail:send_message", action="send",
+            pattern="mail:send_message", scope="email", provenance="allow-always:op",
+        )  # fmt: skip
+    finally:
+        store.close()
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("call_mcp_tool", {"server_id": "mail", "tool": "send_message"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "send it"})
+    path = config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    sends = [r for r in rows if (r.get("scope"), r.get("action")) == ("email", "send")]
+    assert sends and all(r["verdict"] == "require_approval" for r in sends), sends
+    assert sends[-1]["decided_by"] == "email/every-send"
