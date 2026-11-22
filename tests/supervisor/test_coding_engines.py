@@ -858,3 +858,33 @@ def test_run_task_refuses_an_external_engine_without_a_real_pin(
         assert store.recent_runs() == []
     finally:
         store.close()
+
+
+def test_run_task_gives_an_external_engine_the_env_it_needs_on_every_path(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v132-F16 (Neon N2; v94-F3, ADR 0047 §3): an engine's auth/identity env
+    names were merged only by the resolver, so `skep run --minimal --engine
+    claude_code` (no policy resolved) ran the agent with none of them."""
+    import skep.supervisor.dispatch as dispatch_module
+    import skep.supervisor.engines as engines
+    from skep.supervisor.contracts_io import DEFAULT_PERMISSIONS
+    from skep.supervisor.dispatch import run_task
+
+    seen: list[object] = []
+
+    def spawn(_config: object, task: object, *_args: object, **_kwargs: object) -> object:
+        seen.append(task)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(dispatch_module, "spawn_worker", spawn)
+    monkeypatch.setattr(engines, "engine_available", lambda engine: (True, "stub"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
+    run_task(
+        repo, "Fix it.", config=config, worker_kind="coding",
+        permissions=DEFAULT_PERMISSIONS, execution_mode="sandbox",
+        coding_engine="claude_code", verify_command="grep -q value existing.py",
+    )  # fmt: skip
+    (task,) = seen
+    allowed = task.permissions.env_allowlist  # type: ignore[attr-defined]
+    assert set(CODING_ENGINES["claude_code"].env_vars) <= set(allowed)

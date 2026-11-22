@@ -481,6 +481,15 @@ def run_task(
     # (a hand-edited task, a stray caller) loses it here.
     if dispatch_decision is None or dispatch_decision.delegation is None:
         permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
+    if worker_kind == "coding" and engine.external:
+        # v132-F16 (v94-F3, ADR 0047 §3): what an engine cannot work without
+        # is merged on every creation path, like its API host — `skep run
+        # --minimal --engine …` resolves no policy and ran it with none.
+        needed = [name for name in engine.env_vars if name not in permissions.env_allowlist]
+        if needed:
+            permissions = permissions.model_copy(
+                update={"env_allowlist": [*permissions.env_allowlist, *needed]}
+            )
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
