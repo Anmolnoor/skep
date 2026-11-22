@@ -17,7 +17,9 @@ Register from chat (a card) or the API:
 Under the email scope: `list_recent` and `read_message` classify as
 `email/read` and run in-turn once granted (`allow_mcp_tool`);
 `send_message` classifies as `email/send` and **always cards** — nothing
-sends without your verdict (I6).
+sends without your verdict (I6). The card is HIGH and approve-once;
+`allow_mcp_tool` refuses a send, and a send grant an earlier version stored
+no longer skips the card (v132-F2).
 
 Config, in `skep serve`'s environment:
 

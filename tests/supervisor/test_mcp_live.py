@@ -369,40 +369,51 @@ def test_email_deny_rule_refuses_inline_and_blocks_learned_allows(
     ollama.script_reply("could not remember that")
     response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow"})
     assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []  # NO card
-    assert "no-sending" in response.text
+    assert "never remembered" in response.text  # v132-F2: no send is ever granted
 
 
-def test_email_allow_always_writes_an_email_scope_rule(
+def test_email_send_is_never_remembered_and_every_send_cards(
     config: SupervisorConfig,
     ollama: FakeOllama,
     fake_runner: list[tuple[str, dict[str, Any]]],
 ) -> None:
-    """allow_mcp_tool on a mail-bound server writes the learned rule in the
-    email scope with the derived verb, and the second send auto-allows."""
+    """v132-F2 (I6, docs/assistant-tools.md): a mail send always cards.
+    ``allow_mcp_tool`` on a send is refused at proposal (no card whose
+    confirm could only store a bypass), and a send grant stored before the
+    fix still cards — HIGH, once — on every send."""
     _seed_email_server(config)
     client, chat_id = chat_client(config, ollama)
     ollama.script_tool_call("allow_mcp_tool", {"server_id": "mail", "tool": "send_message"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
-    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    ollama.script_reply("remembered")
-    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
+    ollama.script_reply("could not remember that")
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []  # NO card
+    assert "never remembered" in response.text
 
     store = RunStore(config.db_path)
-    try:
-        document = json.loads(str(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)))
+    try:  # a grant an earlier version wrote
+        learn_policy_rule(
+            store, rule_id="email:mail:send_message", action="send",
+            pattern="mail:send_message", scope="email", provenance="allow-always:op",
+        )  # fmt: skip
     finally:
         store.close()
-    (learned,) = document["learned"]
-    assert learned["scope"] == "email"
-    assert learned["action"] == "send"
-    assert learned["pattern"] == "mail:send_message"
 
-    ollama.script_tool_call("call_mcp_tool", {"server_id": "mail", "tool": "send_message"})
-    ollama.script_reply("sent without asking")
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "send again"})
-    assert ("tools/call", {"name": "send_message", "arguments": {}}) in fake_runner
-    actions = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    assert all(a["status"] != "proposed" for a in actions)
+    def sends() -> int:
+        return sum(1 for call in fake_runner if call[0] == "tools/call")
+
+    for sent, turn in enumerate(("send it", "send again")):
+        ollama.script_tool_call("call_mcp_tool", {"server_id": "mail", "tool": "send_message"})
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": turn})
+        assert sends() == sent  # nothing went out before the verdict
+        proposed = [
+            a for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
+            if a["status"] == "proposed"
+        ]  # fmt: skip
+        assert len(proposed) == 1, proposed
+        assert proposed[0]["card"].get("tier") == "high", proposed[0]["card"]
+        ollama.script_reply("sent")
+        client.post(f"/api/chats/{chat_id}/actions/{proposed[0]['action_id']}/confirm")
+    assert sends() == 2  # exactly one message per verdict
 
 
 def test_http_transport_is_transparent_to_the_chat_surface(

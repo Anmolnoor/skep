@@ -4435,6 +4435,11 @@ def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str
     rule_scope, rule_action = mcp_tool_scope_action(
         store, MCPTool(server_id=server_id, name=tool_name, description="")
     )
+    if (rule_scope, rule_action) == ("email", "send"):
+        from ..mcp_client import MAIL_SEND_NEVER_GRANTED
+        from ..policy_write import PolicyWriteRejected
+
+        raise PolicyWriteRejected(MAIL_SEND_NEVER_GRANTED)  # v132-F2: at proposal
     return {
         "rule_id": f"{rule_scope}:{server_id}:{tool_name}",
         "action": rule_action,

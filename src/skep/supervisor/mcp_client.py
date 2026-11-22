@@ -734,6 +734,17 @@ def _read_only(tool: MCPTool, scope: str, action: str) -> bool:
     return action == "read" if scope in ("email", "browse") else classify_mcp_risk(tool) == "read"
 
 
+MAIL_SEND_NEVER_GRANTED = (
+    "sending mail is never remembered: every send asks you, once (I6, docs/assistant-tools.md)"
+)
+
+
+def mcp_call_sends_mail(store: RunStore, server_id: str, name: str) -> bool:
+    """v132-F2: is this call an ``email.send`` — the class that always cards?"""
+    tool = MCPTool(server_id=server_id, name=name, description="")
+    return mcp_tool_scope_action(store, tool) == ("email", "send")
+
+
 def mcp_call_is_read(store: RunStore, server_id: str, name: str) -> bool:
     """P4-2 (ADR 0059 D6): is this call a read, by the same classifier
     ``mcp_scope_decision`` hands ``decide()``? A non-read call on a server
@@ -787,6 +798,13 @@ def mcp_scope_decision(
             detail=f"the policy did not load, so {value} is not called: {exc}",
             decided_by="policy/unloadable",
         )
+    if (scope, action) == ("email", "send") and verdict.verdict == "allow":
+        # v132-F2 (I6): no grant answers a send — one stored by an earlier
+        # version, or an operator allow rule. A deny still refuses.
+        return AutonomyDecision(
+            verdict="require_approval", reason="email.require_approval.every_send",
+            detail=value, decided_by=verdict.decided_by,
+        )  # fmt: skip
     if verdict.verdict == "require_approval":
         asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
         reason = f"{scope}.require_approval.{asked}"
