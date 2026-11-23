@@ -54,7 +54,9 @@ from ..policy_write import PolicyWriteRejected
 from . import actions
 from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
+    _GATE_TOOLS,
     activates_memory,
+    boundary,
     card_summary,
     fold_subject,
     headline,
@@ -4190,8 +4192,12 @@ def add_chat_routes(
                     "already_pending": True,
                 }
             run_store.supersede_chat_action(pending.action_id, note=_SUPERSEDED_BY_NEWER)
+        recorded = None
+        if body.tool in _GATE_TOOLS:  # R2 (Neon): the label survives the gate's resolution
+            label, remedy = boundary(body.tool, body.args, store=run_store)
+            recorded = {"boundary": label, **({"remediation": remedy} if remedy else {})}
         action_id = run_store.add_chat_action(
-            chat_id, tool=body.tool, args=body.args, source="operator"
+            chat_id, tool=body.tool, args=body.args, source="operator", card=recorded
         )
         return {
             "action_id": action_id,

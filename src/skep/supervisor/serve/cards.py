@@ -218,7 +218,8 @@ def boundary(
         asks = ("network_ask", "network_added") if manifest else ("network",)
         if any(run.get(key) for run in runs for key in asks) or any(map(_wildcard_network, runs)):
             return "network-egress", None  # R1 G5: it asks to reach hosts
-        if any(_unlocked(store, run.get("repo")) for run in runs):
+        repos = [run.get("repo") for run in runs if run.get("repo")]
+        if repos and all(_unlocked(store, repo) for repo in repos):
             return None, None  # R1 G4: an override carded it, not a locked sandbox
         return "in-sandbox-locked", None
     if tool in _GATE_TOOLS:

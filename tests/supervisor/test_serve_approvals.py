@@ -1680,6 +1680,31 @@ def test_an_unlocked_projects_dispatch_card_is_never_labelled_locked(
     assert "--unlocked" not in card.get("risk", "")
 
 
+def test_a_batch_with_a_locked_member_keeps_its_locked_label(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 (Neon): one unlocked member does not unlabel a batch whose locked
+    member is why it carded."""
+    from skep.supervisor.serve.cards import card_summary
+
+    locked = tmp_path / "locked-repo"
+    member = {"execution_mode": "sandbox", "taint": []}
+    manifest = {
+        "execution_mode": "sandbox",
+        "taint": [],
+        "members": [{**member, "repo": str(repo)}, {**member, "repo": str(locked)}],
+    }
+    args = {"runs": [{"repo": str(repo)}, {"repo": str(locked)}]}
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        card = card_summary("batch_dispatch", args, store=store, recorded={"manifest": manifest})
+    finally:
+        store.close()
+    assert card["boundary"] == "in-sandbox-locked"
+
+
 def test_a_locked_sandbox_gate_card_teaches_the_unlock_line(
     repo: Path, config: SupervisorConfig
 ) -> None:
@@ -1931,11 +1956,20 @@ def test_typed_land_and_approve_cards_and_the_approvals_view_tell_the_same_truth
 
     land = typed("land_run", {"task_id": task_id})
     assert str(cast("dict[str, str]", land["card"])["tamper"]).startswith("TEST-TAMPER")
+    action_ids = []
     for _ in range(2):  # the second is the already-pending card, same truth
         approve = typed("approve_review", {"review_id": review_id, "reason": "worker asks"})
         card = cast("dict[str, str]", approve["card"])
         assert card["boundary"] == "in-sandbox-locked" and card["remediation"] == remedy
+        action_ids.append(approve.get("action_id"))
     assert approve.get("already_pending") is True
+    # R2 (Neon): the typed card records its label, so a resolved card keeps it
+    store = RunStore(config.db_path)
+    try:
+        action = store.get_chat_action(str(action_ids[0]))
+    finally:
+        store.close()
+    assert action is not None and (action.card or {}).get("boundary") == "in-sandbox-locked"
     view = next(
         a for a in client.get("/api/approvals").json()["approvals"] if a["review_id"] == review_id
     )

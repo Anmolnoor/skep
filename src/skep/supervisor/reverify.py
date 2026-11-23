@@ -123,7 +123,8 @@ def _is_pytest_pin(command: str) -> bool:
     too — so `pytest;`, `'pytest'` and `"python" -m pytest` count. A segment
     led by `echo`/`grep`/... only names it. A false positive fails closed
     (unreadable counts block auto-landing); a miss would skip the check."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace = " \t\r"  # a newline separates commands, like `;`
     lexer.whitespace_split = True
     try:
         words = list(lexer)
@@ -131,14 +132,22 @@ def _is_pytest_pin(command: str) -> bool:
         return "pytest" in command or "py.test" in command
     segment: list[str] = []
     for word in [*words, ";"]:
-        if word and all(c in "();<>|&" for c in word):
+        if word and all(c in "();<>|&\n" for c in word):
             while segment and (segment[0] == "env" or _ENV_ASSIGNMENT.match(segment[0])):
                 segment.pop(0)
             if segment and segment[0] not in _NOT_RUNNERS:
                 for w in segment:
-                    if os.path.basename(w) in ("pytest", "py.test") or w == "-mpytest":
+                    if os.path.basename(w) in ("pytest", "py.test") or w in (
+                        "-mpytest",
+                        "-mpy.test",
+                    ):
                         return True
-                    if any(c.isspace() for c in w) and _is_pytest_pin(w):
+                    # an `sh -c` program, spaced or not (`sh -c "pytest;true"`)
+                    if (
+                        w != command
+                        and any(c.isspace() or c in ";&|'\"" for c in w)
+                        and (_is_pytest_pin(w))
+                    ):
                         return True
             segment = []
         else:
@@ -896,9 +905,9 @@ def reverify(
             # What the baseline run wrote must not reach the patched run (I2,
             # review R1 F1): tracked edits reverted and every untracked or
             # ignored path it added removed (review R2: only what it added).
-            shutil.rmtree(baseline_tmp)
+            shutil.rmtree(baseline_tmp, ignore_errors=True)
             reset = subprocess.run(
-                ["git", "-C", str(worktree), "checkout", "-q", "--", "."], check=False
+                ["git", "-C", str(worktree), "reset", "-q", "--hard", "HEAD"], check=False
             )
             added = _untracked(worktree) - pre_baseline
             cleaned = (
@@ -909,7 +918,8 @@ def reverify(
                 if added
                 else reset
             )
-            if reset.returncode or cleaned.returncode or _untracked(worktree) - pre_baseline:
+            leftover = baseline_tmp.exists() or _untracked(worktree) - pre_baseline
+            if reset.returncode or cleaned.returncode or leftover:
                 # Review R2 (Terra): a tree git could not reset is not a clean
                 # baseline for the patched run — confirm nothing (I2).
                 return ReverifyOutcome(
