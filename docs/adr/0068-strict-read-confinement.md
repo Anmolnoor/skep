@@ -1,8 +1,8 @@
 # ADR 0068 — strict read confinement: a sandboxed run reads an allowlist
 
 **Status:** accepted (Phase 03, Work Item 3.2). Linux bubblewrap, the G10
-re-verify and the Queen's file reads are done; the macOS Seatbelt half is
-separate work that builds on the seam below.
+re-verify and the Queen's file reads are done. The macOS Seatbelt half was
+added on 2026-11-23 (see "The Seatbelt half").
 **Related:** ADR 0066 (new projects sandboxed by default; this ADR copies its
 rollout rule), ADR 0047 (external engines: the sandbox is their only wall),
 ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I12.
@@ -71,13 +71,15 @@ readable. A denylist cannot keep up with every place a person keeps files.
    worker had.
 3. **Fail closed.** `write_profile(read_allowlist=…)` on a backend outside
    `STRICT_READ_BACKENDS` raises `SandboxUnavailableError`, naming the fix,
-   rather than running with open reads. Today that is podman and Seatbelt.
+   rather than running with open reads. Today that is podman (Seatbelt
+   joined `STRICT_READ_BACKENDS` on 2026-11-23).
    Dispatch records `sandbox_unavailable`; G10 records `unavailable`.
 4. **Rollout, as ADR 0066 did for the mode.** A NEW project whose mode
    resolves to `sandbox` gets `strict_read_confinement: true` at setup and
    in the preview, but only where the host backend enforces it
-   (`projects.default_strict_reads`). A Mac or podman host therefore never
-   gets a flag that would refuse every run. An explicit value wins. An
+   (`projects.default_strict_reads`): bubblewrap and, since 2026-11-23,
+   Seatbelt. A podman host therefore never gets a flag that would refuse
+   every run. An explicit value wins. An
    existing project keeps what it stored through re-setup and phase changes.
    `skep doctor` names the sandboxed projects still on denylist-only reads,
    with the command that moves one:
@@ -86,9 +88,9 @@ readable. A denylist cannot keep up with every place a person keeps files.
    `extra_read_paths`), which go through the same validator: paths must be
    absolute, never `/`.
 5. **The doctor says which wall is up.** The sandbox line reads
-   `read confinement: strict-allowlist` on bubblewrap and
+   `read confinement: strict-allowlist` on bubblewrap and Seatbelt, and
    `read confinement: denylist-only (reads stay open but the secret floor)`
-   on Seatbelt and podman.
+   on podman.
 6. **The Queen.** Her file reads were already scoped to `operator_roots()`,
    and an absolute path outside them cards. What was left was a bare name
    ("read `canary-downloads.txt`"): it resolved against serve's working
@@ -121,21 +123,96 @@ git metadata, other runs' results and audit trails, other managed repos, the
 operator's own checkout of the repo, the skep home's other files, and host
 `/tmp` and `/run`.
 
-## The Seatbelt seam (the macOS half)
+## The Seatbelt half (2026-11-23)
 
 `strict_read_roots(skep_home, *, worker_llm_key, extra)` is the
-host-independent half. Every backend's profile allows exactly these, plus its
-OS's system roots and the run's writable and git roots. The Seatbelt builder:
+host-independent half: every backend allows exactly these, plus its OS's
+system roots and the run's writable and git roots. On a strict project,
+`build_profile` adds these rules after the write rules (SBPL: the last
+matching rule wins):
 
-- consumes it in `build_profile` in strict mode, with a global
-  `(deny file-read*)`;
-- re-allows macOS's system roots (`/usr`, `/System`, `/Library`,
-  `/opt/homebrew`, `/bin`, `/sbin`, `/dev`, a safe `/private/etc` subset),
-  plus the writable roots, git roots, run `TMPDIR` and these roots;
-- adds `file-read-metadata` on the ancestor chain;
-- emits the secret denies last;
-- then adds `"seatbelt"` to `STRICT_READ_BACKENDS`, which removes its
-  refusal in `write_profile` and turns on the new-project default on Macs.
+```
+(allow default)
+...network and write rules, unchanged...
+(deny file-read* file-test-existence (with errno ENOENT))
+(allow file-read* file-test-existence (literal "/"))
+(allow file-read-metadata file-test-existence <every ancestor, literal>)
+(allow file-read-metadata file-test-existence (subpath "/etc") (subpath "/var/select") ...)
+(allow file-read* file-test-existence (subpath "/usr") (subpath "/System") ... <the run's roots>)
+(deny file-read* <the secret floor>) ... (deny file-read* (literal "/private/etc/sudoers")) ...
+(allow file-read* (literal <this run's own unmasked file>))
+```
+
+- **One global deny.** Not `(allow default)` with a narrow `/Users` deny,
+  which would leave host `/tmp`, `/private/tmp` and `/var` readable. It
+  also covers `file-test-existence`, so `access(F_OK)` cannot confirm that
+  a file name exists outside the wall.
+- **ENOENT, not EPERM.** A denied path looks absent, as it does in
+  bubblewrap's empty root. This is not cosmetic: git dies with `fatal:
+  unable to access '~/.gitconfig': Operation not permitted` on an EPERM
+  user config, but skips a missing one. `(with errno ENOENT)` is SBPL that
+  Apple's own profiles use (`darwin-container-ruby-secure.sb` uses `(with
+  errno EACCES)`); Apple does not document it. If a later macOS drops it, the
+  profile stops compiling and the run fails. It fails closed, never open, but
+  G10 then reports a failed command, not `unavailable`.
+- **`/` is read whole, as one entry.** dyld aborts every process (SIGABRT,
+  even `/bin/echo`) unless it can read `/` itself. That lists the root's
+  entry names. Nothing under them is readable unless it is allowed.
+- **Metadata on the ancestors.** `stat` works but listing and reading do
+  not, on every ancestor of an allowed root: `/Users`, `$HOME`, `/private`,
+  `/private/var`, `/opt`, the worktree's parents and each toolchain's
+  parents. That is what `getcwd()`, `realpath()` and Python's startup need.
+  The `/etc`, `/var` and `/tmp` link spellings of an allowed `/private` root
+  get the same, because libc stats `/etc/localtime` and its target by those
+  names. Without them the run silently falls back to UTC.
+- **The masks still land last.** The secret floor, the store when the
+  worker holds no key, and `/private/etc`'s `master.passwd`, `sudoers`,
+  `sudoers.d`, `ssh` and `kcpassword` come after every allow, so no
+  `extra_read_paths` entry reopens them.
+- **Canonical paths.** Every root is resolved: `/tmp` is `/private/tmp`,
+  `/var` is `/private/var`. Seatbelt matches the vnode's path, so the
+  firmlink spelling `/System/Volumes/Data/Users/...` and
+  `/Volumes/Macintosh HD/Users/...` reach the same denial. The tests probe
+  both.
+
+### What a strict run reads on macOS (I8, stated plainly)
+
+- `/usr` (with `/usr/local`, so Intel Homebrew), `/System`, `/bin`,
+  `/sbin`, `/dev` (device nodes keep their Unix permissions; the raw disks
+  are root/operator only) and `/opt/homebrew`.
+- All of `/Library`. That includes `/Library/Keychains/System.keychain`
+  (encrypted; its key is root-only), system-wide preferences and
+  `/Library/Application Support`, and the CommandLineTools. It holds no
+  user's files. It stays whole because TLS trust, Apple's git and system
+  frameworks all read from it.
+- `/private/etc`, minus the auth entries above.
+- Three spots in `/private/var`: `select/` (the links `/bin/sh` and
+  xcode-select read), `db/timezone/` (where `/etc/localtime` points) and
+  `run/resolv.conf`.
+- The active developer dir. `/usr/bin/git` is xcrun's shim and runs git from
+  it. When that dir is Xcode, the whole `Xcode.app` is read, because xcrun
+  stats its `Info.plist` and loads its `SharedFrameworks`.
+- `strict_read_roots()`, the git metadata, the writable roots (worktree,
+  results, the run-private `TMPDIR` inside it, caches) and
+  `extra_read_paths`, exactly as on Linux.
+
+Not readable: the rest of `$HOME` (`~/Downloads`, `~/Documents`,
+`~/Library`, `~/.gitconfig`), `/Users/Shared`, other users' homes, host
+`/tmp` (`/private/tmp`), `/private/var/folders` (every per-user temp and
+cache dir), the rest of `/private/var`, `/Volumes`, `/Applications` apart
+from the Xcode bundle, `/opt` apart from Homebrew, and `/nix`. A toolchain
+under one of these, such as MacPorts' `/opt/local`, Nix, or an app's bundled
+CLI, needs `extra_read_paths`. A `~/.local/bin` link into a dir outside the
+detected toolchains fails as missing, and a shell's PATH search moves on to
+the next match. xcrun still prints `couldn't create cache file
+'/var/folders/.../xcrun_db'`. That write was already denied before; only its
+errno changed.
+
+Proven by `tests/supervisor/test_sandbox_read_confinement.py` against real
+`sandbox-exec`: the canary probe in the worker profile and in the G10
+profile, plus Python (`import skep`, `getcwd`, `realpath`), `git status`
+under the real `~/.gitconfig`, `uv run pytest`, node and the local timezone
+in the worker wall. The same tests run on Linux against bubblewrap.
 
 ## Not covered yet
 
@@ -161,5 +238,6 @@ OS's system roots and the run's writable and git roots. The Seatbelt builder:
   real bubblewrap.
 - Existing projects do not change until the operator runs the doctor's
   command. The live `~/.skep` is untouched by this change.
-- On Macs nothing changes until the Seatbelt half lands. A project explicitly
-  set strict there is refused, and never silently run with open reads.
+- On Macs, new sandboxed projects read strictly from 2026-11-23. Existing
+  ones keep denylist-only reads until the operator runs the doctor's
+  command, the same rule as on Linux.

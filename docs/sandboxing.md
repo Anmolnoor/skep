@@ -50,9 +50,25 @@ own interpreter), the repo's git metadata minus the sibling worktrees, and the
 project's `extra_read_paths`. The run's own roots are bound as above, and the
 masks below still land last. The rest of `$HOME`, `/var`, `/mnt`, `/srv` and
 `/etc/pve` do not exist inside the sandbox. The G10 re-run of the patch uses
-the same wall. Seatbelt and podman refuse a strict run until they can enforce
-one. `skep doctor` names the sandboxed projects still on the denylist below;
+the same wall. Podman refuses a strict run until it can enforce one.
+`skep doctor` names the sandboxed projects still on the denylist below;
 `skep project setup <repo> --strict-reads` moves one.
+
+Since 2026-11-23, Seatbelt enforces it too, and new sandboxed projects on
+macOS get it by default. The profile denies every read globally, with
+ENOENT, so a denied path looks absent as it does under bwrap. git skips a
+missing `~/.gitconfig`, but dies on an unreadable one. The profile then
+reopens `/usr`, `/System`, `/Library`, `/opt/homebrew`, `/bin`, `/sbin`,
+`/dev`, `/private/etc` minus `master.passwd`/`sudoers`/`ssh`/`kcpassword`,
+`/private/var`'s `select/`, `db/timezone/` and `run/resolv.conf`, and the
+active Xcode bundle or CommandLineTools (`/usr/bin/git` is xcrun's shim). It
+also reopens the same toolchains, git metadata, run roots and
+`extra_read_paths` as on Linux. The ancestors of those get metadata only, so
+`getcwd()` and `realpath()` work without listing anything. The masks still
+come last. Host `/tmp` (`/private/tmp`), `/private/var/folders`, the rest of
+`$HOME` and `/Users/Shared` are unreadable, and so is any of them spelled
+through the `/System/Volumes/Data` firmlink. ADR 0068 lists what a Mac run
+still reads, and why.
 
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every

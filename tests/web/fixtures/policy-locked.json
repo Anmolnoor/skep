@@ -698,7 +698,7 @@
    },
    {
     "default": false,
-    "doc": "ADR 0068: a sandboxed worker and its G10 re-run read an allowlist \u2014 system dirs, detected toolchains, the worktree and git metadata, extra_read_paths \u2014 not the whole disk; on for new sandboxed projects where the backend enforces it (bubblewrap), existing ones migrate with `skep project setup <repo> --strict-reads`",
+    "doc": "ADR 0068: a sandboxed worker and its G10 re-run read an allowlist \u2014 system dirs, detected toolchains, the worktree and git metadata, extra_read_paths \u2014 not the whole disk; on for new sandboxed projects where the backend enforces it (bubblewrap, Seatbelt), existing ones migrate with `skep project setup <repo> --strict-reads`",
     "enforced_at": null,
     "invariant": "I12",
     "kind": "knob",

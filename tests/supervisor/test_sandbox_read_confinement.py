@@ -39,10 +39,22 @@ _TOOLCHAIN_ENV = (
     "PYENV_ROOT",
 )
 
-needs_bwrap = pytest.mark.skipif(
-    not sys.platform.startswith("linux") or sandbox.availability().backend != "bubblewrap",
-    reason="real bubblewrap proof (runs where bwrap is the backend)",
+needs_strict_wall = pytest.mark.skipif(
+    sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
+    reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
 )
+_SEATBELT_STRICT = "(deny file-read* file-test-existence (with errno ENOENT))"
+
+
+def _assert_strict(profile: Path) -> None:
+    """The wall that ran was the strict one, on whichever backend ran it."""
+    text = profile.read_text(encoding="utf-8")
+    if sandbox.availability().backend == "seatbelt":
+        assert _SEATBELT_STRICT in text
+    else:
+        assert _profile_argv(profile)[:3] != ["--ro-bind", "/", "/"]
+        assert "--ro-bind" in _profile_argv(profile)
+
 
 # Prints {path: "read" | the error's name}; a directory counts as read when
 # it can be listed. Exits 1 when anything outside ``--expect-read`` was read.
@@ -274,7 +286,7 @@ def test_an_extra_read_path_that_resolves_to_the_root_is_refused(
         sandbox.strict_read_roots(skep_home, extra=(link,))
 
 
-@pytest.mark.parametrize("backend", ["podman", "seatbelt"])
+@pytest.mark.parametrize("backend", ["podman"])
 def test_a_backend_that_cannot_enforce_strict_reads_refuses_the_run(
     backend: str, skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,12 +302,77 @@ def test_a_backend_that_cannot_enforce_strict_reads_refuses_the_run(
 def test_the_seatbelt_profile_is_unchanged_without_strict_reads(
     skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """macOS keeps its denylist profile until the Seatbelt half lands."""
+    """A project not on strict reads keeps macOS's denylist profile."""
     _usable(monkeypatch, "seatbelt")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     profile = sandbox.write_profile(tmp_path / "p.sb", workspace=workspace, skep_home=skep_home)
     assert "(allow default)" in profile.read_text(encoding="utf-8")
+    assert "deny file-read* file-test-existence" not in profile.read_text(encoding="utf-8")
+
+
+def _rule(lines: list[str], text: str) -> int:
+    return next(i for i, line in enumerate(lines) if text in line)
+
+
+def test_a_strict_seatbelt_profile_denies_every_read_then_reopens_the_allowlist(
+    fake_home: Path, skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GLOBAL read deny (not allow-default plus a /Users deny, which left
+    host /tmp and /var open), the allowlist after it, the masks last."""
+    _usable(monkeypatch, "seatbelt")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    git_root = tmp_path / "common" / "config"
+    git_root.parent.mkdir()
+    git_root.write_text("[core]\n", encoding="utf-8")
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb",
+        workspace=workspace,
+        extra_readable=[git_root],
+        skep_home=skep_home,
+        read_allowlist=(fake_home,),  # the operator lists the whole home
+    )
+    lines = profile.read_text(encoding="utf-8").splitlines()
+    deny = lines.index(_SEATBELT_STRICT)
+    assert deny > lines.index("(allow default)")
+    allows = [i for i, line in enumerate(lines) if line.startswith("(allow file-read")]
+    assert allows and min(allows) > deny
+    reads = "\n".join(lines[i] for i in allows)
+    for system in ("/usr", "/System", "/Library", "/bin", "/sbin", "/dev", "/private/etc"):
+        assert f'(subpath "{system}")' in reads, system
+    for own in (workspace, git_root, fake_home, Path(sys.prefix)):
+        assert f'(subpath "{own.resolve()}")' in reads, own
+    for host in ("/", "/Users", "/private/tmp", "/private/var", "/private/var/folders", "/tmp"):
+        assert f'(subpath "{host}")' not in reads, host
+    # the ancestors: metadata only, so getcwd/realpath work but nothing lists
+    metadata = lines[_rule(lines, "(allow file-read-metadata file-test-existence")]
+    top = workspace.resolve().parents[-2]  # /Users on a Mac, /tmp or /home on CI
+    for ancestor in ("/private", str(top), str(workspace.resolve().parent)):
+        assert f'(literal "{ancestor}")' in metadata, ancestor
+    assert "subpath" not in metadata
+    # last match wins: the masks follow every allow, the extra home included
+    ssh = _rule(lines, f'(deny file-read* (subpath "{(fake_home / ".ssh").resolve()}"))')
+    token = _rule(lines, str((skep_home / "supervisor" / "serve-token").resolve()))
+    sudoers = _rule(lines, '"/private/etc/sudoers")')
+    assert lines[sudoers].startswith("(deny file-read* (literal")
+    assert min(ssh, token, sudoers) > max(allows)
+
+
+def test_a_strict_seatbelt_profile_refuses_an_extra_path_that_is_the_root(
+    skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed (I12): no profile, no run — never open reads."""
+    _usable(monkeypatch, "seatbelt")
+    link = tmp_path / "everything"
+    link.symlink_to("/")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(sandbox.SandboxUnavailableError, match="extra_read_paths"):
+        sandbox.write_profile(
+            tmp_path / "p.sb", workspace=workspace, skep_home=skep_home, read_allowlist=(link,)
+        )
+    assert not (tmp_path / "p.sb").exists()
 
 
 def test_read_allowlist_follows_the_project_policy() -> None:
@@ -325,10 +402,10 @@ def test_a_linked_worktree_reads_its_common_dir_but_not_its_siblings(tmp_path: P
     assert common / "objects" not in roots  # bound writable, never walked for sockets
 
 
-# --- the wall, for real (bubblewrap) ----------------------------------------
+# --- the wall, for real (bubblewrap or Seatbelt) ----------------------------
 
 
-@needs_bwrap
+@needs_strict_wall
 def test_a_strict_worker_reads_no_canary(
     fake_home: Path, skep_home: Path, host_canaries: list[Path], tmp_path: Path
 ) -> None:
@@ -356,6 +433,15 @@ def test_a_strict_worker_reads_no_canary(
         Path("/srv"),
         Path("/media"),
         Path("/root"),
+        # macOS: the same canary by its firmlink and volume names, the host's
+        # per-user temp dirs, and /etc's auth entries (absent on Linux: not read)
+        Path("/System/Volumes/Data", *fake_home.resolve().parts[1:], "Downloads"),
+        Path("/Volumes/Macintosh HD", *fake_home.resolve().parts[1:], "Downloads"),
+        Path("/private/var/folders"),
+        Path("/private/etc/master.passwd"),
+        Path("/etc/master.passwd"),  # its /etc link spelling, read through metadata
+        Path("/private/etc/sudoers"),
+        Path("/Users/Shared"),
     ]
     proc = subprocess.run(
         sandbox.wrap_command(
@@ -371,11 +457,42 @@ def test_a_strict_worker_reads_no_canary(
     seen = json.loads(proc.stdout)
     assert seen.pop(str(workspace / "own.txt")) == "read"  # the probe itself works
     assert [path for path, verdict in seen.items() if verdict == "read"] == [], seen
-    assert "--ro-bind" in _profile_argv(profile)
-    assert _profile_argv(profile)[:3] != ["--ro-bind", "/", "/"]
+    _assert_strict(profile)
 
 
-@needs_bwrap
+@needs_strict_wall
+def test_a_strict_run_still_reads_its_own_unmasked_file(skep_home: Path, tmp_path: Path) -> None:
+    """ES-F122: a codex run's own login copy, inside the masked audit dir,
+    stays readable to that run alone under the strict wall too."""
+    audit = skep_home / "supervisor" / "audit"
+    (audit / "this-run").mkdir(parents=True)
+    own, other = audit / "this-run" / "auth.json", audit / "other-run" / "auth.json"
+    for path in (own, other):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile",
+        workspace=workspace,
+        skep_home=skep_home,
+        unmasked=[own],
+        read_allowlist=(),
+    )
+    proc = subprocess.run(
+        sandbox.wrap_command([sys.executable, "-c", _PROBE, str(own), str(other)], profile),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    seen = json.loads(proc.stdout)
+    assert seen[str(own)] == "read" and seen[str(other)] != "read", seen
+    _assert_strict(profile)
+
+
+@needs_strict_wall
 def test_a_strict_worker_still_runs_python_git_uv_and_pytest(
     skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -399,7 +516,9 @@ def test_a_strict_worker_still_runs_python_git_uv_and_pytest(
         read_allowlist=(),
     )
     steps = [
-        f"{shlex.quote(sys.executable)} -c 'import skep; print(\"python ok\")'",
+        # getcwd/realpath walk the ancestors (Seatbelt: metadata only)
+        f"{shlex.quote(sys.executable)} -c 'import os, skep; "
+        'print(os.path.realpath(os.getcwd()), "python ok")\'',
         "git status --short && git log --oneline -1 >/dev/null && echo 'git ok'",
     ]
     if shutil.which("uv"):
@@ -409,6 +528,8 @@ def test_a_strict_worker_still_runs_python_git_uv_and_pytest(
         )
     if shutil.which("node"):
         steps.append("node --version >/dev/null && echo 'node ok'")
+    # libc finds the zone through /etc/localtime's link spellings
+    steps.append('echo "tz $(date +%Z)"')
     tmp = worktree / ".tmp"
     tmp.mkdir()
     env = {
@@ -428,13 +549,17 @@ def test_a_strict_worker_still_runs_python_git_uv_and_pytest(
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "python ok" in proc.stdout and "git ok" in proc.stdout
+    assert f"{worktree.resolve()} python ok" in proc.stdout
+    host = subprocess.run(["date", "+%Z"], env=env, capture_output=True, text=True, check=True)
+    assert f"tz {host.stdout.strip()}" in proc.stdout
     if shutil.which("uv"):
         assert "uv pytest ok" in proc.stdout and "1 passed" in proc.stdout
     if shutil.which("node"):
         assert "node ok" in proc.stdout
+    _assert_strict(profile)
 
 
-@needs_bwrap
+@needs_strict_wall
 def test_the_g10_rerun_runs_inside_the_same_strict_wall(
     repo: Path, config: SupervisorConfig, fake_home: Path, host_canaries: list[Path],
     tmp_path: Path,
@@ -475,10 +600,10 @@ def test_the_g10_rerun_runs_inside_the_same_strict_wall(
     )
     assert outcome.outcome == "passed", outcome.detail
     assert outcome.exit_codes == [0, 0]
-    assert _profile_argv(profile)[:3] != ["--ro-bind", "/", "/"]
+    _assert_strict(profile)
 
 
-@needs_bwrap
+@needs_strict_wall
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not on PATH")
 def test_g10_still_runs_a_uv_pytest_pin_inside_the_strict_wall(
     repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -512,6 +637,7 @@ def test_g10_still_runs_a_uv_pytest_pin_inside_the_strict_wall(
     )
     assert outcome.outcome == "passed", outcome.detail
     assert outcome.exit_codes == [0, 0]
+    _assert_strict(tmp_path / "reverify.profile.sb")
 
 
 # --- plumbing: dispatch and G10 take the wall from the project --------------
@@ -705,15 +831,17 @@ def _setup(config: SupervisorConfig, repo: Path, route: str = "setup", **body: A
     return (response.json().get("project") or response.json())["policy"]
 
 
+@pytest.mark.parametrize("backend", ["bubblewrap", "seatbelt"])
 @pytest.mark.parametrize("route", ["setup", "preview"])
 def test_a_new_sandboxed_project_reads_strictly_where_the_backend_enforces_it(
-    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, route: str
-) -> None:
-    _host(monkeypatch, "bubblewrap")
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, route: str,
+    backend: str,
+) -> None:  # fmt: skip
+    _host(monkeypatch, backend)
     assert _setup(config, repo, route)["strict_read_confinement"] is True
 
 
-@pytest.mark.parametrize("backend", ["seatbelt", "podman", None])
+@pytest.mark.parametrize("backend", ["podman", None])
 def test_no_strict_default_where_the_backend_cannot_enforce_it(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, backend: str | None
 ) -> None:
@@ -758,7 +886,7 @@ def test_the_cli_migrates_a_project_with_strict_reads() -> None:
     ("backend", "confinement"),
     [
         ("bubblewrap", "strict-allowlist"),
-        ("seatbelt", "denylist-only"),
+        ("seatbelt", "strict-allowlist"),
         ("podman", "denylist-only"),
     ],
 )

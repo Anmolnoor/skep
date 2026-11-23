@@ -318,7 +318,8 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         doc="ADR 0068: a sandboxed worker and its G10 re-run read an allowlist — system "
         "dirs, detected toolchains, the worktree and git metadata, extra_read_paths — "
         "not the whole disk; on for new sandboxed projects where the backend enforces it "
-        "(bubblewrap), existing ones migrate with `skep project setup <repo> --strict-reads`",
+        "(bubblewrap, Seatbelt), existing ones migrate with "
+        "`skep project setup <repo> --strict-reads`",
     ),
     _knob(
         "extra_read_paths",

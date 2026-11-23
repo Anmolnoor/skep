@@ -17,9 +17,10 @@ workspace/results/temp boundary. Reads are left open so the Python/git/test
 toolchain keeps working — except the secret floor (ES-F4, V3): the operator's
 credential dirs and skep's own serve-token/serve.env/``*-secret`` files are
 hidden on every backend (``secret_paths``). Env secrets are closed by the G2
-env allowlist. A strict-read project (ADR 0068, bubblewrap only so far)
-reads an allowlist instead: bwrap's empty root with the system dirs, the
-detected toolchains and the run's own roots bound back, the masks still last.
+env allowlist. A strict-read project (ADR 0068) reads an allowlist instead:
+bwrap's empty root with the system dirs, the detected toolchains and the
+run's own roots bound back; on Seatbelt a global read deny reopening the
+same set. The masks still land last.
 """
 
 from __future__ import annotations
@@ -183,9 +184,8 @@ _BUBBLEWRAP_WALLS = (
 )
 _BUBBLEWRAP_BASE_ARGS = (*_HOST_ROOT, *_BUBBLEWRAP_WALLS)
 
-# ADR 0068: strict read confinement. The backends that enforce it; the
-# Seatbelt half joins once its profile consumes ``strict_read_roots``.
-STRICT_READ_BACKENDS = frozenset({"bubblewrap"})
+# ADR 0068: strict read confinement. The backends that enforce it.
+STRICT_READ_BACKENDS = frozenset({"bubblewrap", "seatbelt"})
 STRICT_READS_KEY = "strict_read_confinement"
 # The empty root's system half (bwrap): a usr-merge link is recreated as a
 # link, a real directory is bound read-only, an absent one skipped.
@@ -287,6 +287,58 @@ def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
         ):
             args += ["--symlink", str(real), str(path)]
     return args
+
+
+# ADR 0068 on Seatbelt: what a strict run reads of macOS itself. Of
+# /private/var only sh's and xcode-select's links, the zone files
+# /etc/localtime points into and resolv.conf; /private/etc minus its auth
+# entries (masked last, after every allow).
+_SEATBELT_SYSTEM_ROOTS = (
+    "/usr", "/System", "/Library", "/opt/homebrew", "/bin", "/sbin", "/dev", "/private/etc",
+    "/private/var/select", "/private/var/db/timezone", "/private/var/run/resolv.conf",
+)  # fmt: skip
+_SEATBELT_ETC_HIDDEN = ("master.passwd", "sudoers", "sudoers.d", "ssh", "kcpassword")
+# /usr/bin/git is xcrun's shim: it runs git from the selected developer dir
+_XCODE_SELECT_LINKS = ("/private/var/select/developer_dir", "/private/var/db/xcode_select_link")
+
+
+def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
+    """ADR 0068: deny every read, then reopen macOS's system roots, the
+    developer dir (the whole Xcode.app: xcrun stats its Info.plist) and
+    ``roots``; metadata alone on each one's ancestors, so getcwd/realpath
+    resolve without listing anything, and on a /private root's /etc, /var or
+    /tmp link spelling (libc stats /etc/localtime's /var/db/timezone target
+    by that name). ``/`` itself is read whole: dyld aborts every process
+    without it. A denied path is ENOENT, as under bwrap's empty root — git
+    dies on an EPERM ~/.gitconfig, not on a missing one."""
+    allowed = [Path(root) for root in _SEATBELT_SYSTEM_ROOTS]
+    for link in _XCODE_SELECT_LINKS:
+        if os.path.islink(link):
+            dev = Path(link).resolve()
+            allowed.append(dev.parents[1] if dev.parent.name == "Contents" else dev)
+    allowed += [Path(root).resolve() for root in roots]
+    allowed = list(dict.fromkeys(allowed))
+    links = [
+        Path("/", *root.parts[2:])
+        for root in allowed
+        if root.parts[1:2] == ("private",) and root.parts[2:3] in (("etc",), ("var",), ("tmp",))
+    ]
+    named = [*allowed, *links]
+    ancestors = sorted({parent for root in named for parent in root.parents} - {Path("/")})
+
+    rules = [
+        "(deny file-read* file-test-existence (with errno ENOENT))",
+        '(allow file-read* file-test-existence (literal "/"))',
+    ]
+    for ops, kind, paths in (
+        ("file-read-metadata", "literal", ancestors),
+        ("file-read-metadata", "subpath", links),
+        ("file-read*", "subpath", allowed),
+    ):
+        if paths:  # an allow with no filter would reopen every path
+            filters = " ".join(f'({kind} "{_sbpl_quote(path)}")' for path in paths)
+            rules.append(f"(allow {ops} file-test-existence {filters})")
+    return rules
 
 
 def _strict_root_args() -> list[str]:
@@ -1057,8 +1109,13 @@ def build_profile(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    read_allowlist: Iterable[Path] | None = None,
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
+
+    ``read_allowlist`` (ADR 0068): None keeps reads open but ``read_denied``;
+    otherwise reads are confined to macOS's system roots, the writable roots
+    and these (``_seatbelt_read_rules``), with ``read_denied`` still last.
 
     Last-matching-rule-wins SBPL: ``allow default`` keeps reads/exec/IPC working,
     then network is denied (deny-all) and writes are denied everywhere and
@@ -1090,6 +1147,8 @@ def build_profile(
     lines.append(f"(allow file-write* {dev_nodes})")
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
+    if read_allowlist is not None:
+        lines += _seatbelt_read_rules([*roots, *read_allowlist])
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
@@ -1148,7 +1207,7 @@ def write_profile(
     secrets. Every caller passes the home its own config names.
 
     ``extra_readable`` is bound read-only where a backend hides the host
-    (bwrap/podman's tmpfs /tmp); Seatbelt leaves reads open and ignores it.
+    (bwrap/podman's tmpfs /tmp); Seatbelt reads it on a strict run alone.
 
     ``worker_llm_key`` leaves the worker's own LLM key readable (B125): only
     a worker whose caste calls the LLM passes it.
@@ -1175,11 +1234,11 @@ def write_profile(
     probe = require_usable(backend)
     if read_allowlist is not None and probe.backend not in STRICT_READ_BACKENDS:
         raise SandboxUnavailableError(
-            f"strict read confinement (ADR 0068) is enforced on bubblewrap only; the "
-            f"{probe.backend} backend cannot confine reads to an allowlist yet, so this "
-            "run is refused rather than run with open reads. Use the native bubblewrap "
-            "backend, or turn it off for this project: `skep project setup <repo> "
-            "--no-strict-reads`."
+            f"strict read confinement (ADR 0068) is enforced on bubblewrap and Seatbelt "
+            f"only; the {probe.backend} backend cannot confine reads to an allowlist yet, "
+            "so this run is refused rather than run with open reads. Use the native "
+            "bubblewrap backend, or turn it off for this project: `skep project setup "
+            "<repo> --no-strict-reads`."
         )
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     # ES-F264: the mask list holds only files that exist now. relay-secret
@@ -1247,6 +1306,14 @@ def write_profile(
     if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
         live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
         read_denied = list(dict.fromkeys([*read_denied, *live]))
+    strict_roots = None
+    if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
+        strict_roots = [
+            *strict_read_roots(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist),
+            *extra_readable,
+            *unmasked,  # still masked but for the literal allow after the masks
+        ]
+        read_denied = [*read_denied, *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN)]
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(
@@ -1259,6 +1326,7 @@ def write_profile(
             write_denied=write_denied,
             loopback_ports=loopback_ports,
             unmasked=unmasked,
+            read_allowlist=strict_roots,
         )
     )
     return profile_path

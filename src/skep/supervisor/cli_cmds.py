@@ -4144,7 +4144,8 @@ def register_supervisor_commands(
         default=None,
         help="sandboxed workers and their re-verify read an allowlist (system dirs, "
         "toolchains, the worktree, extra_read_paths), not the whole disk (ADR 0068); new "
-        "sandboxed projects get it where bubblewrap enforces it, --no-strict-reads opts out",
+        "sandboxed projects get it where bubblewrap or Seatbelt enforces it, "
+        "--no-strict-reads opts out",
     )
     project_preview.add_argument(
         "--codex-chatgpt-login",
@@ -4222,7 +4223,8 @@ def register_supervisor_commands(
         default=None,
         help="sandboxed workers and their re-verify read an allowlist (system dirs, "
         "toolchains, the worktree, extra_read_paths), not the whole disk (ADR 0068); new "
-        "sandboxed projects get it where bubblewrap enforces it, --no-strict-reads opts out",
+        "sandboxed projects get it where bubblewrap or Seatbelt enforces it, "
+        "--no-strict-reads opts out",
     )
     project_setup.add_argument(
         "--codex-chatgpt-login",
