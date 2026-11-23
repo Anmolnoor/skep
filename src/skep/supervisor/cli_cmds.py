@@ -1960,7 +1960,8 @@ def _run_claimed_resume(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
+        + (f"; {PIN_DRIFT_NOTE}" if drifted else ""),
         remembered=remembered,
         claimed=True,
     )

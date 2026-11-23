@@ -1061,6 +1061,9 @@ def test_cli_auto_resume_after_a_pin_change_does_not_auto_land(
     try:
         successor = store.resumed_as_for(final)
         assert successor is not None
+        # R3 (Neon): the approval ledger says so too, as serve's does
+        [gate] = store.approvals_for(final)
+        assert "verify pin changed while the gate waited" in (gate.resolution_note or "")
         landed = [a for a in store.approvals_for(successor) if a.action == "apply_patch"]
         assert all(a.resolved_by != "auto:verified-patch" for a in landed), landed
     finally:
