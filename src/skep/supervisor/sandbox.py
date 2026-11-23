@@ -317,8 +317,10 @@ def _strict_candidates(
             "refusing to build a narrower wall than the run recorded — re-dispatch the run"
         )
     detected = [Path(os.path.abspath(root)) for root in detected]
-    roots = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own, *extra]
-    return list(dict.fromkeys(path for path in roots if _exists(path)))
+    found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
+    # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
+    # above makes the bind fail closed instead of narrowing the worker's wall.
+    return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))
 
 
 def _etc_reserved(real: Path) -> bool:
@@ -1405,8 +1407,14 @@ def write_profile(
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
-        # a mount needs its file; a link can't be mounted over (R4, Neon)
-        read_denied += [p for p in git_masked if not p.is_symlink() and _exists(p)]
+        # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
+        # linked message file refuses the wall rather than going unmasked (R5, Sol)
+        if linked := [str(p) for p in git_masked if p.is_symlink()]:
+            raise SandboxUnavailableError(
+                f"{', '.join(linked)} is a symlink, so the sandbox cannot mask it and the "
+                "in-progress git message would be readable; replace it with a regular file"
+            )
+        read_denied += [p for p in git_masked if _exists(p)]
         extra_readable = list(extra_readable)
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.

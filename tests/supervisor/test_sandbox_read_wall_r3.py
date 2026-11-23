@@ -28,7 +28,7 @@ from skep.supervisor.worktree import (
 )
 
 from .conftest import git
-from .test_sandbox_read_wall_r1 import _TOOLCHAIN_ENV
+from .test_sandbox_read_wall_r1 import _TOOLCHAIN_ENV, needs_bwrap
 
 needs_strict_wall = pytest.mark.skipif(
     sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
@@ -249,11 +249,11 @@ def test_an_extra_path_in_homebrew_s_var_is_refused_on_macos(
 ) -> None:
     """Opus O-R3-3: accepted at setup, then masked last under Seatbelt
     (ENOENT). R4 (Sol): only on macOS — bubblewrap honours these paths."""
-    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
     problem = sandbox.extra_read_path_problem(Path(path), tmp_path / "skep")
     assert problem is not None and "Homebrew's var/" in problem, path
     assert sandbox.extra_read_path_problem(Path("/opt/homebrew/share"), tmp_path / "skep") is None
-    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     assert sandbox.extra_read_path_problem(Path(path), tmp_path / "skep") is None
 
 
@@ -288,3 +288,20 @@ def test_the_etc_rule_covers_every_dir_that_holds_etc() -> None:
     the same one that refuses /private on macOS."""
     assert sandbox._etc_reserved(Path("/"))
     assert not sandbox._etc_reserved(Path("/usr/share"))
+
+
+@needs_bwrap
+def test_a_symlinked_git_message_refuses_the_wall(tmp_path: Path) -> None:
+    """R5 (Sol): a linked COMMIT_EDITMSG/MERGE_MSG can't be masked (bwrap
+    can't mount over a link), so the wall refuses rather than expose it."""
+    from .test_sandbox_read_wall_r1 import _repo_with_private_state
+
+    _repo, common, worktree = _repo_with_private_state(tmp_path)
+    (common / "MERGE_MSG").unlink()
+    (common / "MERGE_MSG").symlink_to(tmp_path / "elsewhere.txt")
+    (tmp_path / "elsewhere.txt").write_text("in-progress message\n", encoding="utf-8")
+    with pytest.raises(sandbox.SandboxUnavailableError, match="cannot mask it"):
+        sandbox.write_profile(
+            tmp_path / "p.profile", workspace=worktree, skep_home=tmp_path / "skep",
+            read_allowlist=(),
+        )  # fmt: skip
