@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from skep.worker_contract import KNOWN_PLUGIN_RISKS
@@ -212,15 +214,22 @@ def require_loopback_ports(value: object) -> list[int]:
 
 
 def _require_extra_read_paths(value: object) -> list[str]:
-    """ADR 0068: absolute paths, never ``/`` (that is no allowlist at all).
-    Each is resolved again at every run, symlinks included (sandbox.py)."""
+    """ADR 0068: absolute paths, never ``/`` (that is no allowlist at all),
+    nor at/above the home, in the skep home, or on /etc's reserved entries
+    (W2, judged where each resolves now). Each is resolved and judged again at
+    every run, symlinks included (sandbox.py) — the refusal that holds."""
+    from .sandbox import extra_read_path_problem
+
     paths = _require_string_list(value, field="extra_read_paths")
+    skep_home = Path(os.environ.get("SKEP_HOME") or Path.home() / ".skep")
     for path in paths:
-        if not path.startswith("/") or path.rstrip("/") == "":
+        if not path.startswith("/") or os.path.normpath(path) in ("/", "//"):
             raise ValueError(
                 f"extra_read_paths entries must be absolute paths other than /, got {path!r} "
                 "— name the directories a strict-read run needs, e.g. ['/srv/datasets']"
             )
+        if problem := extra_read_path_problem(Path(path), skep_home):
+            raise ValueError(f"extra_read_paths: {problem}")
     return paths
 
 

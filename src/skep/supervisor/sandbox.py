@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -43,6 +44,8 @@ from urllib.parse import urlparse
 from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
 from .store import RETIRED_STORE_FILES
+
+logger = logging.getLogger(__name__)
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -228,8 +231,10 @@ def strict_read_roots(
     builtin worker reads (``profile.json``, ``worker_plugins``; the store and
     its own LLM key only with ``worker_llm_key``) and the operator's
     ``extra_read_paths``. Resolved, existing paths only. A detected root at
-    or above the home is dropped; an extra path that resolves to ``/`` is
-    refused. The secret masks still land after every one of them."""
+    or above the home, on /etc's reserved entries, or (a per-user toolchain)
+    itself a link, is dropped; an extra path at or above the home, in or over
+    the skep home, or on /etc's reserved entries refuses the run
+    (``extra_read_path_problem``). The secret masks still land after every one."""
     roots = _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=extra)
     return list(dict.fromkeys(path.resolve() for path in roots))
 
@@ -247,28 +252,87 @@ def _strict_candidates(
         Path(sys.base_prefix),
         Path(sys.exec_prefix),
         Path(__file__).resolve().parents[2],
-        skep_home / "tools" / ".venvs",
         # what .pth files chain in (uv's `run --with` overlay env, an editable install)
         *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
     ]
-    detected += [
-        Path(os.environ.get(env) or home / rel) if env else home / rel
-        for env, rel in _HOME_TOOLCHAINS
+    toolchains = [
+        skep_home / "tools" / ".venvs",
+        *(
+            Path(os.environ.get(env) or home / rel) if env else home / rel
+            for env, rel in _HOME_TOOLCHAINS
+        ),
     ]
+    for root in toolchains:
+        # W2: bound where it is, never through a link of its own — a
+        # ~/.local/bin linked to ~/Downloads would bind the downloads. The
+        # operator follows such a link on purpose with extra_read_paths.
+        if root.is_symlink():
+            logger.warning(
+                "strict reads: %s is a link (to %s), so it is not bound; name it in the "
+                "project's extra_read_paths if the run needs it",
+                root,
+                root.resolve(),
+            )
+        else:
+            detected.append(root)
     supervisor = skep_home / "supervisor"
     own = [skep_home / "profile.json", skep_home / "worker_plugins"]
     if worker_llm_key:
         names = (*_LIVE_STORE_FILES, "llm-secret", *_active_llm_key_names(supervisor))
         own += [supervisor / name for name in names]
-    extra = [Path(os.path.abspath(path)) for path in extra]
-    if any(path.resolve() == Path("/") for path in extra):
-        raise SandboxUnavailableError(
-            "extra_read_paths names a path that resolves to / — that would reopen every "
-            "read strict confinement closes. Name the directories the run needs instead."
-        )
+    extra = _validated_extra(extra, skep_home)
     detected = [Path(os.path.abspath(root)) for root in detected]
-    roots = [*(root for root in detected if not home.is_relative_to(root.resolve())), *own, *extra]
+    roots = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own, *extra]
     return list(dict.fromkeys(path for path in roots if _exists(path)))
+
+
+def _etc_reserved(real: Path) -> bool:
+    """/etc itself or one of its hidden entries: binding either reopens them."""
+    etc = Path("/etc")
+    return real == etc or any(real.is_relative_to(etc / name) for name in _ETC_HIDDEN)
+
+
+def _detected_root_ok(real: Path, home: Path) -> bool:
+    """W2/W11: never the home or above it, never /etc's reserved entries."""
+    return not home.is_relative_to(real) and not _etc_reserved(real)
+
+
+def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
+    """ADR 0068 (W2, W11): why ``path`` cannot be an extra read root, judged
+    where it resolves — at or above the home (``/`` included), in or over the
+    skep home, /etc or its reserved entries — or None."""
+    real = Path(path).resolve()
+    home = Path.home().resolve()
+    skep = skep_home.resolve()
+    if home.is_relative_to(real):
+        return (
+            f"{path} resolves to {real}, at or above the home {home}: that reopens every file "
+            f"strict reads close. Name a subdirectory instead, e.g. {home / 'datasets'}"
+        )
+    if real.is_relative_to(skep) or skep.is_relative_to(real):
+        return (
+            f"{path} resolves to {real}, in or over the skep home {skep} (other runs' "
+            "worktrees, results and audit trails). Name a directory outside it"
+        )
+    if _etc_reserved(real):
+        return (
+            f"{path} resolves to {real}: /etc comes back without "
+            f"{', '.join(sorted(_ETC_HIDDEN))}, and no extra path reopens them"
+        )
+    return None
+
+
+def _validated_extra(extra: Iterable[Path], skep_home: Path) -> list[Path]:
+    """The extra paths, absolute, each checked before anything walks or binds
+    it (W13: a link to / used to walk the whole host first) — or refused."""
+    paths = [Path(os.path.abspath(path)) for path in extra]
+    for path in paths:
+        if problem := extra_read_path_problem(path, skep_home):
+            raise SandboxUnavailableError(
+                f"extra_read_paths: {problem}. The run is refused rather than run with "
+                "that read open; change the project's extra_read_paths."
+            )
+    return paths
 
 
 def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
@@ -661,6 +725,10 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += _env_sockets()
+    # W3: the credentials where $CARGO_HOME moved them — the root the strict
+    # wall binds whole (the default ~/.cargo ones are in HOME_SECRETS).
+    cargo = Path(os.environ.get("CARGO_HOME") or home / ".cargo")
+    candidates += [cargo / "credentials", cargo / "credentials.toml"]
     # W33 where the operator moved it: skep reads the Codex login from
     # $CODEX_HOME when set (codex_login.auth_file), so the mask follows it.
     from .codex_login import auth_file
@@ -895,8 +963,11 @@ def _bubblewrap_args(
     readable_roots = list(readable_roots)
     tmp_mountpoints: dict[str, None] = {}
     for root in [*readable_roots, *writable_roots]:
-        # a file root (one entry of a git common dir) needs only its parents
-        dir_root = Path(root).parent if Path(root).is_file() else Path(root)
+        # an existing non-dir root (a git common dir entry: a file, an
+        # fsmonitor socket) needs only its parents — a --dir at a socket's
+        # path broke the bind (W12); a root not made yet is a dir to be
+        node = Path(root)
+        dir_root = node.parent if node.exists() and not node.is_dir() else node
         for mountpoint in _tmp_mountpoints_for_bind(dir_root):
             tmp_mountpoints.setdefault(mountpoint, None)
     for mountpoint in tmp_mountpoints:
@@ -1255,7 +1326,7 @@ def write_profile(
         extra_readable = list(extra_readable)
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.
-        extra_roots = [Path(path).resolve() for path in read_allowlist or ()]
+        extra_roots = [path.resolve() for path in _validated_extra(read_allowlist or (), skep_home)]
         read_denied += _sockets_under([*extra_readable, *extra_roots])
         aliases = (
             _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist)

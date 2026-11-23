@@ -72,12 +72,6 @@ def queen_filesystem_decision(
     realpath before any document is read (ES-F1)."""
     if not path.strip():
         return AutonomyDecision(verdict="deny", reason="filesystem.deny.missing_path", detail=path)
-    try:
-        target = Path(path).expanduser().resolve()
-    except OSError as exc:
-        return AutonomyDecision(
-            verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
-        )
     floor = queen_floor(holder, Request("filesystem", action, path), role=role)
     if floor is not None:
         return AutonomyDecision(
@@ -100,6 +94,12 @@ def queen_filesystem_decision(
                 "Give its absolute path — one outside these roots asks the operator on a card."
             ),
             decided_by="default/root-boundary",
+        )
+    try:  # W7: only an absolute path gets this far — nothing resolves a name against the cwd
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop (Python < 3.13)
+        return AutonomyDecision(
+            verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
         )
     verdict = queen_decide(holder, store, Request("filesystem", action, str(target)), role=role)
     unmatched = verdict.layer == "default" or verdict.layer.startswith("role:")

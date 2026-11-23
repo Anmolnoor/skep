@@ -257,12 +257,21 @@ def _binding_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str,
     return [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
 
 
-def _project_policy(run_store: RunStore, config: SupervisorConfig, repo: Path) -> dict[str, Any]:
+def _project_policy(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    repo: Path,
+    project_context: ProjectContextPayload | None = None,
+) -> dict[str, Any]:
     """The project policy run_task falls back to for knobs its caller did
-    not pass (the verify pin, the landing branch, the codex login opt-in)."""
+    not pass (the verify pin, the landing branch, the codex login opt-in).
+    W10: the project the caller already resolved comes first — a project
+    bound by template name alone is invisible to the repo lookup."""
     from .policy_resolver import run_policy_for_repo
 
     candidates = _binding_candidates(config, repo)
+    if project_context is not None:
+        candidates.insert(0, (project_context.binding_kind, project_context.binding_value))
     return run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
 
 
@@ -578,7 +587,10 @@ def run_task(
                 raise ValueError(refusal)
             from .codex_login import AUTH_SOURCE, POLICY_KEY, login_status
 
-            if _project_policy(run_store, config, repo).get(POLICY_KEY) is not True:
+            if (
+                _project_policy(run_store, config, repo, project_context).get(POLICY_KEY)
+                is not True
+            ):
                 if login_status().present:
                     # ES-F123 (I9): name the other way in when it is right here.
                     refusal += (
@@ -606,7 +618,7 @@ def run_task(
                 }
             )
     if not verify_command or auto_apply_branch is None:
-        project_policy = _project_policy(run_store, config, repo)
+        project_policy = _project_policy(run_store, config, repo, project_context)
         if not verify_command:
             pinned = project_policy.get("verify_command")
             # A non-string overlay value is treated as unset; resolve_run_policy is
@@ -847,6 +859,12 @@ def run_task(
         # so the proxy also opens an AF_UNIX door and dispatch bind-mounts it in.
         domains = effective_network_domains(task)
         proxy_unix_path: str | None = None
+        # ADR 0068 (W1): the read wall, resolved once from the run's project
+        # and recorded — G10 reads THIS, never the policy again, so a policy
+        # edit between the worker and its re-verify cannot widen G10's reads.
+        read_allowlist = read_allowlist_for(
+            _project_policy(run_store, config, repo, project_context)
+        )
         # ADR 0062 (V6b): with the switch on, a builtin worker's model calls
         # go through a relay route on this same proxy, which holds the key.
         # An allow-all run gets a relay-only proxy (empty allowlist): it
@@ -863,7 +881,11 @@ def run_task(
             and domains == ("*",)
             and execution_mode == "sandbox"
             and config.sandbox
-            and resolve_sandbox_backend(config, NetworkPolicy(allow=domains)) == PODMAN
+            # a strict run takes native bubblewrap even on a podman host (W5)
+            and resolve_sandbox_backend(
+                config, NetworkPolicy(allow=domains), strict_reads=read_allowlist is not None
+            )
+            == PODMAN
         ):
             # A podman run has its own network namespace; a domain-list run
             # already falls back to the native backend, an allow-all one not.
@@ -921,6 +943,8 @@ def run_task(
             dispatched_fields["auth"] = "external-env"
         if coerced_mode is not None:
             dispatched_fields["execution_mode_coerced"] = coerced_mode
+        if read_allowlist is not None:
+            dispatched_fields["read_allowlist"] = [str(path) for path in read_allowlist]
         dispatched_detail = (
             json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )
@@ -991,8 +1015,7 @@ def run_task(
                 write_denied=() if git_pin is None else (git_pin,),
                 unmasked=() if run_login is None else (run_login,),
                 relay=relay if proxy is not None else None,
-                # ADR 0068: the project's read wall (G10 reads the same policy)
-                read_allowlist=read_allowlist_for(_project_policy(run_store, config, repo)),
+                read_allowlist=read_allowlist,  # ADR 0068, as recorded above
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the

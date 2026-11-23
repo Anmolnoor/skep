@@ -1113,6 +1113,14 @@ def reverify(
         stack.close()
 
 
+def _recorded_read_wall(store: RunStore, task_id: str) -> tuple[Path, ...] | None:
+    """The ``read_allowlist`` a run's ``dispatched`` line recorded (ADR 0068):
+    None for a run that read denylist-only."""
+    detail = next((d for st, d, _ in store.transitions_for(task_id) if st == "dispatched"), None)
+    recorded = json.loads(detail or "{}").get("read_allowlist")
+    return None if recorded is None else tuple(Path(path) for path in recorded)
+
+
 def reverify_run(
     *,
     store: RunStore,
@@ -1170,19 +1178,12 @@ def reverify_run(
     # v109-F4: prime against a per-project cache, so the resolve work one
     # re-verify pays for, the next one keeps. (Runtime import: the resolver
     # pulls in the serve tree — the same cycle dispatch dodges.)
-    from .policy_resolver import managed_repos_root, project_cache_root, run_policy_for_repo
+    from .policy_resolver import project_cache_root
 
-    # ADR 0068: the wall the project's worker ran in, read from the same
-    # project policy dispatch read it from — G10 never re-runs a patch with
-    # wider reads than the worker had.
-    candidates = [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
-    read_allowlist = (
-        sandbox.read_allowlist_for(
-            run_policy_for_repo(store, config, repo, binding_candidates=candidates)
-        )
-        if profile_path is not None
-        else None
-    )
+    # ADR 0068 (W1): the wall the worker ran in, as its dispatched line
+    # recorded it — never re-resolved, so a policy edit since (or a project
+    # the repo lookup cannot find) never widens G10's reads past the worker's.
+    read_allowlist = _recorded_read_wall(store, task_id) if profile_path is not None else None
 
     # v127-A0 review (council round 3, I2): re-verify's own half of the
     # project root — the worker's sandbox mounts only ``worker/``, so nothing

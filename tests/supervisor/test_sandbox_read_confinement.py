@@ -200,21 +200,25 @@ def test_denylist_mode_keeps_the_host_root_unchanged(tmp_path: Path) -> None:
 def test_the_secret_masks_land_after_every_extra_read_path(
     fake_home: Path, skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Masks LAST: an operator who lists the whole home still never reads ~/.ssh."""
+    """Masks LAST: an operator who lists a dir holding a credential still
+    never reads it (the whole home is refused outright, W2)."""
     _usable(monkeypatch, "bubblewrap")
+    cargo = fake_home / ".cargo"
+    cargo.mkdir()
+    (cargo / "credentials.toml").write_text("CANARY\n", encoding="utf-8")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     profile = sandbox.write_profile(
         tmp_path / "p.profile",
         workspace=workspace,
         skep_home=skep_home,
-        read_allowlist=(fake_home,),
+        read_allowlist=(cargo,),
     )
     args = _profile_argv(profile)
-    home_bind = args.index(str(fake_home))
-    ssh_mask = max(i for i, arg in enumerate(args) if arg == str(fake_home / ".ssh"))
-    assert ssh_mask > home_bind
-    assert args[ssh_mask - 1] == "--tmpfs"
+    cargo_bind = args.index(str(cargo))
+    mask = max(i for i, arg in enumerate(args) if arg == str(cargo / "credentials.toml"))
+    assert mask > cargo_bind
+    assert args[mask - 2 : mask] == ["--ro-bind", "/dev/null"]
     token_mask = args.index(str(skep_home / "supervisor" / "serve-token"))
     assert args[token_mask - 2 : token_mask] == ["--ro-bind", "/dev/null"]
 
@@ -396,8 +400,8 @@ def test_a_linked_worktree_reads_its_common_dir_but_not_its_siblings(tmp_path: P
     roots = git_metadata_readable_roots(tmp_path / "mine")
     common = (repo / ".git").resolve()
     assert common / "config" in roots
-    assert common / "refs" in roots
-    assert all(root.parent == common for root in roots)
+    assert common / "refs" / "heads" in roots  # refs/ minus the stash (W4)
+    assert all(root.is_relative_to(common) for root in roots)
     assert common / "worktrees" not in roots  # the siblings' HEAD/index stay out
     assert common / "objects" not in roots  # bound writable, never walked for sockets
 
@@ -662,24 +666,25 @@ class _Stop(Exception):
 
 
 @pytest.mark.parametrize(
-    ("policy", "expected"),
-    [
-        (
-            {"strict_read_confinement": True, "extra_read_paths": ["/srv/data"]},
-            (Path("/srv/data"),),
-        ),
-        ({}, None),
-    ],
+    ("recorded", "expected"),
+    [({"read_allowlist": ["/srv/data"]}, (Path("/srv/data"),)), ({}, None)],
 )
-def test_g10_takes_its_wall_from_the_project_policy(
+def test_g10_takes_its_wall_from_the_dispatched_record(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch,
-    policy: dict[str, Any], expected: Any,
+    recorded: dict[str, Any], expected: Any,
 ) -> None:  # fmt: skip
+    """W1: the wall the worker ran in, as dispatch recorded it — the project
+    policy (strict here) is never read again."""
     import importlib
 
     # the package exports the function under the module's name
     reverify_module = importlib.import_module("skep.supervisor.reverify")
-    _bind(config, repo, policy)
+    _bind(config, repo, {"strict_read_confinement": True})
+    store = RunStore(config.db_path)
+    try:
+        store.transition("t-strict", "dispatched", json.dumps(recorded))
+    finally:
+        store.close()
     seen: dict[str, Any] = {}
 
     def spy(**kwargs: Any) -> Any:

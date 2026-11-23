@@ -32,21 +32,24 @@ from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 logger = logging.getLogger("skep.spawner")
 
 
-def resolve_sandbox_backend(config: SupervisorConfig, network: sandbox.NetworkPolicy) -> str | None:
+def resolve_sandbox_backend(
+    config: SupervisorConfig, network: sandbox.NetworkPolicy, *, strict_reads: bool = False
+) -> str | None:
     """v44-F7: which backend wraps this worker; None = the native host backend.
 
     An opted-in podman backend falls back to native — loudly, never silently —
     when podman is unusable here or the run needs a concrete domain allowlist
-    (the filtering-proxy bridge is bubblewrap-specific). Fail-open toward the
-    STRICTER native backend, never toward no sandbox.
+    (the filtering-proxy bridge is bubblewrap-specific) or strict reads (ADR
+    0068, W5: podman cannot confine reads to an allowlist). Fail-open toward
+    the STRICTER native backend, never toward no sandbox.
     """
     if config.sandbox_backend in ("auto", "", "none"):
         return None
     backend = config.sandbox_backend
-    if backend == sandbox.PODMAN and network.is_domain_list:
+    if backend == sandbox.PODMAN and (network.is_domain_list or strict_reads):
         logger.warning(
-            "sandbox_backend=podman cannot enforce a domain allowlist; "
-            "using the native backend for this run"
+            "sandbox_backend=podman cannot enforce %s; using the native backend for this run",
+            "a domain allowlist" if network.is_domain_list else "strict reads",
         )
         return None
     probe = sandbox.availability(backend)
@@ -233,7 +236,8 @@ def spawn_worker(
         network = sandbox.ALLOW_ALL_NETWORK
     else:
         network = sandbox.NetworkPolicy(allow=domains)
-    backend = resolve_sandbox_backend(config, network) if use_sandbox else None
+    strict = read_allowlist is not None
+    backend = resolve_sandbox_backend(config, network, strict_reads=strict) if use_sandbox else None
     if use_sandbox:
         # ES-F1 (B47): no usable backend raises here — the worker never starts
         # unconfined under a "sandbox" record.
@@ -253,7 +257,12 @@ def spawn_worker(
             log_path.parent / "sandbox.profile.sb",
             workspace=workspace,
             extra_writable=writable,
-            extra_readable=git_metadata_readable_roots(workspace),
+            extra_readable=(
+                *git_metadata_readable_roots(workspace),
+                # W8 (I9): the operator chose this command; its own script must
+                # not die as ENOENT behind the wall (its siblings stay out).
+                *(_command_files(argv) if strict else ()),
+            ),
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
@@ -327,3 +336,11 @@ def spawn_worker(
         )
     finally:
         log_handle.close()
+
+
+def _command_files(argv: Iterable[str]) -> list[Path]:
+    """The worker argv's own absolute files (its script; the task file sits in
+    the workspace already), not links: a venv's python is a link into a bound
+    root already, and a file bound over a link breaks bwrap."""
+    return [Path(arg) for arg in argv if os.path.isabs(arg) and os.path.isfile(arg)
+            and not os.path.islink(arg)]  # fmt: skip

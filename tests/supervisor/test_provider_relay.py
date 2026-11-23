@@ -1063,3 +1063,67 @@ def test_a_copilot_relay_strips_the_github_token_its_bearer_came_from(
     env = seen["env"]
     assert env["SKEP_TEST_PLAIN"] == "kept"
     assert not any(github_token in v or bearer in v for v in env.values()), sorted(env)
+
+
+def test_a_strict_allow_all_run_on_a_podman_host_is_still_relayed(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0068 W5 + 0062: a strict run takes native bubblewrap even on a
+    podman host, so the relay check must ask for THAT backend — else it
+    turned the relay off and handed the worker the key file instead."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import dispatch, sandbox
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    started: list[object] = []
+
+    class _Proxy:
+        def __init__(self, *_: object, **kwargs: object) -> None:
+            started.append(kwargs.get("relay"))
+            self.port = 1
+
+        def start(self) -> _Proxy:
+            raise OSError("stop after proxy start")
+
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    monkeypatch.setattr(dispatch, "FilteringProxy", _Proxy)
+    monkeypatch.setattr(
+        dispatch,
+        "resolve_sandbox_backend",
+        lambda *_a, strict_reads=False, **_k: None if strict_reads else sandbox.PODMAN,
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "sandbox_availability",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend=backend),
+    )
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="m",
+        endpoint="http://127.0.0.1:9",
+        api_key_env="SKEP_TEST_RELAY_KEY",
+    )
+    store = RunStore(config.db_path)
+    store.set_setting("provider_key_relay", True)
+    store.add_project_policy(
+        project_id="strict", name="strict", strategy="trusted_local_dev", phase="build",
+        policy={"strict_read_confinement": True},
+    )  # fmt: skip
+    store.add_project_binding(
+        project_id="strict", binding_kind="repo_path", binding_value=str(repo.resolve())
+    )
+    store.close()
+    dispatch.run_task(
+        repo,
+        "x",
+        config=config,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        execution_mode="sandbox",
+    )
+    assert started and started[0] is not None  # the relay rides the native run
