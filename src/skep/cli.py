@@ -144,6 +144,12 @@ def _parser() -> argparse.ArgumentParser:
         "doctor",
         help="check local configuration and runtime readiness",
     )
+    doctor.add_argument(
+        "--offline",
+        action="store_true",
+        help="skip every network probe (the live provider completion probe included)",
+    )
+    doctor.add_argument("--json", action="store_true", help="print machine-readable JSON")
     doctor.set_defaults(func=_doctor)
 
     status = subcommands.add_parser(
@@ -664,8 +670,8 @@ def _onboard_chat(supervisor_home: Path, role: str) -> int:
 
 
 def _doctor(args: argparse.Namespace) -> int:
-    status = build_status(args.home)
-    print(format_doctor_report(status), end="")
+    status = build_status(args.home, offline=args.offline)
+    print((status_json if args.json else format_doctor_report)(status), end="")
     return 0 if status["overall"] == "ready" else 1
 
 

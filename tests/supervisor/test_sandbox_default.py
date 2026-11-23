@@ -114,10 +114,10 @@ def test_doctor_names_projects_still_in_the_workspace(tmp_path: Path) -> None:
             )  # fmt: skip
     finally:
         store.close()
-    advisories = build_status(home)["advisories"]
-    (line,) = [a for a in advisories if "run workers unsandboxed" in a]
-    assert "old" in line and "new" not in line.split(":")[1]
-    assert "--execution-mode sandbox" in line
+    # Phase 05 5.2: a Projects-needing-upgrade line, one per project
+    upgrades = {u["project_id"]: u for u in build_status(home)["project_upgrades"]}
+    assert "--execution-mode sandbox" in upgrades["old"]["command"]
+    assert "sandbox" not in upgrades.get("new", {"needs": []})["needs"]
 
 
 def test_a_scheduled_sandbox_run_on_a_failed_probe_is_refused_with_a_health_row(
