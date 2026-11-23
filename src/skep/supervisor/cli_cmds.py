@@ -1029,6 +1029,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             tail.stop()
 
     record = outcome.record
+    # R1 G1 (I5, I6): only a run whose grants ARE the project's policy — the
+    # policy the unlocked step reloads. --minimal, start-minimal and an
+    # unbound template chose narrower grants and learn through approvals.
+    if record.state == "pending_approval" and resolved_policy is not None:
+        record = _answer_unlocked_gates(config, record)
     elapsed = time.monotonic() - started
     print(f"task {record.task_id}")
     print(f"  state:        {record.state} ({elapsed:.1f}s)")
@@ -1059,6 +1064,12 @@ def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str
             f"  verification: {record.verification_outcome or '-'}",
             f"  summary:      {record.summary or '-'}",
         ]
+    if rv.outcome == "tampered":
+        # phase-01 1.2 (I8): exit 0 under rewritten tests — name the flags
+        from .serve.actions import tamper_note
+
+        verdict = f"TAMPERED — NOT CONFIRMED by re-verify (G10) — {tamper_note(rv)}"
+        return [f"  verification: {verdict}", f"  worker claim: {claim}"]
     if rv.confirmed:
         verdict = "confirmed by re-verify (G10)"
     elif rv.outcome == "unavailable":
@@ -1391,6 +1402,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                     )
                 elif reverify.commands:
                     lines.append(f"                recorded verify: {reverify.commands}")
+                from .serve.actions import tamper_note
+
+                tampered = tamper_note(reverify)  # phase-01 1.2: V1's flags and counts
+                if tampered:
+                    lines.append(f"                {tampered}")
             usage = store.usage_for(record.task_id)
             if usage is not None:
                 lines.append(f"  usage:        {_usage_summary(usage)} (G8)")
@@ -1809,7 +1825,67 @@ def _resume_pending_approval(
         raise
 
 
-def _resume_claimed_gate(
+# ADR 0061 (phase-01 1.1): how many gates in a row one CLI `skep run`
+# answers itself before the next waits for a human — a worker that gates
+# again after every resume must not hold the foreground forever.
+MAX_UNLOCKED_RESUMES = 10
+
+
+def _answer_unlocked_gates(config: SupervisorConfig, record: RunRecord) -> RunRecord:
+    """ADR 0061 parity for a CLI ``skep run``: serve's one decision
+    (``unlocked_gate_allowed``: decide(…, sandboxed=True), one decision-log
+    row per request, actor ``auto:unlocked``) answers the gate, and the CLI
+    resumes it in-process, up to ``MAX_UNLOCKED_RESUMES`` times. Returns the
+    last run of the chain; a gate the decision did not allow, or one past
+    the cap, stays pending for a human."""
+    from .serve.actions import UNLOCKED_ACTOR, unlocked_gate_allowed
+    from .serve.settings import ConfigHolder
+
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        for _ in range(MAX_UNLOCKED_RESUMES):
+            try:
+                approval = unlocked_gate_allowed(store, holder, record.task_id)
+            except (ValueError, OSError) as exc:  # R1 G3: a missing task.json
+                _err(f"unlocked: could not answer the gate: {exc}", state=record.state)
+                return record
+            if approval is None or not store.claim_approval(approval.review_id):
+                return record
+            try:
+                audit_task = config.audit_dir / record.task_id / "task.json"
+                original = CodingWorkerTask.model_validate_json(audit_task.read_text())
+                new = _run_claimed_resume(
+                    config,
+                    store,
+                    record,
+                    UNLOCKED_ACTOR,
+                    original,
+                    approval.review_id,
+                    remembered=False,
+                )
+            except (ValueError, OSError) as exc:
+                # R1 G3: a refused resume (no auth env, engine absent, no
+                # task.json) is an answer, as on serve: the gate stays a card.
+                store.unclaim_approval(approval.review_id)
+                _err(f"unlocked: could not resume the gate: {exc}", state=record.state)
+                return record
+            except BaseException:
+                store.unclaim_approval(approval.review_id)
+                raise
+            print(f"  unlocked:     answered {record.task_id} -> {new.task_id} ({new.state})")
+            record = new
+        if record.state == "pending_approval":
+            print(
+                f"  unlocked:     answered {MAX_UNLOCKED_RESUMES} gates in a row (the cap); "
+                "this one waits for you"
+            )
+        return record
+    finally:
+        store.close()
+
+
+def _run_claimed_resume(
     config: SupervisorConfig,
     store: RunStore,
     record: RunRecord,
@@ -1818,7 +1894,8 @@ def _resume_claimed_gate(
     review_id: str,
     *,
     remembered: bool,
-) -> int:
+) -> RunRecord:
+    """Resume a claimed gate in-process; returns the successor run."""
     approval = store.get_approval(review_id)
     approval_reason = None if approval is None else approval.reason
     approval_action = None if approval is None else approval.action
@@ -1845,13 +1922,19 @@ def _resume_claimed_gate(
         commands=approval_commands,
     )
     print(f"resuming task {record.task_id} with approval by {actor} ...")
+    from .serve.actions import PIN_DRIFT_NOTE, pin_drifted
+
+    drifted = pin_drifted(store, config, Path(record.repo), original)
+    if drifted:
+        print(f"  note:         {PIN_DRIFT_NOTE}")
     outcome = run_task(
         Path(record.repo),
         record.instructions,
         config=config,
         permissions=original.permissions,
         budget=original.budget,
-        auto_apply_verified_patch=original.auto_apply_verified_patch,
+        # Review R3 (H5, I2): a superseded pin never lands by itself
+        auto_apply_verified_patch=False if drifted else original.auto_apply_verified_patch,
         project_context=original.project_context,
         dispatch_decision=resume_after_approval_decision(
             resumed_from_task_id=record.task_id,
@@ -1864,6 +1947,12 @@ def _resume_claimed_gate(
         # sandbox and silently moved a workspace run (ADR 0050 parity with
         # resume_past_gate, which already carries it).
         execution_mode=record.execution_mode,
+        # R1 G7 (I2): the audited run's pin, caste, protocol and engine — not
+        # run_task's defaults, which a template-bound pin never reaches.
+        worker_kind=original.worker_kind,
+        planning_protocol=original.planning_protocol,
+        verify_command=original.verify_command,
+        coding_engine=record.coding_engine or "",
         store=store,
     )
     # Resolve the original's approval, linking it to the resume it produced.
@@ -1871,7 +1960,8 @@ def _resume_claimed_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
+        + (f"; {PIN_DRIFT_NOTE}" if drifted else ""),
         remembered=remembered,
         claimed=True,
     )
@@ -1884,7 +1974,22 @@ def _resume_claimed_gate(
         record.task_id, TaskState.SUPERSEDED.value, f"resumed as {outcome.record.task_id}"
     )
     store.update_ledger_outcome(record.task_id, outcome.record.state)
-    new = outcome.record
+    return outcome.record
+
+
+def _resume_claimed_gate(
+    config: SupervisorConfig,
+    store: RunStore,
+    record: RunRecord,
+    actor: str,
+    original: CodingWorkerTask,
+    review_id: str,
+    *,
+    remembered: bool,
+) -> int:
+    new = _run_claimed_resume(
+        config, store, record, actor, original, review_id, remembered=remembered
+    )
     remembered_template = None
     if remembered and new.state == "completed":
         remembered_template = _remember_learned_template(
@@ -4033,8 +4138,8 @@ def register_supervisor_commands(
         action=argparse.BooleanOptionalAction,
         default=None,
         help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
-        "command asks answer themselves on serve-dispatched runs (never a host no rule "
-        "names), dispatch needs no card and a G10-confirmed patch "
+        "command asks answer themselves, on serve and on a foreground `skep run` alike "
+        "(never a host no rule names), dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",

@@ -591,6 +591,7 @@ def _unlocked_advisories(home: Path) -> list[str]:
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
+    from .supervisor.cli_cmds import MAX_UNLOCKED_RESUMES
     from .supervisor.store import RunStore
 
     store = RunStore(db_path, readonly=True)
@@ -606,8 +607,9 @@ def _unlocked_advisories(home: Path) -> list[str]:
         return []
     lines = [
         f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0061): {', '.join(unlocked)} — "
-        "on runs the serve dispatches, sandboxed workers there are not asked about "
-        "commands no rule names (a CLI `skep run` still stops at every gate); a host no "
+        "sandboxed workers there are not asked about commands no rule names, on runs the "
+        "serve dispatches and on a CLI `skep run` (which answers up to "
+        f"{MAX_UNLOCKED_RESUMES} gates in a row, then waits for you); a host no "
         "rule names is still refused or asked, never auto-approved (D42); "
         f"turn it off with `skep project setup <repo> --project-id {unlocked[0]} --no-unlocked`"
     ]

@@ -139,7 +139,7 @@ from ..shell_prefixes import (
     reaches_network,
     worker_allowlist_reason,
 )
-from ..store import ChatTaint, RunStore, owner_alive
+from ..store import ApprovalRecord, ChatTaint, RunStore, owner_alive
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -394,6 +394,7 @@ def reverification_event_view_for_task(store: RunStore, task_id: str) -> dict[st
             "commands": reverify.commands,
             "exit_codes": reverify.exit_codes,
             "detail": reverify.detail,
+            "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
         },
     }
 
@@ -520,7 +521,57 @@ def reverification_summary(reverify: Any) -> dict[str, Any] | None:
     """
     if reverify is None:
         return None
-    return {"outcome": reverify.outcome, "confirmed": reverify.confirmed}
+    return {
+        "outcome": reverify.outcome,
+        "confirmed": reverify.confirmed,
+        "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
+    }
+
+
+def tamper_note(reverify: Any) -> str | None:
+    """phase-01 1.2 (I8): what G10's test-tamper guard (V1) found — its flags
+    and the executed-test counts, baseline → patched — or the unreadable-counts
+    block; None when neither applies. Every face quotes this one line."""
+    if reverify is None:
+        return None
+    counts = reverify.test_counts or {}
+    failed = [
+        f.partition(":")[2] for f in reverify.tamper_flags if f.startswith("tamper_check_failed")
+    ]
+    if failed and len(failed) == len(reverify.tamper_flags):
+        # Review R3 (H7, I8): the guard could not look — say that, not "changes"
+        return (
+            f"the test-tamper check could not inspect this patch ({', '.join(failed)}); "
+            "auto-landing is blocked — review the patch before landing it by hand"
+        )
+    if reverify.tamper_flags:
+        totals = ""
+        if counts.get("status") == "ok":
+            base, patched = counts["baseline"], counts["patched"]
+            totals = (
+                "; "
+                + ", ".join(
+                    f"{word} {base[key]} → {patched[key]}"
+                    for word, key in (
+                        ("executed tests", "total_executed"),
+                        ("passed", "passed"),
+                        ("skipped", "skipped"),
+                    )
+                )
+                + " (baseline → patched)"
+            )
+        return (
+            f"TEST-TAMPER: the patch changes the tests ({', '.join(reverify.tamper_flags)})"
+            f"{totals} — re-verification (G10) did NOT confirm it and skep will not land it "
+            "by itself; review the test changes before any landing"
+        )
+    if counts.get("status") == "unparseable" and reverify.outcome == "passed":
+        # R1 G9: a re-run that failed (a collection error) says that itself
+        return (
+            "TEST COUNTS UNREADABLE: the pinned pytest check's test counts could not be "
+            "read, so auto-landing was blocked — review the patch before landing it by hand"
+        )
+    return None
 
 
 def reverification_warning(reverify: Any) -> str | None:
@@ -534,6 +585,10 @@ def reverification_warning(reverify: Any) -> str | None:
     """
     if reverify is None or reverify.confirmed:
         return None
+    if reverify.outcome == "tampered":
+        # phase-01 1.2 (I8): exit code 0 under rewritten tests is no failure
+        # and no "could not" — it is the tamper, named with its evidence.
+        return tamper_note(reverify)
     if reverify.outcome == "not_applicable":
         return None
     if reverify.outcome == "passed" and reverify.worker_outcome == "passed":
@@ -2754,6 +2809,11 @@ def approval_view(
         ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
+    if approval.status == "pending":  # R1 G6: the card's boundary, one classifier
+        from .cards import boundary
+
+        label, remedy = boundary("approve_review", {"review_id": approval.review_id}, store=store)
+        row.update({k: v for k, v in (("boundary", label), ("remediation", remedy)) if v})
     if project_context is not None:
         row["project_context"] = project_context
     decision = None
@@ -3796,6 +3856,29 @@ def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
     return delegation if isinstance(delegation, dict) else None
 
 
+PIN_DRIFT_NOTE = (
+    "verify pin changed while the gate waited — auto-landing is off for the "
+    "successor; a human lands it"
+)
+
+
+def pin_drifted(
+    store: RunStore, config: SupervisorConfig, repo: Path, original: CodingWorkerTask
+) -> bool:
+    """Review R3 (H5, I2): a resume re-runs the AUDITED pin. When the project's
+    current pin for the run's binding differs, that check is superseded, so
+    the successor must not land by itself under it. Unresolvable = drifted."""
+    ctx = original.project_context
+    candidates = [] if ctx is None else [(ctx.binding_kind, ctx.binding_value)]
+    try:
+        policy = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+    except PolicyResolutionError:
+        return True
+    current = policy.get("verify_command") or ""
+    audited = (original.verify_command or "").strip()  # R3: strip both, as G10 does
+    return not isinstance(current, str) or current.strip() != audited
+
+
 def resume_past_gate(
     store: RunStore,
     config: SupervisorConfig,
@@ -3860,6 +3943,7 @@ def resume_past_gate(
         decision=None if decision is None else decision.to_payload(),
         commands=approval_commands,
     )
+    drifted = pin_drifted(store, config, Path(str(run["repo"])), original)
     # B142: claim the gate before dispatching — check-then-act let two
     # approves (web + a messenger button) each dispatch a resume.
     if not store.claim_approval(review_id):
@@ -3870,7 +3954,7 @@ def resume_past_gate(
             str(run["instructions"]),
             permissions=permissions,
             budget=original.budget,
-            auto_apply_verified_patch=original.auto_apply_verified_patch,
+            auto_apply_verified_patch=False if drifted else original.auto_apply_verified_patch,
             project_context=original.project_context,
             dispatch_decision=resume_after_approval_decision(
                 resumed_from_task_id=task_id, delegation=delegation
@@ -3879,6 +3963,12 @@ def resume_past_gate(
             resume_of=task_id,
             approval_verdict=verdict,
             execution_mode=str(run.get("execution_mode") or "sandbox"),
+            # R1 G7 (I2, ADR 0050 parity with the CLI): the audited run's pin,
+            # caste, protocol and engine — not the submit defaults.
+            worker_kind=original.worker_kind,
+            planning_protocol=original.planning_protocol,
+            verify_command=original.verify_command,
+            coding_engine=str(run.get("coding_engine") or ""),
         )
     except DispatchError as exc:
         store.unclaim_approval(review_id)
@@ -3890,7 +3980,7 @@ def resume_past_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {resumed_id} (dispatched)",
+        note=f"resumed as {resumed_id} (dispatched)" + (f"; {PIN_DRIFT_NOTE}" if drifted else ""),
         remembered=remembered,
         claimed=True,
     )
@@ -3915,17 +4005,18 @@ def _gate_requests(store: RunStore, approval: Any) -> list[Request]:
     return [Request("shell", "run", shlex.join(command)) for command in commands]
 
 
-def auto_answer_unlocked_gate(
-    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
-) -> str | None:
-    """ADR 0061: on an unlocked project a sandboxed run's gate answers itself
-    when ``decide(…, sandboxed=True)`` allows every request it names, under
-    the run's own role and chain — the click path (``resume_past_gate``),
-    actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
-    A host gate never answers itself, not even for a host a rule allows
-    (D42, v132-F1: it is never put to ``decide`` here), and only the serve's
-    done-callback calls this — a CLI run stops at its gate.
-    Returns the resumed task id, or None: the gate stays a human's card."""
+def unlocked_gate_allowed(
+    store: RunStore, holder: ConfigHolder, task_id: str
+) -> ApprovalRecord | None:
+    """ADR 0061: the ONE decision both faces share (I5, ADR 0050). On an
+    unlocked project a sandboxed run's gate answers itself when
+    ``decide(…, sandboxed=True)`` allows every request it names, under the
+    run's own role and chain. Each request is a decision-log row, actor
+    ``auto:unlocked``, naming the run (I13, D34). A host gate never answers
+    itself, not even for a host a rule allows (D42, v132-F1: it is never put
+    to ``decide`` here). Returns the pending gate for the caller to resume —
+    serve via ``resume_past_gate``, a CLI ``skep run`` in its own bounded
+    loop — or None: the gate stays a human's card."""
     run = store.get_run(task_id)
     if run is None or run.state != "pending_approval":
         return None
@@ -3939,14 +4030,21 @@ def auto_answer_unlocked_gate(
     if stack.unlocked is None:
         return None
     audit_task = holder.current.audit_dir / task_id / "task.json"
-    delegation = _delegation_of(CodingWorkerTask.model_validate_json(audit_task.read_text()))
+    task = CodingWorkerTask.model_validate_json(audit_task.read_text())
+    if task.project_context is None or task.project_context.project_id != stack.unlocked:
+        # Review R3 (H2, I5, I6): the stack is the repo's own project; a run
+        # that ran under another policy (a template bound to a locked project,
+        # --minimal, no project) learns through a human, not this step.
+        return None
+    delegation = _delegation_of(task)
     chain, role = delegation_inputs(
         holder,
         (delegation or {}).get("chain") or (),
         (delegation or {}).get("role"),
         team=(delegation or {}).get("team"),
     )
-    for req in requests:
+    allowed = True
+    for req in requests:  # R1 G2 (I13): every request is decided and logged
         verdict = decide_v3(req, stack=stack, role=role, chain=chain, sandboxed=True)
         row = _decision_row(
             verdict,
@@ -3958,8 +4056,20 @@ def auto_answer_unlocked_gate(
         )
         row["task_id"] = task_id  # D34: the run's receipt lists what it reached
         log_decision(holder.current.audit_dir, row)
-        if verdict.verdict != "allow":
-            return None
+        allowed = allowed and verdict.verdict == "allow"
+    return approval if allowed else None
+
+
+def auto_answer_unlocked_gate(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
+) -> str | None:
+    """Serve's done-callback face of ``unlocked_gate_allowed``: an allowed
+    gate resumes on the click path (``resume_past_gate``), actor
+    ``auto:unlocked``, once. Returns the resumed task id, or None: the gate
+    stays a human's card."""
+    approval = unlocked_gate_allowed(store, holder, task_id)
+    if approval is None:
+        return None
     return resume_past_gate(
         store,
         holder.current,

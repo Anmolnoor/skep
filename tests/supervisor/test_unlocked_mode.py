@@ -34,12 +34,16 @@ def _sandbox(usable: bool) -> Any:
     return probe
 
 
-def lock_baseline(home: Path, name: str = "builder") -> None:
-    """An approved baseline, so the zero-state guard binds nothing."""
+def lock_baseline(home: Path, name: str = "builder", *, shell_rules: bool = True) -> None:
+    """An approved baseline, so the zero-state guard binds nothing.
+    ``shell_rules=False`` drops every shell rule: zero operator shell rules,
+    so only the floor stands between a gate and the unlocked step."""
     from skep.supervisor import policy_baseline as pb
     from skep.supervisor.policy_templates import load_policy_template
 
     layer = load_policy_template(name).model_dump(mode="json")
+    if not shell_rules:
+        layer["rules"] = [rule for rule in layer["rules"] if rule["scope"] != "shell"]
     pb.write_lock(home, pb._load_layer(layer), approved_by="op")
 
 
@@ -239,6 +243,15 @@ def _bound(config: SupervisorConfig, repo: Path, policy: dict[str, Any]) -> RunS
 
 
 UNLOCKED = {"unlocked": True, "verify_command": PIN}
+
+
+def _own_project(repo: Path) -> Any:
+    from skep.worker_contract.task import ProjectContextPayload
+
+    return ProjectContextPayload(
+        project_id="unlockable", name="Unlockable", strategy="trusted_local_dev",
+        phase="build", binding_kind="repo_path", binding_value=str(repo.resolve()),
+    )  # fmt: skip
 
 
 @pytest.mark.parametrize("v2", [False, True], ids=["engine-v1", "engine-v2"])
@@ -488,13 +501,14 @@ def _gated_run(
     mode: str = "shellgate",
     unlocked: bool = True,
     execution_mode: str = "sandbox",
+    shell_rules: bool = True,
 ) -> tuple[Any, str]:
     """A serve app, an (un)locked project on ``repo`` and one run that stops
     on ``gate``; returns the client and the first run's terminal record."""
     from .conftest import wait_terminal
 
     config.home.mkdir(parents=True, exist_ok=True)
-    lock_baseline(config.home)
+    lock_baseline(config.home, shell_rules=shell_rules)
     _bound(config, repo, {**UNLOCKED, "unlocked": unlocked}).close()
     client = serve_client(config)
     sent = client.post("/api/runs", json={
@@ -683,6 +697,380 @@ def test_a_cli_run_on_an_unlocked_project_stops_at_an_unnamed_host_gate(
     assert _decisions(config) == []
 
 
+# --- phase-01 1.1: CLI `skep run` answers the same gates, through one decision --
+
+# what the worker floor and decide()'s floor deny, and the opaque shell
+# _widens keeps asking — with ZERO operator shell rules, so nothing but the
+# floor and _widens stands between these gates and the unlocked step.
+FLOOR_GATES = ["git_push_origin_main", "sudo_true", "env_git_push", "sh_-c_echo_x"]
+
+
+def test_zero_shell_rules_never_unlock_the_floor_or_an_opaque_shell(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.policy_v3 import Request, decide, load_stack
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    lock_baseline(config.home, shell_rules=False)
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        stack = load_stack(ConfigHolder(config, store), store, repo=str(repo.resolve()))
+    finally:
+        store.close()
+    assert stack.unlocked is not None
+    for command, verdict in (("git push origin main", "deny"), ("sudo true", "deny"),
+                             ("env git push", "deny"), ('sh -c "echo x"', "require_approval"),
+                             ("make lint", "allow")):  # fmt: skip
+        got = decide(Request("shell", "run", command), stack=stack, sandboxed=True)
+        assert got.verdict == verdict, (command, got)
+
+
+@_SANDBOX
+@pytest.mark.parametrize("gate", FLOOR_GATES)
+def test_serve_never_auto_answers_a_floor_or_opaque_shell_gate_with_zero_shell_rules(
+    repo: Path, config: SupervisorConfig, gate: str
+) -> None:
+    client, first = _gated_run(config, repo, gate, shell_rules=False)
+    _settled(config, first)
+    assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
+    rows = _decisions(config)
+    assert [r["verdict"] for r in rows] == [
+        "require_approval" if gate.startswith("sh_") else "deny"
+    ]
+    assert rows[0]["task_id"] == first
+
+
+def _cli_run(
+    tmp_path: Path,
+    repo: Path,
+    gate: str,
+    *,
+    unlocked: bool = True,
+    shell_rules: bool = False,
+    extra: tuple[str, ...] = (),
+) -> tuple[SupervisorConfig, int]:
+    """One CLI ``skep run`` on an (un)locked project whose worker gates on ``gate``."""
+    import shlex
+    import sys
+
+    from skep.supervisor.cli_cmds import build_config
+
+    from .conftest import FAKE_WORKER
+
+    root = tmp_path / "cli-home"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    lock_baseline(config.home, shell_rules=shell_rules)
+    _bound(config, repo, {**UNLOCKED, "unlocked": unlocked}).close()
+    argv = ["--home", str(root), "run", str(repo), f"Fix it. MODE:shellgate GATE:{gate}"]
+    argv += ["--worker-cmd", shlex.join([sys.executable, str(FAKE_WORKER)]), "--quiet"]
+    argv += ["--execution-mode", "sandbox", *extra]
+    return config, main(argv)
+
+
+def _pending(config: SupervisorConfig) -> list[Any]:
+    store = RunStore(config.db_path)
+    try:
+        return store.pending_approvals()
+    finally:
+        store.close()
+
+
+@_SANDBOX
+@pytest.mark.parametrize("gate", FLOOR_GATES)
+def test_cli_never_auto_answers_a_floor_or_opaque_shell_gate_with_zero_shell_rules(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], gate: str
+) -> None:
+    config, code = _cli_run(tmp_path, repo, gate)
+    assert code == 4
+    assert "state:        pending_approval" in capsys.readouterr().out
+    rows = _decisions(config)
+    assert [r["verdict"] for r in rows] == [
+        "require_approval" if gate.startswith("sh_") else "deny"
+    ]
+    assert [a.task_id for a in _pending(config)] == [rows[0]["task_id"]]
+
+
+@_SANDBOX
+def test_cli_run_answers_an_allowed_gate_itself_and_lands_like_serve(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    out = capsys.readouterr().out
+    assert code == 0, out
+    rows = _decisions(config)
+    assert [(r["verdict"], r["decided_by"]) for r in rows] == [
+        ("allow", "unlocked:unlockable/zero-ask")
+    ]
+    first = rows[0]["task_id"]
+    store = RunStore(config.db_path)
+    try:
+        resolved = store.approvals_for(first)
+        assert [(a.status, a.resolved_by) for a in resolved] == [("approved", "auto:unlocked")]
+        final = store.resumed_as_for(first)
+        record = store.get_run(first)
+        assert record is not None and record.state == "superseded"
+    finally:
+        store.close()
+    assert final is not None and f"task {final}" in out
+    # G10 confirmed the pinned verify, then the patch landed on skep/* — never main
+    assert _landed(config, final) == ("auto:verified-patch", f"skep/{final}")
+
+
+@_SANDBOX
+def test_cli_run_stops_answering_at_the_resume_cap(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that gates again after every resume must not loop the
+    foreground forever: past the cap its gate waits for a human."""
+    from skep.supervisor import cli_cmds
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+
+    def regating(*args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("approval_verdict", None)  # the fake worker gates again
+        return real_run_task(*args, **kwargs)
+
+    monkeypatch.setattr(cli_cmds, "run_task", regating)
+    monkeypatch.setattr(cli_cmds, "MAX_UNLOCKED_RESUMES", 2)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    out = capsys.readouterr().out
+    assert code == 4, out
+    assert "answered 2 gates in a row (the cap)" in out
+    rows = _decisions(config)
+    assert [r["verdict"] for r in rows] == ["allow", "allow"]
+    pending = _pending(config)
+    assert len(pending) == 1 and pending[0].task_id not in {r["task_id"] for r in rows}
+
+
+@_SANDBOX
+def test_cli_run_on_a_locked_project_still_stops_at_the_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, code = _cli_run(tmp_path, repo, "make_lint", unlocked=False, shell_rules=True)
+    assert code == 4
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
+    assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_minimal_run_never_answers_its_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1 G1 (I5, I6): --minimal promises deny-all grants and learning through
+    approvals; the unlocked step reloads the project's policy, so it never
+    answers for a run that chose narrower grants."""
+    config, code = _cli_run(tmp_path, repo, "make_lint", extra=("--minimal",))
+    assert code == 4
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
+    assert len(_pending(config)) == 1
+
+
+def test_a_batch_gate_logs_every_request_before_it_answers(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 G2 (I13): each request a batch gate names is decided and logged,
+    the ones after a refusal too; the gate answers only if all allow."""
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve.actions import unlocked_gate_allowed
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    lock_baseline(config.home, shell_rules=False)
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        task = mint_task(workspace=repo, instructions="gate")
+        task = task.model_copy(update={"project_context": _own_project(repo)})
+        store.create_run(task, repo=repo.resolve(), ref=None, execution_mode="sandbox")
+        (config.audit_dir / task.task_id).mkdir(parents=True)
+        (config.audit_dir / task.task_id / "task.json").write_text(task.model_dump_json())
+        store.transition(task.task_id, "pending_approval", None)
+        store.enqueue_approval(
+            task.task_id, action="shell.run", reason="batch",
+            commands=[["git", "push", "origin", "main"], ["make", "lint"]],
+        )  # fmt: skip
+        assert unlocked_gate_allowed(store, ConfigHolder(config, store), task.task_id) is None
+    finally:
+        store.close()
+    rows = _decisions(config)
+    assert [(r["verdict"], r["task_id"]) for r in rows] == [
+        ("deny", task.task_id),
+        ("allow", task.task_id),
+    ]
+
+
+@_SANDBOX
+def test_cli_run_leaves_the_gate_when_its_resume_is_refused(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G3: a resume refused before it starts (no auth env, a missing
+    engine) is an answer, not a traceback — the gate stays a human's,
+    unclaimed, as serve leaves its card."""
+    from skep.supervisor import cli_cmds
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+
+    def refusing(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            raise ValueError("coding_engine 'codex': NO AUTH ENV")
+        return real_run_task(*args, **kwargs)
+
+    monkeypatch.setattr(cli_cmds, "run_task", refusing)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    captured = capsys.readouterr()
+    assert code == 4, captured
+    assert "NO AUTH ENV" in captured.err and "Traceback" not in captured.err
+    assert "state:        pending_approval" in captured.out
+    rows = _decisions(config)
+    assert [a.task_id for a in _pending(config)] == [rows[0]["task_id"]]
+
+
+@_SANDBOX
+def test_cli_run_leaves_the_gate_when_its_task_envelope_is_unreadable(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G3: the decision itself reads task.json — an unreadable one is a
+    printed reason and a standing gate, never a traceback."""
+    import skep.supervisor.serve.actions as actions
+
+    def unreadable(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("task.json")
+
+    monkeypatch.setattr(actions, "unlocked_gate_allowed", unreadable)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    captured = capsys.readouterr()
+    assert code == 4, captured
+    assert "could not answer the gate" in captured.err and "Traceback" not in captured.err
+    assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_auto_resume_keeps_the_audited_pin_caste_and_engine(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G7 (I2): the resumed successor runs under the audited task's pinned
+    verify_command, caste, protocol and engine — never repo-policy defaults
+    (a template-bound pin is one run_task's repo lookup cannot see)."""
+    from skep.supervisor import cli_cmds
+    from skep.worker_contract import CodingWorkerTask
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+    resumed: list[dict[str, Any]] = []
+
+    def watching(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            resumed.append(kwargs)
+        return real_run_task(*args, **kwargs)
+
+    monkeypatch.setattr(cli_cmds, "run_task", watching)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    assert code == 0, capsys.readouterr()
+    first = _decisions(config)[0]["task_id"]
+    audited = CodingWorkerTask.model_validate_json(
+        (config.audit_dir / first / "task.json").read_text()
+    )
+    assert audited.verify_command == PIN
+    [kwargs] = resumed
+    assert kwargs["verify_command"] == PIN
+    assert kwargs["worker_kind"] == audited.worker_kind
+    assert kwargs["planning_protocol"] == audited.planning_protocol
+    assert kwargs["coding_engine"] == "builtin"
+
+
+@_SANDBOX
+def test_cli_template_run_under_a_locked_project_never_answers_its_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R3 (H2, I5, I6): a template bound to a LOCKED project resolves
+    that project's policy; the unlocked step reloads the repo's own
+    (unlocked) one — not the policy the run ran under — so it never answers."""
+    import shlex
+    import sys
+
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.templates import WorkflowTemplate
+
+    from .conftest import FAKE_WORKER
+
+    root = tmp_path / "cli-home"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    lock_baseline(config.home, shell_rules=False)
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        store.add_project_policy(
+            project_id="locked", name="Locked", strategy="trusted_local_dev", phase="build",
+            policy={"verify_command": PIN},
+        )  # fmt: skip
+        store.add_project_binding(
+            project_id="locked", binding_kind="template_name", binding_value="tpl"
+        )
+        store.add_template(
+            WorkflowTemplate(name="tpl", instructions="Fix it. MODE:shellgate GATE:make_lint")
+        )
+    finally:
+        store.close()
+    argv = ["--home", str(root), "run", "--template", "tpl", str(repo), "--quiet"]
+    argv += ["--worker-cmd", shlex.join([sys.executable, str(FAKE_WORKER)])]
+    argv += ["--execution-mode", "sandbox"]
+    assert main(argv) == 4, capsys.readouterr()
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
+    assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_auto_resume_after_a_pin_change_does_not_auto_land(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3 (H5, I2): the operator changed the pin while the gate was
+    pending — the successor runs under the audited pin but never lands by
+    itself under the superseded check; the CLI says so."""
+    from skep.supervisor import cli_cmds
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+    resumed: list[dict[str, Any]] = []
+
+    def drifting(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            resumed.append(kwargs)
+            return real_run_task(*args, **kwargs)
+        outcome = real_run_task(*args, **kwargs)
+        store = RunStore(kwargs["config"].db_path)
+        try:
+            store.add_project_policy(
+                project_id="unlockable", name="Unlockable", strategy="trusted_local_dev",
+                phase="build", policy={**UNLOCKED, "verify_command": "true"},
+            )  # fmt: skip
+        finally:
+            store.close()
+        return outcome
+
+    monkeypatch.setattr(cli_cmds, "run_task", drifting)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    out = capsys.readouterr().out
+    [kwargs] = resumed
+    assert kwargs["verify_command"] == PIN
+    assert kwargs["auto_apply_verified_patch"] is False
+    assert "verify pin changed while the gate waited" in out
+    final = _decisions(config)[0]["task_id"]
+    store = RunStore(config.db_path)
+    try:
+        successor = store.resumed_as_for(final)
+        assert successor is not None
+        # R3 (Neon): the approval ledger says so too, as serve's does
+        [gate] = store.approvals_for(final)
+        assert "verify pin changed while the gate waited" in (gate.resolution_note or "")
+        landed = [a for a in store.approvals_for(successor) if a.action == "apply_patch"]
+        assert all(a.resolved_by != "auto:verified-patch" for a in landed), landed
+    finally:
+        store.close()
+    assert code in (0, 4), out
+
+
 def _callback_ran(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Set once the done-callback reaches the terminal notice — which it
     does only after the auto-answer declined. A state read right after the
@@ -742,7 +1130,9 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
     # D42 / L4: doctor tells the truth about hosts and the CLI path
     assert "a host no rule names is still refused or asked, never auto-approved" in lines[0]
-    assert "a CLI `skep run` still stops at every gate" in lines[0]
+    # phase-01 1.1/1.2: the CLI answers unlocked gates too, up to its cap
+    assert "still stops at every gate" not in lines[0]
+    assert "a CLI `skep run` (which answers up to 10 gates in a row" in lines[0]
     assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
     # D34: the hosts the mode auto-approved in the window, with counts
     from datetime import UTC, datetime, timedelta

@@ -1108,6 +1108,9 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         "created_at": detail["reverification"]["created_at"],
         # ES-F3: the commit G10 verified on — what landing builds on.
         "base_commit": detail["reverification"]["base_commit"],
+        # V1 (phase-01 1.3): no tampering, and a grep pin's counts are unknown.
+        "tamper_flags": (),
+        "test_counts": {"status": "unknown", "runner": None},
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {

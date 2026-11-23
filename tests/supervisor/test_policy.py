@@ -86,6 +86,15 @@ def test_rule_blocks_when_reverification_unconfirmed() -> None:
     assert evaluate((rule,), ctx) is None
 
 
+def test_no_rule_lands_an_unconfirmed_reverification() -> None:
+    """Review R1 (F6, I2): `require_reverified=False` does not open the
+    landing gate to an unconfirmed G10 — every rule refuses it."""
+    rule = AutoApprovalRule(name="loose", require_reverified=False)
+    ctx = dataclasses.replace(_PASS, reverify_confirmed=False)
+    assert "re-verification" in (rule_block_reason(rule, ctx) or "")
+    assert evaluate((rule,), ctx) is None
+
+
 def test_rule_blocks_on_risk_flags_and_failed_verification() -> None:
     rule = AutoApprovalRule(name="autofix")
     assert rule_block_reason(rule, dataclasses.replace(_PASS, risk_flags=("touches_ci",)))

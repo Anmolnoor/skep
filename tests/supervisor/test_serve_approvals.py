@@ -942,6 +942,7 @@ def test_reverification_helpers_only_warn_when_unconfirmed() -> None:
     assert reverification_summary(_record(confirmed=False, outcome="failed")) == {
         "outcome": "failed",
         "confirmed": False,
+        "tamper_flags": [],
     }
     assert reverification_warning(None) is None
     assert reverification_warning(_record(confirmed=True, outcome="passed")) is None
@@ -1036,7 +1037,11 @@ def test_unconfirmed_reverification_surfaces_on_every_completed_run_surface(
     finally:
         store.close()
 
-    assert summary_view["reverification"] == {"outcome": "failed", "confirmed": False}
+    assert summary_view["reverification"] == {
+        "outcome": "failed",
+        "confirmed": False,
+        "tamper_flags": [],
+    }
     assert "could NOT confirm" in detail["guidance"]
 
     review_id = client.post(f"/api/runs/{task_id}/approvals").json()["review_id"]
@@ -1532,3 +1537,551 @@ def test_v128_f7_a_denied_land_card_after_landing_records_nothing(
         ]
     finally:
         store.close()
+
+
+# ---- phase-01 1.2: boundary-labelled cards (I6, I9) ------------------------
+
+_EXPECTED_BOUNDARY: dict[str, tuple[str, ...]] = {
+    "patch-landing": (
+        "land_run", "approve_review", "deny_review", "create_branch", "delete_branch",
+        "merge_branch",
+    ),
+    "network-egress": ("read_url", "refresh_repo", "register_repo"),
+    "outbound-content": (
+        "push_branch", "push_baseline", "open_pr", "merge_pr", "close_pr", "call_mcp_tool",
+        "search_web", "discord_delete_message", "discord_timeout_member", "add_provider",
+        "use_provider", "set_assistant_model", "set_tts_provider",
+    ),
+    "host-shell": (
+        "run_shell", "start_process", "stop_process", "diagnose_run", "read_file",
+        "search_files", "register_mcp_server", "setup_browser", "promote_tool",
+        "promote_skill_pack", "sync_notes", "workon",
+    ),
+    # a run-starting card with no taint and no host mode on record: the run's
+    # own wall is the sandbox, and the project is not shown to be unlocked
+    "in-sandbox-locked": (
+        "dispatch_run", "quick_edit", "batch_dispatch", "start_research", "forge_tool",
+        "run_code", "resume_run",
+    ),
+    "policy-change": (
+        "allow_command_review", "allow_env_bootstrap", "allow_fetch_domain", "allow_mcp_tool",
+        "allow_shell_command", "apply_policy_preset", "approve_policy_baseline",
+        "attach_policy_group", "copy_project_policy", "delete_policy_group",
+        "detach_policy_group", "revoke_policy_rule", "set_operator_policy", "set_policy",
+        "set_policy_group", "set_role", "setup_project", "unregister_repo", "remove_project",
+        "set_project_phase", "propose_schedule", "delete_schedule", "set_schedule_enabled",
+        "run_schedule_now", "delete_note", "delete_task", "set_task_due", "forget_memory",
+        "approve_memory_proposal", "reject_memory_proposal", "remember", "add_note",
+        "add_task", "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
+        "suspend_skill_pack", "suspend_tool", "unregister_mcp_server", "remove_provider",
+        "set_persona", "set_personality", "set_run_completion_notify", "delegate_analysis",
+    ),
+}  # fmt: skip
+
+
+def test_every_card_kind_has_its_boundary_label() -> None:
+    """Every tool that can become a card carries exactly one label from the
+    fixed set; a new card kind fails here until someone maps it."""
+    from skep.supervisor.serve.cards import BOUNDARIES, card_summary
+    from skep.supervisor.serve.tools import (
+        COMMAND_ONLY_TOOLS,
+        MUTATING_TOOL_NAMES,
+        TAINT_ASKED_STORE_WRITES,
+    )
+
+    expected = {tool: label for label, tools in _EXPECTED_BOUNDARY.items() for tool in tools}
+    cardable = MUTATING_TOOL_NAMES | COMMAND_ONLY_TOOLS | TAINT_ASKED_STORE_WRITES | {"search_web"}
+    assert set(expected) == cardable, (cardable - set(expected), set(expected) - cardable)
+    assert set(_EXPECTED_BOUNDARY) | {"tainted-dispatch"} == set(BOUNDARIES)
+    for tool, label in sorted(expected.items()):
+        assert card_summary(tool, {}).get("boundary") == label, tool
+    assert "boundary" not in card_summary("not_a_card_kind", {})
+
+
+def _bound_project(store: RunStore, repo: Path, *, unlocked: bool) -> None:
+    store.add_project_policy(
+        project_id="proj",
+        name="proj",
+        strategy="trusted_local_dev",
+        phase="build",
+        policy={"unlocked": unlocked, "verify_command": "pytest"},
+    )
+    store.add_project_binding(project_id="proj", binding_kind="repo_path", binding_value=str(repo))
+
+
+def _gate(store: RunStore, repo: Path, *, mode: str, action: str = "shell.run") -> tuple[str, str]:
+    from skep.supervisor import mint_task
+
+    task = mint_task(workspace=repo, instructions="gate me")
+    store.create_run(task, repo=repo, ref=None, execution_mode=mode)
+    store.transition(task.task_id, "pending_approval", None)
+    review_id = store.enqueue_approval(
+        task.task_id, action=action, reason="worker asks to run make", commands=[["make"]]
+    )
+    return task.task_id, review_id
+
+
+def test_a_dispatch_card_names_taint_host_or_the_locked_sandbox(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.store import ChatTaint
+
+    remedy = f"skep project setup {repo} --execution-mode sandbox --unlocked"
+    sandboxed = {"manifest": {"repo": str(repo), "execution_mode": "sandbox", "taint": []}}
+    host = {"manifest": {"repo": str(repo), "execution_mode": "workspace", "taint": []}}
+    args = {"repo": str(repo), "instructions": "x"}
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        tainted = card_summary(
+            "dispatch_run", args, taint=ChatTaint(untrusted=1), store=store, recorded=sandboxed
+        )
+        assert tainted["boundary"] == "tainted-dispatch" and "remediation" not in tainted
+        assert card_summary("dispatch_run", args, store=store, recorded=host)["boundary"] == (
+            "host-shell"
+        )
+        _bound_project(store, repo, unlocked=False)
+        locked = card_summary("dispatch_run", args, store=store, recorded=sandboxed)
+        # R1 G4: unlocking stops a worker's shell asks, not every dispatch card
+        assert locked["boundary"] == "in-sandbox-locked" and "remediation" not in locked
+        # R1 G5: a sandboxed run that asks to reach hosts guards the network
+        for hosts in ({"network_ask": ["files.example"]}, {"network_added": ["api.example"]},
+                      {"network": ["*"]}):  # fmt: skip
+            asks = {"manifest": {**sandboxed["manifest"], **hosts}}
+            card = card_summary("dispatch_run", args, store=store, recorded=asks)
+            assert card["boundary"] == "network-egress", hosts
+        assert card_summary("dispatch_run", {**args, "network": ["x.example"]})["boundary"] == (
+            "network-egress"
+        )
+    finally:
+        store.close()
+    assert remedy  # the line itself lives on the gate card (below)
+
+
+def test_an_unlocked_projects_dispatch_card_is_never_labelled_locked(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 G4: an unlocked project's sandboxed dispatch cards only for an
+    override (taint, hosts, an engine pick); the fixed set has no label for
+    an engine pick, so it gets none rather than a false 'locked'."""
+    from skep.supervisor.serve.cards import card_summary
+
+    sandboxed = {"manifest": {"repo": str(repo), "execution_mode": "sandbox", "taint": []}}
+    args = {"repo": str(repo), "instructions": "x", "engine": "codex"}
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        card = card_summary("dispatch_run", args, store=store, recorded=sandboxed)
+    finally:
+        store.close()
+    assert "boundary" not in card and "remediation" not in card
+    assert "--unlocked" not in card.get("risk", "")
+
+
+def test_a_batch_with_a_locked_member_keeps_its_locked_label(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 (Neon): one unlocked member does not unlabel a batch whose locked
+    member is why it carded."""
+    from skep.supervisor.serve.cards import card_summary
+
+    locked = tmp_path / "locked-repo"
+    member = {"execution_mode": "sandbox", "taint": []}
+    manifest = {
+        "execution_mode": "sandbox",
+        "taint": [],
+        "members": [{**member, "repo": str(repo)}, {**member, "repo": str(locked)}],
+    }
+    args = {"runs": [{"repo": str(repo)}, {"repo": str(locked)}]}
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        card = card_summary("batch_dispatch", args, store=store, recorded={"manifest": manifest})
+    finally:
+        store.close()
+    assert card["boundary"] == "in-sandbox-locked"
+
+
+def test_a_locked_sandbox_gate_card_teaches_the_unlock_line(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.serve.run_status import _mirror_gate_card, run_terminal_text
+
+    remedy = f"skep project setup {repo} --execution-mode sandbox --unlocked"
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=False)
+        task_id, review_id = _gate(store, repo, mode="sandbox")
+        args = {"review_id": review_id, "reason": "worker asks to run make"}
+        card = card_summary("approve_review", args, store=store)
+        assert card["boundary"] == "in-sandbox-locked"
+        assert card["remediation"] == remedy and remedy in card["risk"]
+        notice = run_terminal_text(store, task_id)
+        assert notice is not None and remedy in notice[0]
+        # the mirrored card records it, so the resolved card keeps its label
+        chat = store.create_chat(title="t", model=None)
+        _mirror_gate_card(store, task_id, chat.chat_id)
+        mirrored = store.pending_chat_actions(chat.chat_id)[0]
+        resolved = card_summary("approve_review", args, recorded=mirrored.card, live_tier=False)
+        assert resolved["boundary"] == "in-sandbox-locked" and resolved["remediation"] == remedy
+
+        _host_task, host_review = _gate(store, repo, mode="workspace")
+        host_args = {"review_id": host_review, "reason": "r"}
+        host = card_summary("approve_review", host_args, store=store)
+        assert host["boundary"] == "host-shell" and "remediation" not in host
+        _net_task, net_review = _gate(store, repo, mode="sandbox", action="network.fetch")
+        net = card_summary("approve_review", {"review_id": net_review, "reason": "r"}, store=store)
+        assert net["boundary"] == "network-egress"
+    finally:
+        store.close()
+
+
+def test_an_unlocked_projects_sandbox_gate_offers_no_unlock_line(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.cards import card_summary
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        _task_id, review_id = _gate(store, repo, mode="sandbox")
+        card = card_summary("approve_review", {"review_id": review_id, "reason": "r"}, store=store)
+        # R1 G4: never 'locked' on an unlocked project — no fixed label fits
+        assert "boundary" not in card
+        assert "remediation" not in card and "--unlocked" not in card["risk"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("action", ["git.stage", "git.commit", "env.read"])
+def test_a_locked_sandbox_gate_unlocking_never_answers_offers_no_unlock_line(
+    repo: Path, config: SupervisorConfig, action: str
+) -> None:
+    """R1 G4 (I8, I9): unlocked answers a sandboxed worker's shell.run asks
+    only — a git or env gate stays a human's on an unlocked project too, so
+    the unlock line would promise a no-op."""
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=False)
+        task_id, review_id = _gate(store, repo, mode="sandbox", action=action)
+        card = card_summary("approve_review", {"review_id": review_id, "reason": "r"}, store=store)
+        notice = run_terminal_text(store, task_id)
+    finally:
+        store.close()
+    assert card["boundary"] == "in-sandbox-locked"
+    assert "remediation" not in card and "--unlocked" not in card.get("risk", "")
+    assert notice is not None and "--unlocked" not in notice[0]
+
+
+def test_gate_and_resume_cards_are_labelled_by_what_they_reach(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.cards import card_summary
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        host_task, _ = _gate(store, repo, mode="workspace", action="apply_patch")
+        _, landing = _gate(store, repo, mode="workspace", action="apply_patch")
+        _, skill = _gate(store, repo, mode="workspace", action="promote_skill")
+        labels = {
+            review: card_summary("approve_review", {"review_id": review}, store=store)["boundary"]
+            for review in (landing, skill)
+        }
+        resumed = card_summary("resume_run", {"task_id": host_task}, store=store)
+    finally:
+        store.close()
+    assert labels == {landing: "patch-landing", skill: "policy-change"}
+    assert resumed["boundary"] == "host-shell"
+    script = card_summary("propose_schedule", {"caste": "script", "instructions": "ls"})
+    assert script["boundary"] == "host-shell"
+    assert card_summary("approve_review", {"reason": "worker asks"})["boundary"] == "host-shell"
+
+
+# ---- phase-01 1.2: outcome="tampered" tells the truth everywhere (I8) --------
+
+
+def _tampered_run(config: SupervisorConfig, repo: Path, *, counts_status: str = "ok") -> str:
+    """A completed run with a patch, recorded through the real G10 record path
+    with the flags V1 really emits (static + pytest count drops)."""
+    from skep.supervisor import mint_task
+    from skep.supervisor.reverify import count_flags, pytest_counts
+
+    baseline = pytest_counts("==== 3 passed, 1 skipped in 0.10s ====")
+    patched = pytest_counts("==== 2 passed, 2 skipped in 0.08s ====")
+    assert baseline is not None and patched is not None
+    if counts_status == "ok":
+        flags = ("test_file_deleted:tests/test_x.py", *count_flags(baseline, patched))
+        counts = {"status": "ok", "runner": "pytest", "baseline": baseline, "patched": patched}
+        outcome, confirmed = "tampered", False
+    else:
+        flags, counts = (), {"status": "unparseable", "runner": "pytest"}
+        outcome, confirmed = "passed", True
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="cheat")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed", None)
+        patch = config.home / "task.patch"
+        patch.write_text("diff --git a/tests/test_x.py b/tests/test_x.py\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        store.record_reverification(
+            task.task_id,
+            outcome=outcome,
+            worker_outcome="passed",
+            confirmed=confirmed,
+            commands=["pytest -q"],
+            exit_codes=[0],
+            detail="test tampering: see flags",
+            tamper_flags=flags,
+            test_counts=counts,
+        )
+    finally:
+        store.close()
+    return task.task_id
+
+
+def test_a_tampered_run_says_so_on_every_surface(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import _verification_lines
+    from skep.supervisor.serve.actions import reverification_event_view_for_task
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    config = build_config(tmp_path / "home", None)  # the CLI face reads this home
+    task_id = _tampered_run(config, repo)
+    flags = ("test_file_deleted:tests/test_x.py", "test_total_dropped", "test_passed_dropped")
+    store = RunStore(config.db_path)
+    try:
+        reverify = store.reverification_for(task_id)
+        record = store.get_run(task_id)
+        assert reverify is not None and record is not None
+        assert reverify.tamper_flags == (*flags, "test_skipped_increased")
+        warning = reverification_warning(reverify)
+        notice = run_terminal_text(store, task_id)
+        assert notice is not None
+        card = card_summary("land_run", {"task_id": task_id}, store=store)
+        event = reverification_event_view_for_task(store, task_id)
+        summary = reverification_summary(reverify)
+        guidance = execute_read_tool(
+            "get_run", {"task_id": task_id}, store=store, holder=ConfigHolder(config, store)
+        )["guidance"]
+    finally:
+        store.close()
+    lines = "\n".join(_verification_lines(config, record))
+    assert main(["--home", str(tmp_path / "home"), "review", task_id]) == 0
+    review = capsys.readouterr().out
+    assert card["boundary"] == "patch-landing"
+    assert card["tamper"].startswith("TEST-TAMPER") and card["risk"].startswith(card["tamper"])
+    assert event is not None and event["payload"]["tamper_flags"] == list(reverify.tamper_flags)
+    assert summary is not None and summary["tamper_flags"] == list(reverify.tamper_flags)
+    assert "changed the tests" in guidance
+    for text in (warning, notice[0], lines, card["tamper"], review):
+        assert text is not None
+        for flag in flags:
+            assert flag in text, (flag, text)
+        assert "executed tests 3 → 2" in text, text  # a skip is not an executed test
+        assert "FAILED (exit codes [0])" not in text
+        assert "ready to land" not in text
+    assert notice[1] == "action_needed"
+
+
+def test_unreadable_pytest_counts_say_auto_landing_was_blocked(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    task_id = _tampered_run(config, repo, counts_status="unparseable")
+    store = RunStore(config.db_path)
+    try:
+        card = card_summary("land_run", {"task_id": task_id}, store=store)
+        notice = run_terminal_text(store, task_id)
+    finally:
+        store.close()
+    assert "auto-landing was blocked" in card["tamper"]
+    assert card["risk"].startswith(card["tamper"])
+    assert notice is not None and "auto-landing was blocked" in notice[0]
+
+
+def test_tamper_note_names_unreadable_counts_only_on_a_passing_rerun() -> None:
+    """R1 G9 (I8): a re-run that already failed (a collection error, exit 2)
+    is reported as that failure — not as counts that blocked auto-landing."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.actions import tamper_note
+
+    counts = {"status": "unparseable", "runner": "pytest"}
+    for outcome in ("failed", "unavailable"):
+        failed = SimpleNamespace(tamper_flags=(), test_counts=counts, outcome=outcome)
+        assert tamper_note(failed) is None
+    passed = SimpleNamespace(tamper_flags=(), test_counts=counts, outcome="passed")
+    assert "TEST COUNTS UNREADABLE" in str(tamper_note(passed))
+
+
+def test_a_tamper_check_that_could_not_read_the_patch_says_so() -> None:
+    """Review R3 (H7, I8): a lone ``tamper_check_failed`` flag is the guard
+    failing, not a patch that changes the tests."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.actions import tamper_note
+
+    broken = SimpleNamespace(
+        tamper_flags=("tamper_check_failed:OSError",),
+        test_counts=None,
+        outcome="tampered",
+        confirmed=False,
+    )
+    assert tamper_note(broken) == (
+        "the test-tamper check could not inspect this patch (OSError); auto-landing is "
+        "blocked — review the patch before landing it by hand"
+    )
+    assert "could not inspect" in str(reverification_warning(broken))
+
+
+def test_typed_land_and_approve_cards_and_the_approvals_view_tell_the_same_truth(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 G6: a typed /land or /approve builds its card from the store, as an
+    assistant card does — the TEST-TAMPER banner, the gate's own boundary —
+    and GET /api/approvals carries the same label and remediation."""
+    task_id = _tampered_run(config, repo)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=False)
+        _gate_task, review_id = _gate(store, repo, mode="sandbox")
+    finally:
+        store.close()
+    remedy = f"skep project setup {repo} --execution-mode sandbox --unlocked"
+    client = _client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+
+    def typed(tool: str, args: dict[str, str]) -> dict[str, object]:
+        sent = client.post(f"/api/chats/{chat_id}/commands", json={"tool": tool, "args": args})
+        assert sent.status_code < 300, sent.text
+        return cast("dict[str, object]", sent.json())
+
+    land = typed("land_run", {"task_id": task_id})
+    assert str(cast("dict[str, str]", land["card"])["tamper"]).startswith("TEST-TAMPER")
+    action_ids = []
+    for _ in range(2):  # the second is the already-pending card, same truth
+        approve = typed("approve_review", {"review_id": review_id, "reason": "worker asks"})
+        card = cast("dict[str, str]", approve["card"])
+        assert card["boundary"] == "in-sandbox-locked" and card["remediation"] == remedy
+        action_ids.append(approve.get("action_id"))
+    assert approve.get("already_pending") is True
+    # R2 (Neon): the typed card records its label, so a resolved card keeps it
+    store = RunStore(config.db_path)
+    try:
+        action = store.get_chat_action(str(action_ids[0]))
+    finally:
+        store.close()
+    assert action is not None and (action.card or {}).get("boundary") == "in-sandbox-locked"
+    view = next(
+        a for a in client.get("/api/approvals").json()["approvals"] if a["review_id"] == review_id
+    )
+    assert view["boundary"] == "in-sandbox-locked" and view["remediation"] == remedy
+
+
+def test_a_serve_resume_keeps_the_audited_pin_caste_and_engine(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 G7 (I2, ADR 0050): serve's resume — a human approve or the unlocked
+    auto-answer — runs the successor under the audited task's pinned verify,
+    caste, protocol and engine, as the CLI resume does."""
+    from types import SimpleNamespace
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.serve.actions import require_run, resume_past_gate
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(
+            workspace=repo, instructions="x", planning_protocol="react", verify_command="pytest -q"
+        )
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox", coding_engine="codex")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        review_id = store.enqueue_approval(
+            task.task_id, action="shell.run", reason="r", commands=[["make"]]
+        )
+        submitted: dict[str, object] = {}
+
+        def submit(*_: object, **kwargs: object) -> str:
+            submitted.update(kwargs)
+            return "successor"
+
+        runner = cast("Dispatcher", SimpleNamespace(submit=submit))
+        run = require_run(store, task.task_id)
+        assert resume_past_gate(store, config, runner, run, review_id, "tester") == "successor"
+    finally:
+        store.close()
+    keys = ("worker_kind", "planning_protocol", "verify_command", "coding_engine")
+    assert [submitted[key] for key in keys] == ["coding", "react", "pytest -q", "codex"]
+
+
+@pytest.mark.parametrize(
+    ("current", "audited", "lands"),
+    [
+        ("pytest -q", "pytest -q", None),
+        ("pytest", "pytest -q", False),
+        ("pytest -q", " pytest -q ", None),  # review R3: both sides stripped, like G10
+    ],
+)
+def test_a_serve_resume_after_a_pin_change_does_not_auto_land(
+    repo: Path, config: SupervisorConfig, current: str, audited: str, lands: bool | None
+) -> None:
+    """Review R3 (H5, I2): the project's pin changed while the gate waited —
+    the successor keeps the audited pin but never lands by itself under the
+    superseded check, and the resolved gate says so."""
+    from types import SimpleNamespace
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.serve.actions import require_run, resume_past_gate
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        store.add_project_policy(
+            project_id="proj", name="proj", strategy="trusted_local_dev", phase="build",
+            policy={"unlocked": True, "verify_command": current},
+        )  # fmt: skip
+        task = mint_task(workspace=repo, instructions="x", verify_command=audited)
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        review_id = store.enqueue_approval(
+            task.task_id, action="shell.run", reason="r", commands=[["make"]]
+        )
+        submitted: dict[str, object] = {}
+
+        def submit(*_: object, **kwargs: object) -> str:
+            submitted.update(kwargs)
+            return "successor"
+
+        runner = cast("Dispatcher", SimpleNamespace(submit=submit))
+        run = require_run(store, task.task_id)
+        assert resume_past_gate(store, config, runner, run, review_id, "tester") == "successor"
+        note = store.get_approval(review_id).resolution_note or ""  # type: ignore[union-attr]
+    finally:
+        store.close()
+    assert submitted["verify_command"] == audited
+    assert submitted["auto_apply_verified_patch"] is lands
+    assert ("verify pin changed while the gate waited" in note) is (lands is False)

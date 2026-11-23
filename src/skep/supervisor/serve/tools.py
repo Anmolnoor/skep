@@ -3529,6 +3529,15 @@ def _get_run_guidance(
             "with /approve <review_id>. Do not describe the run as still working, and "
             "never suggest bypassing the gate."
         )
+    # phase-01 1.2 (I8): a tampered run is not "could not confirm" — the patch
+    # changed the tests the check runs, and the user must hear exactly that.
+    if run.get("state") == "completed" and reverify is not None and reverify.outcome == "tampered":
+        return (
+            "The supervisor did NOT confirm this run: the patch changed the tests "
+            f"({actions.tamper_note(reverify)}). Tell the user this explicitly. Do not "
+            "present the run as verified or passed, and do not suggest landing it without "
+            "a human reviewing the test changes first."
+        )
     # v20-F3: a completed run the supervisor could not re-verify must never be
     # relayed as verified/passed just because the worker claimed so.
     if run.get("state") == "completed" and reverify is not None and not reverify.confirmed:
