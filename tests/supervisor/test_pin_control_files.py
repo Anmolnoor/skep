@@ -266,7 +266,10 @@ def test_a_maintain_run_that_edits_conftest_waits_for_a_human(
     assert outcome.record.state == "completed"
     store = RunStore(config.db_path)
     try:
-        assert store.reverification_for(outcome.record.task_id).confirmed  # type: ignore[union-attr]
+        reverify = store.reverification_for(outcome.record.task_id)
+        # V1 (phase-01 1.3): a conftest.py edit is test tampering, never confirmed.
+        assert reverify is not None and not reverify.confirmed
+        assert reverify.tamper_flags == ("test_config_changed:conftest.py",)
         assert store.approvals_for(outcome.record.task_id) == [], "the run auto-landed"
         details = [d for _, d, _ in store.transitions_for(outcome.record.task_id) if d]
     finally:
