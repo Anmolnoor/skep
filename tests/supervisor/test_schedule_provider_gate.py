@@ -592,7 +592,7 @@ def test_an_untrusted_or_unknown_chat_taint_refuses_the_unattended_run(
     if chat == "untrusted":
         chat_id = store.create_chat(title="c", model=None).chat_id
         store.add_chat_taint(chat_id, untrusted=7)
-    _bound(store, tmp_path, monkeypatch, coding_engine="builtin", chat_id=chat_id)
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)  # codex, every gate open
     seen, dispatch = _dispatch()
     (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
     assert seen == [] and result.task_id is None
@@ -600,9 +600,25 @@ def test_an_untrusted_or_unknown_chat_taint_refuses_the_unattended_run(
     assert ("message 7" if chat == "untrusted" else "unknown") in result.state
     (row,) = _refusals(config)
     assert (row["rule_id"], row["chat"], row["caste"], row["engine"]) == (
-        "schedule.untrusted_taint", chat_id, "coding", "builtin"
+        "schedule.untrusted_taint", chat_id, "coding", "codex"
     )  # fmt: skip
     assert "untrusted" in row["taint"]
+
+
+def test_an_untrusted_chat_still_dispatches_a_builtin_tick(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Master plan trap 6: the refusal is for EXTERNAL engines. A run's own
+    notice marks its chat untrusted, so refusing builtin ticks would stop
+    every chat-bound schedule after its first run; a builtin tick dispatches
+    with the bits attached (v126-F11)."""
+    _probe(monkeypatch, READY)
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    store.add_chat_taint(chat_id, untrusted=7)
+    _bound(store, tmp_path, monkeypatch, coding_engine="builtin", chat_id=chat_id)
+    seen, dispatch = _dispatch()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == ["coding"] and _refusals(config) == []
 
 
 def test_a_private_only_chat_still_runs(

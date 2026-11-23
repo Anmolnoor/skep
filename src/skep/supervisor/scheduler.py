@@ -970,8 +970,12 @@ def _untrusted_refusal(
     schedule whose chat carries ``untrusted`` refuses here, on the final
     dispatch path (v126-F11 only recorded the bits). A chat that is gone
     counts as both bits (get_chat_taint fails closed). ``private`` alone
-    never stops a run: a mail chat's schedule keeps working."""
-    if not schedule.chat_id:
+    never stops a run: a mail chat's schedule keeps working. Scoped to an
+    EXTERNAL coding engine (master plan trap 6): a builtin tick still
+    dispatches with the bits attached (v126-F11) — a run's own notice marks
+    its chat untrusted, so refusing builtin ticks would stop every chat-bound
+    schedule after its first run."""
+    if not schedule.chat_id or caste != "coding" or not resolve_engine(engine).external:
         return None
     chat = schedule.chat_id
     taint = store.get_chat_taint(chat)
