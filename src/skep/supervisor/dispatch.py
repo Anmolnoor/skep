@@ -82,7 +82,13 @@ from .provider_hosts import provider_hosts_for
 from .provider_relay import provider_relay_for_run, readopted_relay, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
-from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError, in_wall_tmp_env
+from .sandbox import (
+    PODMAN,
+    NetworkPolicy,
+    SandboxUnavailableError,
+    in_wall_tmp_env,
+    read_allowlist_for,
+)
 from .sandbox import availability as sandbox_availability
 from .secret_floor import CODEX_RUN_LOGIN
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
@@ -979,6 +985,8 @@ def run_task(
                 write_denied=() if git_pin is None else (git_pin,),
                 unmasked=() if run_login is None else (run_login,),
                 relay=relay if proxy is not None else None,
+                # ADR 0068: the project's read wall (G10 reads the same policy)
+                read_allowlist=read_allowlist_for(_project_policy(run_store, config, repo)),
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the

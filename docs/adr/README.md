@@ -69,3 +69,4 @@ touches.
 | [0063](0063-codex-login-provider.md) | The Queen on a ChatGPT plan: the Codex login as a provider credential, Queen only (v118) |
 | [0066](0066-sandbox-by-default.md) | New projects run sandboxed when the host can sandbox; stored modes are carried forward (v127-F8) |
 | [0067](0067-channel-admin.md) | A channel admin named at the desk confirms every card from the messenger, HIGH ones included (v130-F5) |
+| [0068](0068-strict-read-confinement.md) | Strict read confinement: a sandboxed run and its G10 re-run read an allowlist (Phase 03; bubblewrap, Seatbelt pending) |

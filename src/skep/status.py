@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .profile import PersonalProfile, load_profile, profile_path
+from .supervisor.sandbox import STRICT_READ_BACKENDS, STRICT_READS_KEY, socket_gap
 from .supervisor.sandbox import availability as sandbox_availability
-from .supervisor.sandbox import socket_gap
 from .supervisor.store import RETIRED_STORE_FILES
 
 _STALE_PENDING_DAYS = 7
@@ -42,7 +42,7 @@ def build_status(
             home,
             None,
             required,
-            sandbox=_sandbox_check(),
+            sandbox=_sandbox_check(home),
             coding_worker=worker_provider_check(home, provider_timeout),
         )
         payload["advisories"] = (
@@ -83,7 +83,7 @@ def build_status(
         home,
         profile,
         required,
-        sandbox=_sandbox_check(),
+        sandbox=_sandbox_check(home),
         coding_worker=worker_provider_check(home, provider_timeout),
     )
     payload["advisories"] = (
@@ -1274,16 +1274,29 @@ def _provider_check(
     return _probe_provider_endpoint(provider.name, provider.endpoint, timeout)
 
 
-def _sandbox_check() -> dict[str, Any]:
+def _sandbox_check(home: Path) -> dict[str, Any]:
     probe = sandbox_availability()
     if probe.usable:
         backend = probe.backend or "native"
         gap = f" {residual}" if (residual := socket_gap(backend)) else ""
-        return {
+        # ADR 0068 (I8): what a sandboxed run can read, said plainly.
+        strict = probe.backend in STRICT_READ_BACKENDS
+        confinement = "strict-allowlist" if strict else "denylist-only"
+        check: dict[str, Any] = {
             "status": "ready",
-            "detail": f"{backend} backend is usable.{gap}",
+            "detail": f"{backend} backend is usable; read confinement: {confinement}"
+            f"{'' if strict else ' (reads stay open but the secret floor)'}.{gap}",
             "backend": probe.backend,
+            "read_confinement": confinement,
         }
+        open_reads = _open_read_projects(home) if strict else []
+        if open_reads:
+            check["next_step"] = (
+                f"{len(open_reads)} sandboxed project(s) still read the whole disk but the "
+                f"secret floor: {', '.join(open_reads)}. Confine one to an allowlist: "
+                f"`skep project setup <repo> --project-id {open_reads[0]} --strict-reads`."
+            )
+        return check
 
     reason = probe.reason or "unavailable"
     detail = reason
@@ -1295,6 +1308,26 @@ def _sandbox_check() -> dict[str, Any]:
         "reason": probe.reason,
         "backend": probe.backend,
     }
+
+
+def _open_read_projects(home: Path) -> list[str]:
+    """ADR 0068: sandboxed projects set up before strict reads, still on the
+    denylist (unsandboxed ones are ``_workspace_mode_advisories``' to name)."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        return sorted(
+            record.project_id
+            for record in store.list_project_policies()
+            if record.policy.get("default_execution_mode") == "sandbox"
+            and record.policy.get(STRICT_READS_KEY) is not True
+        )
+    finally:
+        store.close()
 
 
 def _probe_provider_endpoint(provider: str, endpoint: str, timeout: float) -> dict[str, Any]:

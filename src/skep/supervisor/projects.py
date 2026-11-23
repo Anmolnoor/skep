@@ -63,6 +63,12 @@ PROJECT_POLICY_KEYS = frozenset(
         # only with a pinned verify_command, a usable sandbox and an approved
         # baseline (registry.unlocked_block_reason).
         "unlocked",
+        # ADR 0068: a sandboxed run reads an allowlist, not the whole disk —
+        # on for a NEW sandboxed project where the backend enforces it
+        # (default_strict_reads); an existing one migrates with --strict-reads.
+        "strict_read_confinement",
+        # ADR 0068: absolute paths such a run may read too (secret masks win).
+        "extra_read_paths",
     }
 )
 
@@ -205,6 +211,36 @@ def require_loopback_ports(value: object) -> list[int]:
     return sorted(set(value))
 
 
+def _require_extra_read_paths(value: object) -> list[str]:
+    """ADR 0068: absolute paths, never ``/`` (that is no allowlist at all).
+    Each is resolved again at every run, symlinks included (sandbox.py)."""
+    paths = _require_string_list(value, field="extra_read_paths")
+    for path in paths:
+        if not path.startswith("/") or path.rstrip("/") == "":
+            raise ValueError(
+                f"extra_read_paths entries must be absolute paths other than /, got {path!r} "
+                "— name the directories a strict-read run needs, e.g. ['/srv/datasets']"
+            )
+    return paths
+
+
+def default_strict_reads(
+    store: RunStore, *, project_id: str, policy: dict[str, Any], backend: str | None
+) -> None:
+    """ADR 0068 (ADR 0066's rule for reads): a NEW sandboxed project reads an
+    allowlist when ``backend`` can enforce one. An explicit value wins, and an
+    existing project keeps what it stored until the operator migrates it."""
+    from .sandbox import STRICT_READ_BACKENDS, STRICT_READS_KEY
+
+    if (
+        STRICT_READS_KEY not in policy
+        and policy.get("default_execution_mode") == "sandbox"
+        and backend in STRICT_READ_BACKENDS
+        and store.get_project_policy(project_id) is None
+    ):
+        policy[STRICT_READS_KEY] = True
+
+
 def _require_bool(value: object, *, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
@@ -257,9 +293,12 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
         "auto_dispatch_allowed",
         "codex_chatgpt_login",
         "unlocked",
+        "strict_read_confinement",
     ):
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
+    if "extra_read_paths" in normalized:
+        normalized["extra_read_paths"] = _require_extra_read_paths(normalized["extra_read_paths"])
     if normalized.get("auto_apply_branch") is not None:
         normalized["auto_apply_branch"] = _require_auto_apply_branch(
             normalized["auto_apply_branch"]

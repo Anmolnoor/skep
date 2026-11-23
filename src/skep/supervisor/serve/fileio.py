@@ -86,6 +86,21 @@ def queen_filesystem_decision(
             detail=floor["reason"],
             decided_by=floor["decided_by"],
         )
+    if not Path(path).expanduser().is_absolute():
+        # ADR 0068 (I9), after the floor: a bare name ("read
+        # canary-downloads.txt") would resolve against serve's cwd — often the
+        # home — so it is refused with the roots the Queen does read.
+        roots = ", ".join(str(root) for root in operator_roots(store, holder))
+        return AutonomyDecision(
+            verdict="deny",
+            reason="filesystem.deny.outside_root_lookup",
+            detail=(
+                f"{path!r} is a name, not a path: the Queen reads inside its operator roots "
+                f"({roots}) and never searches your home or ~/Downloads for a file name. "
+                "Give its absolute path — one outside these roots asks the operator on a card."
+            ),
+            decided_by="default/root-boundary",
+        )
     verdict = queen_decide(holder, store, Request("filesystem", action, str(target)), role=role)
     unmatched = verdict.layer == "default" or verdict.layer.startswith("role:")
     if verdict.verdict == "require_approval" and unmatched and not target.exists():

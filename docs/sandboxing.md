@@ -40,6 +40,20 @@ run's tools read points inside the workspace: `TMPDIR`, zsh's `TMPPREFIX`,
 ignores `TMPDIR`), and on macOS `XDG_RUNTIME_DIR` (on Linux bubblewrap gives each run a private
 `/tmp` instead).
 
+A strict-read project (`strict_read_confinement`, ADR 0068) reads an
+allowlist instead. It is on by default for new sandboxed projects on Linux,
+and bubblewrap enforces it with an empty root. Bound back, read-only: `/usr`,
+`/opt`, `/nix`, `/etc` minus `pve`/`shadow`/`gshadow`/`sudoers`/`ssh`, the
+detected toolchains (`~/.local/bin`, uv's pythons and tools,
+`~/.local/share/claude`, `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.pyenv`, skep's
+own interpreter), the repo's git metadata minus the sibling worktrees, and the
+project's `extra_read_paths`. The run's own roots are bound as above, and the
+masks below still land last. The rest of `$HOME`, `/var`, `/mnt`, `/srv` and
+`/etc/pve` do not exist inside the sandbox. The G10 re-run of the patch uses
+the same wall. Seatbelt and podman refuse a strict run until they can enforce
+one. `skep doctor` names the sandboxed projects still on the denylist below;
+`skep project setup <repo> --strict-reads` moves one.
+
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
 backend: `~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials

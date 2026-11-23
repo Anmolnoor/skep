@@ -120,7 +120,15 @@ def test_worker_git_write_roots_exclude_hooks_and_config(
         roots = git_metadata_writable_roots(wt)
         assert roots == ((common / "worktrees" / "task-roots"), common / "objects")
         assert common not in roots
-        assert git_metadata_readable_roots(wt) == (common,)
+        # ADR 0068: the common dir's entries, minus the siblings' worktrees/
+        # and objects/ (a writable root already)
+        readable = git_metadata_readable_roots(wt)
+        assert readable == tuple(
+            entry
+            for entry in sorted(common.iterdir())
+            if entry.name not in ("worktrees", "objects")
+        )
+        assert common / "config" in readable and common / "HEAD" in readable
         assert git_metadata_readable_roots(repo) == ()  # non-linked: .git is in the tree
         assert git_metadata_readable_roots(wt.parent) == ()  # not a checkout
     finally:

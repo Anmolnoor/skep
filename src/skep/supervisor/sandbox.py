@@ -17,7 +17,9 @@ workspace/results/temp boundary. Reads are left open so the Python/git/test
 toolchain keeps working — except the secret floor (ES-F4, V3): the operator's
 credential dirs and skep's own serve-token/serve.env/``*-secret`` files are
 hidden on every backend (``secret_paths``). Env secrets are closed by the G2
-env allowlist.
+env allowlist. A strict-read project (ADR 0068, bubblewrap only so far)
+reads an allowlist instead: bwrap's empty root with the system dirs, the
+detected toolchains and the run's own roots bound back, the masks still last.
 """
 
 from __future__ import annotations
@@ -29,11 +31,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from .. import landlock
@@ -163,10 +166,8 @@ def _bubblewrap_binary() -> str | None:
 # grandchild that killpg alone used to miss. --die-with-parent ties the tree
 # to bwrap; --new-session blocks TIOCSTI keystroke injection into a terminal;
 # --unshare-ipc keeps SysV IPC / mqueues private.
-_BUBBLEWRAP_BASE_ARGS = (
-    "--ro-bind",
-    "/",
-    "/",
+_HOST_ROOT = ("--ro-bind", "/", "/")
+_BUBBLEWRAP_WALLS = (
     "--dev",
     "/dev",
     "--unshare-pid",
@@ -180,6 +181,126 @@ _BUBBLEWRAP_BASE_ARGS = (
     "--die-with-parent",
     "--new-session",
 )
+_BUBBLEWRAP_BASE_ARGS = (*_HOST_ROOT, *_BUBBLEWRAP_WALLS)
+
+# ADR 0068: strict read confinement. The backends that enforce it; the
+# Seatbelt half joins once its profile consumes ``strict_read_roots``.
+STRICT_READ_BACKENDS = frozenset({"bubblewrap"})
+STRICT_READS_KEY = "strict_read_confinement"
+# The empty root's system half (bwrap): a usr-merge link is recreated as a
+# link, a real directory is bound read-only, an absent one skipped.
+_SYSTEM_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/opt", "/nix")
+# /etc comes back entry by entry, minus these: the host's auth secrets and
+# Proxmox's cluster tree (never mounted over: a FUSE mount we may not stat).
+_ETC_HIDDEN = frozenset(
+    {"pve", "shadow", "shadow-", "gshadow", "gshadow-", "sudoers", "sudoers.d", "ssh"}
+)
+_SITE_DIRS = ("site-packages", "dist-packages")
+# Per-user toolchains: (the variable that moves one, its default under $HOME).
+_HOME_TOOLCHAINS = (
+    (None, ".local/bin"),  # uv/uvx and the claude launcher (their installers' default)
+    ("UV_PYTHON_INSTALL_DIR", ".local/share/uv/python"),
+    ("UV_TOOL_DIR", ".local/share/uv/tools"),
+    (None, ".local/share/claude"),  # the claude_code engine's versions
+    ("CARGO_HOME", ".cargo"),
+    ("RUSTUP_HOME", ".rustup"),
+    ("NVM_DIR", ".nvm"),
+    ("PYENV_ROOT", ".pyenv"),
+)
+
+
+def read_allowlist_for(policy: Mapping[str, Any]) -> tuple[Path, ...] | None:
+    """ADR 0068: None keeps a project's reads denylist-only; a strict
+    project's ``extra_read_paths`` (often none) turn the allowlist on."""
+    if policy.get(STRICT_READS_KEY) is not True:
+        return None
+    return tuple(Path(path) for path in policy.get("extra_read_paths") or ())
+
+
+def strict_read_roots(
+    skep_home: Path, *, worker_llm_key: bool = False, extra: Iterable[Path] = ()
+) -> list[Path]:
+    """ADR 0068: what a strict run reads beyond the OS's system roots and its
+    own workspace/git roots — the half every backend's profile shares.
+
+    The detected toolchains (skep's own interpreter and package, the usual
+    per-user installs, ``<skep home>/tools/.venvs``), the skep-home files the
+    builtin worker reads (``profile.json``, ``worker_plugins``; the store and
+    its own LLM key only with ``worker_llm_key``) and the operator's
+    ``extra_read_paths``. Resolved, existing paths only. A detected root at
+    or above the home is dropped; an extra path that resolves to ``/`` is
+    refused. The secret masks still land after every one of them."""
+    roots = _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=extra)
+    return list(dict.fromkeys(path.resolve() for path in roots))
+
+
+def _strict_candidates(
+    skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
+) -> list[Path]:
+    """``strict_read_roots`` as written (absolute, not resolved): bwrap
+    recreates a written path that is a link (uv's ``cpython-3.12-…`` minor
+    version link, which a venv's python points through) as a symlink to the
+    resolved root, so the masks on the resolved path still hold."""
+    home = Path.home().resolve()
+    detected = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(sys.exec_prefix),
+        Path(__file__).resolve().parents[2],
+        skep_home / "tools" / ".venvs",
+        # what .pth files chain in (uv's `run --with` overlay env, an editable install)
+        *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
+    ]
+    detected += [
+        Path(os.environ.get(env) or home / rel) if env else home / rel
+        for env, rel in _HOME_TOOLCHAINS
+    ]
+    supervisor = skep_home / "supervisor"
+    own = [skep_home / "profile.json", skep_home / "worker_plugins"]
+    if worker_llm_key:
+        names = (*_LIVE_STORE_FILES, "llm-secret", *_active_llm_key_names(supervisor))
+        own += [supervisor / name for name in names]
+    extra = [Path(os.path.abspath(path)) for path in extra]
+    if any(path.resolve() == Path("/") for path in extra):
+        raise SandboxUnavailableError(
+            "extra_read_paths names a path that resolves to / — that would reopen every "
+            "read strict confinement closes. Name the directories the run needs instead."
+        )
+    detected = [Path(os.path.abspath(root)) for root in detected]
+    roots = [*(root for root in detected if not home.is_relative_to(root.resolve())), *own, *extra]
+    return list(dict.fromkeys(path for path in roots if _exists(path)))
+
+
+def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
+    """A written root that is a link becomes a link to its resolved root in
+    bwrap's empty root — unless a bound root already holds it (the link is
+    there, read-only). ponytail: only a link in a real parent — one under a
+    linked parent dir (Fedora Atomic's /home) stays unreachable by that name."""
+    bound = [Path(root) for root in bound]
+    args: list[str] = []
+    for path in paths:
+        real = path.resolve()
+        if (
+            real != path
+            and path.parent.resolve() == path.parent
+            and not any(path.is_relative_to(root) for root in bound)
+        ):
+            args += ["--symlink", str(real), str(path)]
+    return args
+
+
+def _strict_root_args() -> list[str]:
+    """ADR 0068: the system half of bwrap's empty root, read-only."""
+    paths = [*_SYSTEM_ROOTS, *(f"/etc/{name}" for name in sorted(os.listdir("/etc")))]
+    args: list[str] = []
+    for path in paths:
+        if path.removeprefix("/etc/") in _ETC_HIDDEN:
+            continue
+        if os.path.islink(path):
+            args += ["--symlink", os.readlink(path), path]
+        elif os.path.exists(path):
+            args += ["--ro-bind", path, path]
+    return args
 
 
 def _run_rebinds() -> list[str]:
@@ -440,7 +561,7 @@ def _sockets_under(roots: Iterable[Path]) -> list[Path]:
     common dir): bound read-only they stay connectable, so each gets
     /dev/null laid over it. ponytail: ``objects/`` is skipped — git keeps
     only object files there, and it is the one big subtree."""
-    found = []
+    found = [Path(root) for root in roots if _is_socket(Path(root))]  # a root that IS one
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [name for name in dirnames if name != "objects"]
@@ -692,7 +813,13 @@ def _bubblewrap_args(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    strict: bool = False,
+    aliases: Iterable[Path] = (),
 ) -> list[str]:
+    # ADR 0068: ``strict`` starts from bwrap's empty root instead of the
+    # host's: the system dirs, then ``readable_roots`` (which the caller has
+    # widened with strict_read_roots), are all a run sees outside its own;
+    # ``aliases`` are their written names (``_alias_links``).
     # D6: the netns has its own loopback, so the host's is reachable only
     # through the proxy bridge, which admits the run's loopback ports alone;
     # netshim presents each of them on the netns loopback over that bridge.
@@ -708,14 +835,17 @@ def _bubblewrap_args(
             "socket to enforce per-domain rules on bubblewrap. Start a FilteringProxy with "
             "a unix_socket_path and pass both, or use deny-all / allow-all."
         )
-    args = [*_BUBBLEWRAP_BASE_ARGS, *_run_rebinds()]
+    base = _strict_root_args() if strict else list(_HOST_ROOT)
+    args = [*base, *_BUBBLEWRAP_WALLS, *_run_rebinds()]
     if network.is_deny_all or network.is_domain_list:
         args.append("--unshare-net")
     writable_roots = list(writable_roots)
     readable_roots = list(readable_roots)
     tmp_mountpoints: dict[str, None] = {}
     for root in [*readable_roots, *writable_roots]:
-        for mountpoint in _tmp_mountpoints_for_bind(Path(root)):
+        # a file root (one entry of a git common dir) needs only its parents
+        dir_root = Path(root).parent if Path(root).is_file() else Path(root)
+        for mountpoint in _tmp_mountpoints_for_bind(dir_root):
             tmp_mountpoints.setdefault(mountpoint, None)
     for mountpoint in tmp_mountpoints:
         args.extend(["--dir", mountpoint])
@@ -729,6 +859,7 @@ def _bubblewrap_args(
     for pinned in write_denied:
         # W31: read-only over its writable root (the run's git pin).
         args.extend(["--ro-bind", str(pinned), str(pinned)])
+    args.extend(_alias_links(aliases, [*readable_roots, *writable_roots]))
     for denied in read_denied:
         # ES-F4: after the writable binds, so a mask wins inside one too.
         # /tmp and /run are fresh tmpfs here: their host paths do not exist,
@@ -746,6 +877,10 @@ def _bubblewrap_args(
         )
     for own in unmasked:  # after the masks: this run's own file in a masked dir
         args.extend(["--ro-bind", str(own), str(own)])
+    if network.is_domain_list and unix_socket_path is not None:
+        args.extend(["--ro-bind", str(Path(unix_socket_path).parent), SANDBOX_PROXY_DIR])
+    if strict:  # the empty root's own dirs, made read-only once every bind is in
+        args.extend(["--remount-ro", "/"])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         # ES-F251: netshim binds each port inside the worker's own netns,
@@ -764,7 +899,6 @@ def _bubblewrap_args(
                 "runs a sandbox run unconfined."
             )
         socket_path = Path(unix_socket_path)
-        args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
         # appends the trailing "--" that separates it from the worker argv.
         args.extend(
@@ -1000,6 +1134,7 @@ def write_profile(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    read_allowlist: Iterable[Path] | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1027,10 +1162,25 @@ def write_profile(
     ``unmasked`` (ES-F122 follow-up): files inside a masked directory that
     THIS run alone may read, bound back read-only after the masks — a codex
     run's own login copy under the audit dir every other run cannot see.
+
+    ``read_allowlist`` (ADR 0068, ``read_allowlist_for``): None keeps reads
+    open but the secret floor (denylist-only); a tuple — the project's
+    ``extra_read_paths`` — confines reads to an allowlist: the system dirs,
+    ``strict_read_roots`` and the run's own roots. A backend outside
+    ``STRICT_READ_BACKENDS`` refuses it rather than run with open reads.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
+    read_allowlist = None if read_allowlist is None else tuple(read_allowlist)
     probe = require_usable(backend)
+    if read_allowlist is not None and probe.backend not in STRICT_READ_BACKENDS:
+        raise SandboxUnavailableError(
+            f"strict read confinement (ADR 0068) is enforced on bubblewrap only; the "
+            f"{probe.backend} backend cannot confine reads to an allowlist yet, so this "
+            "run is refused rather than run with open reads. Use the native bubblewrap "
+            "backend, or turn it off for this project: `skep project setup <repo> "
+            "--no-strict-reads`."
+        )
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     # ES-F264: the mask list holds only files that exist now. relay-secret
     # used to appear on the first relayed dispatch, readable by every run
@@ -1044,7 +1194,16 @@ def write_profile(
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         extra_readable = list(extra_readable)
-        read_denied += _sockets_under(extra_readable)
+        # ponytail: the detected toolchains are not walked for sockets (~/.rustup
+        # alone is tens of thousands of files); the operator's paths are.
+        extra_roots = [Path(path).resolve() for path in read_allowlist or ()]
+        read_denied += _sockets_under([*extra_readable, *extra_roots])
+        aliases = (
+            _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist)
+            if read_allowlist is not None
+            else []
+        )
+        extra_readable += dict.fromkeys(path.resolve() for path in aliases)
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(
@@ -1072,6 +1231,8 @@ def write_profile(
             write_denied=write_denied,
             loopback_ports=loopback_ports,
             unmasked=unmasked,
+            strict=read_allowlist is not None,
+            aliases=aliases,
         )
         # After the netshim when there is one (it alone needs the proxy
         # bridge); wrap_command's "--" then ends the step's options.

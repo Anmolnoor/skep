@@ -697,6 +697,34 @@
     "type": "bool"
    },
    {
+    "default": false,
+    "doc": "ADR 0068: a sandboxed worker and its G10 re-run read an allowlist \u2014 system dirs, detected toolchains, the worktree and git metadata, extra_read_paths \u2014 not the whole disk; on for new sandboxed projects where the backend enforces it (bubblewrap), existing ones migrate with `skep project setup <repo> --strict-reads`",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "strict_read_confinement",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": [],
+    "doc": "absolute paths a strict-read run may also read (ADR 0068), resolved at every run; the secret floor still masks inside them",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "extra_read_paths",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
     "default": [],
     "doc": "names of attached policy groups, live-composed between phase and project (ADR 0048)",
     "enforced_at": null,
@@ -1607,6 +1635,14 @@
     "value": 900
    },
    {
+    "key": "extra_read_paths",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
     "key": "loopback_ports",
     "note": "not configured at any layer \u2014 the resolver's fallback",
     "overridden": [],
@@ -1673,6 +1709,14 @@
     "source_layer": null,
     "source_name": null,
     "value": []
+   },
+   {
+    "key": "strict_read_confinement",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
    },
    {
     "key": "ticker_interval_seconds",

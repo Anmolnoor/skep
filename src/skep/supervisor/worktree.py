@@ -156,12 +156,22 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     """The shared common dir a linked worktree's git must READ (HEAD, config, refs).
 
     Reads are open on every backend except where a fresh tmpfs hides the host
-    (bwrap and podman mount one on /tmp): a repo there kept only the writable
-    binds above, so the worker's own ``git diff`` died and its patch was never
-    written. The sandbox binds these read-only, beneath the writable roots.
+    (bwrap and podman mount one on /tmp, and a strict-read root hides
+    everything, ADR 0068): a repo there kept only the writable binds above,
+    so the worker's own ``git diff`` died and its patch was never written.
+    The sandbox binds these read-only, beneath the writable roots.
+
+    The common dir's entries, not the dir: ``worktrees/`` holds the SIBLING
+    runs' HEAD and index (this run's own git dir is a writable root), and
+    ``objects/`` is a writable root already. ``config`` stays — git cannot run
+    without it — so its remote URLs remain readable.
     """
     dirs = _git_dirs(workspace)
-    return () if dirs is None or dirs[0] == dirs[1] else (dirs[1],)
+    if dirs is None or dirs[0] == dirs[1]:
+        return ()
+    return tuple(
+        entry for entry in sorted(dirs[1].iterdir()) if entry.name not in ("worktrees", "objects")
+    )
 
 
 def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:
