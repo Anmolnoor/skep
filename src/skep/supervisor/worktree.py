@@ -181,7 +181,7 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
 def git_metadata_masked(workspace: Path) -> tuple[Path, ...]:
     """The main checkout's own state no git in the run reads, masked over
     the common dir ``git_metadata_readable_roots`` binds: its in-progress
-    messages and ``ORIG_HEAD``."""
+    messages."""
     common = _linked_common_dir(workspace)
     return () if common is None else tuple(common / name for name in _COMMON_DIR_PRIVATE)
 
@@ -203,8 +203,10 @@ def git_walk_links(workspace: Path) -> tuple[Path, ...]:
     )
 
 
-_COMMON_DIR_PRIVATE = ("COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD")
-_GIT_WALKED = ("refs", "logs", "worktrees", "index", "packed-refs")
+# R4 (Neon): ORIG_HEAD is not masked — a /dev/null over it makes in-wall
+# `git fsck` fail, and the commit it names is visible in objects/ and logs/.
+_COMMON_DIR_PRIVATE = ("COMMIT_EDITMSG", "MERGE_MSG")
+_GIT_WALKED = ("refs", "logs", "worktrees", "index", "packed-refs", "HEAD")
 
 
 def _linked_common_dir(workspace: Path) -> Path | None:

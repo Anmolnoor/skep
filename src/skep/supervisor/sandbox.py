@@ -307,6 +307,15 @@ def _strict_candidates(
         own += [supervisor / name for name in names]
     own = [path for path in own if _in_place(path, skep_home)]
     extra = _validated_extra(extra, skep_home)
+    # R4 (Sol R3-2): ``extra`` is the run's RECORDED wall (resolved, existing at
+    # dispatch). One that vanished since must not just drop out of this
+    # profile — it could return before G10 and widen G10's reads past the
+    # worker's. Refuse instead (the worker: sandbox_unavailable; G10: unavailable).
+    if gone := [str(path) for path in extra if not _exists(path)]:
+        raise SandboxUnavailableError(
+            f"recorded extra read root(s) {', '.join(gone)} vanished after dispatch; "
+            "refusing to build a narrower wall than the run recorded — re-dispatch the run"
+        )
     detected = [Path(os.path.abspath(root)) for root in detected]
     roots = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own, *extra]
     return list(dict.fromkeys(path for path in roots if _exists(path)))
@@ -354,7 +363,9 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
             f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them or a "
             "dir that holds /etc (on macOS, /private holds the host's /tmp and /var too)"
         )
-    if var := next((v for v in _HOMEBREW_VAR if _over(Path(v), real)), None):
+    if sys.platform == "darwin" and (
+        var := next((v for v in _HOMEBREW_VAR if _over(Path(v), real)), None)
+    ):  # R4 (Sol): bwrap honours these; only Seatbelt masks them
         return (
             f"{path} resolves to {real}, in Homebrew's var/ ({var}): a strict run on macOS "
             "masks it (local databases and service state), so the path would read as "
@@ -1394,7 +1405,8 @@ def write_profile(
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
-        read_denied += [path for path in git_masked if _exists(path)]  # a mount needs its file
+        # a mount needs its file; a link can't be mounted over (R4, Neon)
+        read_denied += [p for p in git_masked if not p.is_symlink() and _exists(p)]
         extra_readable = list(extra_readable)
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.

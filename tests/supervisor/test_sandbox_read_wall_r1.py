@@ -418,8 +418,10 @@ def _repo_with_private_state(base: Path) -> tuple[Path, Path, Path]:
     (repo / "b.txt").write_text("staged secret\n", encoding="utf-8")
     git(repo, "add", "b.txt")
     common = repo / ".git"
-    for name in ("MERGE_MSG", "ORIG_HEAD"):
-        (common / name).write_text("CANARY\n", encoding="utf-8")
+    (common / "MERGE_MSG").write_text("CANARY\n", encoding="utf-8")
+    # R4: ORIG_HEAD is visible (unmasked); a real ref keeps in-wall fsck clean
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (common / "ORIG_HEAD").write_text(head + "\n", encoding="utf-8")
     private = base / "private"
     private.mkdir()
     (private / "canary.txt").write_text("CANARY private\n", encoding="utf-8")
@@ -436,8 +438,9 @@ def test_the_common_dir_is_bound_whole_and_the_main_checkout_s_private_state_mas
     # 3I: the dir itself, so a rename git makes in it (index, packed-refs,
     # HEAD) stays live; a symlinked entry ("leak") resolves inside the wall
     assert git_metadata_readable_roots(worktree) == (common,)
+    # R4 (Neon): ORIG_HEAD is not masked (a /dev/null there breaks git fsck)
     assert git_metadata_masked(worktree) == tuple(
-        common / name for name in ("COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD")
+        common / name for name in ("COMMIT_EDITMSG", "MERGE_MSG")
     )
 
 
@@ -457,7 +460,9 @@ def test_git_status_and_diff_still_work_inside_the_narrowed_metadata(
     )
     proc = subprocess.run(
         sandbox.wrap_command(
-            ["/bin/sh", "-c", "git status --short && git diff --stat && git log --oneline -1"],
+            ["/bin/sh", "-c",
+             "git status --short && git diff --stat && git log --oneline -1"
+             " && git fsck --no-progress --no-dangling"],
             profile,
         ),
         cwd=worktree, capture_output=True, text=True, check=False, timeout=60,
@@ -465,7 +470,7 @@ def test_git_status_and_diff_still_work_inside_the_narrowed_metadata(
     )  # fmt: skip
     assert proc.returncode == 0, proc.stderr
     assert "a.txt" in proc.stdout and "1 file changed" in proc.stdout
-    private = [common / "MERGE_MSG", common / "ORIG_HEAD", common / "COMMIT_EDITMSG",
+    private = [common / "MERGE_MSG", common / "COMMIT_EDITMSG",
                common / "leak" / "canary.txt", tmp_path / "private" / "canary.txt"]  # fmt: skip
     seen = _probe(profile, private, cwd=worktree)
     assert "read" not in seen.values(), seen

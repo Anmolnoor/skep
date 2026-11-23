@@ -185,7 +185,9 @@ def test_a_running_wall_sees_what_the_operator_stages_or_packs_after_it_started(
     try:
         deadline = time.monotonic() + 60
         while not (run / ".up").exists():
-            assert wall.poll() is None and time.monotonic() < deadline, wall.communicate()
+            if wall.poll() is not None or time.monotonic() >= deadline:
+                wall.kill()  # R4 (Sol): reap before reading, never hang CI
+                raise AssertionError(wall.communicate(timeout=10))
             time.sleep(0.05)
         oids["late"] = late(repo)
         (run / ".go").touch()
@@ -242,11 +244,26 @@ def test_a_strict_run_refuses_a_linked_entry_git_s_walk_reads(
     "path", ["/opt/homebrew/var", "/opt/homebrew/var/postgresql@16", "/usr/local/var/mysql",
              "/USR/LOCAL/VAR/redis"],
 )  # fmt: skip
-def test_an_extra_path_in_homebrew_s_var_is_refused(path: str, tmp_path: Path) -> None:
-    """Opus O-R3-3: accepted at setup, then masked last under Seatbelt (ENOENT)."""
+def test_an_extra_path_in_homebrew_s_var_is_refused_on_macos(
+    path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opus O-R3-3: accepted at setup, then masked last under Seatbelt
+    (ENOENT). R4 (Sol): only on macOS — bubblewrap honours these paths."""
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
     problem = sandbox.extra_read_path_problem(Path(path), tmp_path / "skep")
     assert problem is not None and "Homebrew's var/" in problem, path
     assert sandbox.extra_read_path_problem(Path("/opt/homebrew/share"), tmp_path / "skep") is None
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    assert sandbox.extra_read_path_problem(Path(path), tmp_path / "skep") is None
+
+
+def test_a_recorded_extra_root_that_vanished_refuses_the_wall(tmp_path: Path) -> None:
+    """R4 (Sol R3-2): the recorded wall names roots that existed at dispatch;
+    one gone by profile time must refuse, not quietly narrow the worker's
+    wall while G10 (after it returns) binds it."""
+    gone = tmp_path / "data"
+    with pytest.raises(sandbox.SandboxUnavailableError, match="vanished after dispatch"):
+        sandbox.strict_read_roots(tmp_path / "skep", extra=(gone,))
 
 
 macos = pytest.mark.skipif(sys.platform != "darwin", reason="/etc is /private/etc on macOS")

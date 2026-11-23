@@ -475,6 +475,22 @@ never a quiet host run). Proven against real bubblewrap by the running-wall
 test (the same test runs under Seatbelt on a Mac) and `test_g10_never_reads_an_extra_root_made_after_dispatch` in
 `test_sandbox_read_wall_r2.py`.
 
+## Review round 4 (2026-11-23)
+
+- `ORIG_HEAD` is no longer masked: a `/dev/null` over it made in-wall
+  `git fsck` exit 8 (`badRefFiletype`), and the commit it names is already
+  reachable through `objects/` and `logs/`. Only `COMMIT_EDITMSG` and
+  `MERGE_MSG` stay masked (where they exist as regular files at start; a
+  symlinked one is skipped, since bwrap cannot mount over a link). Earlier
+  sections that list `ORIG_HEAD` among the masked files describe round 3.
+- `HEAD` joins the entries whose link out of the common dir refuses a strict
+  run, beside `refs`, `logs`, `worktrees`, `index` and `packed-refs`.
+- A recorded extra read root that vanished between dispatch and profile time
+  refuses the wall (`sandbox_unavailable` for the worker, `unavailable` for
+  G10) rather than quietly building a narrower wall than the run recorded.
+- The Homebrew `var/` refusal for extra paths applies on macOS only;
+  bubblewrap honours those paths.
+
 ## Consequences
 
 - New sandboxed projects on Linux read only what a build needs. Python, git,
