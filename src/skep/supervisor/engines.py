@@ -220,6 +220,32 @@ def resolve_engine(name: str | None) -> CodingEngine:
     return engine
 
 
+ACP_WORKER = "skep.workers.acp"
+# Phase 04 R1 (A1): a ``python -m skep.workers.acp <adapter…>`` command whose
+# adapter no registry entry declares — still an ACP engine: governed, walled.
+ACP_UNREGISTERED = "acp"
+
+
+def _spellings(token: str) -> tuple[str, str]:
+    """The module a token names: dotted (``.__main__`` too) or as a path to
+    the package, its ``__main__.py`` or the module's ``.py``."""
+    path = Path(token)
+    if path.name == "__main__.py":
+        path = path.parent
+    elif path.suffix == ".py":
+        path = path.with_suffix("")
+    return token.removesuffix(".__main__"), ".".join(path.parts[-3:])
+
+
+def acp_adapter_argv(argv: Sequence[str]) -> tuple[str, ...] | None:
+    """A1: the adapter argv a worker command running ``skep.workers.acp``
+    hands it (what follows the module), else None."""
+    for i, token in enumerate(argv):
+        if ACP_WORKER in _spellings(token):
+            return tuple(argv[i + 1 :])
+    return None
+
+
 def external_agent_for_command(argv: Sequence[str]) -> str | None:
     """D36 (ES-F255): the external agent a worker command actually runs —
     ``python -m skep.workers.claude_code`` (``.__main__`` too) or a path to
@@ -227,17 +253,28 @@ def external_agent_for_command(argv: Sequence[str]) -> str | None:
     ``SKEP_WORKER_CMD`` that runs one is that agent, whatever the engine id.
     The generic shell worker counts: it wraps any local CLI agent.
 
+    A1 (Phase 04 R1): keyed by each engine's ``-m`` module, never its last
+    argv token (an ACP entry's is the adapter's name). ``skep.workers.acp``
+    is ``acp:<adapter>`` when its adapter is registered, else
+    ``ACP_UNREGISTERED`` — every caller (the scheduler's gates, dispatch's
+    pipes and wall, the spawner's key masks) reads this one answer.
+
     ponytail: these spellings only — a wrapper script that execs the module
     is not seen here; the CLI adapters' and the shell worker's own
     SKEP_SANDBOX refusal (cli_adapter ``requires_sandbox``) is the wall
     behind this one."""
-    modules = {e.argv[-1]: e.name for e in CODING_ENGINES.values() if e.external and e.argv}
+    adapter = acp_adapter_argv(argv)
+    if adapter is not None:
+        name = f"acp:{adapter[0]}" if adapter else ""
+        return name if name in CODING_ENGINES else ACP_UNREGISTERED
+    modules = {
+        e.argv[2] if e.argv[1:2] == ("-m",) else e.argv[-1]: e.name
+        for e in CODING_ENGINES.values()
+        if e.external and e.argv
+    }
     modules["skep.workers.shell_worker"] = "shell_worker"
     for token in argv:
-        path = Path(token)
-        if path.name == "__main__.py":
-            path = path.parent
-        for name in (token.removesuffix(".__main__"), ".".join(path.parts[-3:])):
+        for name in _spellings(token):
             if name in modules:
                 return modules[name]
     return None

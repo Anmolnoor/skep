@@ -48,7 +48,11 @@ if TYPE_CHECKING:
 
 # D4: the default modes of both adapters never ask, so the engine pins one
 # that does; an adapter without it fails the run (I9: fail to ask, not allow).
+# codex-acp: every codex mode but agent-full-access (which never asks) runs
+# each command in codex's own sandbox, and that sandbox cannot start inside
+# skep's (measured, ADR 0058 D4) — read-only is still the one that asks.
 ASKING_MODES = {"claude-agent-acp": "default", "codex-acp": "read-only"}
+ENGINE_ERROR_ACTOR = "auto:engine-error"  # A13: the engine failed the ask, no human
 _CARD_POLL_SECONDS = 0.2
 
 
@@ -89,6 +93,7 @@ class AcpEngine:
         task: CodingWorkerTask,
         adapter: str,
         walled: bool,
+        chat_id: str | None = None,
     ) -> None:
         from ..supervisor.acp.govern import EngineBinding, Governor, _Sink
         from ..supervisor.acp.proxy import Proxy
@@ -100,18 +105,19 @@ class AcpEngine:
         )
 
         self._process, self._store, self._task, self._adapter = process, store, task, adapter
-        actor = f"acp-engine:{adapter}"
+        actor, engine = f"acp-engine:{adapter}", f"acp:{adapter}"
 
         def decide(
-            item: tuple[str, str, str], cwd: str, ring: Any, tid: str | None, client_side: bool
-        ) -> dict[str, Any]:
+            item: tuple[str, str, str], cwd: str, ring: Any, tid: str | None,
+            client_side: bool, url: str | None,
+        ) -> dict[str, Any]:  # fmt: skip
             return acp_engine_decide(
-                holder, store, task, item, actor=actor, cwd=cwd, ring=ring, tool_call_id=tid,
-                client_side=client_side, walled=walled,
+                holder, store, task, item, actor=actor, engine=engine, cwd=cwd, ring=ring,
+                tool_call_id=tid, client_side=client_side, walled=walled, url=url,
             )  # fmt: skip
 
         run = store.get_run(task.task_id)
-        blame = {"task_id": task.task_id, "engine": f"acp:{adapter}", "caste": task.worker_kind}
+        blame = {"task_id": task.task_id, "engine": engine, "caste": task.worker_kind}
         self.governor = Governor(
             holder, store, None, holder.current.audit_dir, adapter, actor, task.workspace,
             str(holder.current.home), engine=EngineBinding(
@@ -137,12 +143,22 @@ class AcpEngine:
         self._cond = threading.Condition()
         self._closed = False
         self.failure: str | None = None
+        # A10: the dispatching chat (a schedule's), else ONE fallback per run.
+        self._chat_id, self._chat_lock = chat_id, threading.Lock()
+        self._asks: list[threading.Thread] = []  # A7: joined by finish()
         self._thread = threading.Thread(target=self._drive, name="acp-engine", daemon=True)
         self._thread.start()
 
     def finish(self, timeout: float = 30.0) -> str | None:
-        """Wait for the session to end; the failure the run must state, or None."""
+        """Wait for the session and its open asks to end; the failure the run
+        must state, or None. Called before the store closes: an ask still
+        waiting would resolve its card on a closed store."""
+        end = time.monotonic() + timeout
         self._thread.join(timeout)
+        for ask in list(self._asks):
+            ask.join(max(0.0, end - time.monotonic()))
+        if self._thread.is_alive():  # A15: never "no failure" for a session still running
+            return f"the ACP session did not end within {timeout:g}s of the worker's exit"
         return self.failure
 
     # --- the wire -------------------------------------------------------
@@ -178,7 +194,9 @@ class AcpEngine:
                 self._responses[rid] = msg
                 self._cond.notify_all()
         elif method == "session/request_permission" and rid is not None:
-            threading.Thread(target=self._forwarded, args=(msg,), daemon=True).start()
+            ask = threading.Thread(target=self._forwarded, args=(msg,), daemon=True)
+            self._asks.append(ask)
+            ask.start()
         elif rid is not None:
             error = {"code": -32601, "message": f"skep's ACP engine does not serve {method}"}
             self._send({"id": rid, "error": error})
@@ -252,6 +270,8 @@ class AcpEngine:
             self._ask_human(msg)
         except Exception as exc:  # never leave the agent waiting on an ask
             self._say(f"forwarded ask: {exc}; answered cancelled")
+            if self.governor.engine is not None:  # A13: no human answered it
+                self.governor.engine.answered_by[json.dumps(msg.get("id"))] = ENGINE_ERROR_ACTOR
             self._send({"id": msg.get("id"), "result": {"outcome": {"outcome": "cancelled"}}})
 
     def _ask_human(self, msg: dict[str, Any]) -> None:
@@ -279,27 +299,37 @@ class AcpEngine:
             "title": call.get("title"), "kind": call.get("kind"),
             "reason": None if isinstance(probe, Decided) else getattr(probe, "reason", None),
         }  # fmt: skip
-        chat_id = self._store.chat_for_task(self._task.task_id)
-        action_id = propose_acp_permission(self._store, self._task, ask, chat_id=chat_id)
         deadline = time.monotonic() + self._card_timeout
-        timed_out = False
+        with self._chat_lock:
+            chat_id = self._chat_id or self._store.chat_for_task(self._task.task_id)
+            self._chat_id, action_id = propose_acp_permission(
+                self._store, self._task, ask, chat_id=chat_id,
+                expires_at=time.time() + self._card_timeout,
+            )  # fmt: skip
+        lost = False
         while True:
             card = self._store.get_chat_action(action_id)
-            if card is not None and card.status not in ("proposed", "executing"):
+            if card is None or card.status not in ("proposed", "executing"):
                 break
             if self._closed or time.monotonic() > deadline:
                 note = "the run ended before an answer" if self._closed else "card timed out"
-                timed_out = expire_acp_permission(self._store, action_id, f"auto-denied: {note}")
-                if timed_out:
+                if expire_acp_permission(self._store, action_id, f"auto-denied: {note}"):
+                    continue  # re-read: the denial it just recorded
+                if lost:  # A6: a confirm stuck mid-claim is no answer — deny
+                    card = None
                     break
-            time.sleep(_CARD_POLL_SECONDS)  # ponytail: a poll — any process may answer
-        allowed = not timed_out and card is not None and card.status == "confirmed"
-        kind = "allow_once" if allowed else "reject_once"
+                lost = True  # a confirm running right now gets one more poll
+            with self._cond:  # A7: the session's end wakes this at once
+                if lost or not self._closed:
+                    self._cond.wait(_CARD_POLL_SECONDS)  # ponytail: a poll — any process answers
+        allowed = card is not None and card.status == "confirmed"
+        option = kinds.get("allow_once" if allowed else "reject_once")
         outcome: dict[str, Any] = {"outcome": "cancelled"}
-        if kinds.get(kind) is not None:
-            outcome = {"outcome": "selected", "optionId": kinds[kind]}
-        if timed_out and self.governor.engine is not None:
-            self.governor.engine.answered_by[json.dumps(msg.get("id"))] = ACP_TIMEOUT_ACTOR
+        if option is not None:
+            outcome = {"outcome": "selected", "optionId": option}
+        engine = self.governor.engine
+        if engine is not None and not allowed and (card is None or (card.result or {}).get("auto")):
+            engine.answered_by[json.dumps(msg.get("id"))] = ACP_TIMEOUT_ACTOR  # not a human
         self._send({"id": msg.get("id"), "result": {"outcome": outcome}})
 
 

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -53,8 +54,6 @@ from skep.worker_contract import (
     ProjectContextPayload,
     TaskIntent,
     TaskState,
-    Verification,
-    VerificationOutcome,
     merge_approval_grants,
 )
 
@@ -114,6 +113,7 @@ from .worktree import (
 if TYPE_CHECKING:
     # Runtime import stays inside _resolve_provider_routing: packs → scheduler
     # → dispatch is a cycle at module-init time.
+    from ..workers.acp import AcpEngine
     from .engines import CodingEngine
     from .packs import RoutingDecision
 
@@ -405,6 +405,7 @@ def run_task(
     planning_protocol: str = "plan",
     verify_command: str = "",
     coding_engine: str = "",
+    chat_id: str | None = None,
 ) -> IngestOutcome:
     """Run one contract task against ``repo`` and return its durable run record.
 
@@ -421,6 +422,9 @@ def run_task(
     ``coding`` task. Empty resolves from the project policy; "builtin" is
     skep's own worker. An EXTERNAL engine's own commands do not pass the
     capability layer — the sandbox is what confines it.
+
+    ``chat_id`` (Phase 04 R1, A10): the chat that dispatched the run (a
+    schedule's), where an ACP engine files the asks it cannot decide.
     """
     # v127-F11 (I9): the funnel for every face that skips submit_run (CLI run,
     # scheduler tick, resume, batch) — an unknown or retired caste is refused
@@ -431,6 +435,7 @@ def run_task(
     proxy: FilteringProxy | None = None
     proxy_socket_dir: str | None = None
     active_names: tuple[str, ...] = ()
+    acp: AcpEngine | None = None
     # ES-F4 (B07): every mode's worktrees live under the active SKEP_HOME.
     # Workspace mode used `<repo parent>/.skep/worktrees` — the real ~/.skep
     # for a repo in $HOME, and outside the run's SKEP_HOME always.
@@ -464,8 +469,10 @@ def run_task(
     # workers (audit, researcher, …) are unaffected — an engine replaces the
     # CODING implementation only.
     from .engines import (
+        ACP_UNREGISTERED,
         CODING_ENGINES,
         acp_adapter,
+        acp_adapter_argv,
         engine_available,
         external_agent_for_command,
         resolve_engine,
@@ -516,6 +523,12 @@ def run_task(
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
     # ADR 0058: an ACP engine's adapter runs in the sandbox; its governor here.
     adapter = acp_adapter(engine) if worker_argv is not None else None
+    if wrapped == ACP_UNREGISTERED:
+        # A1: a worker command driving an adapter no entry declares is an ACP
+        # engine all the same — the pipes, the governor and the wall below.
+        from .acp.mapper import agent_name
+
+        adapter = agent_name({}, acp_adapter_argv(config.command_for(worker_kind)) or ()) or "?"
     codex_auth: str | None = None  # ES-F122: set only when the plan login is used
     run_login: Path | None = None
     coerced_mode: str | None = None
@@ -623,6 +636,25 @@ def run_task(
                         chatgpt_login=True,
                     )
                 }
+            )
+    if adapter is not None:
+        # A2 (ADR 0058, ADR 0068; I9, I12): the adapter reads only behind the
+        # strict read wall — never the project's optional setting.
+        name = f"acp:{adapter}"
+        if read_allowlist_for(_project_policy(run_store, config, repo, project_context)) is None:
+            raise ValueError(
+                f"coding_engine {name!r} runs only behind strict reads, and this project's "
+                "strict_read_confinement is off — the agent could read your whole home; "
+                f"`skep project setup {shlex.quote(str(repo))} --strict-reads`, then dispatch "
+                "again (ADR 0058)"
+            )
+        network = NetworkPolicy(allow=tuple(permissions.egress()))
+        probe = sandbox_availability(resolve_sandbox_backend(config, network, strict_reads=True))
+        if not (config.sandbox and probe.usable):
+            raise ValueError(
+                f"coding_engine {name!r} needs a sandbox backend that confines reads, and "
+                f"{'the sandbox is off' if not config.sandbox else probe.detail} — skep never "
+                "runs it unconfined; `skep doctor` names the fix (ADR 0058, I12)"
             )
     if not verify_command or auto_apply_branch is None:
         project_policy = _project_policy(run_store, config, repo, project_context)
@@ -1058,7 +1090,6 @@ def run_task(
         if proxy_unix_path is not None:
             running_detail += f" proxy socket {proxy_unix_path}"
         run_store.transition(task.task_id, "running", running_detail)
-        acp = None
         if adapter is not None:
             # ADR 0058 (Phase 04 4.1): the governor and the ACP client, outside
             # the wall, on the worker's pipes. ``walled``: the adapter runs in
@@ -1070,6 +1101,7 @@ def run_task(
             acp = AcpEngine(
                 process, holder=ConfigHolder(config, run_store), store=run_store, task=task,
                 adapter=adapter, walled=execution_mode == "sandbox" and config.sandbox,
+                chat_id=chat_id,
             )  # fmt: skip
 
         verdict = watch_worker(
@@ -1087,16 +1119,7 @@ def run_task(
 
         result = _run_result(run_store, task.task_id, result_path)
         acp_failure = acp.finish() if acp is not None else None
-        if acp_failure and result is not None and result.status in _ACP_DOWNGRADABLE:
-            # I8/I9: the session's own failure (no asking mode, an adapter
-            # error) is the run's — the worker inside only saw the agent exit.
-            result = result.model_copy(update={
-                "status": TaskState.FAILED,
-                "summary": f"{engine.name}: {acp_failure}",
-                "verification": Verification(
-                    outcome=VerificationOutcome.FAILED, details=f"skep acp: {acp_failure}"
-                ),
-            })  # fmt: skip
+        acp = None  # finished: the finally below has nothing left to join
 
         outcome = ingest_run(
             store=run_store,
@@ -1110,6 +1133,24 @@ def run_task(
             # v43-F2: completed research reports project into ~/.skep/workspace.
             delivery_root=config.home.parent / "workspace",
         )
+        if acp_failure and result is not None and result.status in _ACP_DOWNGRADABLE:
+            # I8/I9 (ADR 0058 D7, A9): the session's own failure (no asking
+            # mode, an adapter error, a refusal) is the run's — the worker
+            # inside only saw the agent exit. Its claim stays as it made it
+            # (store + audit); the supervisor's verdict is its own record.
+            verdict_detail = {
+                "status": TaskState.FAILED.value,
+                "reason": acp_failure,
+                "worker_status": result.status.value,
+                "by": f"skep acp engine (acp:{adapter})",
+            }
+            (audit_task_dir / "supervisor_verdict.json").write_text(
+                json.dumps(verdict_detail, ensure_ascii=True), encoding="utf-8"
+            )
+            run_store.transition(task.task_id, TaskState.FAILED.value, f"skep acp: {acp_failure}")
+            record = run_store.get_run(task.task_id)
+            assert record is not None
+            outcome = IngestOutcome(record=record, review_id=outcome.review_id)
 
         # G10: independently re-verify a completed claim before trusting it. The
         # worker's worktree is torn down first; re-verification builds its own
@@ -1190,6 +1231,8 @@ def run_task(
                 cleanup_orphans(repo, worktrees_root, keep=_keep_worktree_names(run_store))
         return outcome
     finally:
+        if acp is not None:  # A7: its open asks write to the store — before it closes
+            acp.finish()
         if run_login is not None:
             run_login.unlink(missing_ok=True)
         _ACTIVE.discard(*active_names)
