@@ -189,6 +189,7 @@ def spawn_worker(
     write_denied: Iterable[Path] = (),
     unmasked: Iterable[Path] = (),
     relay: ProviderRelay | None = None,
+    read_allowlist: tuple[Path, ...] | None = None,
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -207,6 +208,9 @@ def spawn_worker(
     ``relay`` (ADR 0062): the run's provider-key relay. A relayed worker
     holds no copy of the key: its key files stay masked (no B125 carve-out)
     and no env variable carrying the key reaches it.
+
+    ``read_allowlist`` (ADR 0068): the project's read wall
+    (``sandbox.read_allowlist_for``); None keeps reads denylist-only.
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -273,6 +277,7 @@ def spawn_worker(
                 ),
             ),
             unmasked=unmasked,
+            read_allowlist=read_allowlist,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
         if bubblewrap and config.readopt_workers:

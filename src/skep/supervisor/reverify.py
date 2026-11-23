@@ -525,6 +525,7 @@ class _PrimeWall:
         writable: list[Path],
         config: SupervisorConfig,
         name: str = "prime",
+        read_allowlist: tuple[Path, ...] | None = None,
     ) -> None:
         self.hosts = hosts
         self._name = name
@@ -533,6 +534,7 @@ class _PrimeWall:
         self._profile_path = profile_path
         self._writable = writable
         self._config = config
+        self._read_allowlist = read_allowlist
         self._proxy: FilteringProxy | None = None
         self._profile: Path | None = None
 
@@ -569,6 +571,7 @@ class _PrimeWall:
                 proxy_port=proxy.port,
                 unix_socket_path=proxy.unix_socket_path,
                 skep_home=self._config.home.parent,
+                read_allowlist=self._read_allowlist,
             )
         self._proxy = proxy
 
@@ -672,6 +675,7 @@ def reverify(
     node_cache_dir: Path | None = None,
     count_pytest: bool = False,
     baseline_counts: dict[str, int] | None = None,
+    read_allowlist: tuple[Path, ...] | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -697,6 +701,10 @@ def reverify(
     are read on the baseline (``baseline_counts`` when the caller has them
     cached, else by running it right before the patch applies) and on the
     patched tree, into ``test_counts``.
+
+    ``read_allowlist`` (ADR 0068): the run's read wall, the same one its
+    worker had (``sandbox.read_allowlist_for``) — every prime and the verify
+    run inside it; None keeps reads denylist-only.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -793,6 +801,7 @@ def reverify(
             profile_path=profile_path,
             writable=cache_writable,
             config=config,
+            read_allowlist=read_allowlist,
         )
         # v127 council round 4 (N1, second door): an install AFTER the patch
         # applies builds/installs patch-chosen code (a uv build backend, a
@@ -808,6 +817,7 @@ def reverify(
             writable=[],
             config=config,
             name="patched-prime",
+            read_allowlist=read_allowlist,
         )
         if uv_prime:
             # v94-F7: prime the BASELINE env before the patch is applied — only
@@ -878,6 +888,7 @@ def reverify(
                     unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
                     skep_home=config.home.parent,
                     loopback_ports=ports,
+                    read_allowlist=read_allowlist,
                 )
             except sandbox.SandboxUnavailableError as exc:
                 # ES-F251 (ES-F1, I12): no wall, no re-run — honestly
@@ -1159,7 +1170,19 @@ def reverify_run(
     # v109-F4: prime against a per-project cache, so the resolve work one
     # re-verify pays for, the next one keeps. (Runtime import: the resolver
     # pulls in the serve tree — the same cycle dispatch dodges.)
-    from .policy_resolver import project_cache_root
+    from .policy_resolver import managed_repos_root, project_cache_root, run_policy_for_repo
+
+    # ADR 0068: the wall the project's worker ran in, read from the same
+    # project policy dispatch read it from — G10 never re-runs a patch with
+    # wider reads than the worker had.
+    candidates = [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
+    read_allowlist = (
+        sandbox.read_allowlist_for(
+            run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+        )
+        if profile_path is not None
+        else None
+    )
 
     # v127-A0 review (council round 3, I2): re-verify's own half of the
     # project root — the worker's sandbox mounts only ``worker/``, so nothing
@@ -1197,6 +1220,7 @@ def reverify_run(
         node_cache_dir=node_cache_dir,
         count_pytest=count_pytest,
         baseline_counts=cached,
+        read_allowlist=read_allowlist,
     )
     counts = outcome.test_counts
     if counts is not None and counts["baseline_source"] == "run" and base_commit:

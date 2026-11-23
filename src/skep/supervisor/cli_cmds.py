@@ -2802,6 +2802,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     execution_mode = getattr(args, "execution_mode", None)
     if execution_mode:  # v127-F8: the doctor's fix line needs a CLI face
         overrides["default_execution_mode"] = execution_mode
+    strict_reads = getattr(args, "strict_reads", None)
+    if strict_reads is not None:  # ADR 0068: the doctor's migration line
+        overrides["strict_read_confinement"] = strict_reads
     return overrides
 
 
@@ -4129,6 +4132,14 @@ def register_supervisor_commands(
         "D6); loopback is otherwise closed but for a local model provider's own port",
     )
     project_preview.add_argument(
+        "--strict-reads",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="sandboxed workers and their re-verify read an allowlist (system dirs, "
+        "toolchains, the worktree, extra_read_paths), not the whole disk (ADR 0068); new "
+        "sandboxed projects get it where bubblewrap enforces it, --no-strict-reads opts out",
+    )
+    project_preview.add_argument(
         "--codex-chatgpt-login",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -4197,6 +4208,14 @@ def register_supervisor_commands(
         help="a loopback port this project's sandboxed workers may reach (repeatable, "
         "D6; name every port, the list replaces the project's); loopback is otherwise "
         "closed but for a local model provider's own port",
+    )
+    project_setup.add_argument(
+        "--strict-reads",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="sandboxed workers and their re-verify read an allowlist (system dirs, "
+        "toolchains, the worktree, extra_read_paths), not the whole disk (ADR 0068); new "
+        "sandboxed projects get it where bubblewrap enforces it, --no-strict-reads opts out",
     )
     project_setup.add_argument(
         "--codex-chatgpt-login",

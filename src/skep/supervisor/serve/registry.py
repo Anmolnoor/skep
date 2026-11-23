@@ -36,6 +36,7 @@ from ..policy_layers import baseline_guard
 from ..projects import (
     PROJECT_STRATEGIES,
     ProjectBinding,
+    default_strict_reads,
     first_party_project_policy,
     first_party_schedule_seeds,
     list_projects,
@@ -1248,6 +1249,12 @@ def setup_project_record(
         overrides=policy_overrides or {},
         notes=notes,
     )
+    default_strict_reads(  # ADR 0068
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        backend=new_project_sandbox_probe().backend,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
@@ -1521,6 +1528,12 @@ def preview_project_setup(
         policy=base_policy,
         overrides=policy_overrides,
         notes=notes,
+    )
+    default_strict_reads(  # ADR 0068
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        backend=new_project_sandbox_probe().backend,
     )
     base_policy, bindings = _carry_forward_existing(
         run_store,

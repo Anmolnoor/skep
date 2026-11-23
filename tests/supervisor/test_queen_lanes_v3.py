@@ -302,7 +302,12 @@ def test_the_queen_rest_cli_and_hook_give_one_verdict_and_one_label(
                 path=path,
                 role=None if role is None else SHIPPED_ROLES[role],
             )
-            if queen.reason == "filesystem.deny.no_such_path":
+            if queen.reason in (
+                "filesystem.deny.no_such_path",
+                # ADR 0068 (I9): a bare name is refused before it is resolved
+                # against serve's cwd — a validity check, like no_such_path
+                "filesystem.deny.outside_root_lookup",
+            ):
                 continue
             value = str(Path(path).expanduser().resolve())  # what the Queen decides
             rest = policy_decide(holder, store, scope="filesystem", action="read", value=value,
