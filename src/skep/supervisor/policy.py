@@ -15,6 +15,7 @@ auto:<rule>`), so the audit trail always names what granted the autonomy.
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import re
@@ -260,6 +261,21 @@ _PACKAGE_DEPENDENCY_KEYS = frozenset(
     }
 )
 _PACKAGE_RUNNERS = frozenset({"npm", "pnpm", "yarn"})
+# V1 review R1 (F7): test-runner config proper — what a patch edits to change
+# which tests run. The rest of _PIN_CONTROL_GLOBS (vite.config, setup.py,
+# Makefile, .npmrc ...) steers the check too, so it blocks auto-landing, but
+# editing it is not test tampering and keeps a confirmed G10 (I8).
+_TEST_CONFIG_GLOBS = (
+    "conftest.py",
+    "pytest.ini",
+    ".pytest.ini",
+    "pytest.toml",
+    ".pytest.toml",
+    "jest.config.*",
+    "vitest.config.*",
+)
+# Compared section by section (``_test_config(..., runner_only=True)``).
+_TEST_CONFIG_PARSED = ("pyproject.toml", "package.json", "setup.cfg", "tox.ini")
 
 
 def _dig(node: object, *keys: str) -> object:
@@ -268,11 +284,23 @@ def _dig(node: object, *keys: str) -> object:
     return node
 
 
-def _test_config(name: str, text: str | None) -> object:
+def _test_config(name: str, text: str | None, *, runner_only: bool = False) -> object:
     """The parts of ``pyproject.toml``/``package.json`` that steer the check.
-    Unparseable → a sentinel that never compares equal (blocks)."""
+    Unparseable → a sentinel that never compares equal (blocks).
+
+    ``runner_only`` (V1 review R1, F7): just the test runner's own section —
+    pyproject's ``[tool.pytest*]``, package.json's test scripts and ``jest``
+    key, setup.cfg's ``[tool:pytest]``, tox.ini's ``[pytest]``."""
     if text is None:
         return None
+    if name in ("setup.cfg", "tox.ini"):
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            return object()
+        section = "tool:pytest" if name == "setup.cfg" else "pytest"
+        return dict(parser[section]) if parser.has_section(section) else None
     try:
         doc = json.loads(text) if name == "package.json" else tomllib.loads(text)
     except ValueError:
@@ -280,9 +308,15 @@ def _test_config(name: str, text: str | None) -> object:
     if not isinstance(doc, dict):
         return object()
     if name == "package.json":
+        if runner_only:
+            scripts = doc.get("scripts")
+            scripts = scripts if isinstance(scripts, dict) else {}
+            return {k: v for k, v in scripts.items() if "test" in k}, doc.get("jest")
         return {k: v for k, v in doc.items() if k not in _PACKAGE_DEPENDENCY_KEYS}
     tool = doc.get("tool")
     tool = tool if isinstance(tool, dict) else {}
+    if runner_only:
+        return {k: v for k, v in tool.items() if k.startswith("pytest")}
     return (
         {k: v for k, v in tool.items() if k.startswith(_PYPROJECT_TOOL_PREFIXES)},
         _dig(tool, "hatch", "envs"),
@@ -301,7 +335,12 @@ def _test_config(name: str, text: str | None) -> object:
 
 def _git_text(repo: Path, *args: str, env: dict[str, str] | None = None) -> str | None:
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=False
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        errors="replace",  # a binary blob is unparseable config, never a crash
+        env=env,
+        check=False,
     )
     return proc.stdout if proc.returncode == 0 else None
 
@@ -358,20 +397,49 @@ def pin_control_changes(
         or os.path.normpath(path) in pin_paths
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in ("pyproject.toml", "package.json")]
-    if not parsed:
-        return tuple(hits)
+    hits += _config_changes(repo, patch_path, base, parsed, runner_only=False)
+    return tuple(sorted(set(hits), key=changed_files.index))
+
+
+def test_config_changes(
+    repo: Path, patch_path: Path, base: str, changed_files: tuple[str, ...]
+) -> tuple[str, ...]:
+    """V1 (review R1, F7): the changed files that are test-runner config —
+    ``_TEST_CONFIG_GLOBS``, ``.github/workflows/**``, and the runner section
+    of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``."""
+    hits = [
+        path
+        for path in changed_files
+        if any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+        or path.startswith(".github/workflows/")
+    ]
+    parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
+    hits += _config_changes(repo, patch_path, base, parsed, runner_only=True)
+    return tuple(sorted(set(hits), key=changed_files.index))
+
+
+def _config_changes(
+    repo: Path, patch_path: Path, base: str, paths: list[str], *, runner_only: bool
+) -> list[str]:
+    """``paths`` whose ``_test_config`` differs between ``base`` and the patch
+    applied in a scratch index; every path when the patch does not apply."""
+    if not paths:
+        return []
+    hits = []
     with tempfile.TemporaryDirectory(prefix="skep-pinctl-") as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
         applied = _git_text(repo, "read-tree", base, env=env) is not None and (
             _git_text(repo, "apply", "--cached", str(patch_path), env=env) is not None
         )
-        for path in parsed:
+        for path in paths:
             name = os.path.basename(path)
             before = _git_text(repo, "show", f"{base}:{path}")
             after = _git_text(repo, "show", f":{path}", env=env)
-            if not applied or _test_config(name, before) != _test_config(name, after):
+            if not applied or _test_config(name, before, runner_only=runner_only) != _test_config(
+                name, after, runner_only=runner_only
+            ):
                 hits.append(path)
-    return tuple(sorted(set(hits), key=changed_files.index))
+    return hits
 
 
 @dataclass(frozen=True)
@@ -422,7 +490,9 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
         )
     if rule.require_verification_passed and ctx.verification_outcome != "passed":
         return f"verification is {ctx.verification_outcome!r}, not 'passed'"
-    if rule.require_reverified and not ctx.reverify_confirmed:
+    # Review R1 (F6, I2): every rule — `require_reverified=False` stays for
+    # compatibility but no longer lands an unconfirmed G10.
+    if not ctx.reverify_confirmed:
         return "supervisor re-verification did not confirm the result"
     if rule.require_pinned_verify and not ctx.verify_pinned:
         # I9: name the missing key and where it goes, not just the refusal.

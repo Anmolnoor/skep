@@ -279,3 +279,45 @@ def test_a_maintain_run_that_edits_conftest_waits_for_a_human(
         json.loads(d)["auto_apply_blocked"] for d in details if "auto_apply_blocked" in d
     )
     assert "conftest.py" in " ".join(str(v) for v in blocked.values())
+
+
+@pytest.mark.parametrize(
+    ("edits", "expected"),
+    [
+        # V1 review R1 (F7): only the runner's own section is test config.
+        ({"package.json": {**_PACKAGE, "devDependencies": {"jest": "29.7.0"}}}, ()),
+        (
+            {
+                "package.json": {
+                    **_PACKAGE,
+                    "scripts": {"test": "true", "check": "node tools/check.js --ci"},
+                }
+            },
+            None,
+        ),
+        ({"package.json": {**_PACKAGE, "jest": {"testPathIgnorePatterns": ["x"]}}}, None),
+        ({"pyproject.toml": _PYPROJECT.replace("2.31.0", "2.32.0")}, ()),
+        ({"pyproject.toml": _PYPROJECT.replace('"-q"', '"-q -k fast"')}, None),
+        ({"tox.ini": "[pytest\n"}, None),  # unparseable: flagged
+        ({"tox.ini": "[testenv]\ncommands = pytest\n"}, ()),
+        ({"Makefile": "test:\n\ttrue\n"}, ()),
+    ],
+)
+def test_test_config_changes_read_only_the_runner_section(
+    project_repo: Path, edits: dict[str, object], expected: tuple[str, ...] | None
+) -> None:
+    from skep.supervisor.policy import test_config_changes
+
+    base = git(project_repo, "rev-parse", "HEAD").stdout.strip()
+    for name, value in edits.items():
+        text = value if isinstance(value, str) else json.dumps(value, indent=2) + "\n"
+        (project_repo / name).write_text(text)
+    git(project_repo, "add", "-A")
+    patch = project_repo.parent / "runner.patch"
+    patch.write_text(git(project_repo, "diff", "--cached", base).stdout)
+    git(project_repo, "reset", "-q", "--hard", base)
+    git(project_repo, "clean", "-qfd")
+    changed = tuple(sorted(edits))
+    assert test_config_changes(project_repo, patch, base, changed) == (
+        changed if expected is None else expected
+    )

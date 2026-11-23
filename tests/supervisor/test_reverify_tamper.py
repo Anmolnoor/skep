@@ -54,7 +54,9 @@ def _seed(repo: Path, *, failing: bool = False) -> None:
 def _patch(repo: Path, name: str, edit: Callable[[Path], object]) -> Path:
     edit(repo)
     git(repo, "add", "-A")
-    text = git(repo, "diff", "--cached", "--no-color", "--src-prefix=a/", "--dst-prefix=b/").stdout
+    text = git(
+        repo, "diff", "--cached", "--binary", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"
+    ).stdout
     git(repo, "reset", "-q", "--hard", "HEAD")
     path = repo.parent / f"{name}.patch"
     path.write_text(text, encoding="utf-8")
@@ -252,9 +254,9 @@ def test_a_baseline_cache_hit_skips_the_second_baseline_run(
 ) -> None:
     _seed(repo)
     runs: list[str] = []
-    real: Callable[..., tuple[int, str]] = reverify_mod._run_command
+    real: Callable[..., tuple[int, str, str]] = reverify_mod._run_command
 
-    def counting(command: str, **kwargs: Any) -> tuple[int, str]:
+    def counting(command: str, **kwargs: Any) -> tuple[int, str, str]:
         runs.append(command)
         return real(command, **kwargs)
 
@@ -369,6 +371,11 @@ def test_the_run_detail_api_exposes_tamper_flags_and_counts(config: SupervisorCo
         ("\x1b[32m3 passed\x1b[0m\x1b[32m in 0.01s\x1b[0m", {"passed": 3, "total_executed": 3}),
         ("=== no tests ran in 0.01s ===", {"total_executed": 0}),
         ("collected 3 items\nKeyboardInterrupt", None),
+        # Review R1 (F9): a line with no pytest word is not a summary.
+        ("2 files in 0.01s", None),
+        ("3 passed in 0.01s\n2 files in 0.01s", {"passed": 3, "total_executed": 3}),
+        # Review R1 (F2): two summaries (a second pytest, a printed fake) fail closed.
+        ("1 passed in 0.01s\n== 2 passed in 0.02s ==", None),
     ],
 )
 def test_pytest_counts_reads_the_final_summary_line(
@@ -393,3 +400,253 @@ def test_an_unreadable_patch_is_a_failed_rerun_not_tampering(
     assert outcome.outcome == "failed", outcome.detail
     assert record.tamper_flags == ()
     assert approved is None
+
+
+# --- review round 1 -----------------------------------------------------------
+
+
+def test_what_the_baseline_run_leaves_behind_never_reaches_the_patched_run(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """F1 (I2): the cold-cache baseline runs in the worktree the patch then
+    lands in. An ignored file or a temp file it wrote must not make the
+    patched tests pass."""
+    (repo / ".gitignore").write_text("state.txt\n")
+    writer = (
+        "import tempfile\nfrom pathlib import Path\n\n\n"
+        "def test_state():\n"
+        "    Path('state.txt').write_text('x')\n"
+        "    (Path(tempfile.gettempdir()) / 'skep-v1-state').write_text('x')\n"
+    )
+    reader = writer.replace(
+        "    Path('state.txt').write_text('x')\n"
+        "    (Path(tempfile.gettempdir()) / 'skep-v1-state').write_text('x')\n",
+        "    assert Path('state.txt').exists() or "
+        "(Path(tempfile.gettempdir()) / 'skep-v1-state').exists()\n",
+    )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_state.py").write_text(writer)
+    _seed_more = TEST_B  # keep the tree shape of _seed
+    (repo / "tests" / "test_b.py").write_text(_seed_more)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "state")
+    patch = _patch(repo, "leak", lambda r: (r / "tests" / "test_state.py").write_text(reader))
+    outcome, record, approved, _ = _run(repo, config, patch)
+    assert outcome.outcome == "failed", outcome.detail
+    assert outcome.exit_codes == [1]
+    assert record.confirmed is False and approved is None
+
+
+def test_a_printed_second_summary_fails_closed(repo: Path, config: SupervisorConfig) -> None:
+    """F2: a fake summary printed after pytest's own (an atexit hook) can't
+    stand in for the real counts — two summaries are unreadable."""
+    _seed(repo)
+    fake = "import atexit\n\natexit.register(print, '==== 9 passed in 0.01s ====')\n\n\n"
+    patch = _patch(repo, "fake", lambda r: (r / "tests" / "test_b.py").write_text(fake + TEST_B))
+    outcome, record, approved, blocked = _run(repo, config, patch)
+    assert record.test_counts["status"] == "unparseable", outcome.detail
+    assert approved is None
+    assert "test counts could not be read" in blocked[VERIFIED_PATCH_RULE.name]
+
+
+def test_a_summary_on_stderr_is_not_counted(repo: Path, config: SupervisorConfig) -> None:
+    """F2: counts come from the pin's stdout, where pytest writes its summary."""
+    _seed(repo)
+    fake = (
+        "import atexit\nimport sys\n\n"
+        "atexit.register(lambda: print('== 1 passed in 0.01s ==', file=sys.stderr))\n\n\n"
+    )
+    patch = _patch(repo, "stderr", lambda r: (r / "tests" / "test_b.py").write_text(fake + TEST_B))
+    outcome, record, approved, blocked = _run(repo, config, patch)
+    assert outcome.outcome == "passed", outcome.detail
+    assert record.test_counts["patched"]["total_executed"] == 3
+    assert approved is not None, blocked
+
+
+def test_a_pin_that_runs_pytest_twice_fails_closed(repo: Path, config: SupervisorConfig) -> None:
+    _seed(repo)
+    pin = f"{PIN} tests/test_a.py && {PIN} tests/test_b.py"
+    patch = _patch(repo, "twice", lambda r: (r / "a.txt").write_text("a\n"))
+    outcome, record, approved, _ = _run(repo, config, patch, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    assert record.test_counts["status"] == "unparseable"
+    assert approved is None
+
+
+def test_a_maxfail_pin_keeps_an_honest_regression_failed(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """F3: `-x` stops at the first failure, so a real regression executes
+    fewer tests. That is a failed re-run, not tampering."""
+    _seed(repo)
+    patch = _patch(
+        repo,
+        "regress",
+        lambda r: (r / "tests" / "test_a.py").write_text(TEST_A.replace("1 == 1", "1 == 2")),
+    )
+    outcome, record, approved, _ = _run(repo, config, patch, f"{PIN} -x")
+    assert outcome.outcome == "failed", outcome.detail
+    assert outcome.tamper_flags == ()
+    counts = record.test_counts
+    assert counts["status"] == "ok"
+    assert counts["patched"]["total_executed"] < counts["baseline"]["total_executed"]
+    assert record.confirmed is False and approved is None
+
+
+def test_a_quoted_pytest_pin_is_still_counted(repo: Path, config: SupervisorConfig) -> None:
+    """F4: `-m 'pytest'` is a pytest pin, so a quietly removed failing test
+    is caught by the counts."""
+    _seed(repo, failing=True)
+    pin = f"{shlex.quote(sys.executable)} -m 'pytest' -q -p no:cacheprovider"
+    patch = _patch(repo, "quoted", lambda r: (r / "tests" / "test_a.py").write_text(TEST_A))
+    _assert_tampered(_run(repo, config, patch, pin), "test_total_dropped")
+
+
+@pytest.mark.parametrize(
+    ("pin", "expected"),
+    [
+        ("pytest;", True),
+        ("'pytest' -q", True),
+        ('"python" -m pytest', True),
+        ("python -m pytest", True),
+        ("uv run pytest -x", True),
+        ("cd sub && CI=1 py.test", True),
+        ("uv run --with pytest-xdist pytest -n auto", True),
+        ("sh -c 'pytest -q'", True),
+        ("/usr/bin/pytest", True),
+        ("grep pytest x", False),
+        ("echo pytest-ish", False),
+        ("npm test", False),
+        ("uv run --with pytest-xdist python check.py", False),
+        ("pytest 'unclosed", True),  # unreadable: fail closed
+    ],
+)
+def test_pytest_pins_are_read_from_shell_words(pin: str, expected: bool) -> None:
+    assert reverify_mod._is_pytest_pin(pin) is expected
+
+
+def test_a_deleted_test_file_with_a_quoted_path_is_flagged(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """F5: git quotes non-ASCII paths; the guard reads NUL-delimited names."""
+    _seed(repo)
+    odd = repo / "tests" / "test_é x.py"
+    odd.write_text(TEST_B.replace("three", "four"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "odd")
+    patch = _patch(repo, "odd", lambda r: (r / "tests" / "test_é x.py").unlink())
+    _assert_tampered(_run(repo, config, patch), "test_file_deleted:tests/test_é x.py")
+
+
+def test_a_modified_binary_fixture_under_tests_does_not_crash(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """F5: a binary blob is read as bytes, never decoded as text."""
+    _seed(repo)
+    (repo / "tests" / "blob.bin").write_bytes(b"\xff\xfe\x00\x01" * 64)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "blob")
+    patch = _patch(
+        repo, "blob", lambda r: (r / "tests" / "blob.bin").write_bytes(b"\xfe\xff\x00\x02" * 64)
+    )
+    outcome, record, approved, blocked = _run(repo, config, patch)
+    assert outcome.outcome == "passed", outcome.detail
+    assert record.tamper_flags == ()
+    assert approved is not None, blocked
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after"),
+    [
+        ("vite.config.ts", None, "export default {}\n"),
+        ("setup.py", "VERSION = '1.0'\n", "VERSION = '1.1'\n"),
+        (
+            "setup.cfg",
+            "[metadata]\nversion = 1.0\n\n[tool:pytest]\naddopts = -q\n",
+            "[metadata]\nversion = 1.1\n\n[tool:pytest]\naddopts = -q\n",
+        ),
+    ],
+)
+def test_build_config_edits_are_not_test_tampering(
+    repo: Path, config: SupervisorConfig, name: str, before: str | None, after: str
+) -> None:
+    """F7 (I8): a file that steers the check but is not test config keeps its
+    `confirmed` verdict; the landing gate still sends it to a human."""
+    _seed(repo)
+    if before is not None:
+        (repo / name).write_text(before)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "config")
+    outcome, record, approved, blocked = _run(
+        repo, config, _patch(repo, "cfg", lambda r: (r / name).write_text(after))
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert outcome.tamper_flags == ()
+    assert record.confirmed is True
+    assert approved is None
+    assert "decide what the pinned check runs" in blocked[VERIFIED_PATCH_RULE.name]
+
+
+def test_a_setup_cfg_pytest_section_edit_is_tampering(repo: Path, config: SupervisorConfig) -> None:
+    _seed(repo)
+    (repo / "setup.cfg").write_text("[tool:pytest]\naddopts = -q\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "cfg")
+    patch = _patch(
+        repo,
+        "deselect",
+        lambda r: (r / "setup.cfg").write_text(
+            "[tool:pytest]\naddopts = -q --deselect tests/test_b.py::test_three\n"
+        ),
+    )
+    _assert_tampered(_run(repo, config, patch), "test_config_changed:setup.cfg")
+
+
+def test_an_xfail_call_over_a_failing_test_is_tampered(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """F8: `pytest.xfail(...)` turns a failing test into an xfail that still
+    counts as executed — the marker and the xfailed count both say so."""
+    _seed(repo, failing=True)
+    patch = _patch(
+        repo,
+        "xfail",
+        lambda r: (r / "tests" / "test_a.py").write_text(
+            "import pytest\n\n\n"
+            + TEST_A
+            + FAILING.replace("assert 1 == 2", "pytest.xfail('later')")
+        ),
+    )
+    _assert_tampered(
+        _run(repo, config, patch), "skip_marker_added:tests/test_a.py", "test_xfailed_increased"
+    )
+
+
+def test_an_xfail_call_plus_a_noop_test_is_tampered(repo: Path, config: SupervisorConfig) -> None:
+    _seed(repo)
+    patch = _patch(
+        repo,
+        "xfail-noop",
+        lambda r: (r / "tests" / "test_a.py").write_text(
+            "import pytest\n\n\n"
+            + TEST_A.replace("assert 2 == 2", "pytest.xfail('later')")
+            + "\n\ndef test_noop():\n    pass\n"
+        ),
+    )
+    _assert_tampered(_run(repo, config, patch), "test_xfailed_increased")
+
+
+def test_a_guard_that_cannot_read_the_patch_fails_closed(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: nothing the guard's git calls raise escapes before the verdict is
+    persisted — it is a flag, so the run is not confirmed."""
+    _seed(repo)
+    patch = _patch(repo, "any", lambda r: (r / "a.txt").write_text("a\n"))
+
+    def broken(*_args: object) -> tuple[str, ...]:
+        raise OSError("git vanished")
+
+    monkeypatch.setattr(reverify_mod, "patch_paths", broken)
+    flags = reverify_mod.static_tamper_flags(repo, patch, "HEAD")
+    assert flags == ["tamper_check_failed:OSError"]
