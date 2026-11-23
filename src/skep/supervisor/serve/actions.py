@@ -139,7 +139,7 @@ from ..shell_prefixes import (
     reaches_network,
     worker_allowlist_reason,
 )
-from ..store import ChatTaint, RunStore, owner_alive
+from ..store import ApprovalRecord, ChatTaint, RunStore, owner_alive
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -3915,17 +3915,18 @@ def _gate_requests(store: RunStore, approval: Any) -> list[Request]:
     return [Request("shell", "run", shlex.join(command)) for command in commands]
 
 
-def auto_answer_unlocked_gate(
-    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
-) -> str | None:
-    """ADR 0061: on an unlocked project a sandboxed run's gate answers itself
-    when ``decide(…, sandboxed=True)`` allows every request it names, under
-    the run's own role and chain — the click path (``resume_past_gate``),
-    actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
-    A host gate never answers itself, not even for a host a rule allows
-    (D42, v132-F1: it is never put to ``decide`` here), and only the serve's
-    done-callback calls this — a CLI run stops at its gate.
-    Returns the resumed task id, or None: the gate stays a human's card."""
+def unlocked_gate_allowed(
+    store: RunStore, holder: ConfigHolder, task_id: str
+) -> ApprovalRecord | None:
+    """ADR 0061: the ONE decision both faces share (I5, ADR 0050). On an
+    unlocked project a sandboxed run's gate answers itself when
+    ``decide(…, sandboxed=True)`` allows every request it names, under the
+    run's own role and chain. Each request is a decision-log row, actor
+    ``auto:unlocked``, naming the run (I13, D34). A host gate never answers
+    itself, not even for a host a rule allows (D42, v132-F1: it is never put
+    to ``decide`` here). Returns the pending gate for the caller to resume —
+    serve via ``resume_past_gate``, a CLI ``skep run`` in its own bounded
+    loop — or None: the gate stays a human's card."""
     run = store.get_run(task_id)
     if run is None or run.state != "pending_approval":
         return None
@@ -3960,6 +3961,19 @@ def auto_answer_unlocked_gate(
         log_decision(holder.current.audit_dir, row)
         if verdict.verdict != "allow":
             return None
+    return approval
+
+
+def auto_answer_unlocked_gate(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
+) -> str | None:
+    """Serve's done-callback face of ``unlocked_gate_allowed``: an allowed
+    gate resumes on the click path (``resume_past_gate``), actor
+    ``auto:unlocked``, once. Returns the resumed task id, or None: the gate
+    stays a human's card."""
+    approval = unlocked_gate_allowed(store, holder, task_id)
+    if approval is None:
+        return None
     return resume_past_gate(
         store,
         holder.current,

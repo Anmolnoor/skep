@@ -1029,6 +1029,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             tail.stop()
 
     record = outcome.record
+    if record.state == "pending_approval":
+        record = _answer_unlocked_gates(config, record)
     elapsed = time.monotonic() - started
     print(f"task {record.task_id}")
     print(f"  state:        {record.state} ({elapsed:.1f}s)")
@@ -1809,7 +1811,57 @@ def _resume_pending_approval(
         raise
 
 
-def _resume_claimed_gate(
+# ADR 0061 (phase-01 1.1): how many gates in a row one CLI `skep run`
+# answers itself before the next waits for a human — a worker that gates
+# again after every resume must not hold the foreground forever.
+MAX_UNLOCKED_RESUMES = 10
+
+
+def _answer_unlocked_gates(config: SupervisorConfig, record: RunRecord) -> RunRecord:
+    """ADR 0061 parity for a CLI ``skep run``: serve's one decision
+    (``unlocked_gate_allowed``: decide(…, sandboxed=True), one decision-log
+    row per request, actor ``auto:unlocked``) answers the gate, and the CLI
+    resumes it in-process, up to ``MAX_UNLOCKED_RESUMES`` times. Returns the
+    last run of the chain; a gate the decision did not allow, or one past
+    the cap, stays pending for a human."""
+    from .serve.actions import UNLOCKED_ACTOR, unlocked_gate_allowed
+    from .serve.settings import ConfigHolder
+
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        for _ in range(MAX_UNLOCKED_RESUMES):
+            approval = unlocked_gate_allowed(store, holder, record.task_id)
+            if approval is None or not store.claim_approval(approval.review_id):
+                return record
+            audit_task = config.audit_dir / record.task_id / "task.json"
+            original = CodingWorkerTask.model_validate_json(audit_task.read_text())
+            try:
+                new = _run_claimed_resume(
+                    config,
+                    store,
+                    record,
+                    UNLOCKED_ACTOR,
+                    original,
+                    approval.review_id,
+                    remembered=False,
+                )
+            except BaseException:
+                store.unclaim_approval(approval.review_id)
+                raise
+            print(f"  unlocked:     answered {record.task_id} -> {new.task_id} ({new.state})")
+            record = new
+        if record.state == "pending_approval":
+            print(
+                f"  unlocked:     answered {MAX_UNLOCKED_RESUMES} gates in a row (the cap); "
+                "this one waits for you"
+            )
+        return record
+    finally:
+        store.close()
+
+
+def _run_claimed_resume(
     config: SupervisorConfig,
     store: RunStore,
     record: RunRecord,
@@ -1818,7 +1870,8 @@ def _resume_claimed_gate(
     review_id: str,
     *,
     remembered: bool,
-) -> int:
+) -> RunRecord:
+    """Resume a claimed gate in-process; returns the successor run."""
     approval = store.get_approval(review_id)
     approval_reason = None if approval is None else approval.reason
     approval_action = None if approval is None else approval.action
@@ -1884,7 +1937,22 @@ def _resume_claimed_gate(
         record.task_id, TaskState.SUPERSEDED.value, f"resumed as {outcome.record.task_id}"
     )
     store.update_ledger_outcome(record.task_id, outcome.record.state)
-    new = outcome.record
+    return outcome.record
+
+
+def _resume_claimed_gate(
+    config: SupervisorConfig,
+    store: RunStore,
+    record: RunRecord,
+    actor: str,
+    original: CodingWorkerTask,
+    review_id: str,
+    *,
+    remembered: bool,
+) -> int:
+    new = _run_claimed_resume(
+        config, store, record, actor, original, review_id, remembered=remembered
+    )
     remembered_template = None
     if remembered and new.state == "completed":
         remembered_template = _remember_learned_template(

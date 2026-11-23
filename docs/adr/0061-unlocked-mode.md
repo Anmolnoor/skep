@@ -3,7 +3,9 @@
 **Status:** accepted (ES-F140–ES-F147); amended by D42 (ES-F311): unlocked
 never answers a network host — see "Amendment: D42" at the end; and by D46
 and D47 (2026-11-21): unlocked answers a role's catch-all ask, and
-onboarding offers the mode — see the amendments after it.
+onboarding offers the mode — see the amendments after it; and on
+2026-11-23 (phase-01 1.1): a CLI `skep run` answers the same gates — see
+"Delta 2026-11-23" at the end.
 **Replaces:** the August `unlocked` branch's ADR (numbered 0052 there; the
 design archive keeps it as accepted ADR 9999). **Builds on:** ADR 0059
 (policy v3), ADR 0048 (policy groups), ADR 0047 (engines), ADR 0044
@@ -253,3 +255,29 @@ D47:
 This is I6 as written: the operator climbs the per-project ramp explicitly,
 once, at setup. Nothing turns it on for every project or by default.
 
+## Delta 2026-11-23 — CLI `skep run` parity (phase-01 1.1)
+
+"A CLI `skep run` on an unlocked project stops at every gate" (Worker gates,
+D46) no longer holds. The decision is now one shared helper,
+`unlocked_gate_allowed` (`serve/actions.py`): the same preconditions (run in
+`pending_approval`, execution mode `sandbox` on a home whose sandbox is on,
+project unlocked, a `shell.run` gate only), the same `decide(…,
+sandboxed=True)` under the run's role and chain, one decision-log row per
+request with actor `auto:unlocked` and the run's `task_id`. Serve's done
+callback resumes an allowed gate through `resume_past_gate`, as before; a
+CLI `skep run` resumes it in-process through the same resume `skep review
+--approve` takes, then asks the helper again for the successor's gate. One
+decision path, no second allow list (I5).
+
+- **The cap.** One CLI `skep run` answers at most `MAX_UNLOCKED_RESUMES` (10,
+  `cli_cmds.py`) gates in a row; a run still gating after that stops at its
+  card and says so (`answered 10 gates in a row (the cap); this one waits
+  for you`). Serve has no such loop: each resume is a new dispatch.
+- **What still cards, on both faces:** any request `decide` does not allow —
+  the floor (`git push`, `sudo`, `env git push`, … with zero operator shell
+  rules too; the worker's own shell floor denies them first, upstream), an
+  opaque shell `_widens` keeps asking (`sh -c "…"`, `$(…)`, `&`), the
+  operator's or a role's deny or named ask, the baseline guard; every host
+  gate (D42); any gate that is not `shell.run`; a locked project; a
+  workspace-mode run or an unsandboxed home. `skep review --approve` and a
+  serve approve still resume only what a human answered.
