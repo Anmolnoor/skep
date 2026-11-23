@@ -1074,14 +1074,25 @@ def _engine_tick(
     *,
     binding: str,
     template: bool,
+    monkeypatch: pytest.MonkeyPatch,
     managed: bool = False,
 ) -> dict[str, object]:
     """One tick on a project pinned to codex + a verify command; the dispatch
-    kwargs it would run with (captured, then stopped)."""
+    kwargs it would run with (captured, then stopped). Phase 04 4.2: every
+    external-engine gate open — a usable sandbox, strict reads, codex's
+    binary and auth env (faked)."""
     from dataclasses import replace
 
+    from skep.supervisor import scheduler
     from skep.supervisor.policy_resolver import managed_repos_root
+    from skep.supervisor.sandbox import SandboxAvailability
     from skep.supervisor.templates import WorkflowTemplate
+
+    monkeypatch.setattr(
+        scheduler, "sandbox_availability", lambda backend=None: SandboxAvailability(True)
+    )
+    monkeypatch.setattr(scheduler, "engine_available", lambda engine: (True, "/usr/bin/codex"))
+    monkeypatch.setenv("OPENAI_API_KEY", "k-fake")
 
     repo = create_audit_toy_repo((managed_repos_root(config) if managed else tmp_path) / "work")
     store = RunStore(config.db_path)
@@ -1097,7 +1108,8 @@ def _engine_tick(
             project_id="p", name="p", strategy="trusted_local_dev", phase="maintain",
             policy={"coding_engine": "codex", "verify_command": "uv run pytest -q",
                     "auto_dispatch_allowed": True, "default_execution_mode": "sandbox",
-                    "auto_apply_branch": "skep/maintain", "worker_protocol": "react"},
+                    "auto_apply_branch": "skep/maintain", "worker_protocol": "react",
+                    "strict_read_confinement": True},
         )  # fmt: skip
         store.add_project_binding(project_id="p", binding_kind=binding, binding_value=value)
         schedule = make_schedule(
@@ -1127,15 +1139,21 @@ def _engine_tick(
     ],
 )
 def test_a_bound_tick_runs_the_projects_engine_and_verify_pin(
-    tmp_path: Path, audit_config: SupervisorConfig, binding: str, template: bool, managed: bool
+    tmp_path: Path,
+    audit_config: SupervisorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    binding: str,
+    template: bool,
+    managed: bool,
 ) -> None:
     """v132-F5 (I2, I8): a scheduled run is the project's run — its engine pin
     (it ran builtin), its verify pin (a template-only binding lost it, so G10
     fell back to the worker's own check), its landing branch and protocol
     reach dispatch; a managed clone's slug binds a template tick too."""
     captured = _engine_tick(
-        tmp_path, audit_config, binding=binding, template=template, managed=managed
-    )
+        tmp_path, audit_config, binding=binding, template=template, managed=managed,
+        monkeypatch=monkeypatch,
+    )  # fmt: skip
     assert captured.get("coding_engine") == "codex", captured
     assert captured.get("verify_command") == "uv run pytest -q"
     assert captured.get("auto_apply_branch") == "skep/maintain"
@@ -1144,11 +1162,13 @@ def test_a_bound_tick_runs_the_projects_engine_and_verify_pin(
 
 @pytest.mark.parametrize("template", [False, True])
 def test_a_slug_binds_only_the_managed_clone_not_a_same_named_folder(
-    tmp_path: Path, audit_config: SupervisorConfig, template: bool
+    tmp_path: Path, audit_config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, template: bool
 ) -> None:
     """v132-F5 (I5, I6): a repo_slug names a managed clone (<home>/repos/<slug>).
     A folder elsewhere that happens to share its basename is not that project
     and inherits none of its policy."""
-    captured = _engine_tick(tmp_path, audit_config, binding="repo_slug", template=template)
+    captured = _engine_tick(
+        tmp_path, audit_config, binding="repo_slug", template=template, monkeypatch=monkeypatch
+    )
     assert captured.get("project_context") is None, captured
     assert not captured.get("coding_engine")

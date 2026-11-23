@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import select
+import shlex
 import signal
 import subprocess
 import threading
@@ -30,12 +31,19 @@ from skep.worker_contract import Permissions
 
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
 from .castes import CASTES, RETIRED_CASTES
+from .codex_login import run_auth_source
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
-from .engines import external_agent_for_command, resolve_engine
+from .engines import (
+    CODING_ENGINES,
+    engine_available,
+    external_agent_for_command,
+    resolve_engine,
+)
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
+from .policy import known_vacuous_verify
 from .policy_resolver import (
     PolicyResolutionError,
     managed_repos_root,
@@ -43,9 +51,18 @@ from .policy_resolver import (
     run_policy_for_repo,
 )
 from .policy_v3 import log_decision
+from .projects import _require_auto_apply_branch
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
-from .spawner import build_worker_env
-from .store import PROVIDER_BLOCKED_STATE, SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
+from .sandbox import DENY_ALL_NETWORK, STRICT_READS_KEY
+from .sandbox import availability as sandbox_availability
+from .spawner import build_worker_env, resolve_sandbox_backend
+from .store import (
+    PROVIDER_BLOCKED_STATE,
+    SCHEDULE_SUCCESS_STATES,
+    UNKNOWN_TAINT_ORIGIN,
+    RunStore,
+    ScheduleRecord,
+)
 from .templates import WorkflowTemplate, instantiate
 
 if TYPE_CHECKING:
@@ -725,6 +742,19 @@ _TICK_LANES = frozenset({"note", "script", "prompt", "digest"})
 _PROVIDER_AUTH_FAILURE = re.compile(r"provider request failed: (40[13]\b[^\n]*)")
 
 
+def _live_kind_and_repo(store: RunStore, schedule: ScheduleRecord) -> tuple[str, str] | None:
+    """A template-bound tick runs the template as it is now, so its caste and
+    repo come from the live template, not the schedule row's snapshot. None:
+    the template is gone (the tick itself reports that)."""
+    if schedule.template_name is None or schedule.worker_kind in _TICK_LANES:
+        return schedule.worker_kind, schedule.repo
+    template = store.get_template(schedule.template_name)
+    if template is None:
+        return None
+    instance = instantiate(template, schedule.params, repo=schedule.repo, ref=schedule.ref)
+    return instance.worker_kind, instance.repo
+
+
 def _uses_worker_provider(
     store: RunStore, config: SupervisorConfig, schedule: ScheduleRecord
 ) -> bool:
@@ -732,16 +762,11 @@ def _uses_worker_provider(
     caste must need one, and its worker must be skep's own: a worker command
     running an external agent's module (--worker-cmd / SKEP_WORKER_CMD, the
     resolver's ``wrapped``) or a coding run on an external engine
-    authenticates on its own (ADR 0047) — skep's dead key is not its key. A
-    template-bound tick runs the template as it is now, so its caste and repo
-    come from the live template, not the schedule row's snapshot."""
-    worker_kind, repo = schedule.worker_kind, schedule.repo
-    if schedule.template_name is not None and worker_kind not in _TICK_LANES:
-        template = store.get_template(schedule.template_name)
-        if template is None:
-            return False  # the tick itself reports the missing template
-        instance = instantiate(template, schedule.params, repo=schedule.repo, ref=schedule.ref)
-        worker_kind, repo = instance.worker_kind, instance.repo
+    authenticates on its own (ADR 0047) — skep's dead key is not its key."""
+    live = _live_kind_and_repo(store, schedule)
+    if live is None:
+        return False
+    worker_kind, repo = live
     caste = CASTES.get(worker_kind)
     if caste is None or not caste.needs_provider:
         return False
@@ -789,6 +814,191 @@ def _provider_blocked(reason: str) -> str:
         "provider's key or settings (`skep doctor` shows the coding worker check); the schedule "
         "resumes on its next tick, and this skip never counts toward auto-disable"
     )
+
+
+# Phase 04 4.2: a schedule an external engine's gates closed on. Disabled, not
+# re-tried each tick; `skep doctor` lists it with the fix (status.py).
+PAUSED_STATE = "paused"
+
+
+def _refusal_row(
+    schedule: ScheduleRecord,
+    repo: Path,
+    *,
+    rule: str,
+    note: str,
+    caste: str,
+    engine: str | None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Phase 04 4.2 (I8, I13): a tick refused before any run, as one
+    ``decisions.jsonl`` row with Phase 02's blame fields — no ``task_id``,
+    because no run was minted. It names a repo, so replay never re-decides it."""
+    row: dict[str, Any] = {
+        "at": now_ts(),
+        "actor": f"schedule:{schedule.name}",
+        "repo": str(repo),
+        "scope": "schedule",
+        "action": "dispatch",
+        "value": schedule.name,
+        "source": "guard",
+        "verdict": "deny",
+        "rule_id": f"schedule.{rule}",
+        "decided_by": f"schedule/{rule}",
+        "layer": "guard",
+        "note": note,
+        "schedule": schedule.name,
+        "caste": caste,
+        **extra,
+    }
+    if engine and caste == "coding":
+        row["engine"] = engine
+    if schedule.role:
+        row["role"] = schedule.role
+    if schedule.chat_id:
+        row["chat"] = schedule.chat_id
+    return row
+
+
+def _external_engine_pause(
+    store: RunStore, config: SupervisorConfig, schedule: ScheduleRecord
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Phase 04 4.2 (I1, I2, I4, I12): an external coding agent's own commands
+    never pass the capability layer (ADR 0047), so it runs unattended only
+    when ALL five gates hold — sandbox, strict_reads, verify_pin, engine_auth,
+    landing. Judged before the tick spends anything, on what run_task would
+    launch: the project's engine, or the agent a --worker-cmd runs (D36).
+    Returns the ``paused:`` state and one decisions row per closed gate, or
+    None (a builtin run, or every gate open). run_task's own refusals stay
+    the backstop for every other face."""
+    live = _live_kind_and_repo(store, schedule)
+    if live is None or live[0] != "coding":
+        return None
+    repo = Path(live[1]).expanduser().resolve()
+    candidates = _bound_candidates(config, repo, schedule)
+    policy = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+    # The dispatch branches' own test: only a bound tick passes the policy's
+    # engine; an unbound one dispatches builtin (or what --worker-cmd runs).
+    bound = (
+        any(store.project_for_binding(kind, value) is not None for kind, value in candidates)
+        or store.project_for_binding("repo_path", str(repo)) is not None
+    )
+    engine = resolve_engine(str(policy.get("coding_engine") or "") if bound else None)
+    name = engine.name
+    if not engine.external:
+        wrapped = external_agent_for_command(config.command_for("coding"))
+        if wrapped is None:
+            return None
+        name, engine = wrapped, CODING_ENGINES.get(wrapped, engine)
+    setup = f"skep project setup {shlex.quote(str(repo))}"
+    closed: list[tuple[str, str]] = []
+    mode = policy.get("default_execution_mode")
+    # A strict-read run launches the backend that can confine reads whatever
+    # its network (spawner.resolve_sandbox_backend), so that is the one probed.
+    probe = sandbox_availability(
+        resolve_sandbox_backend(config, DENY_ALL_NETWORK, strict_reads=True)
+    )
+    if mode != "sandbox":
+        closed.append(
+            ("sandbox", f"the project's default_execution_mode is {mode or 'unset'}, not "
+             f"sandbox — `{setup} --execution-mode sandbox`")
+        )  # fmt: skip
+    elif not (config.sandbox and probe.usable):
+        closed.append(
+            ("sandbox", f"no usable sandbox here ({probe.reason}: {probe.detail}) — "
+             "`skep doctor` names the fix")
+        )  # fmt: skip
+    if policy.get(STRICT_READS_KEY) is not True:
+        closed.append(
+            ("strict_reads", "strict_read_confinement is off, so the agent could read your "
+             f"whole home — `{setup} --strict-reads`")
+        )  # fmt: skip
+    vacuous = known_vacuous_verify(str(policy.get("verify_command") or ""))
+    if vacuous is not None:
+        closed.append(
+            ("verify_pin", f"{vacuous}, so G10 and its V1 test-tamper guard would confirm "
+             f'nothing — `{setup} --verify-command "<command>"`')
+        )  # fmt: skip
+    present, detail = engine_available(engine)
+    # ponytail: the project's default budget; run_task re-checks a plan login
+    # against the run's own budget (a template's may be longer).
+    seconds = int(policy.get("default_wall_clock_seconds") or DEFAULT_BUDGET.wall_clock_seconds)
+    if not present:
+        closed.append(("engine_auth", f"{detail} — install it (`skep doctor` lists each engine)"))
+    elif (
+        engine.auth_env
+        and not any(os.environ.get(var) for var in engine.auth_env)
+        and run_auth_source(engine.name, policy, min_seconds=seconds) is None
+    ):
+        closed.append(
+            ("engine_auth", f"NO AUTH ENV — set one of {'/'.join(engine.auth_env)} in the "
+             "environment the daemon inherits (<home>/serve.env, then restart it)")
+        )  # fmt: skip
+    branch = policy.get("auto_apply_branch")
+    if branch is not None:
+        try:
+            _require_auto_apply_branch(branch)
+        except ValueError as exc:
+            closed.append(("landing", f"{exc} — main never moves unattended (I1)"))
+    if not closed:
+        return None
+    state = (
+        f"{PAUSED_STATE}: an unattended run on the external engine {name!r} needs all five "
+        f"gates and {', '.join(gate for gate, _ in closed)} failed — "
+        + "; ".join(f"gate {gate}: {why}" for gate, why in closed)
+        + ". Fix it, then re-enable the schedule (chat: set_schedule_enabled; "
+        f"PATCH /api/schedules/{schedule.name})"
+    )
+    rows = [
+        _refusal_row(schedule, repo, rule=gate, note=why, caste="coding", engine=name)
+        for gate, why in closed
+    ]
+    return state, rows
+
+
+def _untrusted_refusal(
+    store: RunStore,
+    schedule: ScheduleRecord,
+    repo: Path,
+    *,
+    caste: str,
+    engine: str | None,
+    rows: list[dict[str, Any]],
+) -> str | None:
+    """Phase 04 4.2 (ADR 0059 D5, I6): a chat that read outside content makes
+    every dispatch for it ask, and an unattended tick has nobody to ask — so a
+    schedule whose chat carries ``untrusted`` refuses here, on the final
+    dispatch path (v126-F11 only recorded the bits). A chat that is gone
+    counts as both bits (get_chat_taint fails closed). ``private`` alone
+    never stops a run: a mail chat's schedule keeps working."""
+    if not schedule.chat_id:
+        return None
+    chat = schedule.chat_id
+    taint = store.get_chat_taint(chat)
+    if taint.untrusted is None:
+        return None
+    if taint.untrusted == UNKNOWN_TAINT_ORIGIN:
+        why = (
+            f"its chat {chat} is gone or unreadable, so its taint is unknown (counts as untrusted)"
+        )
+        fix = "re-create the schedule from a chat you trust, or from the CLI"
+    else:
+        why = f"its chat {chat} carries the untrusted bit (set by message {taint.untrusted})"
+        fix = (
+            f"read what set it, then `skep trust {chat} --bit untrusted` (/trust in the chat), "
+            "or re-create the schedule from a clean chat"
+        )
+    note = (
+        f"schedule {schedule.name!r} refused: {why}, and an unattended run never acts for a "
+        f"chat that read outside content (ADR 0059 D5) — {fix}"
+    )
+    rows.append(
+        _refusal_row(
+            schedule, repo, rule="untrusted_taint", note=note, caste=caste, engine=engine,
+            taint=taint.bits(),
+        )
+    )  # fmt: skip
+    return f"policy_blocked: {note}"
 
 
 def run_due(
@@ -854,6 +1064,9 @@ def run_due(
                             f"the worker provider probe failed ({probe.get('detail')})"
                         )
                 blocked_state = provider_block
+            elif (pause := _external_engine_pause(store, config, schedule)) is not None:
+                blocked_state, refusals = pause  # Phase 04 4.2: before any run
+                rows.extend(refusals)
             # v53-F5: a chained schedule reads its source's last output as
             # labeled CONTEXT — never as new instructions.
             chained = _chained_context(store, schedule)
@@ -1014,6 +1227,11 @@ def run_due(
                         engine=coding_engine or None, caste=instance.worker_kind, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
+                    blocked_state = _untrusted_refusal(
+                        store, schedule, repo, caste=instance.worker_kind,
+                        engine=coding_engine or None, rows=rows,
+                    )  # fmt: skip
+                if blocked_state is None:
                     dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
                         repo,
@@ -1109,6 +1327,11 @@ def run_due(
                         engine=coding_engine or None, caste=schedule.worker_kind, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
+                    blocked_state = _untrusted_refusal(
+                        store, schedule, repo, caste=schedule.worker_kind,
+                        engine=coding_engine or None, rows=rows,
+                    )  # fmt: skip
+                if blocked_state is None:
                     dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
                         repo,
@@ -1180,7 +1403,14 @@ def run_due(
             # it advances and records health, but stops hot-looping on a broken
             # config until an operator fixes and re-enables it.
             health = store.schedule_health(schedule.name)
-            if (
+            paused = state.startswith(f"{PAUSED_STATE}: ")
+            if paused:
+                # Phase 04 4.2 (I9): paused, not re-tried every tick, and told
+                # where the operator is — `skep doctor` lists it with the fix.
+                store.set_schedule_enabled(schedule.name, enabled=False)
+                store.set_schedule_disabled_reason(schedule.name, state)
+                _deliver_tick_text(store, schedule, f"schedule {schedule.name!r} {state}", notify)
+            elif (
                 health is not None
                 and health.consecutive_failures >= MAX_SCHEDULE_CONSECUTIVE_FAILURES
             ):
@@ -1200,7 +1430,7 @@ def run_due(
                     "set_schedule_enabled to resume",
                     notify,
                 )
-            if schedule.once and not state.startswith(PROVIDER_BLOCKED_STATE):
+            if schedule.once and not paused and not state.startswith(PROVIDER_BLOCKED_STATE):
                 # v44-F2: one-shot means ONE fire, success or not — retrying a
                 # failed one-shot every interval forever would be worse than the
                 # failure. The disabled row + reason is the record of what happened.

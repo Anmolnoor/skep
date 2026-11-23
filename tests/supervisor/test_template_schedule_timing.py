@@ -93,12 +93,17 @@ def test_a_tick_carries_the_creating_chats_current_taint(
         dispatch = _fake_dispatch(seen)
         run_due(store=store, config=config, now=EIGHT, dispatch=dispatch)
         assert "chat_taint" not in (seen[0]["dispatch_decision"].constraints or {})
-        # The chat read outside content after it created the schedule: the
+        # The chat read private data after it created the schedule: the
         # next tick says so, as a live dispatch from that chat would.
         message = store.add_chat_message(chat.chat_id, role="tool", content="x", tool_name="t")
-        store.add_chat_taint(chat.chat_id, untrusted=message)
+        store.add_chat_taint(chat.chat_id, private=message)
         run_due(store=store, config=config, now="2030-01-01T08:01:00Z", dispatch=dispatch)
-        assert seen[1]["dispatch_decision"].constraints["chat_taint"] == ["untrusted"]
+        assert seen[1]["dispatch_decision"].constraints["chat_taint"] == ["private"]
+        # Phase 04 4.2: untrusted is no longer metadata only — the tick refuses.
+        store.add_chat_taint(chat.chat_id, untrusted=message)
+        later = "2030-01-01T08:02:00Z"
+        (result,) = run_due(store=store, config=config, now=later, dispatch=dispatch)
+        assert len(seen) == 2 and result.state.startswith("policy_blocked: ")
     finally:
         store.close()
 
@@ -107,7 +112,8 @@ def test_a_tick_whose_creating_chat_is_gone_counts_as_tainted(
     tmp_path: Path, config: SupervisorConfig
 ) -> None:
     """v126-F11 (review): fail closed, as get_chat_taint does — a chat that is
-    not there counts as both bits, never as clean."""
+    not there counts as both bits, never as clean; Phase 04 4.2: so the
+    unattended tick refuses rather than dispatching with the bits attached."""
     store = RunStore(config.db_path)
     try:
         store.add_template(_template())
@@ -118,8 +124,8 @@ def test_a_tick_whose_creating_chat_is_gone_counts_as_tainted(
             )
         )  # fmt: skip
         seen: list[dict[str, Any]] = []
-        run_due(store=store, config=config, now=EIGHT, dispatch=_fake_dispatch(seen))
-        assert seen[0]["dispatch_decision"].constraints["chat_taint"] == ["private", "untrusted"]
+        (result,) = run_due(store=store, config=config, now=EIGHT, dispatch=_fake_dispatch(seen))
+        assert seen == [] and "taint is unknown" in result.state
     finally:
         store.close()
 
