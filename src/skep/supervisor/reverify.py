@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -39,6 +40,7 @@ from . import sandbox
 from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
+from .policy import pin_control_changes
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
@@ -56,11 +58,27 @@ _COMMAND_NOT_FOUND = 127
 _REVERIFY_TIMEOUT_SECONDS = 300.0
 
 
+# V1 (phase-01 1.3): what the guard can and cannot see, said on every verdict.
+V1_SCOPE = (
+    "V1 detects deleted or emptied test files, added skip/xfail markers, test-config "
+    "edits and drops in the executed test count; it cannot prove an edited assertion "
+    "is still strong"
+)
+
+
 @dataclass(frozen=True)
 class ReverifyOutcome:
+    """One G10 verdict.
+
+    V1 (phase-01 1.3): ``tamper_flags`` non-empty makes the outcome
+    "tampered" and the run unconfirmed. V1 detects deleted or emptied test
+    files, added skip/xfail markers, test-config edits and drops in the
+    executed pytest count; it cannot prove an edited assertion is still strong.
+    """
+
     # "passed" | "failed" | "unavailable" | "not_applicable" (v65-F1: a run
     # that claimed no file changes has no patch to re-verify — benign, never
-    # the lying-worker shape).
+    # the lying-worker shape) | "tampered" (V1: the patch changed the tests).
     outcome: str
     commands: list[str]
     exit_codes: list[int]
@@ -69,6 +87,149 @@ class ReverifyOutcome:
     # verify_command, "worker" when they came from the worker's own
     # verify.result event. The record must say what it actually re-ran.
     commands_source: str = "worker"
+    # V1: "kind" or "kind:path" — test_file_deleted, test_file_emptied,
+    # skip_marker_added, test_config_changed, test_total_dropped,
+    # test_passed_dropped, test_skipped_increased.
+    tamper_flags: tuple[str, ...] = ()
+    # V1: see ReverifyRecord.test_counts.
+    test_counts: dict[str, Any] | None = None
+
+
+# V1: pytest's own summary line ("== 1 failed, 2 passed in 0.12s ==", or
+# "no tests ran in 0.01s"), read from the pin's output — the pin is never changed.
+_PYTEST_SUMMARY = re.compile(r"^=*\s*((?:\d+ [a-z]+(?:, )?)+|no tests ran)\s+in\s+[\d.]+\s*s\b")
+_PYTEST_WORDS = {
+    "passed": "passed",
+    "failed": "failed",
+    "error": "errors",
+    "errors": "errors",
+    "skipped": "skipped",
+    "xfailed": "xfailed",
+    "xpassed": "xpassed",
+    "deselected": "deselected",
+}
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# pytest exits 0 (pass), 1 (failures) or 5 (no tests) when the tests ran.
+_COUNTABLE_EXITS = (0, 1, 5)
+_PYTEST_PIN = re.compile(r"(?:^|[\s/])(?:pytest|py\.test)(?:\s|$)")
+
+
+def pytest_counts(output: str) -> dict[str, int] | None:
+    """The counts on pytest's final summary line, or None when there is none.
+    ``total_executed`` = passed + failed + errors + xfailed + xpassed."""
+    for line in reversed(_ANSI.sub("", output).splitlines()):
+        match = _PYTEST_SUMMARY.match(line.strip())
+        if match is None:
+            continue
+        counts = dict.fromkeys(dict.fromkeys(_PYTEST_WORDS.values()), 0)
+        for number, word in re.findall(r"(\d+) ([a-z]+)", match.group(1)):
+            if word in _PYTEST_WORDS:
+                counts[_PYTEST_WORDS[word]] += int(number)
+        counts["total_executed"] = sum(
+            counts[k] for k in ("passed", "failed", "errors", "xfailed", "xpassed")
+        )
+        return counts
+    return None
+
+
+def count_flags(baseline: dict[str, int], patched: dict[str, int]) -> list[str]:
+    """V1: tests the patch made vanish or stop counting. A passing test that
+    turned into a failing one is a regression (the re-run fails), not tamper."""
+    flags = []
+    if patched["total_executed"] < baseline["total_executed"]:
+        flags.append("test_total_dropped")
+    if patched["passed"] < baseline["passed"] and (
+        patched["failed"] + patched["errors"] <= baseline["failed"] + baseline["errors"]
+    ):
+        flags.append("test_passed_dropped")
+    if patched["skipped"] > baseline["skipped"]:
+        flags.append("test_skipped_increased")
+    return flags
+
+
+_SKIP_MARKER = re.compile(
+    r"pytest\.mark\.(?:skip|xfail)|\bpytest\.skip\(|\b(?:it|test|describe)\.skip\b"
+    r"|#\[ignore\]|\bt\.Skip\("
+)
+_DOC_SUFFIXES = (".md", ".rst", ".txt")
+
+
+def _is_test_file(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    name = parts[-1] if parts else ""
+    return (
+        "tests" in parts[:-1]
+        or (name.startswith("test_") and name.endswith(".py"))
+        or any(fnmatch(name, g) for g in ("*_test.*", "*.test.*", "*.spec.*"))
+    )
+
+
+def static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
+    """V1: what the patch does to the tests, read by the supervisor from the
+    patch artifact applied to ``base`` in a scratch index (never the worker's
+    claim). Test-config edits reuse the landing gate's own reading
+    (``pin_control_changes``), so a dependency-only manifest bump is clean —
+    without the pin's words: a file the pin names is the landing gate's
+    concern, not test tampering (``grep -q x app.py`` names the fixed file)."""
+    changed = patch_paths(repo, patch_path)
+    if not changed:
+        return []
+    flags = [
+        f"test_config_changed:{path}"
+        for path in pin_control_changes(repo, patch_path, base, changed, ())
+    ]
+    flags += [f"test_config_changed:{p}" for p in changed if p.startswith(".github/workflows/")]
+    with tempfile.TemporaryDirectory(prefix="skep-v1-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
+            )
+
+        if (
+            git("read-tree", base).returncode
+            or git("apply", "--cached", str(patch_path)).returncode
+        ):
+            return flags  # the re-run already says the patch does not apply
+        status = git("diff", "--cached", "--no-renames", "--name-status", base).stdout
+        for line in status.splitlines():
+            code, _, path = line.partition("\t")
+            if not _is_test_file(path):
+                continue
+            if code == "D":
+                flags.append(f"test_file_deleted:{path}")
+            elif code == "M" and not git("show", f":{path}").stdout.strip():
+                flags.append(f"test_file_emptied:{path}")
+        diff = git(
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "-U0",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+        ).stdout
+        current, in_hunk = "", False
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                current, in_hunk = "", False
+            elif not in_hunk and line.startswith("+++ b/"):
+                current = line[len("+++ b/") :]
+            elif line.startswith("@@"):
+                in_hunk = True
+            elif (
+                in_hunk
+                and line.startswith("+")
+                and current
+                and not current.endswith(_DOC_SUFFIXES)
+                and _SKIP_MARKER.search(line)
+            ):
+                flags.append(f"skip_marker_added:{current}")
+                current = ""  # once per file
+    return list(dict.fromkeys(flags))
 
 
 def verification_commands_from_events(events: list[Event]) -> list[str]:
@@ -423,6 +584,8 @@ def reverify(
     evidence_dir: Path | None = None,
     loopback_ports: tuple[int, ...] = (),
     node_cache_dir: Path | None = None,
+    count_pytest: bool = False,
+    baseline_counts: dict[str, int] | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -443,6 +606,11 @@ def reverify(
 
     ``node_cache_dir`` (v127-A0) is the uv cache's twin for a Node prime; None
     keeps a worktree-local throwaway.
+
+    ``count_pytest`` (V1): the single command is a pytest pin, so its counts
+    are read on the baseline (``baseline_counts`` when the caller has them
+    cached, else by running it right before the patch applies) and on the
+    patched tree, into ``test_counts``.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -635,6 +803,23 @@ def reverify(
                     f"the re-verify sandbox could not be built, so the verification "
                     f"command was not run: {exc}",
                 )
+        baseline_source: str | None = "cache" if baseline_counts is not None else None
+        if count_pytest and baseline_counts is None:
+            # V1: the pin on the BASELINE, before the patch applies — counted
+            # on exit 1 too (an already-failing suite still has a total).
+            # No bytecode: a same-size edit in the same second would run stale.
+            code, output = _run_command(
+                commands[0],
+                cwd=worktree,
+                env={**env, "PYTHONDONTWRITEBYTECODE": "1"},
+                profile_path=profile_path,
+                timeout=command_timeout_seconds(timeout_seconds),
+            )
+            baseline_counts = pytest_counts(output) if code in _COUNTABLE_EXITS else None
+            baseline_source = "run" if baseline_counts is not None else None
+            # What the baseline run wrote must not reach the patched run.
+            subprocess.run(["git", "-C", str(worktree), "checkout", "-q", "--", "."], check=False)
+            shutil.rmtree(worktree / ".pytest_cache", ignore_errors=True)
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
             capture_output=True,
@@ -743,9 +928,24 @@ def reverify(
                 exit_codes,
                 "verification command not found on the supervisor (toolchain mismatch)",
             )
+        test_counts: dict[str, Any] | None = None
+        if count_pytest:
+            patched = pytest_counts(outputs[0]) if exit_codes[0] in _COUNTABLE_EXITS else None
+            usable = baseline_counts is not None and patched is not None
+            test_counts = {
+                "status": "ok" if usable else "unparseable",
+                "runner": "pytest",
+                "baseline": baseline_counts,
+                "patched": patched,
+                "baseline_source": baseline_source,
+            }
         if all(code == 0 for code in exit_codes):
             return ReverifyOutcome(
-                "passed", commands, exit_codes, f"re-ran clean: all exit 0{primed}"
+                "passed",
+                commands,
+                exit_codes,
+                f"re-ran clean: all exit 0{primed}",
+                test_counts=test_counts,
             )
         # v115-F12: the failed re-run's own words ride the record; the full
         # output lands beside the profile in the audit dir when there is one.
@@ -769,6 +969,7 @@ def reverify(
             exit_codes,
             f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
+            test_counts=test_counts,
         )
     except _PrimeUnavailable as exc:
         # N3: a prime that cannot start is a supervisor-side problem — the
@@ -856,6 +1057,13 @@ def reverify_run(
     # and the landing must build on exactly the tree that was confirmed.
     base_commit = resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
 
+    # V1: count the project's own pytest pin; cached per (repo, base, pin).
+    count_pytest = bool(pinned) and _PYTEST_PIN.search(pinned) is not None
+    cached = (
+        store.cached_test_counts(str(repo), base_commit, pinned)
+        if count_pytest and base_commit
+        else None
+    )
     outcome = reverify(
         repo=repo,
         ref=base_commit or ref,
@@ -870,7 +1078,15 @@ def reverify_run(
         uv_cache_dir=uv_cache_dir,
         loopback_ports=loopback_ports,
         node_cache_dir=node_cache_dir,
+        count_pytest=count_pytest,
+        baseline_counts=cached,
     )
+    counts = outcome.test_counts
+    if counts is not None and counts["baseline_source"] == "run" and base_commit:
+        store.cache_test_counts(str(repo), base_commit, pinned, counts["baseline"])
+    if counts is None and outcome.exit_codes and not count_pytest:
+        # I8: a runner whose counts V1 cannot read is said so, never guessed.
+        outcome = replace(outcome, test_counts={"status": "unknown", "runner": None})
     # I8: the record says WHAT it re-ran, not just how it went — "passed" means
     # something different when the worker chose the command than when the
     # project did. Only stamped when commands actually ran.
@@ -887,6 +1103,7 @@ def reverify_run(
         )
     else:
         outcome = replace(outcome, commands_source=commands_source)
+    outcome = _v1_verdict(outcome, repo, patch_path, base_commit or ref or "HEAD")
     confirmed = worker_outcome == "passed" and outcome.outcome == "passed"
     store.record_reverification(
         task_id,
@@ -897,5 +1114,40 @@ def reverify_run(
         exit_codes=outcome.exit_codes,
         detail=outcome.detail,
         base_commit=base_commit if outcome.exit_codes else None,
+        tamper_flags=outcome.tamper_flags,
+        test_counts=outcome.test_counts,
     )
+    return outcome
+
+
+def _v1_verdict(
+    outcome: ReverifyOutcome, repo: Path, patch_path: Path | None, base: str
+) -> ReverifyOutcome:
+    """V1: a patch that changed the tests under the check is "tampered" —
+    whatever the re-run said, it did not confirm the patch."""
+    flags: list[str] = []
+    if patch_path is not None and patch_path.is_file() and outcome.outcome != "not_applicable":
+        flags = static_tamper_flags(repo, patch_path, base)
+    counts = outcome.test_counts or {}
+    if counts.get("status") == "ok":
+        flags += count_flags(counts["baseline"], counts["patched"])
+    if flags:
+        totals = (
+            f" (executed tests {counts['baseline']['total_executed']} on the baseline, "
+            f"{counts['patched']['total_executed']} patched)"
+            if counts.get("status") == "ok"
+            else ""
+        )
+        return replace(
+            outcome,
+            outcome="tampered",
+            tamper_flags=tuple(flags),
+            detail=f"test tampering: {', '.join(flags)}{totals}. {V1_SCOPE}. "
+            f"The re-run itself: {outcome.outcome}: {outcome.detail}",
+        )
+    if counts.get("status") == "unparseable":
+        return replace(
+            outcome,
+            detail=f"{outcome.detail} [test counts unparseable: auto-landing is blocked]",
+        )
     return outcome

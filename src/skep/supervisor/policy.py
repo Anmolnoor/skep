@@ -388,6 +388,10 @@ class AutoApprovalContext:
     reverify_commands: tuple[str, ...] = ()
     # v127-F5 round 2: changed files that steer the pinned check (supervisor-read).
     pin_control_files: tuple[str, ...] = ()
+    # V1 (phase-01 1.3): G10's test-tamper flags, and its pytest-count status
+    # ("ok" | "unparseable" | "unknown"; None when nothing was counted).
+    tamper_flags: tuple[str, ...] = ()
+    test_counts_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -402,6 +406,20 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
     """Return why ``rule`` does *not* apply, or None when it matches."""
     if not ctx.changed_files:
         return "no changed files to apply"
+    # V1 (I2): every rule, whatever its other settings — a check the patch
+    # rewrote, or whose counts nobody could read, confirms nothing.
+    if ctx.tamper_flags:
+        return (
+            f"test-tamper guard: the patch changes the tests ({', '.join(ctx.tamper_flags)}), "
+            "so a passing check proves nothing and skep can't land it by itself; "
+            "the patch is still landable by hand after review"
+        )
+    if ctx.test_counts_status == "unparseable":
+        return (
+            "the pinned pytest check's test counts could not be read, so skep can't rule "
+            "out dropped tests and won't land the patch by itself; the patch is still "
+            "landable by hand"
+        )
     if rule.require_verification_passed and ctx.verification_outcome != "passed":
         return f"verification is {ctx.verification_outcome!r}, not 'passed'"
     if rule.require_reverified and not ctx.reverify_confirmed:
@@ -513,6 +531,10 @@ def maybe_auto_approve(
             )
             if patch_path is not None and changed_files
             else ()
+        ),
+        tamper_flags=tuple(reverify.tamper_flags) if reverify is not None else (),
+        test_counts_status=(
+            (reverify.test_counts or {}).get("status") if reverify is not None else None
         ),
     )
     matched = evaluate(rules, ctx)
