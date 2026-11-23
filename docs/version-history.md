@@ -3199,22 +3199,28 @@ Everything merged since 1.5.0 (#116–#119):
 
 Everything merged since 1.6.0 (#121–#122):
 
-- **v131 (#121):** `skep onboard` sets a project up as `builder` by default
-  and asks once whether to work without asking in that one folder (`--unlocked`
-  on the CLI, the "Work without asking" row on the web); an unlocked project
-  also answers its role's catch-all ask, while launcher, interpreter and
-  wrapper-shell lines still ask (ADR 0061 D46, D47). An unanswered card now
-  waits a day before it auto-denies, not five minutes (ADR 0032 D48).
+- **v131 (#121):** onboarding defaults the policy template and role to
+  `builder`, and interactive `skep onboard` offers once, per eligible folder,
+  to work without asking there (`--unlocked` on the CLI, the "Work without
+  asking" row on the web). An unlocked project also answers its role's
+  catch-all ask for eligible sandboxed worker requests; launcher, interpreter
+  and wrapper-shell lines keep their gate when an automatic grant would widen
+  a binding rule (ADR 0061 D46, D47). The default confirmation-card timeout is
+  now 24 hours instead of five minutes; cards that mirror a worker gate are
+  exempt, as before (ADR 0032 D48).
 - **v132 (#122):** bug fixes from a two-model review. Unlocked mode never
-  auto-answers a worker's network host gate. Every `email.send` asks, once,
-  and can never be remembered as an allow. An unlock stays on the folder it
-  was given for, and concurrent setups are serialized by a per-home lock.
-  Claude Code and Codex refuse to run without a real pinned verify command on
-  every path, including `skep run --minimal --engine` and recovery, and get
-  their declared env everywhere. Scheduled runs use the project's own engine,
-  verify command, landing branch and planning protocol. A project registered
-  by repo name binds only its managed clone. A phase change keeps the keys the
-  operator set. A deleted seeded schedule stays deleted. `skep review` shows
-  where a run landed or why it did not land automatically. A worker can no
-  longer overwrite supervisor audit files with a same-named artifact, and a
-  Telegram photo captioned `/update` no longer triggers an update.
+  auto-answers a worker's network host gate. Every mail send that policy
+  permits asks once, and a send approval can never be remembered. An unlock
+  stays on the folder it was given for, and concurrent setups are serialized
+  by a per-home lock. A new Claude Code or Codex dispatch, including
+  `skep run --minimal --engine`, refuses a missing or known-vacuous verify
+  command and gets the engine's declared env; a recovered run reuses the
+  verify command recorded on the task. Scheduled runs use the project's own
+  engine, verify command, landing branch and planning protocol. A project
+  registered by repo name binds only its managed clone. A phase change keeps
+  the settings the operator set outside the phase's control; phase-owned
+  settings are re-derived and the unlock is turned off. A deleted seeded
+  schedule stays deleted. `skep review` shows where a run landed, or the
+  recorded reason it did not land automatically. A worker can no longer
+  overwrite supervisor audit files with a same-named artifact, and a Telegram
+  photo captioned `/update` no longer triggers an update.
