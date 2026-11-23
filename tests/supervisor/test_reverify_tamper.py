@@ -537,6 +537,10 @@ def test_a_quoted_pytest_pin_is_still_counted(repo: Path, config: SupervisorConf
         ("sh -c 'pytest -q'", True),
         ("/usr/bin/pytest", True),
         ("python -mpytest -q", True),
+        ('sh -c "pytest>out"', True),
+        ("pytest-3 -q", True),
+        ("python3 -Impytest", True),
+        ("pytest-cov-report x", False),
         ("echo starting\npytest -q", True),
         ('sh -c "pytest;true"', True),
         ("sh -c \"'pytest'\"", True),
@@ -691,10 +695,13 @@ def test_baseline_cleanup_removes_only_what_the_baseline_added(tmp_path: Path) -
     (wt / ".venv").mkdir()
     primed = reverify_mod._untracked(wt)
     assert "ext.so" in primed and not any(p.startswith(".venv") for p in primed)
-    (wt / "state.txt").write_text("baseline")
     (wt / "build").mkdir()
-    (wt / "build" / "out").write_text("baseline")
-    assert reverify_mod._untracked(wt) - primed == {"state.txt", "build/"}
+    (wt / "build" / "primed").write_text("prime")  # a directory the prime made
+    primed = reverify_mod._untracked(wt)
+    (wt / "state.txt").write_text("baseline")
+    (wt / "build" / "out").write_text("baseline")  # review R3: inside a primed dir
+    (wt / ".venv" / "x").write_text("baseline")
+    assert reverify_mod._untracked(wt) - primed == {"state.txt", "build/out"}
 
 
 def test_a_fake_summary_after_a_burst_of_output_fails_closed(

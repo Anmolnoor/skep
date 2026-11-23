@@ -117,6 +117,11 @@ _COUNTABLE_EXITS = (0, 1, 5)
 _NOT_RUNNERS = frozenset({"echo", "printf", "grep", "rg", "which"})
 
 
+# pytest, py.test, pytest-3 (Fedora/Debian); grouped flags like -mpytest, -Impytest.
+_PYTEST_WORD = re.compile(r"^py\.?test(-3(\.\d+)*)?$")
+_PYTEST_FLAGS = re.compile(r"^-[A-Za-z]*m(pytest|py\.test)$")
+
+
 def _is_pytest_pin(command: str) -> bool:
     """V1 (review R1, F4): does the pin run pytest? Read from shell words —
     quotes undone, `;` `&&` `||` `|` split off, an `sh -c '...'` program read
@@ -138,15 +143,12 @@ def _is_pytest_pin(command: str) -> bool:
                 segment.pop(0)
             if segment and segment[0] not in _NOT_RUNNERS:
                 for w in segment:
-                    if os.path.basename(w) in ("pytest", "py.test") or w in (
-                        "-mpytest",
-                        "-mpy.test",
-                    ):
+                    if _PYTEST_WORD.match(os.path.basename(w)) or _PYTEST_FLAGS.match(w):
                         return True
                     # an `sh -c` program, spaced or not (`sh -c "pytest;true"`)
                     if (
                         w != command
-                        and any(c.isspace() or c in ";&|'\"" for c in w)
+                        and any(c.isspace() or c in ";&|<>()'\"" for c in w)
                         and (_is_pytest_pin(w))
                     ):
                         return True
@@ -620,10 +622,12 @@ _BASELINE_KEEP = (".venv", "node_modules", ".reverify-tmp", ".uv-cache", ".node-
 
 
 def _untracked(worktree: Path) -> set[str]:
-    """Untracked and ignored paths in ``worktree`` (whole new directories as
-    one entry), minus the primed environments and re-verify scratch."""
+    """Untracked and ignored FILES in ``worktree`` — one entry per file, so a
+    file the baseline adds inside a directory the prime made is seen (review
+    R3) — minus the primed environments and re-verify scratch."""
     out = subprocess.run(
-        ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--directory"],
+        ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--", "."]
+        + [f":(top,exclude){keep}" for keep in _BASELINE_KEEP],
         capture_output=True,
         check=False,
     ).stdout.decode("utf-8", "surrogateescape")
@@ -917,17 +921,11 @@ def reverify(
             reset = subprocess.run(
                 ["git", "-C", str(worktree), "reset", "-q", "--hard", "HEAD"], check=False
             )
-            added = _untracked(worktree) - pre_baseline
-            cleaned = (
-                subprocess.run(
-                    ["git", "-C", str(worktree), "clean", "-ffdxq", "--", *sorted(added)],
-                    check=False,
-                )
-                if added
-                else reset
-            )
+            for path in _untracked(worktree) - pre_baseline:
+                with contextlib.suppress(OSError):  # what stays is caught below
+                    (worktree / path).unlink()
             leftover = baseline_tmp.exists() or _untracked(worktree) - pre_baseline
-            if reset.returncode or cleaned.returncode or leftover:
+            if reset.returncode or leftover:
                 # Review R2 (Terra): a tree git could not reset is not a clean
                 # baseline for the patched run — confirm nothing (I2).
                 return ReverifyOutcome(

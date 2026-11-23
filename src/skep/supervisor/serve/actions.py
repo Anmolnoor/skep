@@ -3857,8 +3857,8 @@ def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
 
 
 PIN_DRIFT_NOTE = (
-    "verify pin changed while the gate waited — the successor re-verifies with the "
-    "audited pin and auto-landing is off; a human lands it"
+    "verify pin changed while the gate waited — auto-landing is off for the "
+    "successor; a human lands it"
 )
 
 
@@ -3875,7 +3875,8 @@ def pin_drifted(
     except PolicyResolutionError:
         return True
     current = policy.get("verify_command") or ""
-    return not isinstance(current, str) or current.strip() != original.verify_command
+    audited = (original.verify_command or "").strip()  # R3: strip both, as G10 does
+    return not isinstance(current, str) or current.strip() != audited
 
 
 def resume_past_gate(

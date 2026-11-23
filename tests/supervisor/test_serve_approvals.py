@@ -2035,9 +2035,16 @@ def test_a_serve_resume_keeps_the_audited_pin_caste_and_engine(
     assert [submitted[key] for key in keys] == ["coding", "react", "pytest -q", "codex"]
 
 
-@pytest.mark.parametrize(("current", "lands"), [("pytest -q", None), ("pytest", False)])
+@pytest.mark.parametrize(
+    ("current", "audited", "lands"),
+    [
+        ("pytest -q", "pytest -q", None),
+        ("pytest", "pytest -q", False),
+        ("pytest -q", " pytest -q ", None),  # review R3: both sides stripped, like G10
+    ],
+)
 def test_a_serve_resume_after_a_pin_change_does_not_auto_land(
-    repo: Path, config: SupervisorConfig, current: str, lands: bool | None
+    repo: Path, config: SupervisorConfig, current: str, audited: str, lands: bool | None
 ) -> None:
     """Review R3 (H5, I2): the project's pin changed while the gate waited —
     the successor keeps the audited pin but never lands by itself under the
@@ -2056,7 +2063,7 @@ def test_a_serve_resume_after_a_pin_change_does_not_auto_land(
             project_id="proj", name="proj", strategy="trusted_local_dev", phase="build",
             policy={"unlocked": True, "verify_command": current},
         )  # fmt: skip
-        task = mint_task(workspace=repo, instructions="x", verify_command="pytest -q")
+        task = mint_task(workspace=repo, instructions="x", verify_command=audited)
         store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
         store.transition(task.task_id, "pending_approval")
         write_task_file(task, config.audit_dir / task.task_id / "task.json")
@@ -2075,6 +2082,6 @@ def test_a_serve_resume_after_a_pin_change_does_not_auto_land(
         note = store.get_approval(review_id).resolution_note or ""  # type: ignore[union-attr]
     finally:
         store.close()
-    assert submitted["verify_command"] == "pytest -q"
+    assert submitted["verify_command"] == audited
     assert submitted["auto_apply_verified_patch"] is lands
     assert ("verify pin changed while the gate waited" in note) is (lands is False)
