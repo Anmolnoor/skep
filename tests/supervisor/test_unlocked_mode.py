@@ -904,7 +904,9 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
     # D42 / L4: doctor tells the truth about hosts and the CLI path
     assert "a host no rule names is still refused or asked, never auto-approved" in lines[0]
-    assert "a CLI `skep run` still stops at every gate" in lines[0]
+    # phase-01 1.1/1.2: the CLI answers unlocked gates too, up to its cap
+    assert "still stops at every gate" not in lines[0]
+    assert "a CLI `skep run` (which answers up to 10 gates in a row" in lines[0]
     assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
     # D34: the hosts the mode auto-approved in the window, with counts
     from datetime import UTC, datetime, timedelta

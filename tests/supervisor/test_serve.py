@@ -269,6 +269,7 @@ def test_events_endpoint_serves_the_audit_trail_after_completion(
         # something different when the worker picked it than when the project
         # did (I8). The pin moved with the change.
         "detail": "re-ran clean: all exit 0 [command from the worker's own verify step]",
+        "tamper_flags": [],  # phase-01 1.2: V1's flags ride the event (none here)
     }
     assert all(e["task_id"] == task_id for e in events)
 

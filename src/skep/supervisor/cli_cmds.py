@@ -1061,6 +1061,12 @@ def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str
             f"  verification: {record.verification_outcome or '-'}",
             f"  summary:      {record.summary or '-'}",
         ]
+    if rv.outcome == "tampered":
+        # phase-01 1.2 (I8): exit 0 under rewritten tests — name the flags
+        from .serve.actions import tamper_note
+
+        verdict = f"TAMPERED — NOT CONFIRMED by re-verify (G10) — {tamper_note(rv)}"
+        return [f"  verification: {verdict}", f"  worker claim: {claim}"]
     if rv.confirmed:
         verdict = "confirmed by re-verify (G10)"
     elif rv.outcome == "unavailable":
@@ -1393,6 +1399,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                     )
                 elif reverify.commands:
                     lines.append(f"                recorded verify: {reverify.commands}")
+                from .serve.actions import tamper_note
+
+                tampered = tamper_note(reverify)  # phase-01 1.2: V1's flags and counts
+                if tampered:
+                    lines.append(f"                {tampered}")
             usage = store.usage_for(record.task_id)
             if usage is not None:
                 lines.append(f"  usage:        {_usage_summary(usage)} (G8)")

@@ -140,7 +140,7 @@ def test_network_risk_names_the_host() -> None:
 def test_card_summary_omits_absent_parts_entirely() -> None:
     """Absent, not empty-string — a blank line reads as a missing answer."""
     summary = card_summary("remember", {"text": "x"}, description="")
-    assert set(summary) == {"headline"}
+    assert set(summary) == {"headline", "boundary"}  # phase-01 1.2: every card has one
 
 
 def test_card_summary_tolerates_non_dict_args() -> None:

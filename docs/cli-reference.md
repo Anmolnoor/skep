@@ -423,9 +423,10 @@ codex runs use your ChatGPT plan login when no `OPENAI_API_KEY` is set: an
 access-token-only copy per run, never the refresh token (see
 [codex-chatgpt-login.md](codex-chatgpt-login.md)); `--no-codex-chatgpt-login`
 turns it off. `--unlocked` is the top rung of the trust ramp (ADR 0061): the
-project's sandboxed workers stop asking about commands no rule names on
-runs the serve dispatches (a CLI `skep run` still stops at every gate; a
-host no rule names is still refused or asked, never auto-approved), dispatch
+project's sandboxed workers stop asking about commands no rule names, on
+runs the serve dispatches and on a CLI `skep run` (which answers up to 10
+gates in a row, then waits for you; a host no rule names is still refused or
+asked, never auto-approved), dispatch
 needs no card and a G10-confirmed patch lands on `skep/*`;
 denies, named asks and the floor still hold. It needs a pinned verify
 command, a usable sandbox and an approved baseline; `--no-unlocked` turns it

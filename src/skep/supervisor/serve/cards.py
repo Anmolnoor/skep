@@ -116,6 +116,127 @@ _HIGH_POLICY_TOOLS = _POLICY_TOOLS | {
 _DISPATCH_TOOLS = frozenset({"dispatch_run", "quick_edit", "setup_project", "batch_dispatch"})
 
 
+# phase-01 1.2 (I6, I9): the boundary a card guards, named from what approving
+# it lets cross. Every card kind is listed (test_every_card_kind_has_its_
+# boundary_label fails on a new one): an unmapped kind gets no label, never a
+# guessed one. Run-starting cards, worker gates and script schedules are
+# decided per card in ``boundary``.
+BOUNDARIES = (
+    "patch-landing",
+    "network-egress",
+    "outbound-content",
+    "host-shell",
+    "policy-change",
+    "tainted-dispatch",
+    "in-sandbox-locked",
+)
+_RUN_TOOLS = frozenset(
+    {"dispatch_run", "quick_edit", "batch_dispatch", "start_research", "forge_tool"}
+    | {"run_code", "resume_run"}
+)
+_GATE_TOOLS = frozenset({"approve_review", "deny_review"})
+_BOUNDARY_GROUPS: dict[str, tuple[str, ...]] = {
+    "patch-landing": (
+        "land_run", "approve_review", "deny_review", "create_branch", "delete_branch",
+        "merge_branch",
+    ),
+    "network-egress": ("read_url", "refresh_repo", "register_repo"),
+    "outbound-content": (
+        "push_branch", "push_baseline", "open_pr", "merge_pr", "close_pr", "call_mcp_tool",
+        "search_web", "discord_delete_message", "discord_timeout_member", "add_provider",
+        "use_provider", "set_assistant_model", "set_tts_provider",
+    ),
+    # acts on this host outside any sandbox: a command, a host file, a server
+    "host-shell": (
+        "run_shell", "start_process", "stop_process", "diagnose_run", "read_file",
+        "search_files", "register_mcp_server", "setup_browser", "promote_tool",
+        "promote_skill_pack", "sync_notes", "workon",
+    ),
+    "in-sandbox-locked": tuple(sorted(_RUN_TOOLS)),
+    # skep's own standing state: policy, projects, schedules, memory, skills, settings
+    "policy-change": (
+        "allow_command_review", "allow_env_bootstrap", "allow_fetch_domain", "allow_mcp_tool",
+        "allow_shell_command", "apply_policy_preset", "approve_policy_baseline",
+        "attach_policy_group", "copy_project_policy", "delete_policy_group",
+        "detach_policy_group", "revoke_policy_rule", "set_operator_policy", "set_policy",
+        "set_policy_group", "set_role", "setup_project", "unregister_repo", "remove_project",
+        "set_project_phase", "propose_schedule", "delete_schedule", "set_schedule_enabled",
+        "run_schedule_now", "delete_note", "delete_task", "set_task_due", "forget_memory",
+        "approve_memory_proposal", "reject_memory_proposal", "remember", "add_note",
+        "add_task", "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
+        "suspend_skill_pack", "suspend_tool", "unregister_mcp_server", "remove_provider",
+        "set_persona", "set_personality", "set_run_completion_notify", "delegate_analysis",
+    ),
+}  # fmt: skip
+_BOUNDARY = {tool: label for label, tools in _BOUNDARY_GROUPS.items() for tool in tools}
+UNLOCK_REMEDIATION = "skep project setup {repo} --execution-mode sandbox --unlocked"
+
+
+def _unlock_remedy(store: RunStore | None, repo: Any) -> str | None:
+    """The one line that stops in-sandbox asks — None when the project is
+    already unlocked or there is no store to say (I8: never offer a no-op)."""
+    if store is None or not repo:
+        return None
+    from pathlib import Path
+
+    from ..policy_resolver import project_bound_to_repo
+
+    project = project_bound_to_repo(store, Path(str(repo)))
+    if project is not None and project.policy.get("unlocked") is True:
+        return None
+    return UNLOCK_REMEDIATION.format(repo=shlex.quote(str(repo)))
+
+
+def boundary(
+    tool: str,
+    args: dict[str, Any],
+    *,
+    taint: ChatTaint | None = None,
+    store: RunStore | None = None,
+    manifest: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """phase-01 1.2: ``(label, remediation)`` for one card. A run-starting
+    card from a tainted chat is ``tainted-dispatch``; one whose run is on the
+    host is ``host-shell``; else its wall is the sandbox: ``in-sandbox-locked``,
+    with the unlock line while the project is not unlocked. A worker gate is
+    labelled by what the worker asked (its approval's action)."""
+    if tool in _RUN_TOOLS:
+        runs = [manifest, *(manifest.get("members") or [])] if manifest else [args]
+        if (taint is not None and taint.any) or any(run.get("taint") for run in runs):
+            return "tainted-dispatch", None
+        resumed = (
+            store.get_run(str(args.get("task_id") or ""))
+            if tool == "resume_run" and store is not None
+            else None
+        )
+        if resumed is not None:
+            runs = [{"execution_mode": resumed.execution_mode, "repo": resumed.repo}]
+        modes = {run.get("execution_mode") for run in runs} - {None}
+        if modes - {"sandbox"}:
+            return "host-shell", None
+        repo = next((run.get("repo") for run in runs if run.get("repo")), None)
+        return "in-sandbox-locked", _unlock_remedy(store, repo)
+    if tool in _GATE_TOOLS:
+        gate = store.get_approval(str(args.get("review_id") or "")) if store is not None else None
+        if gate is None:  # risk()'s rule: a reason not 'land …' is a worker gate
+            reason = str(args.get("reason") or "")
+            gated = reason and not reason.startswith("land ")
+            return ("host-shell" if gated else _BOUNDARY[tool]), None
+        if gate.action == "apply_patch":
+            return "patch-landing", None
+        if gate.action == "promote_skill":
+            return "policy-change", None
+        if gate.action.startswith("network."):
+            return "network-egress", None
+        run = store.get_run(gate.task_id) if store is not None else None
+        if run is None or run.execution_mode != "sandbox":
+            return "host-shell", None
+        return "in-sandbox-locked", _unlock_remedy(store, run.repo)
+    if tool == "propose_schedule" and args.get("caste") == "script":
+        return "host-shell", None
+    return _BOUNDARY.get(tool), None
+
+
 def _wildcard_network(args: dict[str, Any]) -> bool:
     for key in ("network", "source_allowlist"):
         value = args.get(key)
@@ -668,6 +789,26 @@ def card_summary(
             summary["headline"] = f"{tool} — {content}"
         if filed:
             danger = filed if danger is None else f"{danger}; {filed}"
+    label, remedy = boundary(
+        tool, safe_args, taint=taint, store=store, manifest=(recorded or {}).get("manifest")
+    )
+    if recorded and recorded.get("boundary"):  # as recorded (a mirrored gate)
+        label, remedy = recorded["boundary"], recorded.get("remediation")
+    if label is not None:
+        summary["boundary"] = label
+    if remedy is not None:
+        summary["remediation"] = remedy
+        unlock = f"this project is not unlocked, so it asks; to stop asks like this: {remedy}"
+        danger = unlock if danger is None else f"{danger}; {unlock}"
+    landing = held.task_id if held is not None else str(safe_args.get("task_id") or "")
+    if label == "patch-landing" and store is not None and landing:
+        # I8: the V1 verdict leads the card — a landing never hides it
+        from .actions import tamper_note
+
+        banner = tamper_note(store.reverification_for(landing))
+        if banner is not None:
+            summary["tamper"] = banner
+            danger = banner if danger is None else f"{banner} — {danger}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:

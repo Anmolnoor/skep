@@ -394,6 +394,7 @@ def reverification_event_view_for_task(store: RunStore, task_id: str) -> dict[st
             "commands": reverify.commands,
             "exit_codes": reverify.exit_codes,
             "detail": reverify.detail,
+            "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
         },
     }
 
@@ -520,7 +521,47 @@ def reverification_summary(reverify: Any) -> dict[str, Any] | None:
     """
     if reverify is None:
         return None
-    return {"outcome": reverify.outcome, "confirmed": reverify.confirmed}
+    return {
+        "outcome": reverify.outcome,
+        "confirmed": reverify.confirmed,
+        "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
+    }
+
+
+def tamper_note(reverify: Any) -> str | None:
+    """phase-01 1.2 (I8): what G10's test-tamper guard (V1) found — its flags
+    and the executed-test counts, baseline → patched — or the unreadable-counts
+    block; None when neither applies. Every face quotes this one line."""
+    if reverify is None:
+        return None
+    counts = reverify.test_counts or {}
+    if reverify.tamper_flags:
+        totals = ""
+        if counts.get("status") == "ok":
+            base, patched = counts["baseline"], counts["patched"]
+            totals = (
+                "; "
+                + ", ".join(
+                    f"{word} {base[key]} → {patched[key]}"
+                    for word, key in (
+                        ("executed tests", "total_executed"),
+                        ("passed", "passed"),
+                        ("skipped", "skipped"),
+                    )
+                )
+                + " (baseline → patched)"
+            )
+        return (
+            f"TEST-TAMPER: the patch changes the tests ({', '.join(reverify.tamper_flags)})"
+            f"{totals} — re-verification (G10) did NOT confirm it and skep will not land it "
+            "by itself; review the test changes before any landing"
+        )
+    if counts.get("status") == "unparseable":
+        return (
+            "TEST COUNTS UNREADABLE: the pinned pytest check's test counts could not be "
+            "read, so auto-landing was blocked — review the patch before landing it by hand"
+        )
+    return None
 
 
 def reverification_warning(reverify: Any) -> str | None:
@@ -534,6 +575,10 @@ def reverification_warning(reverify: Any) -> str | None:
     """
     if reverify is None or reverify.confirmed:
         return None
+    if reverify.outcome == "tampered":
+        # phase-01 1.2 (I8): exit code 0 under rewritten tests is no failure
+        # and no "could not" — it is the tamper, named with its evidence.
+        return tamper_note(reverify)
     if reverify.outcome == "not_applicable":
         return None
     if reverify.outcome == "passed" and reverify.worker_outcome == "passed":

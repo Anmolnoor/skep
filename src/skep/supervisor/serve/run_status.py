@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 from skep.worker_contract import TERMINAL_STATES, Event, EventType
 
 from ..store import RunStore
+from .cards import boundary
 from .channels import state_emoji
 from .channels.outbound import push_to_chat_channel
 
@@ -147,9 +148,15 @@ def _mirror_gate_card(store: RunStore, task_id: str, chat_id: str) -> None:
     # L6: the gate's own decision rides the card, so its why-line names what
     # the worker asked (in words, as the gate recorded it)
     decision = {"verdict": "require_approval", "reason": gate.reason or gate.action}
+    # phase-01 1.2: the boundary as it stood when the gate was mirrored, so the
+    # resolved card (which asks the store nothing) keeps its label
+    label, remedy = boundary("approve_review", args, store=store)
+    recorded: dict[str, Any] = {"decision": decision, "boundary": label}
+    if remedy is not None:
+        recorded["remediation"] = remedy
     store.add_chat_action(
         chat_id, tool="approve_review", args=args, source="gate",
-        decided_by=gate.decided_by, card={"decision": decision},
+        decided_by=gate.decided_by, card=recorded,
     )  # fmt: skip
 
 
@@ -174,6 +181,7 @@ def run_terminal_text(
         created_transition_views_for_task,
         patch_digest,
         patch_path,
+        tamper_note,
     )
 
     run = store.get_run(task_id)
@@ -218,6 +226,14 @@ def run_terminal_text(
             else " — see the Approvals view"
         )
         text = f"run {task_id[:13]}… needs your approval{why}{how}"
+        if gate is not None:  # phase-01 1.2 (I9): a locked sandbox's gate names the way out
+            _label, remedy = boundary(
+                "approve_review", {"review_id": gate.review_id, "reason": gate.reason}, store=store
+            )
+            if remedy is not None:
+                text += (
+                    f"; this project is not unlocked, so it asks — to stop asks like this: {remedy}"
+                )
         kind = "action_needed"
     elif disagreed:
         assert reverify is not None
@@ -248,11 +264,18 @@ def run_terminal_text(
                 f" — the supervisor could NOT re-verify it ({reverify.detail}); "
                 "landing would be unconfirmed"
             )
-        text = (
-            f"run {task_id[:13]}… completed — patch ready to land{files}: "
-            f"land_run {task_id} (landing IS how skep commits; until then the "
-            f"work is on no branch){unverified}"
-        )
+        note = tamper_note(reverify)
+        if reverify is not None and reverify.outcome == "tampered":
+            # phase-01 1.2 (I8): a patch that rewrote its own tests is never
+            # "ready to land" — the line is the tamper, with its evidence.
+            text = f"run {task_id[:13]}… completed{files} — {note}"
+        else:
+            unverified += f" — {note}" if note else ""
+            text = (
+                f"run {task_id[:13]}… completed — patch ready to land{files}: "
+                f"land_run {task_id} (landing IS how skep commits; until then the "
+                f"work is on no branch){unverified}"
+            )
         kind = "action_needed"
         # v128-F7: the newest landing verdict a human denied (not a failed
         # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
