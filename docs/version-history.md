@@ -3207,7 +3207,7 @@ Everything merged since 1.6.0 (#121–#122):
   and wrapper-shell lines keep their gate when an automatic grant would widen
   a binding rule (ADR 0061 D46, D47). The default confirmation-card timeout is
   now 24 hours instead of five minutes; cards that mirror a worker gate are
-  exempt, as before (ADR 0032 D48).
+  exempt (ADR 0032 D48).
 - **v132 (#122):** bug fixes from a two-model review. Unlocked mode never
   auto-answers a worker's network host gate. Every mail send that policy
   permits asks once, and a send approval can never be remembered. An unlock
