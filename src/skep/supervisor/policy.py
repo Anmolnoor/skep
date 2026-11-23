@@ -290,7 +290,8 @@ def _test_config(name: str, text: str | None, *, runner_only: bool = False) -> o
 
     ``runner_only`` (V1 review R1, F7): just the test runner's own section —
     pyproject's ``[tool.pytest*]``, package.json's test scripts and ``jest``
-    key, setup.cfg's ``[tool:pytest]``, tox.ini's ``[pytest]``."""
+    key, setup.cfg's ``[tool:pytest]``, tox.ini's ``[pytest]`` and its
+    ``[testenv*]`` ``commands`` (review R3, H6)."""
     if text is None:
         return None
     if name in ("setup.cfg", "tox.ini"):
@@ -300,7 +301,15 @@ def _test_config(name: str, text: str | None, *, runner_only: bool = False) -> o
         except configparser.Error:
             return object()
         section = "tool:pytest" if name == "setup.cfg" else "pytest"
-        return dict(parser[section]) if parser.has_section(section) else None
+        runner = dict(parser[section]) if parser.has_section(section) else None
+        if name == "setup.cfg":
+            return runner
+        commands = {
+            s: parser[s]["commands"]
+            for s in parser.sections()
+            if (s == "testenv" or s.startswith("testenv:")) and parser.has_option(s, "commands")
+        }
+        return (runner, commands) if runner is not None or commands else None
     try:
         doc = json.loads(text) if name == "package.json" else tomllib.loads(text)
     except ValueError:

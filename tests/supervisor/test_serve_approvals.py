@@ -1932,6 +1932,26 @@ def test_tamper_note_names_unreadable_counts_only_on_a_passing_rerun() -> None:
     assert "TEST COUNTS UNREADABLE" in str(tamper_note(passed))
 
 
+def test_a_tamper_check_that_could_not_read_the_patch_says_so() -> None:
+    """Review R3 (H7, I8): a lone ``tamper_check_failed`` flag is the guard
+    failing, not a patch that changes the tests."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.actions import tamper_note
+
+    broken = SimpleNamespace(
+        tamper_flags=("tamper_check_failed:OSError",),
+        test_counts=None,
+        outcome="tampered",
+        confirmed=False,
+    )
+    assert tamper_note(broken) == (
+        "the test-tamper check could not inspect this patch (OSError); auto-landing is "
+        "blocked — review the patch before landing it by hand"
+    )
+    assert "could not inspect" in str(reverification_warning(broken))
+
+
 def test_typed_land_and_approve_cards_and_the_approvals_view_tell_the_same_truth(
     repo: Path, config: SupervisorConfig
 ) -> None:
@@ -2013,3 +2033,48 @@ def test_a_serve_resume_keeps_the_audited_pin_caste_and_engine(
         store.close()
     keys = ("worker_kind", "planning_protocol", "verify_command", "coding_engine")
     assert [submitted[key] for key in keys] == ["coding", "react", "pytest -q", "codex"]
+
+
+@pytest.mark.parametrize(("current", "lands"), [("pytest -q", None), ("pytest", False)])
+def test_a_serve_resume_after_a_pin_change_does_not_auto_land(
+    repo: Path, config: SupervisorConfig, current: str, lands: bool | None
+) -> None:
+    """Review R3 (H5, I2): the project's pin changed while the gate waited —
+    the successor keeps the audited pin but never lands by itself under the
+    superseded check, and the resolved gate says so."""
+    from types import SimpleNamespace
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.serve.actions import require_run, resume_past_gate
+
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound_project(store, repo, unlocked=True)
+        store.add_project_policy(
+            project_id="proj", name="proj", strategy="trusted_local_dev", phase="build",
+            policy={"unlocked": True, "verify_command": current},
+        )  # fmt: skip
+        task = mint_task(workspace=repo, instructions="x", verify_command="pytest -q")
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        review_id = store.enqueue_approval(
+            task.task_id, action="shell.run", reason="r", commands=[["make"]]
+        )
+        submitted: dict[str, object] = {}
+
+        def submit(*_: object, **kwargs: object) -> str:
+            submitted.update(kwargs)
+            return "successor"
+
+        runner = cast("Dispatcher", SimpleNamespace(submit=submit))
+        run = require_run(store, task.task_id)
+        assert resume_past_gate(store, config, runner, run, review_id, "tester") == "successor"
+        note = store.get_approval(review_id).resolution_note or ""  # type: ignore[union-attr]
+    finally:
+        store.close()
+    assert submitted["verify_command"] == "pytest -q"
+    assert submitted["auto_apply_verified_patch"] is lands
+    assert ("verify pin changed while the gate waited" in note) is (lands is False)

@@ -1922,13 +1922,19 @@ def _run_claimed_resume(
         commands=approval_commands,
     )
     print(f"resuming task {record.task_id} with approval by {actor} ...")
+    from .serve.actions import PIN_DRIFT_NOTE, pin_drifted
+
+    drifted = pin_drifted(store, config, Path(record.repo), original)
+    if drifted:
+        print(f"  note:         {PIN_DRIFT_NOTE}")
     outcome = run_task(
         Path(record.repo),
         record.instructions,
         config=config,
         permissions=original.permissions,
         budget=original.budget,
-        auto_apply_verified_patch=original.auto_apply_verified_patch,
+        # Review R3 (H5, I2): a superseded pin never lands by itself
+        auto_apply_verified_patch=False if drifted else original.auto_apply_verified_patch,
         project_context=original.project_context,
         dispatch_decision=resume_after_approval_decision(
             resumed_from_task_id=record.task_id,

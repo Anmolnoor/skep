@@ -245,6 +245,15 @@ def _bound(config: SupervisorConfig, repo: Path, policy: dict[str, Any]) -> RunS
 UNLOCKED = {"unlocked": True, "verify_command": PIN}
 
 
+def _own_project(repo: Path) -> Any:
+    from skep.worker_contract.task import ProjectContextPayload
+
+    return ProjectContextPayload(
+        project_id="unlockable", name="Unlockable", strategy="trusted_local_dev",
+        phase="build", binding_kind="repo_path", binding_value=str(repo.resolve()),
+    )  # fmt: skip
+
+
 @pytest.mark.parametrize("v2", [False, True], ids=["engine-v1", "engine-v2"])
 def test_unlocked_implies_auto_dispatch_sandbox_and_verified_landing(
     repo: Path, config: SupervisorConfig, v2: bool
@@ -874,6 +883,7 @@ def test_a_batch_gate_logs_every_request_before_it_answers(
     store = _bound(config, repo, UNLOCKED)
     try:
         task = mint_task(workspace=repo, instructions="gate")
+        task = task.model_copy(update={"project_context": _own_project(repo)})
         store.create_run(task, repo=repo.resolve(), ref=None, execution_mode="sandbox")
         (config.audit_dir / task.task_id).mkdir(parents=True)
         (config.audit_dir / task.task_id / "task.json").write_text(task.model_dump_json())
@@ -968,6 +978,94 @@ def test_cli_auto_resume_keeps_the_audited_pin_caste_and_engine(
     assert kwargs["worker_kind"] == audited.worker_kind
     assert kwargs["planning_protocol"] == audited.planning_protocol
     assert kwargs["coding_engine"] == "builtin"
+
+
+@_SANDBOX
+def test_cli_template_run_under_a_locked_project_never_answers_its_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R3 (H2, I5, I6): a template bound to a LOCKED project resolves
+    that project's policy; the unlocked step reloads the repo's own
+    (unlocked) one — not the policy the run ran under — so it never answers."""
+    import shlex
+    import sys
+
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.templates import WorkflowTemplate
+
+    from .conftest import FAKE_WORKER
+
+    root = tmp_path / "cli-home"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    lock_baseline(config.home, shell_rules=False)
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        store.add_project_policy(
+            project_id="locked", name="Locked", strategy="trusted_local_dev", phase="build",
+            policy={"verify_command": PIN},
+        )  # fmt: skip
+        store.add_project_binding(
+            project_id="locked", binding_kind="template_name", binding_value="tpl"
+        )
+        store.add_template(
+            WorkflowTemplate(name="tpl", instructions="Fix it. MODE:shellgate GATE:make_lint")
+        )
+    finally:
+        store.close()
+    argv = ["--home", str(root), "run", "--template", "tpl", str(repo), "--quiet"]
+    argv += ["--worker-cmd", shlex.join([sys.executable, str(FAKE_WORKER)])]
+    argv += ["--execution-mode", "sandbox"]
+    assert main(argv) == 4, capsys.readouterr()
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
+    assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_auto_resume_after_a_pin_change_does_not_auto_land(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3 (H5, I2): the operator changed the pin while the gate was
+    pending — the successor runs under the audited pin but never lands by
+    itself under the superseded check; the CLI says so."""
+    from skep.supervisor import cli_cmds
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+    resumed: list[dict[str, Any]] = []
+
+    def drifting(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            resumed.append(kwargs)
+            return real_run_task(*args, **kwargs)
+        outcome = real_run_task(*args, **kwargs)
+        store = RunStore(kwargs["config"].db_path)
+        try:
+            store.add_project_policy(
+                project_id="unlockable", name="Unlockable", strategy="trusted_local_dev",
+                phase="build", policy={**UNLOCKED, "verify_command": "true"},
+            )  # fmt: skip
+        finally:
+            store.close()
+        return outcome
+
+    monkeypatch.setattr(cli_cmds, "run_task", drifting)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    out = capsys.readouterr().out
+    [kwargs] = resumed
+    assert kwargs["verify_command"] == PIN
+    assert kwargs["auto_apply_verified_patch"] is False
+    assert "verify pin changed while the gate waited" in out
+    final = _decisions(config)[0]["task_id"]
+    store = RunStore(config.db_path)
+    try:
+        successor = store.resumed_as_for(final)
+        assert successor is not None
+        landed = [a for a in store.approvals_for(successor) if a.action == "apply_patch"]
+        assert all(a.resolved_by != "auto:verified-patch" for a in landed), landed
+    finally:
+        store.close()
+    assert code in (0, 4), out
 
 
 def _callback_ran(monkeypatch: pytest.MonkeyPatch) -> Any:

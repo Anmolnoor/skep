@@ -126,6 +126,7 @@ def _is_pytest_pin(command: str) -> bool:
     lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace = " \t\r"  # a newline separates commands, like `;`
     lexer.whitespace_split = True
+    lexer.commenters = ""  # review R3 (H4): `FOO=a#b pytest` is no comment
     try:
         words = list(lexer)
     except ValueError:
@@ -237,10 +238,6 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
     changed = patch_paths(repo, patch_path)
     if not changed:
         return []
-    flags = [
-        f"test_config_changed:{path}"
-        for path in test_config_changes(repo, patch_path, base, changed)
-    ]
     with tempfile.TemporaryDirectory(prefix="skep-v1-") as tmp:
         # Literal pathspecs: a test path with `*` or `[` names itself only.
         env = {
@@ -256,9 +253,19 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
             git("read-tree", base).returncode
             or git("apply", "--cached", str(patch_path)).returncode
         ):
-            return flags  # the re-run already says the patch does not apply
+            # the re-run already says the patch does not apply
+            return [
+                f"test_config_changed:{p}"
+                for p in test_config_changes(repo, patch_path, base, changed)
+            ]
         fields = git("diff", "--cached", "--no-renames", "--name-status", "-z", base).stdout
         names = [f.decode("utf-8", "surrogateescape") for f in fields.split(b"\0") if f]
+        # Review R3 (H3): the config scan reads these unquoted names too — a
+        # git-quoted `.github/workflows/é.yml` matched no prefix.
+        flags = [
+            f"test_config_changed:{path}"
+            for path in test_config_changes(repo, patch_path, base, tuple(names[1::2]))
+        ]
         for code, path in zip(names[::2], names[1::2], strict=True):
             if _is_test_file(path):
                 if code == "D":
@@ -579,8 +586,9 @@ def _run_command(
     profile_path: Path | None,
     timeout: float = _REVERIFY_TIMEOUT_SECONDS,
 ) -> tuple[int, str, str]:
-    """``(exit code, stdout+stderr tail, stdout tail)`` — V1 counts read
-    stdout alone, where pytest writes its summary (review R1, F2)."""
+    """``(exit code, stdout+stderr tail, stdout)`` — V1 counts read stdout
+    alone, where pytest writes its summary (review R1, F2), and all of it:
+    a tail could drop the real summary and keep a fake one (review R3, H1)."""
     argv: list[str] = ["/bin/sh", "-c", command]
     if profile_path is not None:
         argv = sandbox.wrap_command(argv, profile_path)
@@ -600,7 +608,7 @@ def _run_command(
     return (
         proc.returncode,
         combined.strip()[-_OUTPUT_EVIDENCE_CHARS:],
-        (proc.stdout or "")[-_OUTPUT_EVIDENCE_CHARS:],
+        proc.stdout or "",
     )
 
 
