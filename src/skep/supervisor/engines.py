@@ -35,7 +35,7 @@ from __future__ import annotations
 import shutil
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 BUILTIN_ENGINE = "builtin"
@@ -176,6 +176,29 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         advanced=True,
     ),
 }
+
+# ADR 0058 (Phase 04 4.1): the same two CLIs behind their ACP adapters. The
+# adapter runs inside the run's sandbox like any external agent (its own
+# commands still skip the capability layer, so it is external and needs a
+# real pin); skep's governor runs OUTSIDE the wall, deciding every ask the
+# adapter makes (``skep.workers.acp``). Auth, identity, state homes and the
+# API host are the wrapped CLI's — the adapters run the same binaries.
+for _adapter, _cli in (("claude-agent-acp", "claude_code"), ("codex-acp", "codex")):
+    CODING_ENGINES[f"acp:{_adapter}"] = replace(
+        CODING_ENGINES[_cli],
+        name=f"acp:{_adapter}",
+        argv=(sys.executable, "-m", "skep.workers.acp", _adapter),
+        binary=_adapter,
+        about=(
+            f"{_adapter} over ACP: the sandbox is the wall; skep's governor decides "
+            "each permission ask outside it."
+        ),
+    )
+
+
+def acp_adapter(engine: CodingEngine) -> str | None:
+    """The ACP adapter an ``acp:`` engine drives, else None."""
+    return engine.name.removeprefix("acp:") if engine.name.startswith("acp:") else None
 
 
 def engine_names() -> list[str]:

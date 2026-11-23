@@ -194,6 +194,7 @@ def spawn_worker(
     unmasked: Iterable[Path] = (),
     relay: ProviderRelay | None = None,
     read_allowlist: tuple[Path, ...] | None = None,
+    stdio_pipes: bool = False,
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -215,6 +216,9 @@ def spawn_worker(
 
     ``read_allowlist`` (ADR 0068): the project's read wall
     (``sandbox.read_allowlist_for``); None keeps reads denylist-only.
+
+    ``stdio_pipes`` (ADR 0058): stdin and stdout are pipes to the caller —
+    the ACP engine's wire to its adapter; stderr still goes to the log.
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -329,9 +333,9 @@ def spawn_worker(
             argv,
             env=env,
             cwd=task.workspace,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE if stdio_pipes else subprocess.DEVNULL,
+            stdout=subprocess.PIPE if stdio_pipes else log_handle,
+            stderr=log_handle if stdio_pipes else subprocess.STDOUT,
             start_new_session=True,
         )
     finally:
