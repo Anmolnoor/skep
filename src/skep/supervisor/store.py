@@ -196,6 +196,16 @@ CREATE TABLE IF NOT EXISTS reverifications (
     detail TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- V1 (phase-01 1.3): the pinned pytest check's counts on the BASELINE, per
+-- (repo, base_commit, verify_command), so G10 runs the baseline once per base.
+CREATE TABLE IF NOT EXISTS test_count_baselines (
+    repo TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    verify_command TEXT NOT NULL,
+    counts_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (repo, base_commit, verify_command)
+);
 CREATE TABLE IF NOT EXISTS task_usage (
     task_id TEXT PRIMARY KEY,
     provider_calls INTEGER,
@@ -654,6 +664,13 @@ class ReverifyRecord:
     created_at: str
     # ES-F3 (B131): the commit G10 applied the patch to — landing builds on it.
     base_commit: str | None = None
+    # V1 (phase-01 1.3): why G10 called the patch test tampering ("kind" or
+    # "kind:path"); empty when nothing fired or the row predates V1.
+    tamper_flags: tuple[str, ...] = ()
+    # V1: {"status": "ok"|"unparseable"|"unknown", "runner": "pytest"|None,
+    # "baseline"/"patched": pytest counts, "baseline_source": "run"|"cache"};
+    # None when no command ran or the row predates V1.
+    test_counts: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1127,14 @@ class RunStore:
         if "base_commit" not in reverify_columns:
             # ES-F3 (B131): the commit G10 verified on; NULL for older rows.
             self._conn.execute("ALTER TABLE reverifications ADD COLUMN base_commit TEXT")
+        if "tamper_flags_json" not in reverify_columns:
+            # V1 (phase-01 1.3): older rows read as "nothing flagged".
+            self._conn.execute(
+                "ALTER TABLE reverifications"
+                " ADD COLUMN tamper_flags_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "test_counts_json" not in reverify_columns:
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN test_counts_json TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1629,11 +1654,14 @@ class RunStore:
         exit_codes: list[int],
         detail: str,
         base_commit: str | None = None,
+        tamper_flags: tuple[str, ...] = (),
+        test_counts: dict[str, Any] | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
-            " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit,"
+            " tamper_flags_json, test_counts_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1644,7 +1672,32 @@ class RunStore:
                 detail,
                 _now(),
                 base_commit,
+                json.dumps(list(tamper_flags)),
+                None if test_counts is None else json.dumps(test_counts),
             ),
+        )
+        self._conn.commit()
+
+    @_locked
+    def cached_test_counts(
+        self, repo: str, base_commit: str, verify_command: str
+    ) -> dict[str, int] | None:
+        """V1: the baseline pytest counts G10 recorded for this base and pin."""
+        row = self._conn.execute(
+            "SELECT counts_json FROM test_count_baselines"
+            " WHERE repo = ? AND base_commit = ? AND verify_command = ?",
+            (repo, base_commit, verify_command),
+        ).fetchone()
+        return None if row is None else dict(json.loads(row[0]))
+
+    @_locked
+    def cache_test_counts(
+        self, repo: str, base_commit: str, verify_command: str, counts: dict[str, int]
+    ) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO test_count_baselines"
+            " (repo, base_commit, verify_command, counts_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (repo, base_commit, verify_command, json.dumps(counts), _now()),
         )
         self._conn.commit()
 
@@ -1669,8 +1722,8 @@ class RunStore:
     def reverification_for(self, task_id: str) -> ReverifyRecord | None:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
-            " exit_codes_json, detail, created_at, base_commit FROM reverifications"
-            " WHERE task_id = ?",
+            " exit_codes_json, detail, created_at, base_commit, tamper_flags_json,"
+            " test_counts_json FROM reverifications WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1685,6 +1738,8 @@ class RunStore:
             detail=row[6],
             created_at=row[7],
             base_commit=row[8],
+            tamper_flags=tuple(json.loads(row[9])),
+            test_counts=None if row[10] is None else json.loads(row[10]),
         )
 
     # -- usage accounting (G8: cost is answerable) ----------------------------
