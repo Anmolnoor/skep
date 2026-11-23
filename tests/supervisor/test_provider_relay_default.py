@@ -157,6 +157,148 @@ def test_the_run_record_says_who_is_relayed_and_labels_external_engines(
     )
 
 
+def _stopped_run(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, execution_mode: str
+) -> str:
+    """The task id of a run stopped (dispatched) before its worker starts."""
+    import skep.supervisor.dispatch as dispatch_module
+    from skep.profile import run_personal_setup
+    from skep.supervisor.dispatch import run_task
+    from skep.worker_contract import Permissions
+
+    def stop(*_args: object, **_kwargs: object) -> object:
+        raise OSError("the test stops the run before the worker")
+
+    monkeypatch.setattr(dispatch_module, "spawn_worker", stop)
+    monkeypatch.setattr(
+        dispatch_module,
+        "sandbox_availability",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend=backend),
+    )
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="m",
+        endpoint="http://127.0.0.1:9",
+        api_key_env="SKEP_TEST_RELAY_KEY",
+    )
+    outcome = run_task(
+        repo,
+        "Fix it.",
+        config=config,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        execution_mode=execution_mode,
+        verify_command="grep -q value existing.py",
+    )
+    return outcome.record.task_id
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "sandbox_on", "note"),
+    [
+        ("sandbox", True, "on"),
+        ("workspace", True, "on, but an unsandboxed run can read the key file"),
+        ("sandbox", False, "on, but an unsandboxed run can read the key file"),
+    ],
+    ids=["sandboxed", "workspace-mode", "sandbox-off"],
+)
+def test_an_unsandboxed_relayed_run_is_not_recorded_as_holding_no_key(
+    repo: Path,
+    config: SupervisorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+    sandbox_on: bool,
+    note: str,
+) -> None:
+    """Phase 03 review E2 (I8): no wall masks llm-secret* from an unsandboxed
+    worker, so its relay (which still keeps the key out of its env) is not
+    recorded as a plain ``on``. A re-adopted run keeps its relay either way."""
+    import dataclasses
+
+    from skep.supervisor.provider_relay import readopted_relay
+
+    config = dataclasses.replace(config, sandbox=sandbox_on)
+    task_id = _stopped_run(repo, config, monkeypatch, execution_mode)
+    detail = _dispatched(config, task_id)
+    assert detail["provider_key_relay"] == note
+    assert "auth" not in detail
+    store = RunStore(config.db_path)
+    try:
+        assert readopted_relay(store, config, task_id) is not None
+    finally:
+        store.close()
+
+
+def test_a_worker_cmd_running_the_shell_worker_is_an_external_engine(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 03 review E4 (I8, I12): ``--worker-cmd ... skep.workers.shell_worker``
+    wraps any local CLI agent. It was passed as builtin: a live relay token to
+    the operator's provider and a plain ``on`` record without
+    ``auth: external-env``."""
+    import dataclasses
+
+    config = dataclasses.replace(
+        config, worker_command=(sys.executable, "-m", "skep.workers.shell_worker")
+    )
+    detail = _dispatched(config, _stopped_run(repo, config, monkeypatch, "workspace"))
+    assert detail["auth"] == "external-env"
+    assert detail["provider_key_relay"] == (
+        "not used: an external engine authenticates from its own auth env"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "reads_key"),
+    [
+        ("-m skep.workers.coding", True),
+        ("-m skep.workers.shell_worker", False),
+        ("-m skep.workers.claude_code", False),
+    ],
+)
+def test_only_skeps_own_model_workers_get_the_key_file_carve_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, reads_key: bool
+) -> None:
+    """E4 (B125): an unrelayed run's key file is readable only to skep's own
+    LLM-calling workers; a worker command that runs an external agent (the
+    shell worker, or an engine's module as --worker-cmd) authenticates from
+    its own env and gets no carve-out."""
+    from skep.supervisor import spawner
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+
+    class Stop(Exception):
+        pass
+
+    seen: dict[str, Any] = {}
+
+    def capture(_path: Path, **kwargs: Any) -> Path:
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(
+        sandbox,
+        "require_usable",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend="seatbelt"),
+    )
+    monkeypatch.setattr(sandbox, "write_profile", capture)
+    config = build_config(tmp_path / "home", f"{sys.executable} {command}")
+    task = mint_task(workspace=tmp_path, instructions="x")
+    with pytest.raises(Stop):
+        spawner.spawn_worker(
+            config,
+            task,
+            tmp_path / "task.json",
+            tmp_path / "out" / "result.json",
+            log_path=tmp_path / "log" / "worker.log",
+            sandbox_enabled=True,
+        )
+    assert seen["worker_llm_key"] is reads_key
+
+
 def test_doctor_says_on_by_default_and_labels_each_external_engines_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,8 +319,10 @@ def test_doctor_says_on_by_default_and_labels_each_external_engines_auth(
     report = format_doctor_report(build_status(config.home.parent, provider_timeout=0.1))
     (line,) = [ln for ln in report.splitlines() if ln.startswith("- provider key relay:")]
     assert line.startswith(
-        "- provider key relay: on — builtin workers reach openai-compat through their "
-        "run's relay and hold no key"
+        "- provider key relay: on — sandboxed builtin workers reach openai-compat through "
+        "their run's relay and hold no key; an unsandboxed (workspace-mode) run can still "
+        "read the key file, and the ollama worker (skep.workers.ollama) dials its own "
+        "endpoint with the daemon secret"
     ), line
     assert "not relayed" in line and "auth: external-env" in line, line
     for named in (

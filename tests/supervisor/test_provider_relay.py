@@ -18,6 +18,7 @@ import urllib.parse
 from collections.abc import Callable, Iterator
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -310,7 +311,10 @@ def test_a_builtin_worker_reaches_its_model_through_the_relay_only_when_the_swit
     # The model's plan arrived (workspace mode then asks before running verify).
     assert (record.summary or "").startswith("created relayed.py"), record.summary
     assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"
-    assert '"provider_key_relay": "on"' in (dispatched[0] or "")
+    # Phase 03 review E2: workspace mode has no wall over the key file (I8).
+    assert '"provider_key_relay": "on, but an unsandboxed run can read the key file"' in (
+        dispatched[0] or ""
+    )
 
 
 def test_the_worker_takes_its_relay_and_admits_only_that_loopback_url(
@@ -390,7 +394,11 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
     ("provider", "relay_on", "expected"),
     [
         ("openai-compat", False, "provider key relay: off — builtin workers hold the provider key"),
-        ("openai-compat", True, "provider key relay: on — builtin workers reach openai-compat"),
+        (
+            "openai-compat",
+            True,
+            "provider key relay: on — sandboxed builtin workers reach openai-compat",
+        ),
         ("bedrock", True, "provider key relay: on, not used — bedrock signs"),
     ],
 )
@@ -988,3 +996,70 @@ def test_a_copilot_renewal_never_sends_another_profiles_key(
     )
     with pytest.raises(ValueError, match="worker provider changed"):
         provider_relay._renewed_copilot_key(tmp_path, "https://api.githubcopilot.com", "stale")
+
+
+def test_a_copilot_relay_strips_the_github_token_its_bearer_came_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 03 review E1 (I8, I12): an env-backed Copilot provider's relay
+    holds the exchanged bearer; the worker env dropped that value only, so
+    the operator's GitHub token itself reached a worker that allowlisted its
+    variable. Both values leave the env, under any name."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import spawner
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+    from skep.supervisor.provider_relay import provider_relay_for_run
+    from skep.supervisor.serve import llm_copilot
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    github_token = "CANARY-gh-" + secrets.token_hex(8)
+    bearer = "CANARY-bearer-" + secrets.token_hex(8)
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        llm_copilot,
+        "exchange_copilot_token",
+        lambda token, *, timeout=10.0: (bearer if token == github_token else "", 4e9),
+    )
+    monkeypatch.setenv("SKEP_TEST_GH_TOKEN", github_token)
+    monkeypatch.setenv("SKEP_TEST_GH_COPY", github_token)  # the same token, another name
+    monkeypatch.setenv("SKEP_TEST_PLAIN", "kept")
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="gpt-4o",
+        endpoint="https://api.githubcopilot.com",
+        api_key_env="SKEP_TEST_GH_TOKEN",
+    )
+    task = mint_task(
+        workspace=tmp_path,
+        instructions="x",
+        permissions=Permissions(
+            read=["workspace"],
+            write=["workspace"],
+            network=["*"],
+            env_allowlist=["SKEP_TEST_GH_TOKEN", "SKEP_TEST_GH_COPY", "SKEP_TEST_PLAIN"],
+        ),
+    )
+    store = RunStore(config.db_path)
+    try:
+        relay, _model, note = provider_relay_for_run(store, config, task, builtin=True)
+    finally:
+        store.close()
+    assert note == "on" and relay is not None and relay.key == bearer
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("subprocess.Popen", lambda argv, **kw: seen.update(kw))
+    spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "task.json",
+        tmp_path / "out" / "result.json",
+        log_path=tmp_path / "log" / "worker.log",
+        sandbox_enabled=False,
+        relay=relay,
+    )
+    env = seen["env"]
+    assert env["SKEP_TEST_PLAIN"] == "kept"
+    assert not any(github_token in v or bearer in v for v in env.values()), sorted(env)

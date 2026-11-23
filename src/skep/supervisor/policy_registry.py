@@ -357,9 +357,10 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         default=True,
         layers=("global",),
         invariant="I12",
-        doc="ADR 0062 kill switch: on (default), a builtin worker reaches its model through a "
-        "token-checked relay on its run's proxy and never holds the provider key; off, "
-        "the worker holds the key as before. External engines keep their own "
+        doc="ADR 0062 kill switch: on (default), a sandboxed builtin worker reaches its model "
+        "through a token-checked relay on its run's proxy and never holds the provider key "
+        "(an unsandboxed run can still read the key file; the ollama worker keeps the daemon "
+        "secret); off, the worker holds the key as before. External engines keep their own "
         "auth env either way (auth: external-env, not relayed)",
     ),
     _knob(
