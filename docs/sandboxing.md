@@ -74,10 +74,11 @@ default since 2026-11-23, `false` is the kill switch), a builtin worker gets
 no carve-out: its model calls go through a token-checked route on its run's filtering proxy, which adds the key, so the
 key files stay masked and no variable carrying the key reaches its env. Not
 relayed: bedrock (SigV4 signs with the key), a provider with no key, and the
-external engines, which keep their own auth env (`skep doctor` says which). `supervisor/supervisor.sqlite3` stays readable (that worker reads its
-provider settings from it). So does `~/.npmrc` (npm install): the sandbox
-leaves it readable, while the policy floor still refuses every Queen and
-worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
+external engines, which keep their own auth env (`skep doctor` says which). Only a worker that holds its own key (an LLM-calling caste, no relay) reads
+`supervisor/supervisor.sqlite3`, for its provider settings; every other
+sandboxed worker, a relayed one included, gets the store masked. `~/.npmrc`
+stays readable to every worker (npm install needs it), while the policy floor
+still refuses every Queen and worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
 logins — `~/Library/Keychains`, `~/.claude/.credentials.json`,
 `~/.codex/auth.json` — are masked like every other credential (W33): an
 external engine's config dir is redirected per run and it authenticates only
@@ -90,9 +91,11 @@ and is bound back for its own run) and that is deleted when it ends — the
 real `~/.codex/auth.json` stays masked and the refresh token never enters the
 sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
 
-Everything else outside the workspace stays readable, including other runs'
-worktrees under the skep home: no profile masks them. Treat a sandboxed worker
-as able to read any file the lists above do not name.
+In denylist-only mode (a project without `strict_read_confinement`, and
+every Seatbelt run), everything else outside the workspace stays readable,
+including other runs' worktrees under the skep home: no profile masks them.
+Treat such a worker as able to read any file the lists above do not name. A
+strict-read run reads only its allowlist (ADR 0068).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets).

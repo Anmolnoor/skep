@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Container, Iterable, MutableMapping
 from pathlib import Path
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
@@ -163,15 +163,36 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
 
     The common dir's entries, not the dir: ``worktrees/`` holds the SIBLING
     runs' HEAD and index (this run's own git dir is a writable root), and
-    ``objects/`` is a writable root already. ``config`` stays — git cannot run
-    without it — so its remote URLs remain readable.
+    ``objects/`` is a writable root already. W4: no symlinked entry (bound by
+    its own name, its target would be readable), and none of the main
+    checkout's own state a linked worktree's git never reads — its staging
+    ``index``, its in-progress messages, ``ORIG_HEAD``, the stash and its
+    reflog. ``config`` stays — git cannot run without it — so its remote
+    URLs (and any token in one) remain readable.
     """
     dirs = _git_dirs(workspace)
     if dirs is None or dirs[0] == dirs[1]:
         return ()
-    return tuple(
-        entry for entry in sorted(dirs[1].iterdir()) if entry.name not in ("worktrees", "objects")
-    )
+    roots: list[Path] = []
+    for entry in _entries(dirs[1], _COMMON_DIR_PRIVATE):
+        if entry.name == "refs":
+            roots += _entries(entry, {"stash"})
+        elif entry.name == "logs":
+            for log in _entries(entry, ()):
+                roots += _entries(log, {"stash"}) if log.name == "refs" else [log]
+        else:
+            roots.append(entry)
+    return tuple(roots)
+
+
+_COMMON_DIR_PRIVATE = frozenset(
+    {"worktrees", "objects", "index", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD"}
+)
+
+
+def _entries(directory: Path, skip: Container[str]) -> list[Path]:
+    """A dir's entries but ``skip``, never a symlink (W4)."""
+    return [e for e in sorted(directory.iterdir()) if e.name not in skip and not e.is_symlink()]
 
 
 def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:

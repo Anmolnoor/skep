@@ -50,13 +50,28 @@ readable. A denylist cannot keep up with every place a person keeps files.
        LLM key are added only for an LLM-calling worker that holds its key
        (no relay).
      - the operator's `extra_read_paths`.
+     - the worker command's own files: each absolute, existing, non-link file
+       in the operator's `--worker-cmd` / `SKEP_WORKER_CMD` argv (its script),
+       never its directory, so the script runs and its siblings stay out.
 
-     A detected root at or above `$HOME` is dropped. An extra path that
-     resolves to `/` refuses the run. A written root that is a symlink (uv's
-     `cpython-3.12-…` minor-version link, which a venv's python points
-     through) is recreated as a link to its resolved root.
+     Every root is judged where it resolves, before anything walks or binds
+     it. A detected root at or above `$HOME`, or on `/etc` or its hidden
+     entries, is dropped; a per-user toolchain that is itself a symlink (a
+     `~/.local/bin` linked to `~/Downloads`) is dropped too, with a warning in
+     the serve log, and the operator follows such a link on purpose by naming
+     it in `extra_read_paths`. An extra path at or above `$HOME` (so `/`,
+     `/home`, `/var/home`), in or over the skep home, or on `/etc` or its
+     hidden entries refuses the run (`sandbox.extra_read_path_problem`); setup
+     refuses the same paths first, naming a subdirectory to use. A written
+     root that is a symlink (uv's `cpython-3.12-…` minor-version link, which a
+     venv's python points through) is recreated as a link to its resolved
+     root.
    - the run's git metadata: the common dir's entries, without `worktrees/`
-     (the sibling runs' HEAD and index) and `objects/` (already writable).
+     (the sibling runs' HEAD and index), `objects/` (already writable), any
+     symlinked entry (bound by its own name, its target would be readable),
+     and the main checkout's own state a linked worktree's git never reads:
+     `index`, `COMMIT_EDITMSG`, `MERGE_MSG`, `ORIG_HEAD`, `refs/stash` and
+     `logs/refs/stash`. `git status`, `git diff` and `git log` still run.
    - the run's writable roots, as before: worktree, results dir, run-private
      caches.
    - the secret masks, **last**, so no `extra_read_paths` entry or detected
@@ -64,20 +79,30 @@ readable. A denylist cannot keep up with every place a person keeps files.
    - finally `--remount-ro /`, so the empty root's own directories take no
      writes. A write outside the writable roots still fails with EROFS, as
      it does under the host root.
-2. **G10 runs inside the same wall.** `reverify_run` reads the project
-   policy the same way dispatch does (`sandbox.read_allowlist_for`). The
+2. **G10 runs inside the same wall.** Dispatch resolves the wall once, from
+   the project the run already resolved (its `project_context` binding
+   first, so a project bound by template name alone counts), and records it
+   on the run's `dispatched` line as `read_allowlist` (the extra paths; the
+   key is absent for a denylist-only run). `reverify_run`, live or after a
+   restart, reads that record and never the policy again, so a policy edit
+   between the worker and its re-verify cannot widen G10's reads. The
    baseline prime, the patched prime and the verify command all get the
    strict profile. A patch is never re-verified with wider reads than its
    worker had.
 3. **Fail closed.** `write_profile(read_allowlist=…)` on a backend outside
    `STRICT_READ_BACKENDS` raises `SandboxUnavailableError`, naming the fix,
-   rather than running with open reads. Today that is podman and Seatbelt.
-   Dispatch records `sandbox_unavailable`; G10 records `unavailable`.
+   rather than running with open reads. Today that is Seatbelt. A host
+   configured with `sandbox_backend: podman` runs a strict run on native
+   bubblewrap instead, as it already does for a domain-list run
+   (`resolve_sandbox_backend`, loudly in the log); only an explicit podman
+   profile write refuses. Dispatch records `sandbox_unavailable`; G10
+   records `unavailable`.
 4. **Rollout, as ADR 0066 did for the mode.** A NEW project whose mode
    resolves to `sandbox` gets `strict_read_confinement: true` at setup and
    in the preview, but only where the host backend enforces it
-   (`projects.default_strict_reads`). A Mac or podman host therefore never
-   gets a flag that would refuse every run. An explicit value wins. An
+   (`projects.default_strict_reads`). A Mac therefore never gets a flag
+   that would refuse every run; a Linux host configured for podman does get
+   it, and its strict runs take native bubblewrap (decision 3). An explicit value wins. An
    existing project keeps what it stored through re-setup and phase changes.
    `skep doctor` names the sandboxed projects still on denylist-only reads,
    with the command that moves one:
@@ -85,10 +110,12 @@ readable. A denylist cannot keep up with every place a person keeps files.
    REST set it through `policy_overrides` (`strict_read_confinement`,
    `extra_read_paths`), which go through the same validator: paths must be
    absolute, never `/`.
-5. **The doctor says which wall is up.** The sandbox line reads
-   `read confinement: strict-allowlist` on bubblewrap and
-   `read confinement: denylist-only (reads stay open but the secret floor)`
-   on Seatbelt and podman.
+5. **The doctor says which wall is up, and where.** On bubblewrap the
+   sandbox line reads `read confinement: strict-allowlist available; N of M
+   sandboxed projects strict; forged tools, MCP servers, the fast lane and
+   diagnose re-runs stay denylist-only` (`strict_projects` and
+   `sandboxed_projects` in the JSON); on Seatbelt it reads
+   `read confinement: denylist-only (reads stay open but the secret floor)`.
 6. **The Queen.** Her file reads were already scoped to `operator_roots()`,
    and an absolute path outside them cards. What was left was a bare name
    ("read `canary-downloads.txt`"): it resolved against serve's working
@@ -105,11 +132,22 @@ readable. A denylist cannot keep up with every place a person keeps files.
   `/etc` files that hold secrets are root-only on a normal host, so the
   worker, which is not root, cannot open them.
 - All of each detected toolchain dir. `~/.local/bin` holds the operator's own
-  user scripts too. `~/.cargo/credentials{,.toml}` stays masked (it is on the
-  floor).
-- The repo's shared git metadata: `config` (including remote URLs; git cannot
-  run without it), refs, `packed-refs`, reflogs, `hooks/`, `info/`. All
-  objects are readable: a worktree's history is the repo's history.
+  user scripts too. The cargo credentials (`credentials`, `credentials.toml`)
+  stay masked under whichever root is bound, `~/.cargo` or a moved
+  `$CARGO_HOME`. Still readable: cargo's `config.toml` (a
+  `[registries] token` there is readable, as cargo itself needs the file)
+  and nvm's per-version global npmrc (`$NVM_DIR/versions/node/*/etc/npmrc`),
+  which npm reads the way it reads `~/.npmrc`
+  (`sandbox.SANDBOX_READABLE_SECRETS`).
+- The repo's shared git metadata: `config`, which git cannot run without and
+  which can carry credentials (an `http.extraheader`, a token in a remote
+  URL); refs but the stash, `packed-refs`, branch reflogs, `hooks/`, `info/`.
+  `objects/` is shared too: every object in it is readable by hash,
+  including blobs only a sibling run, the operator's staged index or a
+  stash ever referenced.
+- With a dev checkout's serve, skep's own interpreter and package roots are
+  that checkout's `.venv` and `src/`, so a strict run reads that much of the
+  operator's checkout.
 - Its own worktree, results dir and caches, read and write.
 - The **names** of masked credential paths that exist, never their contents.
   The masks are laid down even where nothing is bound, so `~/.bashrc` shows
@@ -152,6 +190,12 @@ OS's system roots and the run's writable and git roots. The Seatbelt builder:
 - A root reached through a linked parent dir keeps only its resolved name.
   On Fedora Atomic, for example, `$HOME` is normally `/var/home/<user>`
   already, so this rarely matters.
+- Hosts that keep system software under `/var` or `/run` lose it in a
+  strict run, and fail closed rather than read more: on Fedora Atomic
+  `/opt` and `/usr/local` are links into `/var`, which is not bound, and on
+  NixOS the profile under `/run/current-system` is gone with host `/run`.
+  Such a host needs `extra_read_paths` (e.g. `/var/opt`) or denylist-only
+  reads.
 
 ## Consequences
 

@@ -1279,17 +1279,28 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
     if probe.usable:
         backend = probe.backend or "native"
         gap = f" {residual}" if (residual := socket_gap(backend)) else ""
-        # ADR 0068 (I8): what a sandboxed run can read, said plainly.
+        # ADR 0068 (I8): what a sandboxed run can read, said plainly — W6: the
+        # wall's effect (which projects have it, which lanes never do), not
+        # only what the backend could do.
         strict = probe.backend in STRICT_READ_BACKENDS
         confinement = "strict-allowlist" if strict else "denylist-only"
+        projects = _sandboxed_projects(home)
+        n_strict = sum(projects.values())
+        effect = (
+            f" available; {n_strict} of {len(projects)} sandboxed projects strict; forged tools, "
+            "MCP servers, the fast lane and diagnose re-runs stay denylist-only"
+            if strict
+            else " (reads stay open but the secret floor)"
+        )
         check: dict[str, Any] = {
             "status": "ready",
-            "detail": f"{backend} backend is usable; read confinement: {confinement}"
-            f"{'' if strict else ' (reads stay open but the secret floor)'}.{gap}",
+            "detail": f"{backend} backend is usable; read confinement: {confinement}{effect}.{gap}",
             "backend": probe.backend,
             "read_confinement": confinement,
+            "strict_projects": n_strict,
+            "sandboxed_projects": len(projects),
         }
-        open_reads = _open_read_projects(home) if strict else []
+        open_reads = [name for name, on in sorted(projects.items()) if strict and not on]
         if open_reads:
             check["next_step"] = (
                 f"{len(open_reads)} sandboxed project(s) still read the whole disk but the "
@@ -1310,22 +1321,21 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
     }
 
 
-def _open_read_projects(home: Path) -> list[str]:
-    """ADR 0068: sandboxed projects set up before strict reads, still on the
-    denylist (unsandboxed ones are ``_workspace_mode_advisories``' to name)."""
+def _sandboxed_projects(home: Path) -> dict[str, bool]:
+    """ADR 0068: each sandboxed project → whether it reads strictly (the
+    unsandboxed ones are ``_workspace_mode_advisories``' to name)."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
-        return []
+        return {}
     from .supervisor.store import RunStore
 
     store = RunStore(db_path, readonly=True)
     try:
-        return sorted(
-            record.project_id
+        return {
+            record.project_id: record.policy.get(STRICT_READS_KEY) is True
             for record in store.list_project_policies()
             if record.policy.get("default_execution_mode") == "sandbox"
-            and record.policy.get(STRICT_READS_KEY) is not True
-        )
+        }
     finally:
         store.close()
 
