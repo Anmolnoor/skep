@@ -59,6 +59,9 @@ def _run(
     state: str,
     detail: str | None = None,
     resume_of: str | None = None,
+    reason: str = "dispatch.auto_allowed.unlocked",
+    constraints: dict[str, Any] | None = None,
+    with_project: bool = True,
 ) -> str:
     task = mint_task(
         workspace=tmp_path,
@@ -71,11 +74,14 @@ def _run(
             phase="build",
             binding_kind="path",
             binding_value=str(tmp_path),
-        ),
+        )
+        if with_project
+        else None,
         dispatch_decision=AutonomyDecisionPayload.model_validate(
             {
                 "verdict": "allow",
-                "reason": "dispatch.auto_allowed.unlocked",
+                "reason": reason,
+                "constraints": constraints,
                 "delegation": {"chain": ["queen@lead"], "role": "builder", "team": None},
             }
         ),
@@ -264,7 +270,9 @@ def test_rotated_generations_are_all_read(config: SupervisorConfig, passing: str
 
 def test_unknown_task_is_a_clean_error(config: SupervisorConfig, passing: str, capsys: Any) -> None:
     assert main(["--home", str(config.home.parent), "run", "forensics", "nope-nope-nope"]) == 2
-    assert "no run 'nope-nope-nope'" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no run 'nope-nope-nope'" in err
+    assert "skep status --personal" in err  # R1 D11: a command that lists task ids
     response = serve_client(config).get("/api/runs/nope-nope-nope/forensics")
     assert response.status_code == 404
 
@@ -322,8 +330,9 @@ def test_missing_evidence_reads_as_unknown(config: SupervisorConfig, tmp_path: P
         report = build_run_forensics(store, config.audit_dir, task_id)
     finally:
         store.close()
-    assert report["identity"]["role"] == "unknown"
-    assert report["identity"]["delegation_chain"] == "unknown"
+    # task.json is gone; the store's `created` transition holds the same decision (R1 D4)
+    assert report["identity"]["role"] == "builder"
+    assert report["identity"]["delegation_chain"] == "queen@lead"
     assert report["outcome"]["g10"]["commands_source"] == "worker"
     assert report["outcome"]["heartbeat_gaps"] == []
     assert report["worker"] == {"log_tail": [], "result": None}
@@ -350,3 +359,242 @@ def test_a_filtered_read_rejects_a_bad_limit(config: SupervisorConfig, passing: 
         "/api/policy/decisions", params={"task_id": passing, "limit": 0}
     )
     assert response.status_code == 400
+
+
+# --- review round 1 -------------------------------------------------------
+
+
+def _report(config: SupervisorConfig, task_id: str) -> dict[str, Any]:
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        return build_run_forensics(store, config.audit_dir, task_id)
+    finally:
+        store.close()
+
+
+def test_a_json_credential_field_in_worker_log_is_masked_everywhere(
+    config: SupervisorConfig, passing: str, capsys: Any
+) -> None:
+    """R1 D1: an OAuth response dumped into worker.log names the secret by key."""
+    log = config.audit_dir / passing / "worker.log"
+    log.write_text(
+        log.read_text()
+        + f'{{"access_token": "{CANARY}", "token_type": "bearer"}}\n'
+        + f"refresh_token: {CANARY}\n"
+    )
+    outputs = _all_outputs(config, passing, capsys)
+    assert all(CANARY not in out for out in outputs)
+    assert all("access_token" in out for out in outputs)
+
+
+def _store_files(config: SupervisorConfig) -> dict[str, bytes]:
+    name = config.db_path.name
+    return {p.name: p.read_bytes() for p in config.db_path.parent.iterdir() if name in p.name}
+
+
+def _quiesce(config: SupervisorConfig) -> None:
+    """A store at rest: WAL checkpointed into the file and no sidecars left."""
+    import sqlite3
+
+    conn = sqlite3.connect(config.db_path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{config.db_path}{suffix}").unlink(missing_ok=True)
+
+
+def test_forensics_on_a_store_at_rest_creates_no_sidecar(
+    config: SupervisorConfig, passing: str, capsys: Any
+) -> None:
+    """R1 D2: a plain mode=ro open of a WAL store creates -wal/-shm beside it."""
+    _quiesce(config)
+    before = _store_files(config)
+    assert main(["--home", str(config.home.parent), "run", "forensics", passing, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["task_id"] == passing
+    assert _store_files(config) == before
+
+
+def test_forensics_never_migrates_an_older_store(
+    config: SupervisorConfig, passing: str, capsys: Any
+) -> None:
+    """R1 D2: ``readonly=True`` falls back to a writable migration; forensics
+    must not — it refuses cleanly and leaves every byte as it was."""
+    import sqlite3
+
+    conn = sqlite3.connect(config.db_path)
+    conn.execute("ALTER TABLE reverifications DROP COLUMN base_commit")  # an older schema
+    conn.commit()
+    conn.close()
+    _quiesce(config)
+    before = _store_files(config)
+    assert main(["--home", str(config.home.parent), "run", "forensics", passing]) == 2
+    assert "needs a migration" in capsys.readouterr().err
+    assert _store_files(config) == before
+
+
+def test_a_worker_side_git_push_refusal_is_in_the_trail(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """R1 D3: the worker's own floor refuses ``git push`` in-process and records
+    it as a command.result event (no decisions.jsonl row): a real worker run."""
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.dispatch import run_task
+
+    from .fake_openai import FakeOpenAI
+    from .test_coding_minimal_worker import (
+        _react_done,
+        _react_reply,
+        _react_verify_action,
+        _react_write_action,
+        _repair_test_setup,
+    )
+
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        push = {"tool": "shell.run", "args": {"argv": ["git", "push"], "purpose": "run"}}
+        server.script_reply(_react_reply({"action": push}))
+        server.script_reply(_react_write_action())
+        server.script_reply(_react_verify_action())
+        server.script_reply(_react_done())
+        outcome = run_task(
+            repo,
+            "Create generated.py that prints ok.",
+            config=config,
+            permissions=permissions,
+            planning_protocol="react",
+        )
+    finally:
+        server.stop()
+    task_id = outcome.record.task_id
+    (block,) = [b for b in _report(config, task_id)["policy_blocks"] if "git push" in b["command"]]
+    assert block["task_id"] == task_id
+    assert block["decision"]["verdict"] == "deny"
+    assert block["decision"]["reason"]
+    assert main(["--home", str(config.home.parent), "run", "forensics", task_id, "--md"]) == 0
+    out = capsys.readouterr().out
+    assert "BLOCKED" in out and "git push" in out and block["decision"]["reason"] in out
+
+
+def test_unlocked_actor_and_taint_come_from_the_whole_chain_and_task_json(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R1 D4: a resumed unlocked run's own rows may be none; the chain's and
+    the dispatch decision's are the evidence."""
+    first = _run(config, tmp_path, state="pending_approval", reason="dispatch.allowed")
+    second = _run(
+        config,
+        tmp_path,
+        state="completed",
+        resume_of=first,
+        reason="dispatch.allowed",
+        constraints={"chat_taint": ["untrusted"]},
+    )
+    log_decision(config.audit_dir, _row(first, actor="worker", decided_by="unlocked:p1/zero-ask"))
+    identity = _report(config, second)["identity"]
+    assert identity["unlocked"] == "yes"
+    assert identity["actor"] == "worker"
+    assert identity["taint"] == "untrusted"
+    # the dispatch decision alone says so, with no row at all
+    only = _run(config, tmp_path, state="completed")
+    assert _report(config, only)["identity"]["unlocked"] == "yes"
+    plain = _run(config, tmp_path, state="completed", reason="dispatch.allowed")
+    assert _report(config, plain)["identity"]["unlocked"] == "unknown"
+    assert _report(config, plain)["identity"]["taint"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("first_line", "backend"),
+    [("# bubblewrap argv", "bubblewrap"), ("# podman argv", "podman"), ("(version 1)", "seatbelt")],
+)
+def test_sandbox_backend_reads_the_retained_profile(
+    config: SupervisorConfig, tmp_path: Path, first_line: str, backend: str
+) -> None:
+    """R1 D5: the spawner keeps ``sandbox.profile.sb`` beside worker.log, and
+    its first line names the backend that wrapped the worker."""
+    task_id = _run(config, tmp_path, state="completed")
+    assert _report(config, task_id)["identity"]["sandbox_backend"] == "unknown"
+    (config.audit_dir / task_id / "sandbox.profile.sb").write_text(f"{first_line}\n[]\n")
+    assert _report(config, task_id)["identity"]["sandbox_backend"] == backend
+
+
+def test_a_repo_named_forensics_is_still_a_repo(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """R1 D6: ``Path('./forensics')`` printed ``forensics`` and took the verb."""
+    monkeypatch.chdir(tmp_path)
+    home = ["--home", str(config.home.parent)]
+    seen: list[str] = []
+
+    def verb(args: Any) -> int:
+        seen.append(args.instructions)
+        return 0
+
+    monkeypatch.setattr("skep.supervisor.cli_cmds.cmd_run_forensics", verb)
+    assert main([*home, "run", "./forensics", "do it"]) != 0  # a (missing) repo, not the verb
+    assert seen == []
+    assert "forensics" in capsys.readouterr().err
+    assert main([*home, "run", "forensics", "some-id"]) == 0
+    assert seen == ["some-id"]
+
+
+def test_reads_are_bounded_and_survive_bad_bytes(config: SupervisorConfig, passing: str) -> None:
+    """R1 D7: a huge worker.log is tailed from its end; a non-UTF-8 byte in
+    any evidence file reads as a replacement character, never a crash."""
+    audit = config.audit_dir / passing
+    with (audit / "worker.log").open("wb") as log:
+        log.write(b"x" * (8 * 1024 * 1024) + b"\n")
+        log.write(b"".join(b"line %d\n" % n for n in range(100)))
+        log.write(b"bad \xff byte\n")
+    with (config.audit_dir / "policy" / "decisions.jsonl").open("ab") as ledger:
+        ledger.write(b'{"task_id": "x", "value": "\xff"}\n')
+        ledger.write(json.dumps(_row(passing, value="after the bad line")).encode() + b"\n")
+    with (audit / "events.ndjson").open("ab") as events:
+        events.write(b'{"ts": "\xff"}\n')
+    report = _report(config, passing)
+    tail = report["worker"]["log_tail"]
+    assert len(tail) == 30 and tail[-2] == "line 99" and tail[-1] == "bad � byte"
+    assert [row["value"] for row in report["policy_trail"]][-1] == "after the bad line"
+    assert len(report["outcome"]["heartbeat_gaps"]) == 1
+
+
+def test_an_active_run_reads_its_live_stream_and_trailing_silence(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R1 D8: a running run has no audit copy yet; its live stream (the one
+    ``current_events`` reads) holds the beats, and silence since the last one
+    is a gap too. Mixed aware/naive stamps read as UTC, never a crash."""
+    task_id = _run(config, tmp_path, state="running")
+    audit_events = config.audit_dir / task_id / "events.ndjson"
+    audit_events.unlink()
+    live = tmp_path / ".events" / f"{task_id}.ndjson"
+    live.parent.mkdir()
+    live.write_text(
+        json.dumps({"ts": "2026-11-23T10:00:00Z", "type": "task.start"})
+        + "\n"
+        + json.dumps({"ts": "2026-11-23T10:00:30", "type": "heartbeat"})
+        + "\n"
+    )
+    gaps = _report(config, task_id)["outcome"]["heartbeat_gaps"]
+    assert gaps[0] == {"from": "2026-11-23T10:00:00Z", "to": "2026-11-23T10:00:30", "seconds": 30}
+    assert gaps[-1]["from"] == "2026-11-23T10:00:30" and gaps[-1]["to"] == "now"
+    # a finished run has no trailing silence to report
+    done = _run(config, tmp_path, state="completed")
+    assert all(gap["to"] != "now" for gap in _report(config, done)["outcome"]["heartbeat_gaps"])
+
+
+def test_g10_detail_renders_in_text_and_markdown(config: SupervisorConfig, passing: str) -> None:
+    """R1 D9: REST carried the G10 detail; the text faces dropped it."""
+    report = _report(config, passing)
+    for markdown in (False, True):
+        assert "pinned verify_command" in render_forensics(report, markdown=markdown)
+
+
+def test_a_dict_project_on_a_row_reads_as_its_name(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R1 D10: a row's project may be the context dict, never print its repr."""
+    task_id = _run(config, tmp_path, state="completed", with_project=False)
+    log_decision(config.audit_dir, _row(task_id, project={"project_id": "p9", "name": "nine"}))
+    assert _report(config, task_id)["identity"]["project"] == "nine"

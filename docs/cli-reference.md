@@ -131,14 +131,20 @@ Important options:
 `run forensics TASK_ID` is one read of a finished (or stuck) run's evidence,
 so a bug report needs no trip through five files: the identity header (repo,
 project, engine, caste,
-actor, role, delegation chain, schedule, execution mode, unlocked, taint —
+actor, role, delegation chain, schedule, execution mode, sandbox backend (from
+the retained `sandbox.profile.sb`), unlocked, taint —
 `unknown` where no record says), the terminal state and every transition with
 monitor and auth alarms flagged (`heartbeat_lost`, `not logged in`, ...), gaps
-over 15 s in `events.ndjson`, the G10 re-verify (commands, where they came
-from, exit codes, V1 tamper flags and test counts), every
-`decisions.jsonl` row naming the run or its resume chain (all rotated
-generations), and the last 30 lines of `worker.log` with the `result.json`
-summary. Every string is redacted; nothing is written. Text by default, `--md`
+over 15 s in `events.ndjson` (a run still going reads its live stream and
+reports the silence since its last event as `-> now`), the G10 re-verify
+(commands, where they came from, exit codes, V1 tamper flags, test counts and
+detail), every `decisions.jsonl` row naming the run or its resume chain (all
+rotated generations) plus every refusal the worker's own capability layer
+recorded as an event (`BLOCKED ...`, e.g. the floor's `git push` deny), and
+the last 30 lines of `worker.log` with the `result.json` summary. Every string
+is redacted (credential fields in JSON or YAML included); nothing is written —
+the store opens strictly read-only, and one that needs a schema migration is
+refused rather than upgraded. Text by default, `--md`
 a paste-ready Markdown report, `--json` the same body as
 `GET /api/runs/{task_id}/forensics`. To run against a repo directory named
 `forensics`, pass it as `./forensics`.

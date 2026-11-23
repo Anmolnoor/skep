@@ -1049,6 +1049,12 @@ _SECRET_SHAPES = (
     # Discord's /interactions|webhooks/<id>/<token> (an httpx error quotes it).
     re.compile(r"(/bot\d+:)([-_A-Za-z0-9]+)"),
     re.compile(r"(/(?:interactions|webhooks)/\d+/)([^/\s?#'\"]+)"),
+    # Phase 02 R1 D1: a credential named by its key in JSON, a dict repr or YAML
+    # ("access_token": "…", api_key: …). The key must END in the credential word
+    # (max_tokens, secret_name stay); a header's "Bearer/Basic ***" stays readable.
+    re.compile(r"(?i)((?<![\w-])[\"']?(?:[a-z0-9]+[_-])*(?:token|api[_-]?key|apikey|secret|"
+               r"password|passwd|authorization)[\"']?\s*[:=]\s*(?!(?:bearer|basic|token)\s))"
+               r"(\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^\s,;})\]'\"]+)"),
 )  # fmt: skip
 
 
