@@ -69,6 +69,7 @@ skep status [--personal] [--json]
 
 ```sh
 skep run [repo] [instructions] [options]
+skep run forensics TASK_ID [--md|--json]
 ```
 
 Common examples:
@@ -124,6 +125,29 @@ Important options:
 - `--quiet` suppresses the live phase tail.
 
 `--minimal` cannot be combined with `--template`, `--network`, or `--env-allow`.
+
+### Run forensics
+
+`run forensics TASK_ID` is one read of a finished (or stuck) run's evidence,
+so a bug report needs no trip through five files: the identity header (repo,
+project, engine, caste,
+actor, role, delegation chain, schedule, execution mode, sandbox backend (from
+the retained `sandbox.profile.sb`), unlocked, taint —
+`unknown` where no record says), the terminal state and every transition with
+monitor and auth alarms flagged (`heartbeat_lost`, `not logged in`, ...), gaps
+over 15 s in `events.ndjson` (a run still going reads its live stream and
+reports the silence since its last event as `-> now`), the G10 re-verify
+(commands, where they came from, exit codes, V1 tamper flags, test counts and
+detail), every `decisions.jsonl` row naming the run or its resume chain (all
+rotated generations) plus every refusal the worker's own capability layer
+recorded as an event (`BLOCKED ...`, e.g. the floor's `git push` deny), and
+the last 30 lines of `worker.log` with the `result.json` summary. Every string
+is redacted (credential fields in JSON or YAML included); nothing is written —
+the store opens strictly read-only, and one that needs a schema migration is
+refused rather than upgraded. Text by default, `--md`
+a paste-ready Markdown report, `--json` the same body as
+`GET /api/runs/{task_id}/forensics`. To run against a repo directory named
+`forensics`, pass it as `./forensics`.
 
 ## Agents
 
@@ -398,6 +422,7 @@ skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
                    [--delegated-by ACTOR@ROLE ...] [--read-only]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N] [--team ID]
+                      [--task TASK_ID] [--engine NAME]
 skep policy grants
 skep policy revoke RULE_ID
 ```
@@ -447,7 +472,9 @@ Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
 `docs/policy-hook.md`, ADR 0053 P3). `policy decisions` reads that ledger
 back, newest first, with counts per verdict and per note source (`observed`,
 `forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
-(also `GET /api/policy/decisions` and the chat `policy_decisions` tool). `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
+(also `GET /api/policy/decisions` and the chat `policy_decisions` tool).
+`--task`/`--engine` (REST: `task_id`/`engine`) keep one run's or one engine's
+rows; a row that predates the key never matches. `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
 `policy approve` locks a template (or a `--file` layer) as the policy
 baseline: it prints the explain table, takes a typed `yes` unless `--yes`,
 and writes `baseline.json`, `baseline.lock` and a row in

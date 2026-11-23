@@ -1041,14 +1041,23 @@ def owner_alive(owner: str | None) -> bool:
     return started is None or started == record.get("started")
 
 
+class StoreNeedsMigration(RuntimeError):
+    """A strict read-only open met a store whose schema needs an upgrade (R1 D2)."""
+
+
 class RunStore:
     """Single-writer SQLite store for runs, events, artifacts, and approvals."""
 
-    def __init__(self, db_path: Path, *, readonly: bool = False) -> None:
+    def __init__(self, db_path: Path, *, readonly: bool = False, strict: bool = False) -> None:
         # O2: the reader finds the home's policy baseline beside the database.
         self.db_path = db_path
-        if readonly and self._open_readonly(db_path):
+        if (readonly or strict) and self._open_readonly(db_path, strict=strict):
             return
+        if strict:
+            raise StoreNeedsMigration(
+                f"{db_path} predates this skep and needs a migration, which a strict "
+                "read never makes; run `skep status` (or start `skep serve`) once, then retry"
+            )
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # G4: SQLite-WAL, single writer. The connection is shared across dispatch
         # threads (check_same_thread=False) and serialized by self._lock; WAL keeps
@@ -1083,7 +1092,7 @@ class RunStore:
             ],
         )
 
-    def _open_readonly(self, db_path: Path) -> bool:
+    def _open_readonly(self, db_path: Path, *, strict: bool = False) -> bool:
         """W41: a read-only command (status, doctor, a list) must not write the
         store. A rw connection does even when nothing changes: the last one to
         close checkpoints a leftover WAL into the database file, and a missing
@@ -1092,7 +1101,17 @@ class RunStore:
         no file, no directory. The schema statements are no-ops on a current
         store; one that needs a migration raises here, and the caller falls
         back to the rw open: that write is an actual change, made once.
-        Returns False for that fallback."""
+        Returns False for that fallback.
+
+        Phase 02 R1 D2: ``strict`` (forensics) also never creates the WAL
+        sidecars — ``mode=ro`` makes ``-wal``/``-shm`` when they are absent —
+        so a store at rest (no sidecars: fully checkpointed, no writer) opens
+        ``immutable=1``; and the caller raises instead of falling back.
+
+        R2 G2: only when NEITHER sidecar exists. ``immutable=1`` ignores a
+        ``-wal``, so a writer that died (``-wal`` kept, ``-shm`` gone) would read
+        stale rows; ``mode=ro`` replays it and writes only a fresh ``-shm``
+        index — never the database or the WAL (read-only never checkpoints)."""
         self._lock = threading.RLock()
         if not db_path.exists():
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1100,9 +1119,13 @@ class RunStore:
             self._migrate()
             self._seed_fresh()  # reads see what a fresh home would hold
             return True
+        at_rest = not any(Path(f"{db_path}{s}").exists() for s in ("-wal", "-shm"))
+        # ponytail: a writer that starts mid-read under immutable=1 can show a torn
+        # read; forensics is one short read, re-run it.
+        flags = "immutable=1" if strict and at_rest else "mode=ro"
         try:
             self._conn = sqlite3.connect(
-                f"{db_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+                f"{db_path.resolve().as_uri()}?{flags}", uri=True, check_same_thread=False
             )
         except sqlite3.OperationalError:
             return False

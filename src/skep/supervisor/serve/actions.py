@@ -9,14 +9,16 @@ returns it as-is, the chat layer catches it and shows the model the failure.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.parse
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -214,6 +216,8 @@ _NONNEGATIVE_POLICY_FIELDS = {"default_max_provider_calls", "card_timeout_second
 
 if TYPE_CHECKING:
     from ..policy_schema import LearnedRule, PolicyDocument, Scope
+
+logger = logging.getLogger("skep.serve")  # R2 G7: a RedactFilter logger
 
 
 def _require_string_list(value: Any, *, field: str) -> list[str]:
@@ -2182,13 +2186,19 @@ def _decision_row(
     req: tuple[str, str, str],
     role: Role | None,
     url: str | None = None,
+    task_id: str | None = None,
+    engine: str | None = None,
+    caste: str | None = None,
 ) -> dict[str, Any]:
     """One ``decisions.jsonl`` row for a v3 verdict. A row decided under a
     role carries ``role``; one without had no role layer. W18: a chat's row
     carries ``chat``, a Queen shell row its ``cwd`` (the floor judges its
     paths there), and a fetch the ``url`` a url_prefix grant matches on
     (``logged_url``: no query, no userinfo; redacted like the value), so the
-    write-time replay can re-decide them."""
+    write-time replay can re-decide them. Phase 02 (I13): a run's row names
+    its ``task_id``, ``engine`` and ``caste`` — each only when known; the
+    engine only for the coding caste, the rule ``run_task`` records
+    ``runs.coding_engine`` by (v101-F4) — no other caste runs one (I8)."""
     scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2212,6 +2222,9 @@ def _decision_row(
         record["role"] = role.name
     if verdict.chain:
         record["delegation_chain"] = list(verdict.chain)
+    engine = engine if caste == "coding" else None
+    blame = {"task_id": task_id, "engine": engine, "caste": caste}
+    record.update({key: value for key, value in blame.items() if value is not None})
     if verdict.source == "run":
         record["project"] = stack.project
     if verdict.note is not None:
@@ -2851,7 +2864,7 @@ def approval_view(
     return row
 
 
-def policy_block_views(events: list[Event]) -> list[dict[str, Any]]:
+def policy_block_views(events: Iterable[Event]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for event in events:
         if event.type is not EventType.COMMAND_RESULT:
@@ -4053,8 +4066,10 @@ def unlocked_gate_allowed(
             repo=run.repo,
             req=(req.scope, req.action, req.value),
             role=role,
+            task_id=task_id,  # D34: the run's receipt lists what it reached
+            engine=run.coding_engine,
+            caste=run.worker_kind,
         )
-        row["task_id"] = task_id  # D34: the run's receipt lists what it reached
         log_decision(holder.current.audit_dir, row)
         allowed = allowed and verdict.verdict == "allow"
     return approval if allowed else None
@@ -4950,6 +4965,7 @@ def submit_run(
                 "then call dispatch_run with the returned slug"
             ),
         )
+    held: list[dict[str, Any]] = []  # 2.1: the dispatch rows, logged with the run's id
     try:
         compiled = compile_run(
             holder,
@@ -4969,6 +4985,7 @@ def submit_run(
             team=team,
             deferred_asks=deferred_asks,
             init_baseline=True,
+            held=held,
         )
     except PolicyResolutionError as exc:
         detail = str(exc)
@@ -4979,6 +4996,7 @@ def submit_run(
     delegation_note = compiled.note
     auto_apply_verified_patch = compiled.auto_apply_verified_patch
     auto_apply_branch = compiled.auto_apply_branch
+    record = _dispatch_recorder(holder.current.audit_dir, held, delegation, resolved)
     try:
         effective_dispatch_decision = dispatch_decision
         if effective_dispatch_decision is None:
@@ -5058,12 +5076,65 @@ def submit_run(
             # (authwapi acceptance, 019fc724: confirmed=true on git diff
             # --check while verify_command="npm test" sat pinned).
             verify_command=str(resolved_policy.policy.get("verify_command") or ""),
+            on_created=record,
         )
     except DispatchError as exc:
+        # the dispatcher owns the rows now: logged at creation, or id-less once
+        # it ends without a run — a timed-out run may still start (I8)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    if delegation is not None:
-        record_delegation(holder.current.audit_dir, delegation, repo=str(resolved), task=task_id)
+    except Exception:
+        record(None)  # refused before the dispatcher took it: no run will come
+        raise
+    # R3 (Sol/Neon): the Dispatcher always calls back itself — on its pool
+    # thread, never this request's — so only another runner needs a fallback.
+    if not isinstance(runner, Dispatcher):
+        record(task_id, wait=False)
     return task_id
+
+
+def with_run_blame(row: dict[str, Any], task_id: str, engine: str | None) -> dict[str, Any]:
+    """R2 G6 (I13): a held dispatch row once its run exists — the id, and the
+    engine the run recorded when the dispatch resolved none (an unbound
+    schedule, a ``--template``/``--minimal`` CLI run). A coding row only: the
+    run records no engine for any other caste (I8)."""
+    stamped = {**row, "task_id": task_id}
+    if engine and "engine" not in row and row.get("caste") == "coding":
+        stamped["engine"] = engine
+    return stamped
+
+
+def _dispatch_recorder(
+    audit_dir: Path, held: list[dict[str, Any]], delegation: dict[str, Any] | None, repo: Path
+) -> Callable[..., None]:
+    """Review R1 (I8, I13): writes a dispatch's held rows, then its hop row,
+    exactly once — with the id when the run is created (the dispatcher calls
+    it there, before the worker spawns), id-less when the dispatch ended
+    without a run. A failed write is logged, never raised: the run it
+    describes may already be live, and must not read as a failed dispatch."""
+    pending = [True]
+    # R2 G5: the dispatcher returns the id before its call writes, so the
+    # caller's fallback (``wait=False``) can overlap it. The dispatcher's call
+    # waits for a fallback mid-write (the worker never spawns before the rows);
+    # the fallback skips a dispatcher mid-write (the id is already answered).
+    lock = threading.Lock()
+
+    def record(task_id: str | None, *, wait: bool = True) -> None:
+        if not lock.acquire(blocking=wait):
+            return
+        try:
+            if not pending:
+                return
+            pending.clear()
+            for row in held:
+                log_decision(audit_dir, {**row, "task_id": task_id} if task_id else row)
+            if delegation is not None and task_id is not None:
+                record_delegation(audit_dir, delegation, repo=str(repo), task=task_id)
+        except Exception:
+            logger.exception("dispatch decision rows for %s were not logged", task_id or "no run")
+        finally:
+            lock.release()
+
+    return record
 
 
 def _preanswer(
@@ -5290,6 +5361,7 @@ def compile_run(
     deferred_asks: bool = False,
     init_baseline: bool,
     resolution: dict[str, Any] | None = None,
+    held: list[dict[str, Any]] | None = None,
 ) -> CompiledRun:
     """W13: what a dispatch's run gets — ``submit_run`` and
     ``dispatch_manifest`` both compile here, so the card cannot drift from
@@ -5333,6 +5405,9 @@ def compile_run(
         # or a denied card's, the only compile its asks will ever get (I13)
         record=init_baseline or resolution is not None,
         resolution=resolution,
+        engine=resolved_policy.coding_engine,
+        caste=caste,
+        held=held,
     )
     raw = resolved_policy.policy.get("auto_apply_verified_patch")
     # v30: a project's maintain-phase integration branch (skep/maintain) —
@@ -5440,19 +5515,25 @@ def delegate_permissions(
     deferred_asks: bool = False,
     record: bool = True,
     resolution: dict[str, Any] | None = None,
+    engine: str | None = None,
+    caste: str | None = None,
+    held: list[dict[str, Any]] | None = None,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
     the permissions untouched (and two Nones) when neither is given: today.
     ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb).
     ``record=False`` (a manifest's compile) logs no rows: a dispatch's asks
-    are recorded once, by the compile its run gets (I13)."""
+    are recorded once, by the compile its run gets (I13). Phase 02: every row
+    names the run's ``engine`` and ``caste``; ``held`` collects the rows for
+    the caller to log once the run has its id (``submit_run``)."""
     chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
     if not chain and worker_role is None:
         return permissions, None, None
     return _within_delegation(
         holder, store, repo, chain, permissions, worker_role, team,
         deferred_asks=deferred_asks, record=record, resolution=resolution,
+        engine=engine, caste=caste, held=held,
     )  # fmt: skip
 
 
@@ -5537,6 +5618,9 @@ def _within_delegation(
     deferred_asks: bool = False,
     record: bool = True,
     resolution: dict[str, Any] | None = None,
+    engine: str | None = None,
+    caste: str | None = None,
+    held: list[dict[str, Any]] | None = None,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
@@ -5575,8 +5659,9 @@ def _within_delegation(
     def row_for(scope: str, action: str, value: str) -> dict[str, Any]:
         verdict = decide_v3(Request(scope, action, value), stack=stack, role=role, chain=chain)
         row = _decision_row(
-            verdict, stack, actor="dispatch", repo=str(repo), req=(scope, action, value), role=role
-        )
+            verdict, stack, actor="dispatch", repo=str(repo), req=(scope, action, value),
+            role=role, engine=engine, caste=caste,
+        )  # fmt: skip
         return {**row, "team": team} if team else row
 
     asks: list[dict[str, Any]] = []
@@ -5590,7 +5675,9 @@ def _within_delegation(
         row = {**row, "delegated": "ask" if ask else "dropped"}
         if resolution is not None:  # a denied card: asked, then answered no
             row = {**row, **resolution}
-        if record:
+        if record and held is not None:
+            held.append(row)
+        elif record:
             log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)
         return None if ask else False
@@ -5598,7 +5685,7 @@ def _within_delegation(
     who = _delegation_who(chain, role)
     refusal = _delegated_write_refusal(
         holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack,
-        record=record,
+        record=record, engine=engine, caste=caste,
     )  # fmt: skip
     if refusal is not None:
         raise HTTPException(status_code=403, detail=refusal)
@@ -5686,6 +5773,8 @@ def _delegated_write_refusal(
     team: str | None = None,
     stack: Stack | None = None,
     record: bool = True,
+    engine: str | None = None,
+    caste: str | None = None,
 ) -> str | None:
     """Why a worker this chain (or role) dispatches may not write — the
     workspace write its delegator is denied — recorded; None when it may.
@@ -5706,6 +5795,8 @@ def _delegated_write_refusal(
             repo=str(repo),
             req=("filesystem", "write", path),
             role=role,
+            engine=engine,
+            caste=caste,
         )
         if _narrowed_by(row, stack, role) and row["verdict"] == "deny":
             if record:  # a manifest's compile records nothing (``delegate_permissions``)
@@ -5899,7 +5990,7 @@ def dispatch_run_decision(
         chain = parse_delegation_chain(delegation_chain, holder.current.home)
         worker_role = resolve_role(role, holder.current.home) if role else None
         resolved = resolve_repo_arg(repo, repos_root(holder), store)
-        write = resolve_run_policy(
+        run_policy = resolve_run_policy(
             store=store,
             config=holder.current,
             repo=resolved,
@@ -5914,10 +6005,13 @@ def dispatch_run_decision(
             # mode ("ask") must not hide the refusal behind its own card
             execution_mode=execution_mode or "workspace",
             engine=engine,
-        ).permissions.write
+        )
     except (ValueError, HTTPException, PolicyResolutionError):
         return decision  # the dispatch itself answers with the honest error
-    refusal = _delegated_write_refusal(holder, store, resolved, chain, write, role=worker_role)
+    refusal = _delegated_write_refusal(
+        holder, store, resolved, chain, run_policy.permissions.write, role=worker_role,
+        engine=run_policy.coding_engine, caste=caste,
+    )  # fmt: skip
     if refusal is None:
         return decision
     return AutonomyDecision(

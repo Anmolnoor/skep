@@ -741,7 +741,56 @@ def _unique_template_name(store: RunStore, base: str) -> str:
     return name
 
 
+def cmd_run_forensics(args: argparse.Namespace) -> int:
+    """Phase 02 2.2: ``skep run forensics <task_id>`` — one run's evidence,
+    redacted, from ``build_run_forensics``, the read behind
+    ``GET /api/runs/<id>/forensics`` (ADR 0050). Read-only: the store opens
+    read-only and nothing is written."""
+    from fastapi import HTTPException
+
+    from .forensics import build_run_forensics, render_forensics
+    from .store import StoreNeedsMigration
+
+    if args.instructions is None:
+        return _err("forensics needs a task id.", next_command="skep run forensics <task_id>")
+    config = build_config(args.home, None)
+    try:  # R1 D2: strict — never a migration, never a WAL sidecar
+        store = RunStore(config.db_path, strict=True)
+    except StoreNeedsMigration as exc:
+        return _err(str(exc))
+    try:
+        report = build_run_forensics(store, config.audit_dir, args.instructions)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep status --personal  # list recent task ids")
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_forensics(report, markdown=args.md))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    held: list[dict[str, Any]] = []  # 2.1: --role/--delegated-by dispatch rows
+    try:
+        return _cmd_run(args, held)
+    finally:  # I13: a run that never got an id still logs them, id-less
+        if held:
+            from .policy_v3 import log_decision
+
+            audit_dir = build_config(args.home, None).audit_dir
+            for row in held:
+                log_decision(audit_dir, row)
+
+
+def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
+    # Phase 02 2.2: the bare word `forensics` is the read verb, not a repo
+    # (a repo directory of that name is `./forensics`: R1 D6 keeps `repo` raw).
+    if args.template is None and args.repo == "forensics":
+        return cmd_run_forensics(args)
+    if args.md or args.json:
+        return _err("--md/--json belong to `skep run forensics <task_id>`.")
     note_retired_auto_approve(args)
     config = build_config(args.home, args.worker_cmd)
     matched_template: WorkflowTemplate | None = None
@@ -898,6 +947,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     delegation_chain=args.delegated_by or [],
                     # V7: the operator runs this — `skep review` answers a card.
                     deferred_asks=True,
+                    engine=resolved_policy.coding_engine if resolved_policy else args.engine,
+                    caste=worker_kind,
+                    held=held,
                 )
             except HTTPException as exc:
                 return _err(str(exc.detail), next_command="skep role list")
@@ -975,6 +1027,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         hop = delegation
 
         def on_run_created(task_id: str) -> None:
+            from .policy_v3 import log_decision
+            from .serve.actions import with_run_blame
+
+            run_store = RunStore(config.db_path, readonly=True)
+            try:  # R2 G6: the engine the run recorded, when no policy resolved one
+                run = run_store.get_run(task_id)
+            finally:
+                run_store.close()
+            engine = run.coding_engine if run is not None else None
+            for row in held:  # 2.1: the dispatch rows, now with the run's id
+                log_decision(config.audit_dir, with_run_blame(row, task_id, engine))
+            held.clear()
             record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
     tail: _PhaseTail | None = None
@@ -3243,12 +3307,18 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
 
 def cmd_policy_decisions(args: argparse.Namespace) -> int:
     """ADR 0054 A3: read decisions.jsonl back, newest first, with counts."""
-    from .serve.actions import policy_decisions
+    from .forensics import filtered_decisions
 
     config = build_config(args.home, None)
     try:
-        view = policy_decisions(
-            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit, team=args.team
+        view = filtered_decisions(
+            config.audit_dir,
+            task_id=args.task,
+            engine=args.engine,
+            actor=args.actor,
+            since=args.since,
+            limit=args.limit,
+            team=args.team,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -3595,9 +3665,20 @@ def cmd_agents(args: argparse.Namespace) -> int:
 def register_supervisor_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    run = subcommands.add_parser("run", help="run one coding task against a repo")
+    run = subcommands.add_parser(
+        "run",
+        help="run one coding task against a repo; `skep run forensics <task_id> "
+        "[--md|--json]` reports a run's evidence in one read",
+    )
+    report_format = run.add_mutually_exclusive_group()
+    report_format.add_argument(
+        "--md", action="store_true", help="forensics: a paste-ready Markdown bug report"
+    )
+    report_format.add_argument(
+        "--json", action="store_true", help="forensics: the report as JSON (= the REST body)"
+    )
     # Optional so `run --template NAME [repo]` works; required (both) for inline runs.
-    run.add_argument("repo", type=Path, nargs="?", default=None)
+    run.add_argument("repo", nargs="?", default=None)  # raw: Path("./x") prints "x"
     run.add_argument("instructions", nargs="?", default=None)
     run.add_argument(
         "--template",
@@ -4364,6 +4445,8 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
     policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
     policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
+    policy_decisions.add_argument("--task", help="one run's rows (rows that name no task skip)")
+    policy_decisions.add_argument("--engine", help="one coding engine's rows, e.g. claude_code")
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     trust = subcommands.add_parser(
