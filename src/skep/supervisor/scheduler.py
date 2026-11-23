@@ -42,6 +42,7 @@ from .policy_resolver import (
     resolve_run_policy,
     run_policy_for_repo,
 )
+from .policy_v3 import log_decision
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
 from .spawner import build_worker_env
 from .store import PROVIDER_BLOCKED_STATE, SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
@@ -668,6 +669,10 @@ def _held_to_role(
     repo: Path,
     permissions: Permissions,
     decision: AutonomyDecision,
+    *,
+    engine: str | None,
+    caste: str,
+    rows: list[dict[str, Any]],
 ) -> tuple[Permissions, AutonomyDecision, str | None]:
     """v123-F1 (DD-7, ADR 0055 D4): a schedule with a role is a delegator,
     ``schedule:<name>@<role>``. Every shell prefix and host its worker gets is
@@ -675,7 +680,9 @@ def _held_to_role(
     I5), so the role only ever tightens what the project allows. Headless:
     asks are dropped, never carded. A role that no longer resolves, or a
     narrowing that refuses, is the third value — ``policy_blocked: <why>`` —
-    and the tick dispatches nothing: it never runs without its role."""
+    and the tick dispatches nothing: it never runs without its role. Phase
+    02 (I13): its dispatch rows name ``engine`` and ``caste`` and are held
+    in ``rows``, logged with the run's ``task_id`` once the tick has one."""
     if schedule.role is None:
         return permissions, decision, None
     from fastapi import HTTPException
@@ -700,8 +707,9 @@ def _held_to_role(
     hop = Delegator(f"schedule:{schedule.name}@{role.name}", role)
     try:
         narrowed, delegation, note = delegate_permissions(
-            live, store, repo, permissions, role=None, delegation_chain=[hop], deferred_asks=False
-        )
+            live, store, repo, permissions, role=None, delegation_chain=[hop], deferred_asks=False,
+            engine=engine, caste=caste, held=rows,
+        )  # fmt: skip
     except HTTPException as exc:
         return permissions, decision, f"policy_blocked: {exc.detail}"
     return narrowed, delegated_decision(decision, delegation, note), None
@@ -811,6 +819,7 @@ def run_due(
     for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
         held: tuple[dict[str, Any], Path] | None = None  # v123 review: the receipt owed (I13)
+        rows: list[dict[str, Any]] = []  # 2.1: the role's dispatch rows, logged with the id
         try:
             # ES B110: computed BEFORE the side effect, inside the try — a row
             # whose interval no clock can hold (stored before the cap) raised
@@ -1001,8 +1010,9 @@ def run_due(
                     auto_apply_verified_patch = None
                 if blocked_state is None:
                     permissions, dispatch_decision, blocked_state = _held_to_role(
-                        store, config, holder, schedule, repo, permissions, dispatch_decision
-                    )
+                        store, config, holder, schedule, repo, permissions, dispatch_decision,
+                        engine=coding_engine or None, caste=instance.worker_kind, rows=rows,
+                    )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
@@ -1095,8 +1105,9 @@ def run_due(
                     auto_apply_verified_patch = None
                 if blocked_state is None:
                     permissions, dispatch_decision, blocked_state = _held_to_role(
-                        store, config, holder, schedule, repo, permissions, dispatch_decision
-                    )
+                        store, config, holder, schedule, repo, permissions, dispatch_decision,
+                        engine=coding_engine or None, caste=schedule.worker_kind, rows=rows,
+                    )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
@@ -1195,6 +1206,8 @@ def run_due(
                 # failure. The disabled row + reason is the record of what happened.
                 store.set_schedule_enabled(schedule.name, enabled=False)
                 store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+            for row in rows:  # 2.1 (I13): with the run's id once it has one
+                log_decision(config.audit_dir, {**row, "task_id": task_id} if task_id else row)
             if held is not None and task_id is not None:
                 # v123-F1 review (I13, R3): one ``delegated`` row naming
                 # ``schedule:<name>@<role>``, as submit_run writes it — last,

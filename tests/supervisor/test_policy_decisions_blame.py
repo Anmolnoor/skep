@@ -110,3 +110,110 @@ def test_an_old_shape_row_still_reads_back(
     assert main(["--home", str(home.home.parent), "policy", "decisions"]) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["rows"] == [old] and view["summary"]["allow"] == 1
+
+
+# --- 2C: the two callers 2A left — `skep run --role/--delegated-by`, schedules
+
+
+def _cli_run(
+    home: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch, mint: bool
+) -> None:
+    """`skep run --delegated-by queen@operator` up to run creation: the fake
+    runner fires ``on_run_created`` (when ``mint``) and refuses, as a dispatch
+    refusal does — no worker runs."""
+    from skep.supervisor import cli_cmds
+
+    def fake_run_task(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        if mint:
+            kwargs["on_run_created"]("task-cli")
+        raise ValueError("stop here")
+
+    store = RunStore(home.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app", name="app", strategy="trusted_local_dev", phase="build",
+            policy={
+                "allowed_shell_commands": [["uv", "sync"], ["git", "status"]],
+                "default_network": ["pypi.org", "example.com"],
+            },
+        )  # fmt: skip
+    finally:
+        store.close()
+    monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+    run = ["--home", str(home.home.parent), "run", str(repo), "x", "--quiet"]
+    main([*run, "--delegated-by", "queen@operator"])
+
+
+def test_a_cli_delegated_runs_dispatch_rows_carry_task_engine_and_caste(
+    home: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cli_run(home, repo, monkeypatch, mint=True)
+    rows = [r for r in _rows(home) if r["actor"] == "dispatch"]
+    assert rows  # the drop beyond the delegator
+    assert {tuple(r[k] for k in BLAME) for r in rows} == {("task-cli", "builtin", "coding")}
+    assert _rows(home)[-1]["source"] == "delegated"  # the hop row still last
+
+
+def test_a_cli_run_refused_before_creation_still_logs_its_rows_id_less(
+    home: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cli_run(home, repo, monkeypatch, mint=False)
+    rows = [r for r in _rows(home) if r["actor"] == "dispatch"]
+    assert rows and all((r["engine"], r["caste"]) == ("builtin", "coding") for r in rows)
+    assert not any("task_id" in r for r in rows)  # no run was ever minted (I8)
+
+
+def _schedule_tick(home: SupervisorConfig, repo: Path, outcome: Any) -> None:
+    """One due schedule held to role ``ops``; the fake dispatch returns
+    ``outcome`` (or raises it)."""
+    from skep.supervisor.scheduler import make_schedule, run_due
+
+    from .test_delegation import _custom_role
+    from .test_schedule_role import PROJECT
+
+    _custom_role(home, "ops", policy_layer="operator")
+
+    def dispatch(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    store = RunStore(home.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app", name="app", strategy="trusted_local_dev", phase="build",
+            policy=PROJECT,
+        )  # fmt: skip
+        nightly = make_schedule(
+            name="nightly", repo=repo, instructions="x", interval_seconds=86400,
+            start_at="2026-06-11T00:00:00Z", role="ops",
+        )  # fmt: skip
+        store.add_schedule(nightly)
+        holder = ConfigHolder(home, store)
+        run_due(
+            store=store, config=home, now="2026-06-11T09:00:00Z", dispatch=dispatch, holder=holder
+        )
+    finally:
+        store.close()
+
+
+def test_a_schedules_dispatch_rows_carry_task_engine_and_caste(
+    home: SupervisorConfig, repo: Path
+) -> None:
+    from types import SimpleNamespace
+
+    record = SimpleNamespace(task_id="task-s", state="completed", summary=None)
+    _schedule_tick(home, repo, SimpleNamespace(record=record))
+    rows = [r for r in _rows(home) if r["actor"] == "dispatch"]
+    assert rows  # uv sync and example.com, beyond the ops role
+    assert {tuple(r[k] for k in BLAME) for r in rows} == {("task-s", "builtin", "coding")}
+    assert _rows(home)[-1]["source"] == "delegated"  # the hop row still last
+
+
+def test_a_schedule_whose_dispatch_fails_logs_its_rows_id_less(
+    home: SupervisorConfig, repo: Path
+) -> None:
+    _schedule_tick(home, repo, RuntimeError("no worker"))
+    rows = [r for r in _rows(home) if r["actor"] == "dispatch"]
+    assert rows and all((r["engine"], r["caste"]) == ("builtin", "coding") for r in rows)
+    assert not any("task_id" in r for r in rows)

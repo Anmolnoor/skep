@@ -768,6 +768,19 @@ def cmd_run_forensics(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    held: list[dict[str, Any]] = []  # 2.1: --role/--delegated-by dispatch rows
+    try:
+        return _cmd_run(args, held)
+    finally:  # I13: a run that never got an id still logs them, id-less
+        if held:
+            from .policy_v3 import log_decision
+
+            audit_dir = build_config(args.home, None).audit_dir
+            for row in held:
+                log_decision(audit_dir, row)
+
+
+def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
     # Phase 02 2.2: the bare word `forensics` is the read verb, not a repo
     # (a repo directory of that name is `./forensics`).
     if args.template is None and str(args.repo) == "forensics":
@@ -930,6 +943,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     delegation_chain=args.delegated_by or [],
                     # V7: the operator runs this — `skep review` answers a card.
                     deferred_asks=True,
+                    engine=resolved_policy.coding_engine if resolved_policy else args.engine,
+                    caste=worker_kind,
+                    held=held,
                 )
             except HTTPException as exc:
                 return _err(str(exc.detail), next_command="skep role list")
@@ -1007,6 +1023,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         hop = delegation
 
         def on_run_created(task_id: str) -> None:
+            from .policy_v3 import log_decision
+
+            for row in held:  # 2.1: the dispatch rows, now with the run's id
+                log_decision(config.audit_dir, {**row, "task_id": task_id})
+            held.clear()
             record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
     tail: _PhaseTail | None = None
