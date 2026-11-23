@@ -120,13 +120,9 @@ def test_worker_git_write_roots_exclude_hooks_and_config(
         roots = git_metadata_writable_roots(wt)
         assert roots == ((common / "worktrees" / "task-roots"), common / "objects")
         assert common not in roots
-        # ADR 0068: the common dir's entries, minus objects/ (a writable root
-        # already); worktrees/ and the index stay, git prune reads them (3H)
-        readable = git_metadata_readable_roots(wt)
-        assert all(entry.is_relative_to(common) for entry in readable)
-        assert not any(entry.is_relative_to(common / "objects") for entry in readable)
-        assert common / "worktrees" in readable and common / "index" in readable
-        assert common / "config" in readable and common / "HEAD" in readable
+        # ADR 0068 (3I): the common dir itself, read-only; objects/ and this
+        # run's git dir above are writable roots bound on top of it
+        assert git_metadata_readable_roots(wt) == (common,)
         assert git_metadata_readable_roots(repo) == ()  # non-linked: .git is in the tree
         assert git_metadata_readable_roots(wt.parent) == ()  # not a checkout
     finally:

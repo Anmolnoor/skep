@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Container, Iterable, MutableMapping
+from collections.abc import Iterable, MutableMapping
 from pathlib import Path
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
@@ -161,29 +161,57 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     so the worker's own ``git diff`` died and its patch was never written.
     The sandbox binds these read-only, beneath the writable roots.
 
-    The common dir's entries, not the dir: ``objects/`` is a writable root
-    already. W4: no symlinked entry (bound by its own name, its target would
-    be readable), and not the main checkout's in-progress messages or
-    ``ORIG_HEAD``. 3H: every root git's reachability walk reads stays —
-    the stash and its reflog, the main ``index``, and ``worktrees/`` (the
-    sibling runs' HEAD, index and reflogs; this run's own git dir is a
-    writable root on top). Hidden, a ``git prune`` in the wall deleted their
-    objects from the shared, writable ``objects/``. ``config`` stays too —
-    git cannot run without it — so its remote URLs (and any token in one)
-    remain readable.
+    The common dir itself, whole (3I): git replaces ``index``,
+    ``packed-refs`` and ``HEAD`` by rename, and a file bind pinned the
+    dispatch-time inode (and missed a ``packed-refs`` made later), so a
+    ``git prune`` in a running wall deleted what the operator staged or
+    packed since. 3H: git's reachability walk reads the stash and its
+    reflog, the main ``index`` and ``worktrees/`` (the sibling runs' HEAD,
+    index and reflogs); hidden, a prune deleted their objects from the
+    shared, writable ``objects/``. ``objects/`` and this run's own git dir
+    are writable roots bound on top; ``git_metadata_masked`` lists what is
+    masked inside it. A symlinked entry is not followed by its own name
+    (W4): it resolves inside the wall. ``config`` stays readable — git
+    cannot run without it — so its remote URLs (and any token in one) do.
     """
-    dirs = _git_dirs(workspace)
-    if dirs is None or dirs[0] == dirs[1]:
+    common = _linked_common_dir(workspace)
+    return () if common is None else (common,)
+
+
+def git_metadata_masked(workspace: Path) -> tuple[Path, ...]:
+    """The main checkout's own state no git in the run reads, masked over
+    the common dir ``git_metadata_readable_roots`` binds: its in-progress
+    messages and ``ORIG_HEAD``."""
+    common = _linked_common_dir(workspace)
+    return () if common is None else tuple(common / name for name in _COMMON_DIR_PRIVATE)
+
+
+def git_walk_links(workspace: Path) -> tuple[Path, ...]:
+    """I2 (3I): the entries git's reachability walk reads that are links out
+    of the common dir. Such a link resolves inside the wall, where its
+    target is absent, so a ``git prune`` there would walk without those
+    pointers — a strict run refuses. (A linked ``worktrees/`` already stops
+    git: the run's gitfile no longer finds its common dir.)"""
+    common = _linked_common_dir(workspace)
+    if common is None:
         return ()
-    return tuple(_entries(dirs[1], _COMMON_DIR_PRIVATE))
+    return tuple(
+        entry
+        for name in _GIT_WALKED
+        if (entry := common / name).is_symlink()
+        and not Path(os.path.realpath(entry)).is_relative_to(common)
+    )
 
 
-_COMMON_DIR_PRIVATE = frozenset({"objects", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD"})
+_COMMON_DIR_PRIVATE = ("COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD")
+_GIT_WALKED = ("refs", "logs", "worktrees", "index", "packed-refs")
 
 
-def _entries(directory: Path, skip: Container[str]) -> list[Path]:
-    """A dir's entries but ``skip``, never a symlink (W4)."""
-    return [e for e in sorted(directory.iterdir()) if e.name not in skip and not e.is_symlink()]
+def _linked_common_dir(workspace: Path) -> Path | None:
+    """The common dir of a linked worktree; None for a non-linked checkout
+    (its git dir is in the tree) or outside a checkout."""
+    dirs = _git_dirs(workspace)
+    return None if dirs is None or dirs[0] == dirs[1] else dirs[1]
 
 
 def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:

@@ -223,8 +223,11 @@ def read_allowlist_for(policy: Mapping[str, Any]) -> tuple[Path, ...] | None:
 def resolved_read_allowlist(paths: Iterable[Path], skep_home: Path) -> tuple[Path, ...]:
     """ADR 0068 (G1): each extra path judged, then resolved ONCE at dispatch.
     The run records these targets, so a link the operator retargets later
-    never moves the wall G10 builds. Refuses like ``write_profile`` does."""
-    return tuple(path.resolve() for path in _validated_extra(paths, skep_home))
+    never moves the wall G10 builds. Refuses like ``write_profile`` does.
+    3I: only the ones that exist, as the worker's profile binds them — one
+    made after dispatch is never in G10's wall."""
+    paths = _validated_extra(paths, skep_home)
+    return tuple(dict.fromkeys(path.resolve() for path in paths if _exists(path)))
 
 
 def strict_read_roots(
@@ -310,11 +313,12 @@ def _strict_candidates(
 
 
 def _etc_reserved(real: Path) -> bool:
-    """/etc itself or one of its hidden entries, by either OS's list and
-    every spelling macOS opens it by (/private/etc, case, the data volume):
-    binding either reopens them."""
+    """/etc, a dir that holds it (3I: /private on macOS, with the host's /tmp
+    and /var), or one of its hidden entries, by either OS's list and every
+    spelling macOS opens it by (/private/etc, case, the data volume):
+    binding any of them reopens them."""
     key, etc = alias_key(real), alias_key(Path("/etc").resolve())
-    return key == etc or any(key.is_relative_to(etc / name) for name in _ALL_ETC_HIDDEN)
+    return etc.is_relative_to(key) or any(key.is_relative_to(etc / n) for n in _ALL_ETC_HIDDEN)
 
 
 def _over(real: Path, inner: Path) -> bool:
@@ -347,7 +351,14 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
     if _etc_reserved(real):
         return (
             f"{path} resolves to {real}: /etc comes back without "
-            f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them"
+            f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them or a "
+            "dir that holds /etc (on macOS, /private holds the host's /tmp and /var too)"
+        )
+    if var := next((v for v in _HOMEBREW_VAR if _over(Path(v), real)), None):
+        return (
+            f"{path} resolves to {real}, in Homebrew's var/ ({var}): a strict run on macOS "
+            "masks it (local databases and service state), so the path would read as "
+            "missing. Name a directory outside it"
         )
     return None
 
@@ -1358,6 +1369,18 @@ def write_profile(
             "bubblewrap backend, or turn it off for this project: `skep project setup "
             "<repo> --no-strict-reads`."
         )
+    from .worktree import git_metadata_masked, git_walk_links
+
+    if read_allowlist is not None and (links := git_walk_links(workspace)):
+        shown = ", ".join(f"{link} (a link to {os.path.realpath(link)})" for link in links)
+        raise SandboxUnavailableError(
+            f"strict reads (ADR 0068): {shown} in the repo's shared git dir. git's "
+            "reachability walk reads it, and inside the wall the link leads nowhere, so a "
+            "`git prune` there would delete objects only it points to. The run is refused "
+            f"rather than run with hidden pointers. Move the target back into {links[0].parent} "
+            "in place of the link, or turn strict reads off for this project: `skep project "
+            "setup <repo> --no-strict-reads`."
+        )
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     # ES-F264: the mask list holds only files that exist now. relay-secret
     # used to appear on the first relayed dispatch, readable by every run
@@ -1369,7 +1392,9 @@ def write_profile(
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
+    git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
+        read_denied += [path for path in git_masked if _exists(path)]  # a mount needs its file
         extra_readable = list(extra_readable)
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.
@@ -1424,6 +1449,7 @@ def write_profile(
     if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
         live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
         read_denied = list(dict.fromkeys([*read_denied, *live]))
+    read_denied = [*read_denied, *git_masked]  # a literal deny holds for a file made later
     strict_roots = None
     if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
         strict_roots = [

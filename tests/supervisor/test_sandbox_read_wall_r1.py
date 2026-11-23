@@ -29,7 +29,11 @@ from typing import Any
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig, sandbox
-from skep.supervisor.worktree import git_metadata_readable_roots, git_metadata_writable_roots
+from skep.supervisor.worktree import (
+    git_metadata_masked,
+    git_metadata_readable_roots,
+    git_metadata_writable_roots,
+)
 
 from .conftest import git
 
@@ -162,8 +166,9 @@ def _g10_wall(config: SupervisorConfig, repo: Path, task_id: str, monkeypatch: A
 @pytest.mark.parametrize(
     ("policy", "wall"),
     [
-        ({"strict_read_confinement": True, "extra_read_paths": ["/srv/data"]},
-         (Path("/srv/data"),)),
+        # an existing dir: a missing one is never in the wall (3I)
+        ({"strict_read_confinement": True, "extra_read_paths": ["/usr/share"]},
+         (Path("/usr/share").resolve(),)),
         ({"strict_read_confinement": False}, None),
     ],
 )  # fmt: skip
@@ -424,18 +429,16 @@ def _repo_with_private_state(base: Path) -> tuple[Path, Path, Path]:
     return repo, common.resolve(), worktree
 
 
-def test_the_common_dir_loses_symlinks_and_the_main_checkout_s_private_state(
+def test_the_common_dir_is_bound_whole_and_the_main_checkout_s_private_state_masked(
     tmp_path: Path,
 ) -> None:
     _repo, common, worktree = _repo_with_private_state(tmp_path)
-    roots = git_metadata_readable_roots(worktree)
-    for never in ("leak", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD", "objects"):
-        assert not any(root == common / never for root in roots), never
-        assert not any(root.is_relative_to(common / never) for root in roots), never
-    # 3H: what git's reachability walk reads stays (refs/stash, logs/refs/stash)
-    for kept in ("config", "HEAD", "refs", "logs", "index", "worktrees"):
-        assert common / kept in roots, kept
-    assert all(root.is_relative_to(common) for root in roots)
+    # 3I: the dir itself, so a rename git makes in it (index, packed-refs,
+    # HEAD) stays live; a symlinked entry ("leak") resolves inside the wall
+    assert git_metadata_readable_roots(worktree) == (common,)
+    assert git_metadata_masked(worktree) == tuple(
+        common / name for name in ("COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD")
+    )
 
 
 @needs_bwrap

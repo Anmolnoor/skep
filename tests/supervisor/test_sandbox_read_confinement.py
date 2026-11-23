@@ -402,12 +402,10 @@ def test_a_linked_worktree_reads_its_common_dir_and_its_siblings_git_dirs(tmp_pa
     for name in ("mine", "sibling"):
         git(repo, "worktree", "add", "-q", "--detach", str(tmp_path / name))
     roots = git_metadata_readable_roots(tmp_path / "mine")
-    common = (repo / ".git").resolve()
-    assert common / "config" in roots
-    assert common / "refs" in roots  # the stash too: git prune reads it (3H)
-    assert all(root.is_relative_to(common) for root in roots)  # never a sibling's checkout
-    assert common / "worktrees" in roots  # the siblings' HEAD/index: git prune reads them (3H)
-    assert common / "objects" not in roots  # bound writable, never walked for sockets
+    # the common dir whole: refs, the stash and the siblings' git dirs, which
+    # git prune reads (3H), live (3I); objects/ is bound writable on top.
+    # Never a sibling's checkout.
+    assert roots == ((repo / ".git").resolve(),)
 
 
 # --- the wall, for real (bubblewrap or Seatbelt) ----------------------------
@@ -966,7 +964,7 @@ def test_a_socket_that_is_a_root_or_in_an_extra_path_is_still_masked(
             sock.bind(str(path))
             sock.close()
         roots = git_metadata_readable_roots(base / "w")
-        assert sockets[0].resolve() in roots
+        assert roots == ((repo / ".git").resolve(),)  # the socket is inside it
         profile = sandbox.write_profile(
             base / "p.profile",
             workspace=base / "w",

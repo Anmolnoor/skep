@@ -149,7 +149,7 @@ def test_bwrap_keeps_die_with_parent_and_its_parent_is_the_keeper_only_while_rea
     is its parent: with re-adoption on, serve spawns the keeper, which runs
     bwrap and outlives serve; with the kill switch, bwrap is serve's own
     child again and dies with it."""
-    from skep.supervisor import SupervisorConfig, spawner
+    from skep.supervisor import SupervisorConfig, spawner, worktree
     from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
 
     def _bubblewrap(backend: str | None = None) -> sandbox.SandboxAvailability:
@@ -160,6 +160,7 @@ def test_bwrap_keeps_die_with_parent_and_its_parent_is_the_keeper_only_while_rea
     monkeypatch.setattr(sandbox, "_bubblewrap_binary", lambda: "/usr/bin/bwrap")
     monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
     monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
+    monkeypatch.setattr(worktree, "git_metadata_masked", lambda _ws: ())  # write_profile's
     captured: list[list[str]] = []
 
     def _popen(argv: list[str], **_kw: object) -> object:
