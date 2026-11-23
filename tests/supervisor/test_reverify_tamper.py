@@ -536,6 +536,7 @@ def test_a_quoted_pytest_pin_is_still_counted(repo: Path, config: SupervisorConf
         ("uv run --with pytest-xdist pytest -n auto", True),
         ("sh -c 'pytest -q'", True),
         ("/usr/bin/pytest", True),
+        ("python -mpytest -q", True),
         ("grep pytest x", False),
         ("echo pytest-ish", False),
         ("npm test", False),
@@ -672,3 +673,20 @@ def test_a_guard_that_cannot_read_the_patch_fails_closed(
     monkeypatch.setattr(reverify_mod, "patch_paths", broken)
     flags = reverify_mod.static_tamper_flags(repo, patch, "HEAD")
     assert flags == ["tamper_check_failed:OSError"]
+
+
+def test_baseline_cleanup_removes_only_what_the_baseline_added(tmp_path: Path) -> None:
+    """Review R2 (Opus): an ignored file the prime left (an in-place editable
+    build) is not the baseline's; only paths that appear afterwards are."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    git(wt, "init", "-q")
+    (wt / ".gitignore").write_text("*.so\nbuild/\nstate.txt\n")
+    (wt / "ext.so").write_text("primed")
+    (wt / ".venv").mkdir()
+    primed = reverify_mod._untracked(wt)
+    assert "ext.so" in primed and not any(p.startswith(".venv") for p in primed)
+    (wt / "state.txt").write_text("baseline")
+    (wt / "build").mkdir()
+    (wt / "build" / "out").write_text("baseline")
+    assert reverify_mod._untracked(wt) - primed == {"state.txt", "build/"}

@@ -136,7 +136,7 @@ def _is_pytest_pin(command: str) -> bool:
                 segment.pop(0)
             if segment and segment[0] not in _NOT_RUNNERS:
                 for w in segment:
-                    if os.path.basename(w) in ("pytest", "py.test"):
+                    if os.path.basename(w) in ("pytest", "py.test") or w == "-mpytest":
                         return True
                     if any(c.isspace() for c in w) and _is_pytest_pin(w):
                         return True
@@ -600,6 +600,23 @@ _OUTPUT_TAIL_CHARS = 2000
 # environments (uv's .venv, node_modules, the worktree-local caches) and the
 # re-verify scratch dir; nothing the baseline's tests wrote.
 _BASELINE_KEEP = (".venv", "node_modules", ".reverify-tmp", ".uv-cache", ".node-cache")
+
+
+def _untracked(worktree: Path) -> set[str]:
+    """Untracked and ignored paths in ``worktree`` (whole new directories as
+    one entry), minus the primed environments and re-verify scratch."""
+    out = subprocess.run(
+        ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--directory"],
+        capture_output=True,
+        check=False,
+    ).stdout.decode("utf-8", "surrogateescape")
+    return {
+        path
+        for path in out.split("\0")
+        if path and path.rstrip("/").split("/")[0] not in _BASELINE_KEEP
+    }
+
+
 # v127-A0 trial fix (V01): what the evidence file keeps — the whole output up
 # to its last 200 KB, so the traceback above pytest's summary survives.
 _OUTPUT_EVIDENCE_CHARS = 200_000
@@ -859,6 +876,10 @@ def reverify(
             # Its own TMPDIR, removed after (review R1, F1).
             baseline_tmp = reverify_tmp / "baseline"
             baseline_tmp.mkdir()
+            # Review R2 (Opus): what the prime already put in the tree (an
+            # in-place editable build, a yarn PnP map) stays; only what the
+            # baseline run adds is removed afterwards.
+            pre_baseline = _untracked(worktree)
             code, _output, stdout = _run_command(
                 commands[0],
                 cwd=worktree,
@@ -873,19 +894,22 @@ def reverify(
             baseline_counts = pytest_counts(stdout) if code in _COUNTABLE_EXITS else None
             baseline_source = "run" if baseline_counts is not None else None
             # What the baseline run wrote must not reach the patched run (I2,
-            # review R1 F1): tracked edits reverted, every untracked and
-            # ignored file removed except the primed environments the
-            # patched run needs and the re-verify scratch dir.
+            # review R1 F1): tracked edits reverted and every untracked or
+            # ignored path it added removed (review R2: only what it added).
             shutil.rmtree(baseline_tmp)
             reset = subprocess.run(
                 ["git", "-C", str(worktree), "checkout", "-q", "--", "."], check=False
             )
-            cleaned = subprocess.run(
-                ["git", "-C", str(worktree), "clean", "-ffdxq"]
-                + [f"--exclude={keep}" for keep in _BASELINE_KEEP],
-                check=False,
+            added = _untracked(worktree) - pre_baseline
+            cleaned = (
+                subprocess.run(
+                    ["git", "-C", str(worktree), "clean", "-ffdxq", "--", *sorted(added)],
+                    check=False,
+                )
+                if added
+                else reset
             )
-            if reset.returncode or cleaned.returncode:
+            if reset.returncode or cleaned.returncode or _untracked(worktree) - pre_baseline:
                 # Review R2 (Terra): a tree git could not reset is not a clean
                 # baseline for the patched run — confirm nothing (I2).
                 return ReverifyOutcome(
