@@ -902,6 +902,11 @@ def run_task(
             }
         if relay_note != "off":  # off: the record reads as it did before ADR 0062
             dispatched_fields["provider_key_relay"] = relay_note
+        if worker_argv is not None:
+            # ADR 0062 delta (I8): an external engine authenticates from its
+            # own env (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, the Codex
+            # ChatGPT login) — never through the relay, whatever the switch.
+            dispatched_fields["auth"] = "external-env"
         if coerced_mode is not None:
             dispatched_fields["execution_mode_coerced"] = coerced_mode
         dispatched_detail = (

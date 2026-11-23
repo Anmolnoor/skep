@@ -332,13 +332,13 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     _knob(
         "provider_key_relay",
         type="bool",
-        default=False,
+        default=True,
         layers=("global",),
         invariant="I12",
-        doc="ADR 0062 kill switch: on, a builtin worker reaches its model through a "
-        "token-checked relay on its run's proxy and never holds the provider key; off "
-        "(default), the worker holds the key as before. External engines keep their own "
-        "auth env either way",
+        doc="ADR 0062 kill switch: on (default), a builtin worker reaches its model through a "
+        "token-checked relay on its run's proxy and never holds the provider key; off, "
+        "the worker holds the key as before. External engines keep their own "
+        "auth env either way (auth: external-env, not relayed)",
     ),
     _knob(
         "auto_approve",

@@ -114,14 +114,22 @@ def provider_relay_for_run(
     """(relay, model, note) for one run. ``note`` is what the run record says
     about the relay; "off" leaves the record as it was before ADR 0062."""
     from .castes import CASTES
-    from .serve.settings import PROVIDER_KEY_RELAY
+    from .serve import settings
 
-    if store.get_setting(PROVIDER_KEY_RELAY) is not True:
+    if not settings.provider_key_relay_enabled(store):
         return None, "", "off"
     if not builtin:
+        # I8: dispatch also labels the run ``auth: external-env`` — the
+        # engine's own tokens and logins never pass this relay.
         return None, "", "not used: an external engine authenticates from its own auth env"
     if not getattr(CASTES.get(task.worker_kind), "needs_provider", True):
         return None, "", "not used: this caste calls no model"
+    if "skep.workers.ollama" in config.command_for(task.worker_kind):
+        # Its SKEP_OLLAMA_URL override (the operator's or provider routing's)
+        # dials that endpoint with the daemon secret, not through
+        # worker_provider_from_env. ponytail: argv spelling only, like
+        # engines.external_agent_for_command; a wrapper script is not seen.
+        return None, "", "not used: the ollama worker dials its own endpoint with the daemon secret"
     return _relay_for(config, task.task_id)
 
 
