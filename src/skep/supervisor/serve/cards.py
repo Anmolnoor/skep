@@ -172,19 +172,16 @@ _BOUNDARY = {tool: label for label, tools in _BOUNDARY_GROUPS.items() for tool i
 UNLOCK_REMEDIATION = "skep project setup {repo} --execution-mode sandbox --unlocked"
 
 
-def _unlock_remedy(store: RunStore | None, repo: Any) -> str | None:
-    """The one line that stops in-sandbox asks — None when the project is
-    already unlocked or there is no store to say (I8: never offer a no-op)."""
+def _unlocked(store: RunStore | None, repo: Any) -> bool:
+    """Is ``repo``'s project unlocked? False with no store or repo to say."""
     if store is None or not repo:
-        return None
+        return False
     from pathlib import Path
 
     from ..policy_resolver import project_bound_to_repo
 
     project = project_bound_to_repo(store, Path(str(repo)))
-    if project is not None and project.policy.get("unlocked") is True:
-        return None
-    return UNLOCK_REMEDIATION.format(repo=shlex.quote(str(repo)))
+    return project is not None and project.policy.get("unlocked") is True
 
 
 def boundary(
@@ -197,9 +194,13 @@ def boundary(
 ) -> tuple[str | None, str | None]:
     """phase-01 1.2: ``(label, remediation)`` for one card. A run-starting
     card from a tainted chat is ``tainted-dispatch``; one whose run is on the
-    host is ``host-shell``; else its wall is the sandbox: ``in-sandbox-locked``,
-    with the unlock line while the project is not unlocked. A worker gate is
-    labelled by what the worker asked (its approval's action)."""
+    host is ``host-shell``; one that asks to reach hosts is ``network-egress``;
+    else its wall is the sandbox: ``in-sandbox-locked`` while the project is
+    not unlocked. A worker gate is labelled by what the worker asked (its
+    approval's action); only a ``shell.run`` gate in a locked sandbox carries
+    the unlock line — the one ask unlocking answers (I8: never offer a no-op;
+    it does not dry-run decide(), so a floor-denied line still shows it).
+    An unlocked project's sandbox has no label in the fixed set: None."""
     if tool in _RUN_TOOLS:
         runs = [manifest, *(manifest.get("members") or [])] if manifest else [args]
         if (taint is not None and taint.any) or any(run.get("taint") for run in runs):
@@ -214,8 +215,12 @@ def boundary(
         modes = {run.get("execution_mode") for run in runs} - {None}
         if modes - {"sandbox"}:
             return "host-shell", None
-        repo = next((run.get("repo") for run in runs if run.get("repo")), None)
-        return "in-sandbox-locked", _unlock_remedy(store, repo)
+        asks = ("network_ask", "network_added") if manifest else ("network",)
+        if any(run.get(key) for run in runs for key in asks) or any(map(_wildcard_network, runs)):
+            return "network-egress", None  # R1 G5: it asks to reach hosts
+        if any(_unlocked(store, run.get("repo")) for run in runs):
+            return None, None  # R1 G4: an override carded it, not a locked sandbox
+        return "in-sandbox-locked", None
     if tool in _GATE_TOOLS:
         gate = store.get_approval(str(args.get("review_id") or "")) if store is not None else None
         if gate is None:  # risk()'s rule: a reason not 'land …' is a worker gate
@@ -231,7 +236,10 @@ def boundary(
         run = store.get_run(gate.task_id) if store is not None else None
         if run is None or run.execution_mode != "sandbox":
             return "host-shell", None
-        return "in-sandbox-locked", _unlock_remedy(store, run.repo)
+        if _unlocked(store, run.repo):
+            return None, None  # R1 G4: unlocked already declined this ask
+        remedy = UNLOCK_REMEDIATION.format(repo=shlex.quote(str(run.repo)))
+        return "in-sandbox-locked", remedy if gate.action == "shell.run" else None
     if tool == "propose_schedule" and args.get("caste") == "script":
         return "host-shell", None
     return _BOUNDARY.get(tool), None

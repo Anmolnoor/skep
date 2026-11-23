@@ -739,6 +739,7 @@ def _cli_run(
     *,
     unlocked: bool = True,
     shell_rules: bool = False,
+    extra: tuple[str, ...] = (),
 ) -> tuple[SupervisorConfig, int]:
     """One CLI ``skep run`` on an (un)locked project whose worker gates on ``gate``."""
     import shlex
@@ -755,7 +756,7 @@ def _cli_run(
     _bound(config, repo, {**UNLOCKED, "unlocked": unlocked}).close()
     argv = ["--home", str(root), "run", str(repo), f"Fix it. MODE:shellgate GATE:{gate}"]
     argv += ["--worker-cmd", shlex.join([sys.executable, str(FAKE_WORKER)]), "--quiet"]
-    argv += ["--execution-mode", "sandbox"]
+    argv += ["--execution-mode", "sandbox", *extra]
     return config, main(argv)
 
 
@@ -843,6 +844,130 @@ def test_cli_run_on_a_locked_project_still_stops_at_the_gate(
     assert "state:        pending_approval" in capsys.readouterr().out
     assert _decisions(config) == []
     assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_minimal_run_never_answers_its_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1 G1 (I5, I6): --minimal promises deny-all grants and learning through
+    approvals; the unlocked step reloads the project's policy, so it never
+    answers for a run that chose narrower grants."""
+    config, code = _cli_run(tmp_path, repo, "make_lint", extra=("--minimal",))
+    assert code == 4
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
+    assert len(_pending(config)) == 1
+
+
+def test_a_batch_gate_logs_every_request_before_it_answers(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 G2 (I13): each request a batch gate names is decided and logged,
+    the ones after a refusal too; the gate answers only if all allow."""
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve.actions import unlocked_gate_allowed
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    lock_baseline(config.home, shell_rules=False)
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        task = mint_task(workspace=repo, instructions="gate")
+        store.create_run(task, repo=repo.resolve(), ref=None, execution_mode="sandbox")
+        (config.audit_dir / task.task_id).mkdir(parents=True)
+        (config.audit_dir / task.task_id / "task.json").write_text(task.model_dump_json())
+        store.transition(task.task_id, "pending_approval", None)
+        store.enqueue_approval(
+            task.task_id, action="shell.run", reason="batch",
+            commands=[["git", "push", "origin", "main"], ["make", "lint"]],
+        )  # fmt: skip
+        assert unlocked_gate_allowed(store, ConfigHolder(config, store), task.task_id) is None
+    finally:
+        store.close()
+    rows = _decisions(config)
+    assert [(r["verdict"], r["task_id"]) for r in rows] == [
+        ("deny", task.task_id),
+        ("allow", task.task_id),
+    ]
+
+
+@_SANDBOX
+def test_cli_run_leaves_the_gate_when_its_resume_is_refused(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G3: a resume refused before it starts (no auth env, a missing
+    engine) is an answer, not a traceback — the gate stays a human's,
+    unclaimed, as serve leaves its card."""
+    from skep.supervisor import cli_cmds
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+
+    def refusing(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            raise ValueError("coding_engine 'codex': NO AUTH ENV")
+        return real_run_task(*args, **kwargs)
+
+    monkeypatch.setattr(cli_cmds, "run_task", refusing)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    captured = capsys.readouterr()
+    assert code == 4, captured
+    assert "NO AUTH ENV" in captured.err and "Traceback" not in captured.err
+    assert "state:        pending_approval" in captured.out
+    rows = _decisions(config)
+    assert [a.task_id for a in _pending(config)] == [rows[0]["task_id"]]
+
+
+@_SANDBOX
+def test_cli_run_leaves_the_gate_when_its_task_envelope_is_unreadable(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G3: the decision itself reads task.json — an unreadable one is a
+    printed reason and a standing gate, never a traceback."""
+    import skep.supervisor.serve.actions as actions
+
+    def unreadable(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("task.json")
+
+    monkeypatch.setattr(actions, "unlocked_gate_allowed", unreadable)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    captured = capsys.readouterr()
+    assert code == 4, captured
+    assert "could not answer the gate" in captured.err and "Traceback" not in captured.err
+    assert len(_pending(config)) == 1
+
+
+@_SANDBOX
+def test_cli_auto_resume_keeps_the_audited_pin_caste_and_engine(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 G7 (I2): the resumed successor runs under the audited task's pinned
+    verify_command, caste, protocol and engine — never repo-policy defaults
+    (a template-bound pin is one run_task's repo lookup cannot see)."""
+    from skep.supervisor import cli_cmds
+    from skep.worker_contract import CodingWorkerTask
+
+    real_run_task = cli_cmds.run_task  # type: ignore[attr-defined]
+    resumed: list[dict[str, Any]] = []
+
+    def watching(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("approval_verdict") is not None:
+            resumed.append(kwargs)
+        return real_run_task(*args, **kwargs)
+
+    monkeypatch.setattr(cli_cmds, "run_task", watching)
+    config, code = _cli_run(tmp_path, repo, "make_lint")
+    assert code == 0, capsys.readouterr()
+    first = _decisions(config)[0]["task_id"]
+    audited = CodingWorkerTask.model_validate_json(
+        (config.audit_dir / first / "task.json").read_text()
+    )
+    assert audited.verify_command == PIN
+    [kwargs] = resumed
+    assert kwargs["verify_command"] == PIN
+    assert kwargs["worker_kind"] == audited.worker_kind
+    assert kwargs["planning_protocol"] == audited.planning_protocol
+    assert kwargs["coding_engine"] == "builtin"
 
 
 def _callback_ran(monkeypatch: pytest.MonkeyPatch) -> Any:

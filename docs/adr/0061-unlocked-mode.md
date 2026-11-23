@@ -130,8 +130,8 @@ is a line in the decision log (I13) with actor `auto:unlocked`. The gates it
 understands: `shell.run` (each listed command). A `network.fetch` /
 `network.read` gate is decided as `network.connect` and, since D42, always
 stays a human card, as does anything else — a git capability, a gate with no
-command. Only the serve's done callback runs the auto-answer: a CLI
-`skep run` on an unlocked project stops at every gate.
+command. Serve's done callback and a foreground CLI `skep run` both run the
+auto-answer (Delta 2026-11-23); REST, the hook and ACP never do.
 
 ### Switching it on and off
 
@@ -195,7 +195,8 @@ unlocked mode never widens the network to them, on any path.
   keeps a host's ask, so a host gate stays a human card on serve exactly as
   it does on a CLI run. A host no rule names is refused (a run with egress)
   or asked (a run without), never auto-approved.
-- Unlocked still answers default command asks, on serve-dispatched runs only.
+- Unlocked still answers default command asks, on serve-dispatched runs and
+  (Delta 2026-11-23) a foreground CLI `skep run`.
 - The D34 listing of hosts the mode auto-approved (doctor, a run's
   `unlocked_hosts`) can only find rows written before D42, and doctor says
   they are historical.
@@ -217,8 +218,9 @@ is a default, not a ceiling).
 - A role's deny or named ask still binds, as do the operator's (`_unlocked`),
   the floor, the baseline guard and taint. D42 is untouched: a network host
   is never the step's.
-- Only sandboxed serve-dispatched runs reach the step (unchanged): a CLI
-  run, REST, the hook and ACP never pass `sandboxed`.
+- Only sandboxed runs reach the step: serve-dispatched ones and, since the
+  Delta 2026-11-23, a foreground CLI `skep run`; REST, the hook and ACP
+  never pass `sandboxed`.
 
 I6 holds: the mode is still the per-project ramp the operator climbs with
 an explicit action, and no model ever answers a card.
@@ -281,3 +283,11 @@ decision path, no second allow list (I5).
   gate (D42); any gate that is not `shell.run`; a locked project; a
   workspace-mode run or an unsandboxed home. `skep review --approve` and a
   serve approve still resume only what a human answered.
+- **Review round 1.** Every request a batch gate names is decided and logged,
+  the ones after a refusal too, and the gate answers only if all allow (I13).
+  A CLI run that chose narrower grants than its project's policy (`--minimal`,
+  start minimal, an unbound template) is never auto-answered: the step reloads
+  the project's policy, which those runs opted out of (I5, I6). A resume
+  refused before it starts (no auth env, engine absent, no `task.json`) prints
+  the reason and leaves the gate a card, unclaimed, as serve does. The resumed
+  successor keeps the audited run's pinned verify, caste, protocol and engine.
