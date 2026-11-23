@@ -1182,3 +1182,35 @@ def test_l10_a_line_level_catastrophe_keeps_its_own_reason_on_the_run_lane() -> 
 
     for command in ("sudo ls > /dev/sda", "git push > /dev/sda"):
         assert run_lane_floor_reason(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"access_token": "CANARY-json-1", "expires_in": 3600}',
+        "{'refresh_token': 'CANARY-py-2'}",
+        '"client_secret":"CANARY-tight-3"',
+        "api_key: CANARY-yaml-4",
+        "  password: CANARY-yaml-5",
+        'resp={"token": "CANARY-6", "authorization": "Basic CANARY-7"}',
+        "github_token=CANARY-8 next",
+        '{"secret": "with \\" quote CANARY-9"}',
+    ],
+)
+def test_redact_masks_json_and_yaml_credential_fields(line: str) -> None:
+    from skep.supervisor import policy_v3
+
+    """Phase 02 R1 D1: a worker.log line that dumps an OAuth response or a
+    config file names the credential by its key, not by a flag or env var."""
+    masked = policy_v3.redact(line)
+    assert "CANARY" not in masked, masked
+    assert "***" in masked
+    assert policy_v3.redact(masked) == masked  # masking twice changes nothing
+
+
+def test_redact_json_fields_keep_what_is_not_a_credential() -> None:
+    from skep.supervisor import policy_v3
+
+    keep = '{"max_tokens": 4096, "token_count": 12, "secret_name": "prod", "keys": 3}'
+    assert policy_v3.redact(keep) == keep
+    assert policy_v3.redact("Authorization: Bearer CANARY") == "Authorization: Bearer ***"

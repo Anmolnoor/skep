@@ -12,19 +12,32 @@ it opens nothing for writing. Every string in the report passes through
 from __future__ import annotations
 
 import json
+import os
 import sys
-from datetime import datetime
-from itertools import pairwise
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
+from ..worker_contract import Event, EventType
 from .policy_v3 import _rotated_generations, redact
-from .serve.actions import UNLOCKED_ACTOR, policy_decisions, require_run
+from .sandbox import _BUBBLEWRAP_HEADER, _PODMAN_HEADER
+from .serve.actions import UNLOCKED_ACTOR, policy_block_views, policy_decisions, require_run
 from .store import RunStore
 
 UNKNOWN = "unknown"
 NOTES = ("observed", "forwarded", "delegated", "alarm")  # policy_decisions' non-decisions
 LOG_TAIL_LINES = 30
+LOG_TAIL_BYTES = 64 * 1024  # R1 D7: the tail is read from EOF, never the whole log
+ACTIVE = ("created", "dispatched", "running")  # the store's own active set
+# R1 D5: the first line of the retained sandbox.profile.sb names its backend.
+PROFILE_BACKENDS = {
+    _BUBBLEWRAP_HEADER: "bubblewrap",
+    _PODMAN_HEADER: "podman",
+    "(version 1)": "seatbelt",
+}
 GAP_SECONDS = 15.0  # three missed beats of the worker's 5 s heartbeat
 # Transition details worth a second look: the monitor's kill reasons and the
 # external engines' auth failures (skep-run-forensics failure shapes 1 and 4).
@@ -48,26 +61,31 @@ def _redacted(value: Any) -> Any:
     return value
 
 
-def _json_lines(path: Path) -> list[dict[str, Any]]:
+def _json_lines(path: Path) -> Iterator[dict[str, Any]]:
+    """R1 D7: one line at a time; a bad byte reads as U+FFFD, a bad line is skipped."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open(encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
     except FileNotFoundError:
-        return []  # no file yet, or rotated away between listing and opening
-    rows = []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+        return  # no file yet, or rotated away between listing and opening
 
 
-def _all_decisions(audit_dir: Path) -> list[dict[str, Any]]:
-    """Every generation, oldest first — v121-F4 keeps the old ones for this."""
+def _chain_decisions(audit_dir: Path, chain: list[str]) -> list[dict[str, Any]]:
+    """Every generation, oldest first — v121-F4 keeps the old ones for this —
+    kept only when the row names a run in the chain."""
     live = audit_dir / "policy" / "decisions.jsonl"
-    return [row for path in (*_rotated_generations(live), live) for row in _json_lines(path)]
+    return [
+        row
+        for path in (*_rotated_generations(live), live)
+        for row in _json_lines(path)
+        if row.get("task_id") in chain
+    ]
 
 
 def _resume_chain(store: RunStore, task_id: str) -> list[str]:
@@ -83,18 +101,64 @@ def _resume_chain(store: RunStore, task_id: str) -> list[str]:
     return chain
 
 
-def _heartbeat_gaps(events_path: Path) -> list[dict[str, Any]]:
-    stamps = []
+def _events_path(audit_dir: Path, store: RunStore, task_id: str) -> Path:
+    """The ingested copy; R1 D8: before ingest (an active run) the live stream
+    ``current_events`` reads."""
+    copy = audit_dir / task_id / "events.ndjson"
+    record = store.get_run(task_id)
+    if copy.exists() or record is None or not record.workspace:
+        return copy
+    return Path(record.workspace) / ".events" / f"{task_id}.ndjson"
+
+
+def _stamp(raw: Any) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)  # R1 D8: naive reads as UTC
+
+
+def _heartbeat_gaps(events_path: Path, *, active: bool) -> list[dict[str, Any]]:
+    """Silences over GAP_SECONDS between events — and, for a run still going,
+    since the last one (``to: now``)."""
+    gaps: list[dict[str, Any]] = []
+    last: tuple[datetime, str] | None = None
     for event in _json_lines(events_path):
-        try:
-            stamps.append((datetime.fromisoformat(str(event.get("ts"))), str(event.get("ts"))))
-        except ValueError:
+        stamp = _stamp(event.get("ts"))
+        if stamp is None:
             continue
-    return [
-        {"from": a[1], "to": b[1], "seconds": round((b[0] - a[0]).total_seconds(), 1)}
-        for a, b in pairwise(stamps)
-        if (b[0] - a[0]).total_seconds() > GAP_SECONDS
-    ]
+        if last is not None and (stamp - last[0]).total_seconds() > GAP_SECONDS:
+            seconds = round((stamp - last[0]).total_seconds(), 1)
+            gaps.append({"from": last[1], "to": str(event["ts"]), "seconds": seconds})
+        last = (stamp, str(event["ts"]))
+    if active and last is not None:
+        silence = (datetime.now(UTC) - last[0]).total_seconds()
+        if silence > GAP_SECONDS:
+            gaps.append({"from": last[1], "to": "now", "seconds": round(silence, 1)})
+    return gaps
+
+
+def _policy_blocks(events_path: Path, task_id: str) -> list[dict[str, Any]]:
+    """R1 D3: a refusal the worker's own capability layer makes (the floor's
+    ``git push`` deny) is a command.result event, not a decisions.jsonl row."""
+    events = []
+    for raw in _json_lines(events_path):
+        if raw.get("type") != EventType.COMMAND_RESULT.value:
+            continue
+        try:
+            events.append(Event.model_validate(raw))
+        except ValidationError:
+            continue
+    return [{"task_id": task_id, **block} for block in policy_block_views(events)]
+
+
+def _sandbox_backend(profile: Path) -> str:
+    try:
+        with profile.open(encoding="utf-8", errors="replace") as lines:
+            return PROFILE_BACKENDS.get(lines.readline().strip(), UNKNOWN)
+    except FileNotFoundError:
+        return UNKNOWN
 
 
 def _commands_source(detail: str) -> str:
@@ -125,14 +189,23 @@ def _result(path: Path) -> dict[str, Any] | None:
     }
 
 
-def _delegation(task_json: Path) -> dict[str, Any]:
+def _dispatch_decision(audit_dir: Path, store: RunStore, task_id: str) -> dict[str, Any]:
+    """task.json's ``dispatch_decision``; the ``created`` transition holds the
+    same one when task.json is gone."""
     try:
-        task = json.loads(task_json.read_text(encoding="utf-8"))
+        task = json.loads((audit_dir / task_id / "task.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        created = next((d for s, d, _ in store.transitions_for(task_id) if s == "created"), None)
+        try:
+            task = json.loads(created or "{}")
+        except json.JSONDecodeError:
+            task = {}
     decision = task.get("dispatch_decision") if isinstance(task, dict) else None
-    delegation = decision.get("delegation") if isinstance(decision, dict) else None
-    return delegation if isinstance(delegation, dict) else {}
+    return decision if isinstance(decision, dict) else {}
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _project(transitions: list[dict[str, Any]]) -> str | None:
@@ -146,6 +219,8 @@ def _project(transitions: list[dict[str, Any]]) -> str | None:
 
 
 def _known(values: list[Any]) -> str:
+    # R1 D10: a row's ``project`` is the context dict: its name, never its repr
+    values = [(v.get("name") or v.get("project_id")) if isinstance(v, dict) else v for v in values]
     seen = sorted({str(v) for v in values if v})
     return ", ".join(seen) if seen else UNKNOWN
 
@@ -157,18 +232,22 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
     task_id = run["task_id"]
     audit = audit_dir / task_id
     chain = _resume_chain(store, task_id)
-    trail = [row for row in _all_decisions(audit_dir) if row.get("task_id") in chain]
+    trail = _chain_decisions(audit_dir, chain)
     own = [row for row in trail if row.get("task_id") == task_id]
-    delegation = _delegation(audit / "task.json")
+    dispatch = {tid: _dispatch_decision(audit_dir, store, tid) for tid in chain}
+    delegation = _dict(dispatch[task_id].get("delegation"))
+    chat_taint = _dict(dispatch[task_id].get("constraints")).get("chat_taint")
     transitions = [
         {"state": state, "detail": detail, "ts": ts}
         for state, detail, ts in store.transitions_for(task_id)
     ]
     project = _project(transitions)
+    # R1 D4: the whole chain's rows and dispatch decisions say "unlocked"
     unlocked = any(
-        row.get("actor") == UNLOCKED_ACTOR or str(row.get("rule_id", "")).startswith("unlocked:")
-        for row in own
-    )
+        row.get("actor") == UNLOCKED_ACTOR
+        or any(str(row.get(key) or "").startswith("unlocked") for key in ("layer", "decided_by"))
+        for row in trail
+    ) or any(d.get("reason") == "dispatch.auto_allowed.unlocked" for d in dispatch.values())
     reverify = store.reverification_for(task_id)
     report = {
         "task_id": task_id,
@@ -178,14 +257,18 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
             "project": project or _known([row.get("project") for row in own]),
             "engine": run["coding_engine"] or _known([row.get("engine") for row in own]),
             "caste": run["worker_kind"] or _known([row.get("caste") for row in own]),
-            "actor": _known([row.get("actor") for row in own]),
+            "actor": _known([row.get("actor") for row in trail]),
             "role": delegation.get("role") or _known([row.get("role") for row in own]),
             "delegation_chain": " -> ".join(delegation.get("chain") or []) or UNKNOWN,
             "schedule": store.schedule_for_task(task_id) or "none recorded",
             "execution_mode": run["execution_mode"],
-            "sandbox_backend": UNKNOWN,  # not recorded per run
+            "sandbox_backend": _sandbox_backend(audit / "sandbox.profile.sb"),
             "unlocked": "yes" if unlocked else UNKNOWN,
-            "taint": _known([bit for row in own for bit in row.get("taint") or []]),
+            "taint": _known(
+                chat_taint
+                if isinstance(chat_taint, list)
+                else [bit for row in own for bit in row.get("taint") or []]
+            ),
         },
         "outcome": {
             "state": run["state"],
@@ -198,7 +281,9 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 for t in transitions
                 if t["detail"] and any(alarm in t["detail"].lower() for alarm in ALARMS)
             ],
-            "heartbeat_gaps": _heartbeat_gaps(audit / "events.ndjson"),
+            "heartbeat_gaps": _heartbeat_gaps(
+                _events_path(audit_dir, store, task_id), active=run["state"] in ACTIVE
+            ),
             "g10": None
             if reverify is None
             else {
@@ -214,6 +299,11 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
         },
         "resume_chain": chain,
         "policy_trail": trail,
+        "policy_blocks": [
+            block
+            for tid in chain
+            for block in _policy_blocks(_events_path(audit_dir, store, tid), tid)
+        ],
         "worker": {
             "log_tail": _log_tail(audit / "worker.log"),
             "result": _result(audit / "result.json"),
@@ -225,9 +315,15 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
 
 def _log_tail(path: Path) -> list[str]:
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-LOG_TAIL_LINES:]
+        with path.open("rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            log.seek(max(0, size - LOG_TAIL_BYTES))
+            lines = log.read().decode("utf-8", errors="replace").splitlines()
     except FileNotFoundError:
         return []
+    if size > LOG_TAIL_BYTES:
+        lines = lines[1:]  # the window's first line may start mid-line
+    return lines[-LOG_TAIL_LINES:]
 
 
 def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
@@ -266,6 +362,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
         lines.append(
             f"{item}V1: tamper_flags={g10['tamper_flags']} test_counts={g10['test_counts']}"
         )
+        if g10["detail"]:
+            lines.append(f"{item}G10 detail: {g10['detail']}")
     lines.append(head(f"Policy trail (resume chain: {' -> '.join(report['resume_chain'])})"))
     lines += [
         f"{item}{row.get('at', '?')} {row.get('task_id')} {row.get('actor', '?')} "
@@ -273,7 +371,15 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
         f"{row.get('scope', '?')}.{row.get('action', '?')} "
         f"{row.get('value', '')!r} decided_by={row.get('decided_by', '?')}"
         for row in report["policy_trail"]
-    ] or [f"{item}no decision rows name this run"]
+    ]
+    lines += [
+        f"{item}BLOCKED {block['task_id']} worker {block['decision']['verdict']} "
+        f"{block['capability_id']} {block['command']!r} reason={block['decision']['reason']} "
+        f"decided_by={block['decision']['decided_by'] or '?'}: {block['detail']}"
+        for block in report["policy_blocks"]
+    ]
+    if not report["policy_trail"] and not report["policy_blocks"]:
+        lines.append(f"{item}no decision rows or worker refusals name this run")
     lines.append(head("Worker"))
     result = worker["result"]
     lines.append(

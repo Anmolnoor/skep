@@ -749,15 +749,19 @@ def cmd_run_forensics(args: argparse.Namespace) -> int:
     from fastapi import HTTPException
 
     from .forensics import build_run_forensics, render_forensics
+    from .store import StoreNeedsMigration
 
     if args.instructions is None:
         return _err("forensics needs a task id.", next_command="skep run forensics <task_id>")
     config = build_config(args.home, None)
-    store = RunStore(config.db_path, readonly=True)
+    try:  # R1 D2: strict — never a migration, never a WAL sidecar
+        store = RunStore(config.db_path, strict=True)
+    except StoreNeedsMigration as exc:
+        return _err(str(exc))
     try:
         report = build_run_forensics(store, config.audit_dir, args.instructions)
     except HTTPException as exc:
-        return _err(str(exc.detail), next_command="skep runs")
+        return _err(str(exc.detail), next_command="skep status --personal  # list recent task ids")
     finally:
         store.close()
     if args.json:
@@ -782,8 +786,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
     # Phase 02 2.2: the bare word `forensics` is the read verb, not a repo
-    # (a repo directory of that name is `./forensics`).
-    if args.template is None and str(args.repo) == "forensics":
+    # (a repo directory of that name is `./forensics`: R1 D6 keeps `repo` raw).
+    if args.template is None and args.repo == "forensics":
         return cmd_run_forensics(args)
     if args.md or args.json:
         return _err("--md/--json belong to `skep run forensics <task_id>`.")
@@ -3660,7 +3664,7 @@ def register_supervisor_commands(
         "--json", action="store_true", help="forensics: the report as JSON (= the REST body)"
     )
     # Optional so `run --template NAME [repo]` works; required (both) for inline runs.
-    run.add_argument("repo", type=Path, nargs="?", default=None)
+    run.add_argument("repo", nargs="?", default=None)  # raw: Path("./x") prints "x"
     run.add_argument("instructions", nargs="?", default=None)
     run.add_argument(
         "--template",
