@@ -4181,7 +4181,11 @@ def add_chat_routes(
                     "args": pending.args,
                     "description": tool_description(pending.tool),
                     "card": card_summary(
-                        pending.tool, pending.args, tool_description(pending.tool)
+                        pending.tool,
+                        pending.args,
+                        tool_description(pending.tool),
+                        store=run_store,
+                        recorded=pending.card or {},
                     ),
                     "already_pending": True,
                 }
@@ -4194,7 +4198,10 @@ def add_chat_routes(
             "tool": body.tool,
             "args": body.args,
             "description": tool_description(body.tool),
-            "card": card_summary(body.tool, body.args, tool_description(body.tool)),
+            # R1 G6: the store-backed card an assistant proposal gets (ChatEngine._card)
+            "card": card_summary(
+                body.tool, body.args, tool_description(body.tool), store=run_store
+            ),
         }
 
     def _resolve_command(chat_id: str, action_id: str, *, confirm: bool) -> dict[str, Any]:

@@ -1029,7 +1029,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             tail.stop()
 
     record = outcome.record
-    if record.state == "pending_approval":
+    # R1 G1 (I5, I6): only a run whose grants ARE the project's policy — the
+    # policy the unlocked step reloads. --minimal, start-minimal and an
+    # unbound template chose narrower grants and learn through approvals.
+    if record.state == "pending_approval" and resolved_policy is not None:
         record = _answer_unlocked_gates(config, record)
     elapsed = time.monotonic() - started
     print(f"task {record.task_id}")
@@ -1842,12 +1845,16 @@ def _answer_unlocked_gates(config: SupervisorConfig, record: RunRecord) -> RunRe
     try:
         holder = ConfigHolder(config, store)
         for _ in range(MAX_UNLOCKED_RESUMES):
-            approval = unlocked_gate_allowed(store, holder, record.task_id)
+            try:
+                approval = unlocked_gate_allowed(store, holder, record.task_id)
+            except (ValueError, OSError) as exc:  # R1 G3: a missing task.json
+                _err(f"unlocked: could not answer the gate: {exc}", state=record.state)
+                return record
             if approval is None or not store.claim_approval(approval.review_id):
                 return record
-            audit_task = config.audit_dir / record.task_id / "task.json"
-            original = CodingWorkerTask.model_validate_json(audit_task.read_text())
             try:
+                audit_task = config.audit_dir / record.task_id / "task.json"
+                original = CodingWorkerTask.model_validate_json(audit_task.read_text())
                 new = _run_claimed_resume(
                     config,
                     store,
@@ -1857,6 +1864,12 @@ def _answer_unlocked_gates(config: SupervisorConfig, record: RunRecord) -> RunRe
                     approval.review_id,
                     remembered=False,
                 )
+            except (ValueError, OSError) as exc:
+                # R1 G3: a refused resume (no auth env, engine absent, no
+                # task.json) is an answer, as on serve: the gate stays a card.
+                store.unclaim_approval(approval.review_id)
+                _err(f"unlocked: could not resume the gate: {exc}", state=record.state)
+                return record
             except BaseException:
                 store.unclaim_approval(approval.review_id)
                 raise
@@ -1928,6 +1941,12 @@ def _run_claimed_resume(
         # sandbox and silently moved a workspace run (ADR 0050 parity with
         # resume_past_gate, which already carries it).
         execution_mode=record.execution_mode,
+        # R1 G7 (I2): the audited run's pin, caste, protocol and engine — not
+        # run_task's defaults, which a template-bound pin never reaches.
+        worker_kind=original.worker_kind,
+        planning_protocol=original.planning_protocol,
+        verify_command=original.verify_command,
+        coding_engine=record.coding_engine or "",
         store=store,
     )
     # Resolve the original's approval, linking it to the resume it produced.
@@ -4112,8 +4131,8 @@ def register_supervisor_commands(
         action=argparse.BooleanOptionalAction,
         default=None,
         help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
-        "command asks answer themselves on serve-dispatched runs (never a host no rule "
-        "names), dispatch needs no card and a G10-confirmed patch "
+        "command asks answer themselves, on serve and on a foreground `skep run` alike "
+        "(never a host no rule names), dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",

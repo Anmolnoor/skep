@@ -556,7 +556,8 @@ def tamper_note(reverify: Any) -> str | None:
             f"{totals} — re-verification (G10) did NOT confirm it and skep will not land it "
             "by itself; review the test changes before any landing"
         )
-    if counts.get("status") == "unparseable":
+    if counts.get("status") == "unparseable" and reverify.outcome == "passed":
+        # R1 G9: a re-run that failed (a collection error) says that itself
         return (
             "TEST COUNTS UNREADABLE: the pinned pytest check's test counts could not be "
             "read, so auto-landing was blocked — review the patch before landing it by hand"
@@ -2799,6 +2800,11 @@ def approval_view(
         ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
+    if approval.status == "pending":  # R1 G6: the card's boundary, one classifier
+        from .cards import boundary
+
+        label, remedy = boundary("approve_review", {"review_id": approval.review_id}, store=store)
+        row.update({k: v for k, v in (("boundary", label), ("remediation", remedy)) if v})
     if project_context is not None:
         row["project_context"] = project_context
     decision = None
@@ -3924,6 +3930,12 @@ def resume_past_gate(
             resume_of=task_id,
             approval_verdict=verdict,
             execution_mode=str(run.get("execution_mode") or "sandbox"),
+            # R1 G7 (I2, ADR 0050 parity with the CLI): the audited run's pin,
+            # caste, protocol and engine — not the submit defaults.
+            worker_kind=original.worker_kind,
+            planning_protocol=original.planning_protocol,
+            verify_command=original.verify_command,
+            coding_engine=str(run.get("coding_engine") or ""),
         )
     except DispatchError as exc:
         store.unclaim_approval(review_id)
@@ -3992,7 +4004,8 @@ def unlocked_gate_allowed(
         (delegation or {}).get("role"),
         team=(delegation or {}).get("team"),
     )
-    for req in requests:
+    allowed = True
+    for req in requests:  # R1 G2 (I13): every request is decided and logged
         verdict = decide_v3(req, stack=stack, role=role, chain=chain, sandboxed=True)
         row = _decision_row(
             verdict,
@@ -4004,9 +4017,8 @@ def unlocked_gate_allowed(
         )
         row["task_id"] = task_id  # D34: the run's receipt lists what it reached
         log_decision(holder.current.audit_dir, row)
-        if verdict.verdict != "allow":
-            return None
-    return approval
+        allowed = allowed and verdict.verdict == "allow"
+    return approval if allowed else None
 
 
 def auto_answer_unlocked_gate(
