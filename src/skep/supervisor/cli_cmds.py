@@ -741,7 +741,39 @@ def _unique_template_name(store: RunStore, base: str) -> str:
     return name
 
 
+def cmd_run_forensics(args: argparse.Namespace) -> int:
+    """Phase 02 2.2: ``skep run forensics <task_id>`` — one run's evidence,
+    redacted, from ``build_run_forensics``, the read behind
+    ``GET /api/runs/<id>/forensics`` (ADR 0050). Read-only: the store opens
+    read-only and nothing is written."""
+    from fastapi import HTTPException
+
+    from .forensics import build_run_forensics, render_forensics
+
+    if args.instructions is None:
+        return _err("forensics needs a task id.", next_command="skep run forensics <task_id>")
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        report = build_run_forensics(store, config.audit_dir, args.instructions)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep runs")
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_forensics(report, markdown=args.md))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    # Phase 02 2.2: the bare word `forensics` is the read verb, not a repo
+    # (a repo directory of that name is `./forensics`).
+    if args.template is None and str(args.repo) == "forensics":
+        return cmd_run_forensics(args)
+    if args.md or args.json:
+        return _err("--md/--json belong to `skep run forensics <task_id>`.")
     note_retired_auto_approve(args)
     config = build_config(args.home, args.worker_cmd)
     matched_template: WorkflowTemplate | None = None
@@ -3236,12 +3268,18 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
 
 def cmd_policy_decisions(args: argparse.Namespace) -> int:
     """ADR 0054 A3: read decisions.jsonl back, newest first, with counts."""
-    from .serve.actions import policy_decisions
+    from .forensics import filtered_decisions
 
     config = build_config(args.home, None)
     try:
-        view = policy_decisions(
-            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit, team=args.team
+        view = filtered_decisions(
+            config.audit_dir,
+            task_id=args.task,
+            engine=args.engine,
+            actor=args.actor,
+            since=args.since,
+            limit=args.limit,
+            team=args.team,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -3588,7 +3626,18 @@ def cmd_agents(args: argparse.Namespace) -> int:
 def register_supervisor_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    run = subcommands.add_parser("run", help="run one coding task against a repo")
+    run = subcommands.add_parser(
+        "run",
+        help="run one coding task against a repo; `skep run forensics <task_id> "
+        "[--md|--json]` reports a run's evidence in one read",
+    )
+    report_format = run.add_mutually_exclusive_group()
+    report_format.add_argument(
+        "--md", action="store_true", help="forensics: a paste-ready Markdown bug report"
+    )
+    report_format.add_argument(
+        "--json", action="store_true", help="forensics: the report as JSON (= the REST body)"
+    )
     # Optional so `run --template NAME [repo]` works; required (both) for inline runs.
     run.add_argument("repo", type=Path, nargs="?", default=None)
     run.add_argument("instructions", nargs="?", default=None)
@@ -4357,6 +4406,8 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
     policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
     policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
+    policy_decisions.add_argument("--task", help="one run's rows (rows that name no task skip)")
+    policy_decisions.add_argument("--engine", help="one coding engine's rows, e.g. claude_code")
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     trust = subcommands.add_parser(
