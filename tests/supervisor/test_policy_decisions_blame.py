@@ -331,8 +331,10 @@ def test_a_blocked_audit_write_never_times_out_a_minted_dispatch(
     from skep.supervisor.serve import actions
 
     released = threading.Event()
+    writers: list[str] = []
 
     def blocked(*args: Any, **kwargs: Any) -> None:
+        writers.append(threading.current_thread().name)
         released.wait(5)
         real(*args, **kwargs)
 
@@ -348,6 +350,8 @@ def test_a_blocked_audit_write_never_times_out_a_minted_dispatch(
     (at_spawn,) = seen
     assert at_spawn and {r["task_id"] for r in at_spawn} == {"task-slow"}
     assert _no_duplicates(_dispatch_rows(home))
+    # R3 (Sol/Neon): only the dispatcher's pool thread writes — never the request
+    assert writers and all(name.startswith("serve-run") for name in writers), writers
 
 
 def test_a_decision_log_failure_never_fails_a_started_dispatch(

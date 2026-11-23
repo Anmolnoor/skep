@@ -1067,7 +1067,7 @@ _KEYED = (
                rf"({_QUOTED}|[^\s,;}})\]'\"]+)"),
     # A YAML plain key needs the space after ":" (so name:tag and host:port stay),
     # and its plain value runs to the line's end.
-    re.compile(rf"(?i)({_CRED_KEY}:[ \t]+{_NOT_SCHEME})"
+    re.compile(rf"(?i)({_CRED_KEY}[ \t]*:[ \t]+{_NOT_SCHEME})"
                rf"({_QUOTED}|[^\s,;}})\]'\"][^\n,;}})\]'\"]*)"),
 )  # fmt: skip
 

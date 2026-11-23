@@ -1192,6 +1192,8 @@ def test_l10_a_line_level_catastrophe_keeps_its_own_reason_on_the_run_lane() -> 
         '"client_secret":"CANARY-tight-3"',
         "api_key: CANARY-yaml-4",
         "  password: CANARY-yaml-5",
+        "password : CANARY-yaml-spaced",  # R3 (Sol): space before the colon
+        "api_key\t:\tCANARY-yaml-tab",
         'resp={"token": "CANARY-6", "authorization": "Basic CANARY-7"}',
         "github_token=CANARY-8 next",
         '{"secret": "with \\" quote CANARY-9"}',

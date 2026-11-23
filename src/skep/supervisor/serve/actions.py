@@ -5085,7 +5085,10 @@ def submit_run(
     except Exception:
         record(None)  # refused before the dispatcher took it: no run will come
         raise
-    record(task_id, wait=False)  # a runner that never called back; else a no-op
+    # R3 (Sol/Neon): the Dispatcher always calls back itself — on its pool
+    # thread, never this request's — so only another runner needs a fallback.
+    if not isinstance(runner, Dispatcher):
+        record(task_id, wait=False)
     return task_id
 
 
