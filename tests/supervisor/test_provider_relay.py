@@ -429,7 +429,8 @@ def test_doctor_says_whether_workers_hold_the_key_and_that_engines_are_not_relay
     report = format_doctor_report(build_status(config.home.parent, provider_timeout=0.1))
     (line,) = [ln for ln in report.splitlines() if ln.startswith("- provider key relay:")]
     assert line.startswith("- " + expected), line
-    assert "claude_code, codex, aider and pi authenticate from their own auth env" in line
+    engines = "claude_code, codex, aider, pi, acp:claude-agent-acp and acp:codex-acp"
+    assert f"{engines} authenticate from their own auth env" in line  # ADR 0058: ACP too
     assert os.environ["SKEP_TEST_RELAY_KEY"] not in report
 
 

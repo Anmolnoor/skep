@@ -4231,6 +4231,11 @@ def add_chat_routes(
                 raise card_taken(run_store, action_id)
             tool = action.tool if confirm else "deny_review"
             args = action.args if confirm else {"review_id": str(action.args.get("review_id", ""))}
+            if action.tool == actions.ACP_PERMISSION_TOOL:  # ADR 0058: the engine's ask, no review
+                tool, args = (
+                    action.tool,
+                    {**action.args, "answer": "allow" if confirm else "reject"},
+                )
             status = "confirmed" if confirm else "denied"
             try:
                 result = execute_mutation(

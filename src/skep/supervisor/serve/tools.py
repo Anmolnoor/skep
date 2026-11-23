@@ -4580,6 +4580,10 @@ def _execute_mutation(
     chat_id: str | None = None,
     preanswered: dict[str, Any] | None = None,
 ) -> Any:
+    if name == actions.ACP_PERMISSION_TOOL:
+        # ADR 0058 D3: nothing runs here — the waiting ACP engine reads the
+        # card's verdict (confirmed / denied) and answers its agent.
+        return {"answer": args.get("answer", "allow"), "task_id": args.get("task_id")}
     if name == "search_web":
         # P4-1: a taint card the operator confirmed (chat.py cards search_web
         # only for a taint ask) — the human's OK answers the ask; a deny that

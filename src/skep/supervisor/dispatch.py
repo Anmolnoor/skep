@@ -53,6 +53,8 @@ from skep.worker_contract import (
     ProjectContextPayload,
     TaskIntent,
     TaskState,
+    Verification,
+    VerificationOutcome,
     merge_approval_grants,
 )
 
@@ -218,6 +220,7 @@ _RESUMABLE_CRASH_STATES = (TaskState.WORKER_CRASHED.value, TaskState.WORKER_TIME
 # across the 2026-08-03 acceptance arc), and no checkpoint ever exists for it.
 # The single source of truth for "resumable" — serve/actions imports this.
 RESUMABLE_STATES = (*_RESUMABLE_CRASH_STATES, TaskState.FAILED.value)
+_ACP_DOWNGRADABLE = (TaskState.COMPLETED, TaskState.FAILED)
 
 # v107-F1: preserved worktrees are evidence and warm workspaces, not tenure.
 # After the TTL the ticker sweep collects them; resuming a run re-activates
@@ -462,6 +465,7 @@ def run_task(
     # CODING implementation only.
     from .engines import (
         CODING_ENGINES,
+        acp_adapter,
         engine_available,
         external_agent_for_command,
         resolve_engine,
@@ -510,6 +514,8 @@ def run_task(
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    # ADR 0058: an ACP engine's adapter runs in the sandbox; its governor here.
+    adapter = acp_adapter(engine) if worker_argv is not None else None
     codex_auth: str | None = None  # ES-F122: set only when the plan login is used
     run_login: Path | None = None
     coerced_mode: str | None = None
@@ -1029,6 +1035,7 @@ def run_task(
                 unmasked=() if run_login is None else (run_login,),
                 relay=relay if proxy is not None else None,
                 read_allowlist=read_allowlist,  # ADR 0068, as recorded above
+                stdio_pipes=adapter is not None,
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the
@@ -1051,6 +1058,19 @@ def run_task(
         if proxy_unix_path is not None:
             running_detail += f" proxy socket {proxy_unix_path}"
         run_store.transition(task.task_id, "running", running_detail)
+        acp = None
+        if adapter is not None:
+            # ADR 0058 (Phase 04 4.1): the governor and the ACP client, outside
+            # the wall, on the worker's pipes. ``walled``: the adapter runs in
+            # the sandbox this dispatch verified above — the one fact that lets
+            # its decisions be ``sandboxed`` (never the standalone face's).
+            from ..workers.acp import AcpEngine
+            from .serve.settings import ConfigHolder
+
+            acp = AcpEngine(
+                process, holder=ConfigHolder(config, run_store), store=run_store, task=task,
+                adapter=adapter, walled=execution_mode == "sandbox" and config.sandbox,
+            )  # fmt: skip
 
         verdict = watch_worker(
             process,
@@ -1066,6 +1086,17 @@ def run_task(
         )
 
         result = _run_result(run_store, task.task_id, result_path)
+        acp_failure = acp.finish() if acp is not None else None
+        if acp_failure and result is not None and result.status in _ACP_DOWNGRADABLE:
+            # I8/I9: the session's own failure (no asking mode, an adapter
+            # error) is the run's — the worker inside only saw the agent exit.
+            result = result.model_copy(update={
+                "status": TaskState.FAILED,
+                "summary": f"{engine.name}: {acp_failure}",
+                "verification": Verification(
+                    outcome=VerificationOutcome.FAILED, details=f"skep acp: {acp_failure}"
+                ),
+            })  # fmt: skip
 
         outcome = ingest_run(
             store=run_store,

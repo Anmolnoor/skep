@@ -740,7 +740,10 @@ def decide(
     every face can ask what read_url asks (V1).
 
     ``sandboxed`` (ADR 0061) is a fact about the request: a worker inside
-    the sandbox walls raised it (only the worker-gate auto-answer says so).
+    the sandbox walls raised it. Two callers say so: the worker-gate
+    auto-answer, and the ACP engine's governor (ADR 0058,
+    ``actions.acp_engine_decide``) for an adapter dispatch launched behind
+    the wall — that governor runs outside it.
     On an unlocked project's run lane, the default asks of such a shell
     request — unmatched, or a catch-all ``*`` ask — are answered ``allow``
     (never a network host, D42) labelled
@@ -748,7 +751,8 @@ def decide(
     and before the role, the delegation cap and taint, which all still
     apply — except a role's catch-all ``*`` ask, which that allow answers
     like a human's grant (D46), for the run's role and every delegator.
-    REST, the CLI, the hook and ACP never pass it."""
+    REST, the CLI, the hook and the standalone ``skep acp govern`` (an IDE's
+    agent on the bare host) never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")

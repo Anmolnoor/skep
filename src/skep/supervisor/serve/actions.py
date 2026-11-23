@@ -4075,6 +4075,136 @@ def unlocked_gate_allowed(
     return approval if allowed else None
 
 
+ACP_PERMISSION_TOOL = "acp_permission"
+ACP_TIMEOUT_ACTOR = "auto:card-timeout"
+
+
+def _outside_wall(
+    task: CodingWorkerTask, item: tuple[str, str, str], cwd: str, client_side: bool
+) -> str | None:
+    """ADR 0058 (I9, I12): why the running wall would refuse ``item`` whatever
+    policy says, or None. Everything here is the supervisor's — the run's
+    worktree and the hosts its proxy was started with — never an adapter's
+    claim. Answering such an ask "allow" would be a lie the sandbox then
+    refuses; answering it with a card would ask a human for something that
+    cannot happen. Neither widens the running sandbox."""
+    from ..netproxy import domain_allowed
+    from ..policy_paths import workspace_value
+    from ..spawner import effective_network_domains
+
+    scope, _action, value = item
+    if client_side:
+        return (
+            "the engine's ACP client runs no tools: one run for the agent would run on "
+            "this host, outside the run's sandbox (I12) — the agent runs it itself, inside"
+        )
+    worktree = task.workspace
+    if scope == "filesystem" and value != "workspace":
+        return (
+            f"{value} is outside this run's worktree — the sandbox lets the agent write only "
+            "there, so an approval could not take effect (I9)"
+        )
+    if scope == "shell" and cwd and workspace_value(cwd, worktree) != "workspace":
+        return (
+            f"the agent named cwd {cwd}, outside this run's worktree — the sandbox lets it "
+            "work only there, so an approval could not take effect (I9)"
+        )
+    hosts = effective_network_domains(task)
+    if scope == "network" and not (
+        domain_allowed(value, hosts) or domain_allowed(value, hosts, port=443)
+    ):
+        return (
+            f"{value} is not among this run's network hosts ({', '.join(hosts) or 'none'}): "
+            "its proxy would refuse it, so skep refuses the ask instead of approving what "
+            "cannot happen (I9) — add the host to the project's network policy and dispatch "
+            "again"
+        )
+    return None
+
+
+def acp_engine_decide(
+    holder: ConfigHolder,
+    store: RunStore,
+    task: CodingWorkerTask,
+    item: tuple[str, str, str],
+    *,
+    actor: str,
+    cwd: str,
+    ring: Literal["advisory", "hard"],
+    tool_call_id: str | None,
+    client_side: bool,
+    walled: bool,
+) -> dict[str, Any]:
+    """ADR 0058 (Phase 04 4.1): one ACP frame of a dispatched run, decided
+    outside its sandbox and recorded with the run's blame and the tool call.
+
+    Bound to the run, never to the adapter: the stack is the run's repo, the
+    role and chain its delegation's. ``sandboxed`` (ADR 0061) is True only
+    when dispatch launched the adapter behind the wall (``walled``) and the
+    run is its own unlocked project's (the R3 rule ``unlocked_gate_allowed``
+    keeps) — the one decide() caller besides the worker-gate auto-answer
+    that may say so; REST, the CLI, the hook and standalone ``skep acp
+    govern`` never do. A verdict the wall would refuse anyway is recorded as
+    the wall's deny with the reason (``_outside_wall``)."""
+    run = store.get_run(task.task_id)
+    repo = str(run.repo) if run is not None else None
+    stack = load_stack(holder, store, repo=repo)
+    delegation = _delegation_of(task)
+    chain, role = delegation_inputs(
+        holder,
+        (delegation or {}).get("chain") or (),
+        (delegation or {}).get("role"),
+        team=(delegation or {}).get("team"),
+    )
+    own = task.project_context is not None and task.project_context.project_id == stack.unlocked
+    sandboxed = walled and own and run is not None and run.execution_mode == "sandbox"
+    req = Request(*item)
+    verdict = decide_v3(req, stack=stack, role=role, chain=chain, face=ring, sandboxed=sandboxed)
+    wall = None if verdict.verdict == "deny" else _outside_wall(task, item, cwd, client_side)
+    if wall is not None:
+        rule = "client-side" if client_side else "outside-wall"
+        verdict = Verdict("deny", "wall", rule, f"wall/{rule}", verdict.source, wall)
+    row = _decision_row(
+        verdict, stack, actor=actor, repo=repo, req=item, role=role, task_id=task.task_id,
+        engine=run.coding_engine if run else None, caste=task.worker_kind,
+    )  # fmt: skip
+    if tool_call_id:
+        row["tool_call_id"] = tool_call_id
+    log_decision(holder.current.audit_dir, row)
+    return row
+
+
+def propose_acp_permission(
+    store: RunStore, task: CodingWorkerTask, ask: dict[str, Any], *, chat_id: str | None
+) -> str:
+    """ADR 0058 D3: an ask the governor could not decide becomes the run's
+    approval card — ``source='gate'``: a run waits on it, like a worker gate,
+    and it resolves on the commands faces (chat card + REST, ADR 0050).
+    The dispatching chat holds it; a run no chat started gets its own."""
+    if chat_id is None or store.get_chat(chat_id) is None:
+        chat_id = store.create_chat(
+            title=f"ACP asks · run {task.task_id[:8]}", model=None, source="acp",
+            role=ROLE_LESS_CHAT_ROLE,
+        ).chat_id  # fmt: skip
+    from .cards import boundary
+
+    args = {"task_id": task.task_id, **ask}
+    label, _ = boundary(ACP_PERMISSION_TOOL, args, store=store)
+    return store.add_chat_action(
+        chat_id, tool=ACP_PERMISSION_TOOL, args=args, source="gate", card={"boundary": label}
+    )
+
+
+def expire_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
+    """I6: an unanswered card is denied — claimed first, so a human's
+    confirm already running wins and this one loses (False)."""
+    if not store.claim_chat_action(action_id):
+        return False
+    payload = {"ok": False, "denied": True, "note": note, "auto": True}
+    store.resolve_chat_action(action_id, status="denied", result=payload, claimed=True)
+    return True
+
+
 def auto_answer_unlocked_gate(
     store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
 ) -> str | None:
