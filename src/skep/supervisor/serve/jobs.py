@@ -79,17 +79,25 @@ class Dispatcher:
         planning_protocol: str = "plan",
         verify_command: str = "",
         coding_engine: str = "",
+        on_created: Callable[[str | None], None] | None = None,
     ) -> str:
         """Dispatch a run in the background; return its task id once minted.
 
         Raises ``DispatchError`` if the run dies before ``create_run`` (bad
         repo, worktree failure) or no id appears within the timeout.
+
+        ``on_created`` (review R1, I13) is called exactly once, on the pool
+        thread: with the id right after ``create_run``, before the worker
+        spawns — or with None once the dispatch ended without a run, even
+        after a timeout. It must not raise.
         """
         created = threading.Event()
         box: dict[str, str] = {}
 
         def _on_created(task_id: str) -> None:
             box["task_id"] = task_id
+            if on_created is not None:
+                on_created(task_id)
             created.set()
 
         future = self._pool.submit(
@@ -120,6 +128,8 @@ class Dispatcher:
         # Wake on whichever comes first: the id callback, or the run failing
         # before it ever created a row.
         def _done(_future: Any) -> None:
+            if on_created is not None and "task_id" not in box:
+                on_created(None)
             created.set()
             callback = self.on_run_finished
             if callback is not None and "task_id" in box:
