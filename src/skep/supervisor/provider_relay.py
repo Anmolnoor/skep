@@ -134,22 +134,25 @@ def provider_relay_for_run(
 
 
 def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | None, str, str]:
-    plan, why = relay_plan(config.home.parent)
+    from .providers import provider_host
+    from .serve.llm_copilot import COPILOT_HOST, copilot_sources
+
+    with copilot_sources() as exchanged:
+        plan, why = relay_plan(config.home.parent)
     if plan is None:
         return None, "", f"not used: {why}"
     endpoint, protocol, key, model = plan
     token = relay_token(config.home, task_id)
-    from .providers import provider_host
-    from .serve.llm_copilot import COPILOT_HOST, copilot_github_token
 
     renew = None
     sources: tuple[str, ...] = ()
     if provider_host(endpoint) == COPILOT_HOST:
         renew = functools.partial(_renewed_copilot_key, config.home.parent, endpoint)
         # Phase 03 review E1 (I8): the GitHub token the bearer came from is a
-        # key too; spawn_worker drops both from the worker env. None: ``key``
-        # was never exchanged, so it is the token itself.
-        github_token = copilot_github_token(key)
+        # key too; spawn_worker drops both from the worker env. Captured as
+        # the bearer was resolved (R2 M5), not looked up in the shared cache.
+        # None: ``key`` was never exchanged, so it is the token itself.
+        github_token = exchanged.get(key)
         sources = (github_token,) if github_token else ()
     relay = ProviderRelay(
         upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew, sources=sources

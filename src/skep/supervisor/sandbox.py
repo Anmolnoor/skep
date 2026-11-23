@@ -42,7 +42,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .. import landlock
-from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
+from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, alias_key, other_homes
 from .store import RETIRED_STORE_FILES
 
 logger = logging.getLogger(__name__)
@@ -287,14 +287,21 @@ def _strict_candidates(
 
 
 def _etc_reserved(real: Path) -> bool:
-    """/etc itself or one of its hidden entries: binding either reopens them."""
-    etc = Path("/etc")
-    return real == etc or any(real.is_relative_to(etc / name) for name in _ETC_HIDDEN)
+    """/etc itself or one of its hidden entries, by either OS's list and
+    every spelling macOS opens it by (/private/etc, case, the data volume):
+    binding either reopens them."""
+    key, etc = alias_key(real), alias_key(Path("/etc").resolve())
+    return key == etc or any(key.is_relative_to(etc / name) for name in _ALL_ETC_HIDDEN)
+
+
+def _over(real: Path, inner: Path) -> bool:
+    """``real`` is ``inner`` or above it, by any spelling APFS opens."""
+    return alias_key(inner).is_relative_to(alias_key(real))
 
 
 def _detected_root_ok(real: Path, home: Path) -> bool:
     """W2/W11: never the home or above it, never /etc's reserved entries."""
-    return not home.is_relative_to(real) and not _etc_reserved(real)
+    return not _over(real, home) and not _etc_reserved(real)
 
 
 def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
@@ -304,12 +311,12 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
     real = Path(path).resolve()
     home = Path.home().resolve()
     skep = skep_home.resolve()
-    if home.is_relative_to(real):
+    if _over(real, home):
         return (
             f"{path} resolves to {real}, at or above the home {home}: that reopens every file "
             f"strict reads close. Name a subdirectory instead, e.g. {home / 'datasets'}"
         )
-    if real.is_relative_to(skep) or skep.is_relative_to(real):
+    if _over(skep, real) or _over(real, skep):
         return (
             f"{path} resolves to {real}, in or over the skep home {skep} (other runs' "
             "worktrees, results and audit trails). Name a directory outside it"
@@ -317,7 +324,7 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
     if _etc_reserved(real):
         return (
             f"{path} resolves to {real}: /etc comes back without "
-            f"{', '.join(sorted(_ETC_HIDDEN))}, and no extra path reopens them"
+            f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them"
         )
     return None
 
@@ -362,11 +369,15 @@ _SEATBELT_SYSTEM_ROOTS = (
     "/private/var/select", "/private/var/db/timezone", "/private/var/run/resolv.conf",
 )  # fmt: skip
 _SEATBELT_ETC_HIDDEN = ("master.passwd", "sudoers", "sudoers.d", "ssh", "kcpassword")
+_ALL_ETC_HIDDEN = _ETC_HIDDEN | set(_SEATBELT_ETC_HIDDEN)
+# M8: Homebrew's (Apple silicon, Intel) local databases and service state,
+# under roots reopened whole; masked last with the /etc entries.
+_HOMEBREW_VAR = ("/opt/homebrew/var", "/usr/local/var")
 # /usr/bin/git is xcrun's shim: it runs git from the selected developer dir
 _XCODE_SELECT_LINKS = ("/private/var/select/developer_dir", "/private/var/db/xcode_select_link")
 
 
-def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
+def _seatbelt_read_rules(roots: Iterable[Path], listed: Iterable[Path] = ()) -> list[str]:
     """ADR 0068: deny every read, then reopen macOS's system roots, the
     developer dir (the whole Xcode.app: xcrun stats its Info.plist) and
     ``roots``; metadata alone on each one's ancestors, so getcwd/realpath
@@ -374,12 +385,16 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
     /tmp link spelling (libc stats /etc/localtime's /var/db/timezone target
     by that name). ``/`` itself is read whole: dyld aborts every process
     without it. A denied path is ENOENT, as under bwrap's empty root — git
-    dies on an EPERM ~/.gitconfig, not on a missing one."""
+    dies on an EPERM ~/.gitconfig, not on a missing one. ``listed``: dirs
+    read as themselves only (their entries' names), never below.
+    /System/Volumes is closed again last (M4): /System reopened it, with the
+    data volume's entries no firmlink maps back to the root."""
     allowed = [Path(root) for root in _SEATBELT_SYSTEM_ROOTS]
     for link in _XCODE_SELECT_LINKS:
         if os.path.islink(link):
             dev = Path(link).resolve()
-            allowed.append(dev.parents[1] if dev.parent.name == "Contents" else dev)
+            # M10: the link itself too — xcrun reads the selection through it
+            allowed += [Path(link), dev.parents[1] if dev.parent.name == "Contents" else dev]
     allowed += [Path(root).resolve() for root in roots]
     allowed = list(dict.fromkeys(allowed))
     links = [
@@ -398,10 +413,14 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
         ("file-read-metadata", "literal", ancestors),
         ("file-read-metadata", "subpath", links),
         ("file-read*", "subpath", allowed),
+        ("file-read*", "literal", [Path(path) for path in listed]),
     ):
         if paths:  # an allow with no filter would reopen every path
             filters = " ".join(f'({kind} "{_sbpl_quote(path)}")' for path in paths)
             rules.append(f"(allow {ops} file-test-existence {filters})")
+    rules.append(
+        '(deny file-read* file-test-existence (subpath "/System/Volumes") (with errno ENOENT))'
+    )
     return rules
 
 
@@ -1181,12 +1200,14 @@ def build_profile(
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
+    read_listed: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
     ``read_allowlist`` (ADR 0068): None keeps reads open but ``read_denied``;
     otherwise reads are confined to macOS's system roots, the writable roots
-    and these (``_seatbelt_read_rules``), with ``read_denied`` still last.
+    and these (``_seatbelt_read_rules``), with ``read_denied`` still last;
+    ``read_listed`` dirs can be listed, not read below.
 
     Last-matching-rule-wins SBPL: ``allow default`` keeps reads/exec/IPC working,
     then network is denied (deny-all) and writes are denied everywhere and
@@ -1200,6 +1221,13 @@ def build_profile(
     lines = [
         "(version 1)",
         "(allow default)",
+        # M9: no process outside the wall — LaunchServices (`open`, an app or
+        # a .command), launchd jobs, Apple events (`tell application
+        # "Terminal" to do script`) — and no Spotlight name/content queries.
+        "(deny lsopen)",
+        "(deny job-creation)",
+        "(deny appleevent-send)",
+        '(deny mach-lookup (global-name "com.apple.metadata.mds"))',
         # ES-F4 (B05) + D6: serve's port never opens, even when a project lists
         # it — dropped from the allows (the loopback deny covers it), never a
         # trailing per-port deny (see _network_rules).
@@ -1219,7 +1247,7 @@ def build_profile(
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
     if read_allowlist is not None:
-        lines += _seatbelt_read_rules([*roots, *read_allowlist])
+        lines += _seatbelt_read_rules([*roots, *read_allowlist], read_listed)
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
@@ -1377,14 +1405,21 @@ def write_profile(
     if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
         live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
         read_denied = list(dict.fromkeys([*read_denied, *live]))
-    strict_roots = None
+    strict_roots, listed = None, []
     if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
         strict_roots = [
             *strict_read_roots(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist),
             *extra_readable,
             *unmasked,  # still masked but for the literal allow after the masks
         ]
-        read_denied = [*read_denied, *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN)]
+        read_denied = [
+            *read_denied,
+            *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN),
+            *map(Path, _HOMEBREW_VAR),
+        ]
+        from .worktree import git_refs_dir
+
+        listed = [refs] if (refs := git_refs_dir(workspace)) else []
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(
@@ -1398,6 +1433,7 @@ def write_profile(
             loopback_ports=loopback_ports,
             unmasked=unmasked,
             read_allowlist=strict_roots,
+            read_listed=listed,
         )
     )
     return profile_path

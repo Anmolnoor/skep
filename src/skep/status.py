@@ -1137,10 +1137,15 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     if plan is None:
         return {"on": True, "relayed": False, "label": f"on, not used — {why}{not_relayed}"}
     # E3 (I8): the guarantee is the wall's, not the provider plan's alone.
+    # R2 M6: and dispatch's — the runs it keeps direct (dispatch.py) are named.
     label = (
-        f"on — sandboxed builtin workers reach {plan[1]} through their run's relay and hold "
-        "no key; an unsandboxed (workspace-mode) run can still read the key file, and the "
-        "ollama worker (skep.workers.ollama) dials its own endpoint with the daemon secret"
+        f"on — a sandboxed builtin worker reaches {plan[1]} through its run's relay and "
+        "holds no key, except on the runs dispatch keeps on the direct path, whose worker "
+        "holds the key (its record says `not used`): an allow-all run on the podman "
+        "backend (a strict-read run takes bubblewrap and is relayed) and a run with no "
+        "network. An unsandboxed (workspace-mode) run is relayed but can still read the "
+        "key file, and the ollama worker (skep.workers.ollama) dials its own endpoint "
+        "with the daemon secret"
     )
     return {"on": True, "relayed": True, "label": label + not_relayed}
 

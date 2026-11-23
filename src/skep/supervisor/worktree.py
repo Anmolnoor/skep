@@ -185,6 +185,17 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def git_refs_dir(workspace: Path) -> Path | None:
+    """The shared ``refs/`` a linked worktree's git lists to enumerate
+    branches and tags (``for-each-ref``, ``branch``). The roots above bind
+    its entries, never the dir: bwrap makes the dir to mount them in, but
+    Seatbelt left it metadata-only and git enumerated nothing, silently. The
+    Seatbelt wall lets the run list it — names only; ``refs/stash`` stays
+    unreadable. None outside a linked worktree (its refs are in the workspace)."""
+    dirs = _git_dirs(workspace)
+    return None if dirs is None or dirs[0] == dirs[1] else dirs[1] / "refs"
+
+
 _COMMON_DIR_PRIVATE = frozenset(
     {"worktrees", "objects", "index", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD"}
 )
