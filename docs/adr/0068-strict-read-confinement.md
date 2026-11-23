@@ -48,7 +48,11 @@ readable. A denylist cannot keep up with every place a person keeps files.
      - from the skep home, the files the builtin worker reads:
        `profile.json` and `worker_plugins/`. The store and the worker's own
        LLM key are added only for an LLM-calling worker that holds its key
-       (no relay).
+       (no relay). Each of these skep-home roots, `tools/.venvs` included, is
+       bound only where it sits in the home: one reached through a link of
+       its own or a linked parent (a `worker_plugins` linked to `~/Downloads`)
+       is dropped, with a warning in the serve log. A relocated plugin shelf
+       is named in `extra_read_paths`, which are judged.
      - the operator's `extra_read_paths`.
      - the worker command's own files: each absolute, existing, non-link file
        in the operator's `--worker-cmd` / `SKEP_WORKER_CMD` argv (its script),
@@ -82,13 +86,22 @@ readable. A denylist cannot keep up with every place a person keeps files.
 2. **G10 runs inside the same wall.** Dispatch resolves the wall once, from
    the project the run already resolved (its `project_context` binding
    first, so a project bound by template name alone counts), and records it
-   on the run's `dispatched` line as `read_allowlist` (the extra paths; the
-   key is absent for a denylist-only run). `reverify_run`, live or after a
-   restart, reads that record and never the policy again, so a policy edit
-   between the worker and its re-verify cannot widen G10's reads. The
-   baseline prime, the patched prime and the verify command all get the
-   strict profile. A patch is never re-verified with wider reads than its
-   worker had.
+   on the run's `dispatched` line as `read_allowlist`: the extra paths'
+   resolved targets, each judged by `extra_read_path_problem` first (a link
+   that now points at the home refuses the run as `sandbox_unavailable`).
+   The key is absent for a denylist-only run. A worker that had no wall
+   (workspace mode, or the sandbox off) records the same list as
+   `g10_read_allowlist` instead, so its record never claims a wall its
+   worker did not have (I8); G10 still re-runs that patch inside the
+   project's wall, narrower than what the worker read. `reverify_run`, live
+   or after a restart, reads that record and never the policy again, and
+   binds exactly those targets: one that is now a link, or no longer
+   resolves to itself (a parent swapped for a link), makes G10
+   `unavailable`, naming the path and where it leads, and nothing runs. So
+   neither a policy edit nor a retargeted link between the worker and its
+   re-verify widens G10's reads. The baseline prime, the patched prime and
+   the verify command all get the strict profile. A patch is never
+   re-verified with wider reads than its worker had.
 3. **Fail closed.** `write_profile(read_allowlist=…)` on a backend outside
    `STRICT_READ_BACKENDS` raises `SandboxUnavailableError`, naming the fix,
    rather than running with open reads. Today that is only an explicit
@@ -263,6 +276,9 @@ in the worker wall. The same tests run on Linux against bubblewrap.
 - A toolchain outside the detected list needs `extra_read_paths`. The
   detected toolchains are not walked for unix sockets (`~/.rustup` alone is
   tens of thousands of files); the operator's extra paths are.
+- G10 checks the recorded targets once, when it starts. Bubblewrap binds by
+  path, so a target swapped for a link while that G10 is still running
+  would be followed.
 - A root reached through a linked parent dir keeps only its resolved name.
   On Fedora Atomic, for example, `$HOME` is normally `/var/home/<user>`
   already, so this rarely matters.

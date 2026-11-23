@@ -1114,11 +1114,20 @@ def reverify(
 
 
 def _recorded_read_wall(store: RunStore, task_id: str) -> tuple[Path, ...] | None:
-    """The ``read_allowlist`` a run's ``dispatched`` line recorded (ADR 0068):
-    None for a run that read denylist-only."""
+    """The wall a run's ``dispatched`` line recorded (ADR 0068): its worker's
+    ``read_allowlist``, or (G3) ``g10_read_allowlist`` for a worker that had
+    no wall; None for a run that read denylist-only."""
     detail = next((d for st, d, _ in store.transitions_for(task_id) if st == "dispatched"), None)
-    recorded = json.loads(detail or "{}").get("read_allowlist")
+    fields = json.loads(detail or "{}")
+    recorded = fields.get("read_allowlist", fields.get("g10_read_allowlist"))
     return None if recorded is None else tuple(Path(path) for path in recorded)
+
+
+def _moved_read_roots(paths: tuple[Path, ...]) -> list[Path]:
+    """G1: recorded targets that are a link now, or no longer resolve to
+    themselves (a parent swapped for a link) — binding one would read
+    whatever it points at today, not what the worker read."""
+    return [path for path in paths if path.is_symlink() or os.path.realpath(path) != str(path)]
 
 
 def reverify_run(
@@ -1149,30 +1158,31 @@ def reverify_run(
     commands = [pinned] if pinned else verification_commands_from_events(store.events_for(task_id))
     commands_source = "project" if pinned else "worker"
 
+    def unavailable(detail: str) -> ReverifyOutcome:
+        outcome = ReverifyOutcome(
+            "unavailable", commands, [], detail, commands_source=commands_source
+        )
+        store.record_reverification(
+            task_id,
+            outcome=outcome.outcome,
+            worker_outcome=worker_outcome,
+            confirmed=False,
+            commands=outcome.commands,
+            exit_codes=outcome.exit_codes,
+            detail=outcome.detail,
+        )
+        return outcome
+
     profile_path: Path | None = None
     if config.sandbox:
         if not sandbox.available():
             # ES-F1 (B47, I12): the patch is the worker's code; running its
             # verify on the bare host is exactly what the wall is for.
-            outcome = ReverifyOutcome(
-                "unavailable",
-                commands,
-                [],
+            return unavailable(
                 f"sandbox unavailable ({sandbox.availability().reason}) — the patch's "
                 "verify command was not run unconfined on the host; fix the backend "
-                "(`skep doctor`) and re-verify",
-                commands_source=commands_source,
+                "(`skep doctor`) and re-verify"
             )
-            store.record_reverification(
-                task_id,
-                outcome=outcome.outcome,
-                worker_outcome=worker_outcome,
-                confirmed=False,
-                commands=outcome.commands,
-                exit_codes=outcome.exit_codes,
-                detail=outcome.detail,
-            )
-            return outcome
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
 
     # v109-F4: prime against a per-project cache, so the resolve work one
@@ -1184,6 +1194,14 @@ def reverify_run(
     # recorded it — never re-resolved, so a policy edit since (or a project
     # the repo lookup cannot find) never widens G10's reads past the worker's.
     read_allowlist = _recorded_read_wall(store, task_id) if profile_path is not None else None
+    if moved := _moved_read_roots(read_allowlist or ()):
+        # G1 (I12): G10 binds exactly the targets dispatch resolved, or nothing.
+        return unavailable(
+            "extra_read_paths: the run's recorded read wall no longer resolves to itself: "
+            + ", ".join(f"{path} now leads to {os.path.realpath(path)}" for path in moved)
+            + " — binding it would read past the wall the worker had, so the "
+            "verification command was not run; re-dispatch the run to re-verify it"
+        )
 
     # v127-A0 review (council round 3, I2): re-verify's own half of the
     # project root — the worker's sandbox mounts only ``worker/``, so nothing

@@ -220,6 +220,13 @@ def read_allowlist_for(policy: Mapping[str, Any]) -> tuple[Path, ...] | None:
     return tuple(Path(path) for path in policy.get("extra_read_paths") or ())
 
 
+def resolved_read_allowlist(paths: Iterable[Path], skep_home: Path) -> tuple[Path, ...]:
+    """ADR 0068 (G1): each extra path judged, then resolved ONCE at dispatch.
+    The run records these targets, so a link the operator retargets later
+    never moves the wall G10 builds. Refuses like ``write_profile`` does."""
+    return tuple(path.resolve() for path in _validated_extra(paths, skep_home))
+
+
 def strict_read_roots(
     skep_home: Path, *, worker_llm_key: bool = False, extra: Iterable[Path] = ()
 ) -> list[Path]:
@@ -232,11 +239,29 @@ def strict_read_roots(
     its own LLM key only with ``worker_llm_key``) and the operator's
     ``extra_read_paths``. Resolved, existing paths only. A detected root at
     or above the home, on /etc's reserved entries, or (a per-user toolchain)
-    itself a link, is dropped; an extra path at or above the home, in or over
+    itself a link, is dropped, as is a skep-home root reached through a link
+    (G2); an extra path at or above the home, in or over
     the skep home, or on /etc's reserved entries refuses the run
     (``extra_read_path_problem``). The secret masks still land after every one."""
     roots = _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=extra)
     return list(dict.fromkeys(path.resolve() for path in roots))
+
+
+def _in_place(path: Path, skep_home: Path) -> bool:
+    """G2: a skep-home root is bound only where it sits in the home, never
+    through a link of its own or a linked parent — a ``worker_plugins``
+    linked to ~/Downloads would bind the downloads, past every broad-root
+    check. A relocated shelf is named in ``extra_read_paths``, which are."""
+    real = skep_home.resolve() / path.relative_to(skep_home)
+    if os.path.realpath(real) == str(real):
+        return True
+    logger.warning(
+        "strict reads: %s is reached through a link (to %s), so it is not bound; name the "
+        "target in the project's extra_read_paths if the run needs it",
+        path,
+        os.path.realpath(real),
+    )
+    return False
 
 
 def _strict_candidates(
@@ -256,11 +281,8 @@ def _strict_candidates(
         *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
     ]
     toolchains = [
-        skep_home / "tools" / ".venvs",
-        *(
-            Path(os.environ.get(env) or home / rel) if env else home / rel
-            for env, rel in _HOME_TOOLCHAINS
-        ),
+        Path(os.environ.get(env) or home / rel) if env else home / rel
+        for env, rel in _HOME_TOOLCHAINS
     ]
     for root in toolchains:
         # W2: bound where it is, never through a link of its own — a
@@ -276,10 +298,11 @@ def _strict_candidates(
         else:
             detected.append(root)
     supervisor = skep_home / "supervisor"
-    own = [skep_home / "profile.json", skep_home / "worker_plugins"]
+    own = [skep_home / "profile.json", skep_home / "worker_plugins", skep_home / "tools" / ".venvs"]
     if worker_llm_key:
         names = (*_LIVE_STORE_FILES, "llm-secret", *_active_llm_key_names(supervisor))
         own += [supervisor / name for name in names]
+    own = [path for path in own if _in_place(path, skep_home)]
     extra = _validated_extra(extra, skep_home)
     detected = [Path(os.path.abspath(root)) for root in detected]
     roots = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own, *extra]

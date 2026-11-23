@@ -329,16 +329,17 @@ def test_detected_roots_on_etc_s_reserved_entries_are_dropped(
     "value", [["/a/.."], ["//"], ["/etc"], ["/etc/ssh/sshd_config"], ["HOME"], ["HOME/.."]]
 )
 def test_setup_refuses_an_extra_read_path_that_reopens_the_wall(
-    value: list[str], fake_home: Path
+    value: list[str], fake_home: Path, skep_home: Path
 ) -> None:
     from skep.supervisor.projects import validate_project_policy
 
     paths = [path.replace("HOME", str(fake_home)) for path in value]
     with pytest.raises(ValueError, match="extra_read_paths") as err:
-        validate_project_policy({"extra_read_paths": paths})
+        validate_project_policy({"extra_read_paths": paths}, skep_home=skep_home)
     if value[0].startswith("HOME"):
         assert "subdirectory" in str(err.value)
-    assert validate_project_policy({"extra_read_paths": [str(fake_home / "datasets")]})
+    ok = {"extra_read_paths": [str(fake_home / "datasets")]}
+    assert validate_project_policy(ok, skep_home=skep_home)
 
 
 @needs_bwrap

@@ -213,22 +213,23 @@ def require_loopback_ports(value: object) -> list[int]:
     return sorted(set(value))
 
 
-def _require_extra_read_paths(value: object) -> list[str]:
-    """ADR 0068: absolute paths, never ``/`` (that is no allowlist at all),
-    nor at/above the home, in the skep home, or on /etc's reserved entries
-    (W2, judged where each resolves now). Each is resolved and judged again at
-    every run, symlinks included (sandbox.py) — the refusal that holds."""
+def _require_extra_read_paths(value: object, skep_home: Path | None) -> list[str]:
+    """ADR 0068: absolute paths, never ``/`` (that is no allowlist at all);
+    with the caller's skep home (G4: the daemon's own, never a SKEP_HOME
+    guess), nor at/above the home, in the skep home, or on /etc's reserved
+    entries (W2, judged where each resolves now). Every project write passes
+    a home (the store does), and each path is judged again at every run
+    (sandbox.py) — the refusal that holds."""
     from .sandbox import extra_read_path_problem
 
     paths = _require_string_list(value, field="extra_read_paths")
-    skep_home = Path(os.environ.get("SKEP_HOME") or Path.home() / ".skep")
     for path in paths:
         if not path.startswith("/") or os.path.normpath(path) in ("/", "//"):
             raise ValueError(
                 f"extra_read_paths entries must be absolute paths other than /, got {path!r} "
                 "— name the directories a strict-read run needs, e.g. ['/srv/datasets']"
             )
-        if problem := extra_read_path_problem(Path(path), skep_home):
+        if skep_home is not None and (problem := extra_read_path_problem(Path(path), skep_home)):
             raise ValueError(f"extra_read_paths: {problem}")
     return paths
 
@@ -268,7 +269,9 @@ def validate_project_binding(binding: ProjectBinding) -> ProjectBinding:
     return ProjectBinding(kind=kind, value=value)
 
 
-def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
+def validate_project_policy(
+    policy: dict[str, Any], *, skep_home: Path | None = None
+) -> dict[str, Any]:
     unknown_policy_keys = sorted(set(policy) - PROJECT_POLICY_KEYS)
     if unknown_policy_keys:
         raise ValueError(
@@ -307,7 +310,9 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
     if "extra_read_paths" in normalized:
-        normalized["extra_read_paths"] = _require_extra_read_paths(normalized["extra_read_paths"])
+        normalized["extra_read_paths"] = _require_extra_read_paths(
+            normalized["extra_read_paths"], skep_home
+        )
     if normalized.get("auto_apply_branch") is not None:
         normalized["auto_apply_branch"] = _require_auto_apply_branch(
             normalized["auto_apply_branch"]
@@ -467,6 +472,7 @@ def validate_project_definition(
     bindings: list[ProjectBinding],
     pack_name: str | None = None,
     pack_version: str | None = None,
+    skep_home: Path | None = None,
 ) -> ProjectDefinition:
     project_id = project_id.strip()
     name = name.strip()
@@ -480,7 +486,7 @@ def validate_project_definition(
         )
     if phase not in PROJECT_PHASES:
         raise ValueError(f"phase must be one of {sorted(PROJECT_PHASES)!r}, got {phase!r}")
-    normalized_policy = validate_project_policy(policy)
+    normalized_policy = validate_project_policy(policy, skep_home=skep_home)
     seen: set[tuple[str, str]] = set()
     normalized: list[ProjectBinding] = []
     for binding in bindings:

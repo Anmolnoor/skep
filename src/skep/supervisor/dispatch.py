@@ -88,6 +88,7 @@ from .sandbox import (
     SandboxUnavailableError,
     in_wall_tmp_env,
     read_allowlist_for,
+    resolved_read_allowlist,
 )
 from .sandbox import availability as sandbox_availability
 from .secret_floor import CODEX_RUN_LOGIN
@@ -862,9 +863,16 @@ def run_task(
         # ADR 0068 (W1): the read wall, resolved once from the run's project
         # and recorded — G10 reads THIS, never the policy again, so a policy
         # edit between the worker and its re-verify cannot widen G10's reads.
+        # G1: the extra paths' resolved targets, judged first: a link the
+        # operator retargets later never moves the wall.
         read_allowlist = read_allowlist_for(
             _project_policy(run_store, config, repo, project_context)
         )
+        if read_allowlist is not None:
+            try:
+                read_allowlist = resolved_read_allowlist(read_allowlist, config.home.parent)
+            except SandboxUnavailableError as exc:
+                return finish_before_worker(reason="sandbox_unavailable", summary=str(exc))
         # ADR 0062 (V6b): with the switch on, a builtin worker's model calls
         # go through a relay route on this same proxy, which holds the key.
         # An allow-all run gets a relay-only proxy (empty allowlist): it
@@ -944,7 +952,12 @@ def run_task(
         if coerced_mode is not None:
             dispatched_fields["execution_mode_coerced"] = coerced_mode
         if read_allowlist is not None:
-            dispatched_fields["read_allowlist"] = [str(path) for path in read_allowlist]
+            # G3 (I8): ``read_allowlist`` is the worker's wall, so only a
+            # worker that had one records it. A workspace run (or the sandbox
+            # off) read the whole disk; G10 still keeps the project's wall.
+            walled = execution_mode == "sandbox" and config.sandbox
+            field = "read_allowlist" if walled else "g10_read_allowlist"
+            dispatched_fields[field] = [str(path) for path in read_allowlist]
         dispatched_detail = (
             json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )

@@ -1292,6 +1292,7 @@ def setup_project_record(
             bindings=bindings,
             pack_name=None if pack is None else pack.name,
             pack_version=None if pack is None else pack.version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1473,6 +1474,7 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
             bindings=list(project.bindings),
             pack_name=project.pack_name,
             pack_version=project.pack_version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1570,6 +1572,7 @@ def preview_project_setup(
             bindings=bindings,
             pack_name=None if pack is None else pack.name,
             pack_version=None if pack is None else pack.version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2090,6 +2093,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 ],
                 pack_name=body.pack_name,
                 pack_version=body.pack_version,
+                skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
