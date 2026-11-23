@@ -3194,3 +3194,36 @@ Everything merged since 1.5.0 (#116–#119):
   live thinking/working status; the channel deck gains `/stop`, `/btw`,
   `/approve`, `/deny`, `/compact`, `/usage` and `/model`, with command menus
   generated from it; Telegram photos reach the model.
+
+## v1.6.1 — fewer questions by default, and the holes they could open closed (2026-11-22)
+
+Everything merged since 1.6.0 (#121–#122):
+
+- **v131 (#121):** onboarding defaults the policy template to `builder`
+  (the role follows the template), and interactive `skep onboard` offers once, per eligible folder,
+  to work without asking there (`--unlocked` on the CLI, the "Work without
+  asking" row on the web). An unlocked project also answers its role's
+  catch-all ask for eligible sandboxed worker requests; launcher, interpreter
+  and wrapper-shell lines keep their gate when an automatic grant would widen
+  a binding rule (ADR 0061 D46, D47). The default confirmation-card timeout is
+  now 24 hours instead of five minutes; cards that mirror a worker gate are
+  exempt (ADR 0032 D48).
+- **v132 (#122):** bug fixes from a two-model review. Unlocked mode never
+  auto-answers a worker's network host gate. A call classified as
+  `email.send` asks once when policy permits it (an explicit deny still
+  refuses without a card), and a send approval can never be remembered.
+  Adding a new folder binding through project setup turns an existing unlock
+  off unless the operator renews it, and concurrent setups are serialized by
+  a per-home lock. A new Claude Code or Codex dispatch, including
+  `skep run --minimal --engine`, refuses a missing or known-vacuous verify
+  command and gets the engine's declared env; recovery prefers the verify
+  command recorded on the task and falls back to project policy. Project-bound
+  scheduled runs use the project's own engine, verify command, landing branch
+  and planning protocol. A project registered by repo name binds only its
+  managed clone. `skep project set-phase` keeps the settings the operator set
+  outside the phase's control; phase-owned settings are re-derived and the
+  unlock is turned off. Project setup skips seeded schedules the operator
+  deleted. `skep review` shows the landing branch or any recorded auto-landing
+  block reason. A worker artifact with a reserved supervisor
+  audit filename is refused, and a Telegram photo captioned `/update` no
+  longer triggers an update.
