@@ -19,7 +19,7 @@ from skep.supervisor.serve.settings import ConfigHolder
 
 from .test_delegation import _dispatch
 from .test_role_policy import _home
-from .test_unlocked_mode import UNLOCKED, _bound, lock_baseline
+from .test_unlocked_mode import UNLOCKED, _bound, _own_project, lock_baseline
 
 BLAME = ("task_id", "engine", "caste")
 
@@ -40,6 +40,8 @@ def test_a_gated_unlocked_runs_rows_carry_task_engine_and_caste(
     store = _bound(config, repo, UNLOCKED)
     try:
         task = mint_task(workspace=repo, instructions="gate", worker_kind="coding")
+        # phase-01 R3 (H2): only a run of the repo's own unlocked project self-answers
+        task = task.model_copy(update={"project_context": _own_project(repo)})
         store.create_run(
             task, repo=repo.resolve(), ref=None, execution_mode="sandbox", coding_engine="codex"
         )
