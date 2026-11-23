@@ -213,7 +213,7 @@ def test_the_token_is_per_run_stable_and_its_secret_is_masked_from_workers(
     assert stat.S_IMODE(os.stat(secret).st_mode) == 0o600
 
 
-def test_the_kill_switch_is_off_by_default_and_set_like_every_policy_field(
+def test_the_kill_switch_is_on_by_default_and_set_like_every_policy_field(
     tmp_path: Path,
 ) -> None:
     from fastapi import HTTPException
@@ -226,9 +226,11 @@ def test_the_kill_switch_is_off_by_default_and_set_like_every_policy_field(
     config = SupervisorConfig(home=tmp_path / "home" / "supervisor", worker_command=("true",))
     store = RunStore(config.db_path)
     holder = ConfigHolder(config, store)
-    assert policy_view(store, holder.current)["provider_key_relay"] is False
-    assert update_policy(store, holder, {"provider_key_relay": True})["provider_key_relay"]
-    assert store.get_setting("provider_key_relay") is True
+    assert policy_view(store, holder.current)["provider_key_relay"] is True
+    assert (
+        update_policy(store, holder, {"provider_key_relay": False})["provider_key_relay"] is False
+    )
+    assert store.get_setting("provider_key_relay") is False
     with pytest.raises(HTTPException):
         update_policy(store, holder, {"provider_key_relay": "yes"})
     store.close()
@@ -374,6 +376,7 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
     store = RunStore(config.db_path)
     try:
         task = mint_task(workspace=tmp_path, instructions="x")
+        store.set_setting("provider_key_relay", False)  # the kill switch (ON by default)
         assert provider_relay_for_run(store, config, task, builtin=builtin)[2] == "off"
         store.set_setting("provider_key_relay", True)
         relay, _model, got = provider_relay_for_run(store, config, task, builtin=builtin)

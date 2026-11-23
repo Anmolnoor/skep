@@ -50,7 +50,7 @@ SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"; O3: |
 # P1 (ADR 0053 D6): the per-scope kill switch — scopes routed through engine v2.
 POLICY_ENGINE_V2_SCOPES = "policy_engine_v2_scopes"
 # ADR 0062 (V6b): the provider-key relay's kill switch; off = the worker holds
-# the key as before.
+# the key as before. ON by default since 2026-11-23 (provider_key_relay_enabled).
 PROVIDER_KEY_RELAY = "provider_key_relay"
 # first-run O5 (ADR 0056 D2): when the store seeded a home that did not exist.
 FRESH_HOME_SEEDED_AT = "fresh_home_seeded_at"
@@ -60,6 +60,14 @@ FRESH_HOME_SEEDED_AT = "fresh_home_seeded_at"
 # still gets the native backend when the host has one — never weaker); what
 # changes is the baseline onboard locks: allow-writes become asks.
 SANDBOX_BACKENDS = ("auto", "podman", "none")
+
+
+def provider_key_relay_enabled(store: RunStore | None) -> bool:
+    """ADR 0062 (delta 2026-11-23): the ONE read of the relay switch — the
+    settings view, dispatch and doctor all call it. ON unless the operator
+    stored an explicit ``False`` (the kill switch); a home with no store yet,
+    an unset key or a malformed value all read ON, the side holding no key."""
+    return store is None or store.get_setting(PROVIDER_KEY_RELAY) is not False
 
 
 def engine_v2_scopes_from(raw: object) -> list[str]:
@@ -236,7 +244,7 @@ def policy_view(store: RunStore, config: SupervisorConfig) -> dict[str, Any]:
         ),
         "sandbox_backend": config.sandbox_backend,
         "policy_engine_v2_scopes": engine_v2_scopes_from(settings.get(POLICY_ENGINE_V2_SCOPES)),
-        "provider_key_relay": settings.get(PROVIDER_KEY_RELAY) is True,
+        "provider_key_relay": provider_key_relay_enabled(store),
     }
 
 

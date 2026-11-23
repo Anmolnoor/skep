@@ -1,7 +1,8 @@
 # ADR 0062 — the provider-key relay: the worker never holds the provider key
 
 **Status:** accepted (operator decision D28), delivered as a strangler behind
-the `provider_key_relay` kill switch, **default OFF**.
+the `provider_key_relay` kill switch, **default OFF** — **default ON since
+2026-11-23** (see the delta at the end).
 **Related:** ADR 0011 (network proxy), ADR 0019 (the llm-secret exception to
 G2), ADR 0047 (CLI agent engines), ADR 0050 (one verb, three faces), ADR 0051
 (provider shelf, per-profile keys), ADR 0059 D3 (V6a `provider_hosts`; this
@@ -92,7 +93,8 @@ supervisor recomputes it without storing it anywhere (section 7).
 
 ### 3. Kill switch
 
-`provider_key_relay` (bool, default false), a global knob set like every
+`provider_key_relay` (bool, default false; default true since the 2026-11-23
+delta), a global knob set like every
 other supervisor setting: `PUT /api/policy`, the chat `set_policy` card, the
 web UI, and listed in the policy registry. Dispatch reads it from the store
 for each run, so `skep run` and serve obey the same switch. OFF is exactly
@@ -195,3 +197,57 @@ is deleted only then, which is when this door becomes one-way.
 - A worker can still spend the operator's quota through the relay, at its own
   provider, within its budget. That was true with the key; what it can no
   longer do is take the key away.
+
+## Delta 2026-11-23 — default ON through one resolver (master plan Phase 03, 3.1)
+
+**Decision.** The relay is ON by default. The switch is read in one place,
+`serve.settings.provider_key_relay_enabled(store)`: ON unless the operator
+stored an explicit `false`. An unset key, a malformed value and a home with no
+store yet all read ON, the side where the worker holds no key. Every face
+calls it and nothing else: the settings view (`policy_view`, behind
+`GET /api/policy`, the web UI and the policy tree), dispatch
+(`provider_relay_for_run`, so `skep run`, serve and the scheduler agree), and
+`skep doctor` (`_provider_key_relay_check`). The policy registry lists the
+knob with `default: true`. `provider_key_relay: false` (`PUT /api/policy`, the
+chat `set_policy` card, the UI) is the documented kill switch, and OFF is still
+exactly the path before this ADR, its dispatched line unchanged.
+
+**The gate it rides on.** Section 4's parity gate now also sends a reply
+streamed piece by piece (flushed, no Content-Length) and the provider's own
+401 and 429 (the client's retries included) for all four relayed protocols;
+the worker sees the same chunks, status and words, and the provider the same
+requests, through the relay as direct. The full suite is green with the
+default ON.
+
+**Masking, as built.** A relayed run's worker gets no B125 carve-out
+(`spawn_worker` passes `worker_llm_key=False`), so `sandbox.secret_paths`
+masks every `llm-secret*` file, `relay-secret`, and the live store, and the
+key is dropped from the worker env by value. The store half supersedes this
+ADR's consequence that "supervisor.sqlite3 stays readable": v127-F6 masked it
+for relayed runs, and a relayed worker reads its provider from
+`SKEP_PROVIDER_RELAY`, not the store. Proved on the real wall by
+`tests/supervisor/test_provider_relay_default.py` (Seatbelt or bubblewrap,
+whichever the host has; the kill switch is its control and the same probe sees
+the key) and `test_provider_relay_bwrap.py` (bubblewrap).
+
+**Honest scope (I8).** The relay covers builtin worker castes that call a
+model, with a keyed, non-bedrock provider, on a run with network that is not
+podman allow-all; every other run's line says why it was not used. A
+`worker_cmd` running the first-party ollama adapter (`skep.workers.ollama`) is
+not relayed either: its `SKEP_OLLAMA_URL` override (the operator's, or provider
+routing's) dials that endpoint itself with the daemon secret, which a relayed
+run masks, so it keeps the old path and its line says so. It covers
+**no external engine**, API-key ones included: nothing routes claude_code,
+codex, aider or pi through it yet (section 5's follow-up, each behind its own
+parity pass). Their credentials reach the run as before:
+`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` for claude_code,
+`OPENAI_API_KEY` or the opted-in ChatGPT login copy (ES-F122) for codex, the
+operator's own config for aider and pi. Their dispatched line says
+`"auth": "external-env"` whatever the switch says, next to the
+`provider_key_relay` note, and `skep doctor` names each engine's credential as
+`auth: external-env, not relayed`. With the default ON, every other dispatched
+line carries the `provider_key_relay` note (`on`, or `not used: <why>`).
+
+**Unchanged.** The old path (key files readable to unrelayed LLM castes,
+`api_key_env` passthrough) stays until the default has run through the
+dogfood period; deleting it is still the one-way step.

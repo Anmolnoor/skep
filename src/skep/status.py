@@ -1103,23 +1103,35 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     engines the relay does not cover. Names and protocols only, never a key."""
     from skep.supervisor.engines import CODING_ENGINES
     from skep.supervisor.provider_relay import relay_plan
-    from skep.supervisor.serve.settings import PROVIDER_KEY_RELAY
+    from skep.supervisor.serve import settings
 
     from .supervisor.store import RunStore
 
     external = [name for name, engine in CODING_ENGINES.items() if engine.external]
     engines = ", ".join(external[:-1]) + f" and {external[-1]}" if len(external) > 1 else ""
-    not_relayed = f"; {engines} authenticate from their own auth env (not relayed)"
+    # ADR 0062 delta (I8): name each engine's own credential — OAuth tokens
+    # and the ChatGPT login included — so nobody reads them as relayed.
+    auth = ", ".join(
+        f"{e.name} {'/'.join(e.auth_env)}" + (" or its ChatGPT login" if e.login_host else "")
+        for e in CODING_ENGINES.values()
+        if e.external and e.auth_env
+    )
+    not_relayed = (
+        f"; {engines} authenticate from their own auth env "
+        f"(auth: external-env, not relayed: {auth})"
+    )
     db = home / "supervisor" / "supervisor.sqlite3"
-    on = False
-    if db.is_file():
-        store = RunStore(db, readonly=True)
-        try:
-            on = store.get_setting(PROVIDER_KEY_RELAY) is True
-        finally:
+    store = RunStore(db, readonly=True) if db.is_file() else None
+    try:
+        on = settings.provider_key_relay_enabled(store)
+    finally:
+        if store is not None:
             store.close()
     if not on:
-        label = "off — builtin workers hold the provider key (set provider_key_relay to relay it)"
+        label = (
+            "off — builtin workers hold the provider key (the kill switch is set: "
+            "set provider_key_relay to true to relay it)"
+        )
         return {"on": False, "relayed": False, "label": label + not_relayed}
     plan, why = relay_plan(home)
     if plan is None:
