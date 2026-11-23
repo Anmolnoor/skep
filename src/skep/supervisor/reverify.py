@@ -877,12 +877,24 @@ def reverify(
             # ignored file removed except the primed environments the
             # patched run needs and the re-verify scratch dir.
             shutil.rmtree(baseline_tmp)
-            subprocess.run(["git", "-C", str(worktree), "checkout", "-q", "--", "."], check=False)
-            subprocess.run(
+            reset = subprocess.run(
+                ["git", "-C", str(worktree), "checkout", "-q", "--", "."], check=False
+            )
+            cleaned = subprocess.run(
                 ["git", "-C", str(worktree), "clean", "-ffdxq"]
                 + [f"--exclude={keep}" for keep in _BASELINE_KEEP],
                 check=False,
             )
+            if reset.returncode or cleaned.returncode:
+                # Review R2 (Terra): a tree git could not reset is not a clean
+                # baseline for the patched run — confirm nothing (I2).
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    "the baseline test run left files git could not clean up, so the "
+                    "patched run would not start from a clean tree; not re-verified",
+                )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
             capture_output=True,

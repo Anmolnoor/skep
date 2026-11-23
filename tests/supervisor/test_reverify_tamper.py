@@ -437,6 +437,28 @@ def test_what_the_baseline_run_leaves_behind_never_reaches_the_patched_run(
     assert record.confirmed is False and approved is None
 
 
+def test_a_baseline_git_cannot_clean_confirms_nothing(repo: Path, config: SupervisorConfig) -> None:
+    """Review R2 (Terra, I2): when git cannot remove what the baseline wrote,
+    the patched run would not start from a clean tree — nothing is confirmed."""
+    locker = (
+        "import os\nfrom pathlib import Path\n\n\n"
+        "def test_lock():\n"
+        "    d = Path('stuck')\n"
+        "    d.mkdir(exist_ok=True)\n"
+        "    (d / 'f').write_text('x')\n"
+        "    os.chmod(d, 0o500)\n"
+    )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_lock.py").write_text(locker)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "lock")
+    patch = _patch(repo, "stuck", lambda r: (r / "existing.py").write_text("value = 1\n"))
+    outcome, record, approved, _ = _run(repo, config, patch)
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "could not clean up" in outcome.detail
+    assert record.confirmed is False and approved is None
+
+
 def test_a_printed_second_summary_fails_closed(repo: Path, config: SupervisorConfig) -> None:
     """F2: a fake summary printed after pytest's own (an atexit hook) can't
     stand in for the real counts — two summaries are unreadable."""
