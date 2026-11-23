@@ -28,6 +28,7 @@ from skep.worker_contract import Event
 
 from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
+from ..forensics import build_run_forensics, filtered_decisions
 from ..store import RunStore
 from .actions import (
     allow_network_host_and_resume,
@@ -61,7 +62,6 @@ from .actions import (
     pending_approval_or_409,
     policy_block_views,
     policy_decide,
-    policy_decisions,
     policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
@@ -933,11 +933,20 @@ def create_app(
         since: str | None = None,
         limit: int = 200,
         team: str | None = None,
+        task_id: str | None = None,
+        engine: str | None = None,
     ) -> dict[str, Any]:
-        """ADR 0054 A3: decisions.jsonl read back — what the governed agents did."""
+        """ADR 0054 A3: decisions.jsonl read back — what the governed agents did.
+        Phase 02 2.2: ``task_id``/``engine`` narrow it, as `--task`/`--engine` do."""
         try:
-            return policy_decisions(
-                holder.current.audit_dir, actor=actor, since=since, limit=limit, team=team
+            return filtered_decisions(
+                holder.current.audit_dir,
+                task_id=task_id,
+                engine=engine,
+                actor=actor,
+                since=since,
+                limit=limit,
+                team=team,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1352,6 +1361,11 @@ def create_app(
                 continue
             terminal_seen = False
             time.sleep(sse_poll_seconds)
+
+    @app.get("/api/runs/{task_id}/forensics")
+    def run_forensics(task_id: str) -> dict[str, Any]:
+        """Phase 02 2.2: the `skep run forensics --json` report (ADR 0050)."""
+        return build_run_forensics(run_store, holder.current.audit_dir, task_id)
 
     @app.get("/api/runs/{task_id}/events")
     def run_events(task_id: str, stream: int = 0) -> Any:
