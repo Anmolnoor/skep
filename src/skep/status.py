@@ -859,8 +859,8 @@ def _repo_registry_advisories(home: Path) -> list[str]:
         )
     if paused:
         advisories.append(
-            f"{len(paused)} schedule(s) on an external coding engine are paused rather than "
-            f"run unconfined: {'; '.join(paused)}"
+            f"{len(paused)} schedule(s) on an external coding engine are paused until all five "
+            f"external-engine gates hold: {'; '.join(paused)}"
         )
     if provider_blocked:
         advisories.append(

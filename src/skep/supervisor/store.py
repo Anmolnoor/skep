@@ -2565,6 +2565,10 @@ class RunStore:
         cursor = self._conn.execute(
             "UPDATE schedules SET enabled = ? WHERE name = ?", (1 if enabled else 0, name)
         )
+        if enabled:  # Phase 04 review R1: a resumed schedule owes no old reason
+            self._conn.execute(
+                "UPDATE schedule_health SET disabled_reason = NULL WHERE name = ?", (name,)
+            )
         self._conn.commit()
         return cursor.rowcount > 0
 

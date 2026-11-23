@@ -17,6 +17,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -25,9 +26,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-from skep.worker_contract import Permissions
+from skep.worker_contract import Budget, Permissions
 
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
 from .castes import CASTES, RETIRED_CASTES
@@ -37,7 +38,7 @@ from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
 from .engines import (
     CODING_ENGINES,
-    engine_available,
+    CodingEngine,
     external_agent_for_command,
     resolve_engine,
 )
@@ -60,6 +61,7 @@ from .store import (
     PROVIDER_BLOCKED_STATE,
     SCHEDULE_SUCCESS_STATES,
     UNKNOWN_TAINT_ORIGIN,
+    ChatTaint,
     RunStore,
     ScheduleRecord,
 )
@@ -444,17 +446,17 @@ def _schedule_dispatch_decision(
     )
 
 
-def _with_chat_taint(
-    store: RunStore, schedule: ScheduleRecord, decision: AutonomyDecision
-) -> AutonomyDecision:
+def _with_chat_taint(taint: ChatTaint | None, decision: AutonomyDecision) -> AutonomyDecision:
     """v126-F11: a tick of a schedule a chat created carries that chat's
     CURRENT taint bits (``constraints.chat_taint``), as a live dispatch from
     the chat does (ADR 0059 D5) — so the run card shows them on every tick,
     not only on the card that created the schedule. A chat that is gone
-    counts as both bits (get_chat_taint fails closed; v126-F11 review)."""
-    if not schedule.chat_id:
+    counts as both bits (get_chat_taint fails closed; v126-F11 review).
+    ``taint``: the tick's one snapshot (None: no chat), the same one the
+    untrusted refusal read (Phase 04 review R1)."""
+    if taint is None:
         return decision
-    bits = store.get_chat_taint(schedule.chat_id).bits()
+    bits = taint.bits()
     if not bits:
         return decision
     return replace(decision, constraints={**(decision.constraints or {}), "chat_taint": bits})
@@ -860,17 +862,23 @@ def _refusal_row(
     return row
 
 
-def _external_engine_pause(
+class _TickEngine(NamedTuple):
+    """The external agent a coding tick would launch, resolved once per tick."""
+
+    name: str
+    engine: CodingEngine
+    policy: dict[str, Any]
+    repo: Path
+
+
+def _tick_engine(
     store: RunStore, config: SupervisorConfig, schedule: ScheduleRecord
-) -> tuple[str, list[dict[str, Any]]] | None:
-    """Phase 04 4.2 (I1, I2, I4, I12): an external coding agent's own commands
-    never pass the capability layer (ADR 0047), so it runs unattended only
-    when ALL five gates hold — sandbox, strict_reads, verify_pin, engine_auth,
-    landing. Judged before the tick spends anything, on what run_task would
-    launch: the project's engine, or the agent a --worker-cmd runs (D36).
-    Returns the ``paused:`` state and one decisions row per closed gate, or
-    None (a builtin run, or every gate open). run_task's own refusals stay
-    the backstop for every other face."""
+) -> _TickEngine | None:
+    """Phase 04 4.2 (D36): the external agent a coding tick would launch —
+    the bound project's engine, else the agent a --worker-cmd runs — with the
+    policy it resolves under; None for skep's own worker (or no coding tick).
+    Resolved ONCE per tick (review R1): the five gates, the taint refusal and
+    their rows all name this engine."""
     live = _live_kind_and_repo(store, schedule)
     if live is None or live[0] != "coding":
         return None
@@ -884,13 +892,63 @@ def _external_engine_pause(
         or store.project_for_binding("repo_path", str(repo)) is not None
     )
     engine = resolve_engine(str(policy.get("coding_engine") or "") if bound else None)
-    name = engine.name
-    if not engine.external:
-        wrapped = external_agent_for_command(config.command_for("coding"))
-        if wrapped is None:
-            return None
-        name, engine = wrapped, CODING_ENGINES.get(wrapped, engine)
-    setup = f"skep project setup {shlex.quote(str(repo))}"
+    if engine.external:
+        return _TickEngine(engine.name, engine, policy, repo)
+    wrapped = external_agent_for_command(config.command_for("coding"))
+    if wrapped is None:
+        return None
+    return _TickEngine(wrapped, CODING_ENGINES.get(wrapped, engine), policy, repo)
+
+
+def _no_auth(tick: _TickEngine, seconds: int) -> str | None:
+    """Gate engine_auth's env half: the engine's auth env, or the opted-in
+    plan login held for ``seconds`` (run_task decides the same way)."""
+    engine = tick.engine
+    if not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env):
+        return None
+    if run_auth_source(engine.name, tick.policy, min_seconds=seconds) is not None:
+        return None
+    return (
+        f"NO AUTH ENV — set one of {'/'.join(engine.auth_env)} in the environment the daemon "
+        "inherits (<home>/serve.env, then restart it)"
+        + (f", or an opted-in plan login valid for the tick's whole {seconds}s" if seconds else "")
+    )
+
+
+def _paused(
+    schedule: ScheduleRecord, tick: _TickEngine, closed: list[tuple[str, str]]
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """The ``paused:`` state and one decisions row per closed gate, or None."""
+    if not closed:
+        return None
+    state = (
+        f"{PAUSED_STATE}: an unattended run on the external engine {tick.name!r} needs all five "
+        f"gates and {', '.join(gate for gate, _ in closed)} failed — "
+        + "; ".join(f"gate {gate}: {why}" for gate, why in closed)
+        + ". Fix it, then re-enable the schedule (chat: set_schedule_enabled; "
+        f"PATCH /api/schedules/{schedule.name})"
+    )
+    rows = [
+        _refusal_row(schedule, tick.repo, rule=gate, note=why, caste="coding", engine=tick.name)
+        for gate, why in closed
+    ]
+    return state, rows
+
+
+def _external_engine_pause(
+    config: SupervisorConfig, schedule: ScheduleRecord, tick: _TickEngine
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Phase 04 4.2 (I1, I2, I4, I12): an external coding agent's own commands
+    never pass the capability layer (ADR 0047), so it runs unattended only
+    when ALL five gates hold — sandbox, strict_reads, verify_pin, engine_auth,
+    landing. Judged before the tick spends anything (or the resolver refuses
+    a vacuous pin first), on the tick's effective engine; what only the
+    resolved run knows — its egress, its budget — is judged again on the
+    final dispatch path (_launch_pause). Returns the ``paused:`` state and one
+    decisions row per closed gate, or None. run_task's own refusals stay the
+    backstop for every other face."""
+    engine, policy = tick.engine, tick.policy
+    setup = f"skep project setup {shlex.quote(str(tick.repo))}"
     closed: list[tuple[str, str]] = []
     mode = policy.get("default_execution_mode")
     # A strict-read run launches the backend that can confine reads whatever
@@ -903,7 +961,12 @@ def _external_engine_pause(
             ("sandbox", f"the project's default_execution_mode is {mode or 'unset'}, not "
              f"sandbox — `{setup} --execution-mode sandbox`")
         )  # fmt: skip
-    elif not (config.sandbox and probe.usable):
+    elif not config.sandbox:
+        closed.append(
+            ("sandbox", "the sandbox is switched off in this supervisor's config, so nothing "
+             "would confine the agent — run the daemon with its sandbox on")
+        )  # fmt: skip
+    elif not probe.usable:
         closed.append(
             ("sandbox", f"no usable sandbox here ({probe.reason}: {probe.detail}) — "
              "`skep doctor` names the fix")
@@ -919,41 +982,74 @@ def _external_engine_pause(
             ("verify_pin", f"{vacuous}, so G10 and its V1 test-tamper guard would confirm "
              f'nothing — `{setup} --verify-command "<command>"`')
         )  # fmt: skip
-    present, detail = engine_available(engine)
-    # ponytail: the project's default budget; run_task re-checks a plan login
-    # against the run's own budget (a template's may be longer).
-    seconds = int(policy.get("default_wall_clock_seconds") or DEFAULT_BUDGET.wall_clock_seconds)
-    if not present:
-        closed.append(("engine_auth", f"{detail} — install it (`skep doctor` lists each engine)"))
-    elif (
-        engine.auth_env
-        and not any(os.environ.get(var) for var in engine.auth_env)
-        and run_auth_source(engine.name, policy, min_seconds=seconds) is None
-    ):
+    # Review R1: the binary as the launch finds it — the worker's PATH, which
+    # leaves skep's own venv off (spawner.build_worker_env).
+    worker_path = build_worker_env((), baseline=config.env_baseline).get("PATH", "")
+    if engine.binary is not None and shutil.which(engine.binary, path=worker_path) is None:
         closed.append(
-            ("engine_auth", f"NO AUTH ENV — set one of {'/'.join(engine.auth_env)} in the "
-             "environment the daemon inherits (<home>/serve.env, then restart it)")
+            ("engine_auth", f"{engine.binary!r} is not on the worker's PATH (skep's own venv "
+             "is left off it) — install it there (`skep doctor` lists each engine)")
         )  # fmt: skip
+    elif (no_auth := _no_auth(tick, 0)) is not None:
+        closed.append(("engine_auth", no_auth))
     branch = policy.get("auto_apply_branch")
     if branch is not None:
         try:
             _require_auto_apply_branch(branch)
         except ValueError as exc:
             closed.append(("landing", f"{exc} — main never moves unattended (I1)"))
-    if not closed:
-        return None
-    state = (
-        f"{PAUSED_STATE}: an unattended run on the external engine {name!r} needs all five "
-        f"gates and {', '.join(gate for gate, _ in closed)} failed — "
-        + "; ".join(f"gate {gate}: {why}" for gate, why in closed)
-        + ". Fix it, then re-enable the schedule (chat: set_schedule_enabled; "
-        f"PATCH /api/schedules/{schedule.name})"
-    )
-    rows = [
-        _refusal_row(schedule, repo, rule=gate, note=why, caste="coding", engine=name)
-        for gate, why in closed
-    ]
-    return state, rows
+    return _paused(schedule, tick, closed)
+
+
+def _launch_pause(
+    schedule: ScheduleRecord, tick: _TickEngine, *, permissions: Permissions, budget: Budget
+) -> tuple[str, list[dict[str, Any]]] | None:
+    """Phase 04 review R1: the two gates only the resolved run can answer,
+    on the final dispatch path. Gate sandbox on the launch's own profile: a
+    ``*`` egress takes no filtering proxy (dispatch), so its files would be
+    walled and its network not — gate (a), because the spec's sandbox gate
+    is the launched profile, and this one does not confine. Gate engine_auth
+    on the tick's own budget: a template's may outlast the project default."""
+    closed: list[tuple[str, str]] = []
+    if "*" in permissions.network:
+        closed.append(
+            ("sandbox", "the run's egress allows every host (`*`), which no filtering proxy "
+             "confines — pin the hosts it needs in the schedule's, template's or project's "
+             "network instead")
+        )  # fmt: skip
+    if (no_auth := _no_auth(tick, budget.wall_clock_seconds)) is not None:
+        closed.append(("engine_auth", no_auth))
+    return _paused(schedule, tick, closed)
+
+
+def _foreign_untrusted_row(store: RunStore, schedule: ScheduleRecord, origin: int) -> int | None:
+    """Review R1 (ADR 0059 D5): the row that makes ``schedule``'s chat
+    untrusted for IT — None when the bit's only sources are finish notices of
+    the schedule's own runs (``worker:<task_id>``, which run_due posts): its
+    own output never refuses its next tick, though the Queen still sees the
+    bit. From the row that set the bit on, every row must be such a notice or
+    one that sets no bit (the operator's or the Queen's words). A tool result
+    counts as foreign: the bit is sticky and records only its first setter,
+    so a read after it leaves no other trace. Unknown taint, or a setter not
+    in this chat (inherited), is the answer as is — fail closed.
+
+    ponytail: reads the whole transcript, only for an untrusted external
+    tick; a race where a Queen tool row lands just before the notice and
+    sets its bit just after is not seen."""
+    chat = schedule.chat_id
+    if not chat or origin == UNKNOWN_TAINT_ORIGIN:
+        return origin
+    since = [message for message in store.chat_messages(chat) if message.id >= origin]
+    if not since or since[0].id != origin:
+        return origin
+    for message in since:
+        kind, _, task = message.provenance.partition(":")
+        if kind == "worker" and store.schedule_for_task(task) == schedule.name:
+            continue
+        if message.role != "tool" and store.covered_by_trust(chat, message.provenance):
+            continue
+        return message.id
+    return None
 
 
 def _untrusted_refusal(
@@ -961,8 +1057,8 @@ def _untrusted_refusal(
     schedule: ScheduleRecord,
     repo: Path,
     *,
-    caste: str,
-    engine: str | None,
+    engine: str,
+    taint: ChatTaint | None,
     rows: list[dict[str, Any]],
 ) -> str | None:
     """Phase 04 4.2 (ADR 0059 D5, I6): a chat that read outside content makes
@@ -970,24 +1066,23 @@ def _untrusted_refusal(
     schedule whose chat carries ``untrusted`` refuses here, on the final
     dispatch path (v126-F11 only recorded the bits). A chat that is gone
     counts as both bits (get_chat_taint fails closed). ``private`` alone
-    never stops a run: a mail chat's schedule keeps working. Scoped to an
-    EXTERNAL coding engine (master plan trap 6): a builtin tick still
-    dispatches with the bits attached (v126-F11) — a run's own notice marks
-    its chat untrusted, so refusing builtin ticks would stop every chat-bound
-    schedule after its first run."""
-    if not schedule.chat_id or caste != "coding" or not resolve_engine(engine).external:
+    never stops a run: a mail chat's schedule keeps working. Only for an
+    EXTERNAL engine (master plan trap 6; the caller passes the tick's
+    effective one): a builtin tick still dispatches with the bits attached
+    (v126-F11). ``taint`` is the tick's one snapshot (None: no chat)."""
+    if taint is None or taint.untrusted is None:
+        return None
+    origin = _foreign_untrusted_row(store, schedule, taint.untrusted)
+    if origin is None:
         return None
     chat = schedule.chat_id
-    taint = store.get_chat_taint(chat)
-    if taint.untrusted is None:
-        return None
-    if taint.untrusted == UNKNOWN_TAINT_ORIGIN:
+    if origin == UNKNOWN_TAINT_ORIGIN:
         why = (
             f"its chat {chat} is gone or unreadable, so its taint is unknown (counts as untrusted)"
         )
         fix = "re-create the schedule from a chat you trust, or from the CLI"
     else:
-        why = f"its chat {chat} carries the untrusted bit (set by message {taint.untrusted})"
+        why = f"its chat {chat} carries the untrusted bit (set by message {origin})"
         fix = (
             f"read what set it, then `skep trust {chat} --bit untrusted` (/trust in the chat), "
             "or re-create the schedule from a clean chat"
@@ -998,11 +1093,35 @@ def _untrusted_refusal(
     )
     rows.append(
         _refusal_row(
-            schedule, repo, rule="untrusted_taint", note=note, caste=caste, engine=engine,
+            schedule, repo, rule="untrusted_taint", note=note, caste="coding", engine=engine,
             taint=taint.bits(),
         )
     )  # fmt: skip
     return f"policy_blocked: {note}"
+
+
+def _external_gates(
+    store: RunStore,
+    schedule: ScheduleRecord,
+    repo: Path,
+    tick: _TickEngine | None,
+    *,
+    permissions: Permissions,
+    budget: Budget,
+    taint: ChatTaint | None,
+    rows: list[dict[str, Any]],
+) -> str | None:
+    """Phase 04 4.2, last before dispatch: the launch's own gates (a closed
+    one pauses), then the untrusted-taint refusal. None: dispatch (a builtin
+    tick — ``tick`` None — is held to neither, master plan trap 6)."""
+    if tick is None:
+        return None
+    pause = _launch_pause(schedule, tick, permissions=permissions, budget=budget)
+    if pause is not None:
+        state, refusals = pause
+        rows.extend(refusals)
+        return state
+    return _untrusted_refusal(store, schedule, repo, engine=tick.name, taint=taint, rows=rows)
 
 
 def run_due(
@@ -1054,6 +1173,11 @@ def run_due(
             verify_command = coding_engine = ""
             auto_apply_branch: str | None = None
             planning_protocol = "plan"
+            # Phase 04 review R1: ONE effective engine and ONE chat-taint
+            # snapshot per tick — the gates, the refusal and the dispatch
+            # metadata all read these.
+            external = _tick_engine(store, config, schedule)
+            taint = store.get_chat_taint(schedule.chat_id) if schedule.chat_id else None
             if _uses_worker_provider(store, config, schedule):
                 if provider_block is None and not provider_probed:
                     provider_probed = True
@@ -1068,7 +1192,9 @@ def run_due(
                             f"the worker provider probe failed ({probe.get('detail')})"
                         )
                 blocked_state = provider_block
-            elif (pause := _external_engine_pause(store, config, schedule)) is not None:
+            elif external is not None and (
+                pause := _external_engine_pause(config, schedule, external)
+            ):
                 blocked_state, refusals = pause  # Phase 04 4.2: before any run
                 rows.extend(refusals)
             # v53-F5: a chained schedule reads its source's last output as
@@ -1231,12 +1357,12 @@ def run_due(
                         engine=coding_engine or None, caste=instance.worker_kind, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
-                    blocked_state = _untrusted_refusal(
-                        store, schedule, repo, caste=instance.worker_kind,
-                        engine=coding_engine or None, rows=rows,
+                    blocked_state = _external_gates(
+                        store, schedule, repo, external, permissions=permissions,
+                        budget=budget, taint=taint, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
-                    dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
+                    dispatch_decision = _with_chat_taint(taint, dispatch_decision)
                     outcome = dispatch(
                         repo,
                         instance.instructions
@@ -1331,12 +1457,12 @@ def run_due(
                         engine=coding_engine or None, caste=schedule.worker_kind, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
-                    blocked_state = _untrusted_refusal(
-                        store, schedule, repo, caste=schedule.worker_kind,
-                        engine=coding_engine or None, rows=rows,
+                    blocked_state = _external_gates(
+                        store, schedule, repo, external, permissions=permissions,
+                        budget=budget, taint=taint, rows=rows,
                     )  # fmt: skip
                 if blocked_state is None:
-                    dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
+                    dispatch_decision = _with_chat_taint(taint, dispatch_decision)
                     outcome = dispatch(
                         repo,
                         schedule.instructions

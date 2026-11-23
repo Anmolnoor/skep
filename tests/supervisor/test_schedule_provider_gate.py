@@ -392,16 +392,21 @@ def _bound(
     usable: bool = True,
     binary: bool = True,
     chat_id: str | None = None,
+    network: tuple[str, ...] = (),
+    template: Any = None,
     **policy: Any,
 ) -> Path:
     """A due schedule on a project with every gate open except what the
-    arguments close: a usable sandbox, the engine's binary, its auth env."""
+    arguments close: a usable sandbox, the engine's binary on the worker's
+    PATH, its auth env. ``template``: the schedule runs it, bound by repo."""
     from skep.supervisor import scheduler
     from skep.supervisor.sandbox import SandboxAvailability
+    from skep.supervisor.scheduler import make_template_schedule
 
     from ..fixtures.toy_repo import create_audit_toy_repo
 
     repo = create_audit_toy_repo(tmp_path / "work").resolve()
+    _fake_binaries(tmp_path, monkeypatch, on_path=binary)
     store.add_project_policy(
         project_id="p", name="p", strategy="trusted_local_dev", phase="build",
         policy={**GATES_OPEN, **policy},
@@ -411,20 +416,40 @@ def _bound(
     if not usable:
         probe = SandboxAvailability(False, "missing_binary", "sandbox-exec not found")
     monkeypatch.setattr(scheduler, "sandbox_availability", lambda backend=None: probe)
-    monkeypatch.setattr(
-        scheduler,
-        "engine_available",
-        lambda engine: (binary, "/usr/bin/x" if binary else f"{engine.binary!r} not on PATH"),
-    )
     for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
         monkeypatch.setenv(var, "k-fake")
-    store.add_schedule(
-        make_schedule(
-            name="nightly", repo=repo, instructions="x", interval_seconds=86400,
-            start_at="2026-06-11T00:00:00Z", chat_id=chat_id,
+    when: dict[str, Any] = {
+        "interval_seconds": 86400,
+        "start_at": "2026-06-11T00:00:00Z",
+        "chat_id": chat_id,
+    }
+    if template is not None:
+        store.add_template(template)
+        store.add_schedule(
+            make_template_schedule(name="nightly", template=template, params={}, repo=repo, **when)
         )
-    )  # fmt: skip
+    else:
+        store.add_schedule(
+            make_schedule(name="nightly", repo=repo, instructions="x", network=network, **when)
+        )
     return repo
+
+
+def _fake_binaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, on_path: bool) -> Path:
+    """Every engine binary as an executable stub, on PATH unless ``on_path``
+    is False — and the host's own installs never on it."""
+    import os
+
+    from skep.supervisor.engines import CODING_ENGINES
+
+    stubs = tmp_path / "bin"
+    stubs.mkdir(exist_ok=True)
+    for name in {e.binary for e in CODING_ENGINES.values() if e.binary} | {"codex-acp"}:
+        (stubs / name).write_text("#!/bin/sh\n")
+        (stubs / name).chmod(0o755)
+    system = os.pathsep.join(("/usr/bin", "/bin"))
+    monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{system}" if on_path else system)
+    return stubs
 
 
 def _refusals(config: SupervisorConfig) -> list[dict[str, Any]]:
@@ -474,7 +499,7 @@ def test_all_five_gates_open_runs_the_external_engine(
         ("strict_reads", {"strict_read_confinement": False}, "--strict-reads"),
         ("verify_pin", {"verify_command": "git diff --check"}, "--verify-command"),
         ("verify_pin", {"verify_command": ""}, "--verify-command"),
-        ("engine_auth", {"binary": False}, "'codex' not on PATH"),
+        ("engine_auth", {"binary": False}, "'codex' is not on the worker's PATH"),
         ("engine_auth", {"auth": False}, "OPENAI_API_KEY"),
         ("landing", {"auto_apply_branch": "main"}, "skep/<slug>"),
     ],
@@ -651,5 +676,210 @@ def test_doctor_lists_a_paused_external_schedule_with_its_upgrade_hint(
         store.close()
     lines = status._repo_registry_advisories(config.home.parent)
     (line,) = [line for line in lines if "nightly" in line]
-    assert "paused" in line and "gate strict_reads:" in line and "--strict-reads" in line
+    assert "paused until all five external-engine gates hold" in line
+    assert "gate strict_reads:" in line and "--strict-reads" in line
     assert "repeated failures" not in line
+
+
+# Phase 04 review R1.
+
+
+def _capture() -> tuple[list[dict[str, Any]], Any]:
+    seen: list[dict[str, Any]] = []
+
+    def dispatch(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return SimpleNamespace(record=SimpleNamespace(task_id=f"t-{len(seen)}", state="completed"))
+
+    return seen, dispatch
+
+
+@pytest.mark.parametrize(("module", "engine"), [("claude_code", "claude_code"), ("codex", "codex")])
+@pytest.mark.parametrize("bound", [True, False])
+def test_a_worker_cmd_running_an_external_agent_is_refused_from_an_untrusted_chat(
+    store: RunStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module: str,
+    engine: str,
+    bound: bool,
+) -> None:
+    """R1 D1: what runs decides. A --worker-cmd running an external agent on
+    a builtin project (or an unbound tick) IS that agent — the taint refusal
+    and its row read the same effective engine the five gates do."""
+    import sys
+
+    from skep.supervisor import scheduler
+
+    _probe(monkeypatch, READY)
+    config = SupervisorConfig(
+        home=tmp_path / "home" / "supervisor",
+        worker_command=(sys.executable, "-m", f"skep.workers.{module}"),
+    )
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    store.add_chat_taint(chat_id, untrusted=7)
+    repo = _bound(store, tmp_path, monkeypatch, coding_engine="builtin", chat_id=chat_id)
+    if not bound:  # every gate open on an unbound repo: only the engine differs
+        store._conn.execute("DELETE FROM project_bindings")
+        store._conn.commit()
+        open_policy = {**GATES_OPEN, "coding_engine": "builtin"}
+        monkeypatch.setattr(scheduler, "run_policy_for_repo", lambda *a, **k: dict(open_policy))
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("policy_blocked: "), result.state
+    (row,) = _refusals(config)
+    assert (row["rule_id"], row["engine"], row["repo"]) == (
+        "schedule.untrusted_taint", engine, str(repo)
+    )  # fmt: skip
+
+
+def test_a_runs_own_notice_never_refuses_its_schedules_next_tick(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D2: a run's finish notice (``worker:<task_id>``) marks the chat
+    untrusted for the Queen (ADR 0059 D5) — but that is the schedule's own
+    output, so its next tick still runs; anything else that reads into the
+    chat after it (a webhook, a tool result) refuses the tick after."""
+    from skep.supervisor.serve import run_status
+
+    monkeypatch.setattr(
+        run_status, "run_terminal_text", lambda store, task_id, **_: (f"{task_id} done", "info")
+    )
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)  # codex, every gate open
+    seen, dispatch = _capture()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert store.get_chat_taint(chat_id).untrusted is not None  # the Queen still sees it
+    store.add_chat_message(chat_id, role="user", content="nice")  # words that set no bit
+    store.add_chat_message(chat_id, role="assistant", content="thanks")
+    (second,) = run_due(store=store, config=config, now="2026-06-12T09:00:00Z", dispatch=dispatch)
+    assert (second.task_id, len(seen)) == ("t-2", 2) and _refusals(config) == []
+    assert seen[1]["dispatch_decision"].constraints["chat_taint"] == ["untrusted"]
+    store.add_chat_message(chat_id, role="user", content="hi", provenance="webhook:w")
+    (third,) = run_due(store=store, config=config, now="2026-06-13T09:00:00Z", dispatch=dispatch)
+    assert len(seen) == 2 and third.state.startswith("policy_blocked: ")
+    (row,) = _refusals(config)
+    assert row["rule_id"] == "schedule.untrusted_taint"
+
+
+@pytest.mark.parametrize("foreign", ["tool", "other_run", "inherited"])
+def test_an_untrusted_bit_from_anything_but_the_schedules_own_runs_still_refuses(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign: str,
+) -> None:
+    """R1 D2, fail closed: a tool row after the notice (it may have read
+    anything, and the sticky bit records only its first setter), another
+    run's notice, or a bit set by a row that is not in this chat."""
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    store.record_schedule_outcome("nightly", task_id="t-0", state="completed")
+    if foreign == "inherited":
+        store.add_chat_taint(chat_id, untrusted=10_000)
+    else:
+        store.add_chat_message(chat_id, role="user", content="t-0 done", provenance="worker:t-0")
+    if foreign == "tool":
+        store.add_chat_message(chat_id, role="tool", content="{}", tool_name="web_fetch")
+    if foreign == "other_run":
+        store.add_chat_message(chat_id, role="user", content="x", provenance="worker:t-9")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("policy_blocked: ")
+
+
+def test_an_allow_all_egress_pauses_the_external_tick_at_the_sandbox_gate(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D3 (gate a, I12): the sandbox gate is judged on the profile the run
+    would launch with. ``*`` egress takes no filtering proxy, so the files
+    are walled and the network is not — that is not a confined launch."""
+    _bound(store, tmp_path, monkeypatch, network=("*",))
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("paused: ")
+    assert "gate sandbox:" in result.state and "egress" in result.state
+    (row,) = _refusals(config)
+    assert row["rule_id"] == "schedule.sandbox"
+
+
+def test_the_engines_binary_must_be_on_the_workers_path_not_only_skeps(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D4: the worker's PATH drops skep's own venv (build_worker_env), so
+    a binary only there is found by the host and never by the launch."""
+    import os
+    import sys
+
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "codex").write_text("#!/bin/sh\n")
+    (venv / "bin" / "codex").chmod(0o755)
+    _bound(store, tmp_path, monkeypatch, binary=False)
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "python"))
+    monkeypatch.setenv("PATH", f"{venv / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and "gate engine_auth:" in result.state
+    assert "'codex' is not on the worker's PATH" in result.state
+
+
+def test_a_plan_login_is_judged_against_the_ticks_own_budget(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D4: a template's budget, not the project's default, is what the
+    run must hold the plan login for (run_task re-checks the same)."""
+    from skep.supervisor import codex_login
+    from skep.supervisor.templates import WorkflowTemplate
+
+    asked: list[float] = []
+
+    def status(min_seconds: float = 0) -> Any:
+        asked.append(min_seconds)
+        problem = "the login expires sooner" if min_seconds > 3600 else None
+        return codex_login.LoginStatus(True, "plus", problem=problem)
+
+    monkeypatch.setattr(codex_login, "login_status", status)
+    long = WorkflowTemplate(name="long", instructions="x", wall_clock_seconds=7200)
+    _bound(store, tmp_path, monkeypatch, codex_chatgpt_login=True, template=long)
+    monkeypatch.delenv("OPENAI_API_KEY")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and "gate engine_auth:" in result.state and 7200 in asked
+
+
+def test_a_sandbox_switched_off_names_itself_not_a_missing_backend(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D5: config.sandbox off is its own reason — never "(None: None)"."""
+    from dataclasses import replace
+
+    _bound(store, tmp_path, monkeypatch)
+    seen, dispatch = _capture()
+    off = replace(config, sandbox=False)
+    (result,) = run_due(store=store, config=off, now=NOW, dispatch=dispatch)
+    assert seen == [] and "gate sandbox:" in result.state
+    assert "None" not in result.state and "sandbox is switched off" in result.state
+
+
+def test_re_enabling_a_paused_schedule_clears_its_gate_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 D6: enable clears ``disabled_reason``, so a later manual disable
+    never shows doctor a stale gate it no longer fails."""
+    config = SupervisorConfig(home=tmp_path / "skep" / "supervisor", worker_command=("false",))
+    config.home.mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound(store, tmp_path, monkeypatch, strict_read_confinement=False)
+        run_due(store=store, config=config, now=NOW, dispatch=_capture()[1])
+        store.set_schedule_enabled("nightly", enabled=True)
+        health = store.schedule_health("nightly")
+        assert health is not None and health.disabled_reason is None
+        store.set_schedule_enabled("nightly", enabled=False)
+    finally:
+        store.close()
+    lines = status._repo_registry_advisories(config.home.parent)
+    assert not [line for line in lines if "nightly" in line]

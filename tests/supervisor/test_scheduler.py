@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -1091,7 +1092,11 @@ def _engine_tick(
     monkeypatch.setattr(
         scheduler, "sandbox_availability", lambda backend=None: SandboxAvailability(True)
     )
-    monkeypatch.setattr(scheduler, "engine_available", lambda engine: (True, "/usr/bin/codex"))
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    (stubs / "codex").write_text("#!/bin/sh\n")
+    (stubs / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(stubs), "/usr/bin", "/bin")))
     monkeypatch.setenv("OPENAI_API_KEY", "k-fake")
 
     repo = create_audit_toy_repo((managed_repos_root(config) if managed else tmp_path) / "work")
