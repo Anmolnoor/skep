@@ -46,7 +46,7 @@ and bubblewrap enforces it with an empty root. Bound back, read-only: `/usr`,
 `/opt`, `/nix`, `/etc` minus `pve`/`shadow`/`gshadow`/`sudoers`/`ssh`, the
 detected toolchains (`~/.local/bin`, uv's pythons and tools,
 `~/.local/share/claude`, `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.pyenv`, skep's
-own interpreter), the repo's git metadata minus the sibling worktrees, and the
+own interpreter), the repo's git metadata (never another checkout), and the
 project's `extra_read_paths`. The run's own roots are bound as above, and the
 masks below still land last. The rest of `$HOME`, `/var`, `/mnt`, `/srv` and
 `/etc/pve` do not exist inside the sandbox. The G10 re-run of the patch uses
@@ -66,9 +66,7 @@ reopens `/usr`, `/System` minus `/System/Volumes`, `/Library`,
 `db/timezone/` and `run/resolv.conf`, the xcode-select links and the active
 Xcode bundle or CommandLineTools (`/usr/bin/git` is xcrun's shim). It also
 reopens the same toolchains, git metadata, run roots and `extra_read_paths`
-as on Linux, and lets git list the repo's shared `refs/` (names only, so
-`git branch` and `for-each-ref` see every branch; `refs/stash` stays
-unreadable). The ancestors of those get metadata only, so `getcwd()` and
+as on Linux. The ancestors of those get metadata only, so `getcwd()` and
 `realpath()` work without listing anything. The masks still come last, with
 Homebrew's `var/` (`/opt/homebrew/var`, `/usr/local/var`: local databases
 and service state). Host `/tmp` (`/private/tmp`), `/private/var/folders`,

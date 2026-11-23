@@ -429,12 +429,12 @@ def test_the_common_dir_loses_symlinks_and_the_main_checkout_s_private_state(
 ) -> None:
     _repo, common, worktree = _repo_with_private_state(tmp_path)
     roots = git_metadata_readable_roots(worktree)
-    for never in ("leak", "index", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD", "refs/stash",
-                  "logs/refs/stash", "worktrees", "objects"):  # fmt: skip
+    for never in ("leak", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD", "objects"):
         assert not any(root == common / never for root in roots), never
         assert not any(root.is_relative_to(common / never) for root in roots), never
-    assert common / "config" in roots and common / "HEAD" in roots
-    assert common / "refs" / "heads" in roots
+    # 3H: what git's reachability walk reads stays (refs/stash, logs/refs/stash)
+    for kept in ("config", "HEAD", "refs", "logs", "index", "worktrees"):
+        assert common / kept in roots, kept
     assert all(root.is_relative_to(common) for root in roots)
 
 
@@ -462,8 +462,7 @@ def test_git_status_and_diff_still_work_inside_the_narrowed_metadata(
     )  # fmt: skip
     assert proc.returncode == 0, proc.stderr
     assert "a.txt" in proc.stdout and "1 file changed" in proc.stdout
-    private = [common / "index", common / "refs" / "stash", common / "logs" / "refs" / "stash",
-               common / "MERGE_MSG", common / "ORIG_HEAD", common / "COMMIT_EDITMSG",
+    private = [common / "MERGE_MSG", common / "ORIG_HEAD", common / "COMMIT_EDITMSG",
                common / "leak" / "canary.txt", tmp_path / "private" / "canary.txt"]  # fmt: skip
     seen = _probe(profile, private, cwd=worktree)
     assert "read" not in seen.values(), seen

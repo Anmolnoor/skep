@@ -161,44 +161,24 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     so the worker's own ``git diff`` died and its patch was never written.
     The sandbox binds these read-only, beneath the writable roots.
 
-    The common dir's entries, not the dir: ``worktrees/`` holds the SIBLING
-    runs' HEAD and index (this run's own git dir is a writable root), and
-    ``objects/`` is a writable root already. W4: no symlinked entry (bound by
-    its own name, its target would be readable), and none of the main
-    checkout's own state a linked worktree's git never reads — its staging
-    ``index``, its in-progress messages, ``ORIG_HEAD``, the stash and its
-    reflog. ``config`` stays — git cannot run without it — so its remote
-    URLs (and any token in one) remain readable.
+    The common dir's entries, not the dir: ``objects/`` is a writable root
+    already. W4: no symlinked entry (bound by its own name, its target would
+    be readable), and not the main checkout's in-progress messages or
+    ``ORIG_HEAD``. 3H: every root git's reachability walk reads stays —
+    the stash and its reflog, the main ``index``, and ``worktrees/`` (the
+    sibling runs' HEAD, index and reflogs; this run's own git dir is a
+    writable root on top). Hidden, a ``git prune`` in the wall deleted their
+    objects from the shared, writable ``objects/``. ``config`` stays too —
+    git cannot run without it — so its remote URLs (and any token in one)
+    remain readable.
     """
     dirs = _git_dirs(workspace)
     if dirs is None or dirs[0] == dirs[1]:
         return ()
-    roots: list[Path] = []
-    for entry in _entries(dirs[1], _COMMON_DIR_PRIVATE):
-        if entry.name == "refs":
-            roots += _entries(entry, {"stash"})
-        elif entry.name == "logs":
-            for log in _entries(entry, ()):
-                roots += _entries(log, {"stash"}) if log.name == "refs" else [log]
-        else:
-            roots.append(entry)
-    return tuple(roots)
+    return tuple(_entries(dirs[1], _COMMON_DIR_PRIVATE))
 
 
-def git_refs_dir(workspace: Path) -> Path | None:
-    """The shared ``refs/`` a linked worktree's git lists to enumerate
-    branches and tags (``for-each-ref``, ``branch``). The roots above bind
-    its entries, never the dir: bwrap makes the dir to mount them in, but
-    Seatbelt left it metadata-only and git enumerated nothing, silently. The
-    Seatbelt wall lets the run list it — names only; ``refs/stash`` stays
-    unreadable. None outside a linked worktree (its refs are in the workspace)."""
-    dirs = _git_dirs(workspace)
-    return None if dirs is None or dirs[0] == dirs[1] else dirs[1] / "refs"
-
-
-_COMMON_DIR_PRIVATE = frozenset(
-    {"worktrees", "objects", "index", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD"}
-)
+_COMMON_DIR_PRIVATE = frozenset({"objects", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD"})
 
 
 def _entries(directory: Path, skip: Container[str]) -> list[Path]:

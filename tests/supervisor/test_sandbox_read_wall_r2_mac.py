@@ -188,11 +188,11 @@ def test_an_upper_case_home_never_reopens_downloads_for_real(
     assert not (tmp_path / "p.sb").exists()
 
 
-# --- M3: git enumerates the shared refs, the stash stays out ----------------
+# --- M3: git enumerates the shared refs (3H: the stash too) ----------------
 
 
 @needs_strict_wall
-def test_git_lists_loose_branches_and_tags_but_never_reads_the_stash(
+def test_git_lists_loose_branches_tags_and_the_stash(
     fake_home: Path, skep_home: Path, tmp_path: Path
 ) -> None:
     repo, common, worktree = _repo_with_private_state(tmp_path)
@@ -210,13 +210,12 @@ def test_git_lists_loose_branches_and_tags_but_never_reads_the_stash(
     proc = _run(profile, ["git", "for-each-ref", "--format=%(refname)"], worktree)
     assert proc.returncode == 0, proc.stderr
     refs = proc.stdout.split()
-    assert {"refs/heads/feature", "refs/tags/v1"} <= set(refs), proc.stdout
-    assert "refs/stash" not in refs, proc.stdout
+    assert {"refs/heads/feature", "refs/tags/v1", "refs/stash"} <= set(refs), proc.stdout
+    assert proc.stderr == ""  # 3H: no broken (unreadable) refs/stash any more
     branches = _run(profile, ["git", "branch", "--format=%(refname:short)"], worktree)
     assert "feature" in branches.stdout.split(), branches.stdout + branches.stderr
-    stash = [common / "refs" / "stash", common / "logs" / "refs" / "stash"]
-    seen = _probe(profile, stash, worktree)
-    assert "read" not in seen.values(), seen
+    log = _run(profile, ["git", "log", "--all", "--oneline"], worktree)  # stopped on it before
+    assert log.returncode == 0 and "WIP on" in log.stdout, log.stderr
 
 
 # --- M4, M8, M10: the system half of the Seatbelt wall ----------------------

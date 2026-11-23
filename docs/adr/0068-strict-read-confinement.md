@@ -2,10 +2,12 @@
 
 **Status:** accepted (Phase 03, Work Item 3.2). Linux bubblewrap, the G10
 re-verify and the Queen's file reads are done. The macOS Seatbelt half was
-added on 2026-11-23 (see "The Seatbelt half").
+added on 2026-11-23 (see "The Seatbelt half"). The git metadata a strict run
+reads was widened again the same day, so git in the wall cannot prune other
+checkouts' objects (see "Data safety over hidden pointers").
 **Related:** ADR 0066 (new projects sandboxed by default; this ADR copies its
 rollout rule), ADR 0047 (external engines: the sandbox is their only wall),
-ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I12.
+ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I11, I12.
 
 ## Context
 
@@ -70,12 +72,14 @@ readable. A denylist cannot keep up with every place a person keeps files.
      root that is a symlink (uv's `cpython-3.12-…` minor-version link, which a
      venv's python points through) is recreated as a link to its resolved
      root.
-   - the run's git metadata: the common dir's entries, without `worktrees/`
-     (the sibling runs' HEAD and index), `objects/` (already writable), any
-     symlinked entry (bound by its own name, its target would be readable),
-     and the main checkout's own state a linked worktree's git never reads:
-     `index`, `COMMIT_EDITMSG`, `MERGE_MSG`, `ORIG_HEAD`, `refs/stash` and
-     `logs/refs/stash`. `git status`, `git diff` and `git log` still run.
+   - the run's git metadata: the common dir's entries, without `objects/`
+     (already writable), any symlinked entry (bound by its own name, its
+     target would be readable), and the main checkout's own state no git
+     command in the run reads: `COMMIT_EDITMSG`, `MERGE_MSG`, `ORIG_HEAD`.
+     `refs/` and `logs/` (the stash and its reflog included), the main
+     `index` and `worktrees/` (the sibling runs' HEAD, index and reflogs)
+     are read-only, because git's reachability walk reads them (2026-11-23,
+     below). `git status`, `git diff` and `git log` still run.
    - the run's writable roots, as before: worktree, results dir, run-private
      caches.
    - the secret masks, **last**, so no `extra_read_paths` entry or detected
@@ -155,10 +159,12 @@ readable. A denylist cannot keep up with every place a person keeps files.
   (`sandbox.SANDBOX_READABLE_SECRETS`).
 - The repo's shared git metadata: `config`, which git cannot run without and
   which can carry credentials (an `http.extraheader`, a token in a remote
-  URL); refs but the stash, `packed-refs`, branch reflogs, `hooks/`, `info/`.
-  `objects/` is shared too: every object in it is readable by hash,
-  including blobs only a sibling run, the operator's staged index or a
-  stash ever referenced.
+  URL); every ref and reflog, the stash's included, `packed-refs`, `hooks/`,
+  `info/`; the operator's staging `index` (which paths they staged); and
+  the sibling runs' git dirs under `worktrees/` (their HEAD, index,
+  reflogs and in-progress messages), never their checkouts. `objects/` is
+  shared too: every object in it is readable by hash, including blobs only
+  a sibling run, the operator's staged index or a stash ever referenced.
 - With a dev checkout's serve, skep's own interpreter and package roots are
   that checkout's `.venv` and `src/`, so a strict run reads that much of the
   operator's checkout.
@@ -168,8 +174,8 @@ readable. A denylist cannot keep up with every place a person keeps files.
   up as an unreadable placeholder and `~/.ssh` as an empty dir.
 
 Not readable: the rest of `$HOME`, other users' homes, `/var`, `/mnt`,
-`/media`, `/srv`, `/root`, `/boot`, `/etc/pve`, sibling worktrees and their
-git metadata, other runs' results and audit trails, other managed repos, the
+`/media`, `/srv`, `/root`, `/boot`, `/etc/pve`, sibling runs' worktrees (the
+checkouts), other runs' results and audit trails, other managed repos, the
 operator's own checkout of the repo, the skep home's other files, and host
 `/tmp` and `/run`.
 
@@ -217,13 +223,11 @@ matching rule wins):
   node still run.
 - **The shared `refs/` is listed (M3).** The git roots are `refs/`'s
   entries, never the dir, so Seatbelt left it metadata-only and `git
-  for-each-ref` and `git branch` found nothing and exited 0. It is listed
-  now (names only); `refs/stash` stays unreadable, so git calls it a broken
-  ref: `for-each-ref` warns, and `git log --all` and `git prune` stop
-  (`bad object refs/stash`, `unable to parse object: refs/stash`) while the
-  operator's checkout has a stash. Before, `git prune --dry-run` in the wall
-  listed that stash's objects for deletion from the shared `objects/`,
-  which the worker can write.
+  for-each-ref` and `git branch` found nothing and exited 0. It was then
+  listed (names only), with `refs/stash` left unreadable, so git called the
+  stash a broken ref and `git log --all` and `git prune` stopped on it.
+  Since 2026-11-23 `refs/` is bound whole (below), stash included, and the
+  listing rule is gone with the reason for it.
 
 - **One global deny.** Not `(allow default)` with a narrow `/Users` deny,
   which would leave host `/tmp`, `/private/tmp` and `/var` readable. It
@@ -312,11 +316,10 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   from there (`etc/openssl@3/cert.pem`), so masking it would break TLS for
   Homebrew's Python and curl. A project that needs it closed names
   narrower paths itself, or runs denylist-only.
-- Under Seatbelt, `git log --all` and `git prune` stop on the unreadable
-  `refs/stash` while the operator's checkout has a stash (M3, above). The
-  stash's objects are readable by hash anyway (`git fsck --unreachable` in
-  the wall lists them; `objects/` is shared), so the exclusion hides the
-  ref, not the content.
+- `objects/` is still writable, so a worker that deletes object files by
+  hand (`rm`, not git) still destroys other checkouts' data. Git in the wall
+  no longer does it by accident; a store the worker cannot delete from
+  needs a per-run object dir with the shared one as a read-only alternate.
 
 - Forged tools (`mcp_client.py`), the fast lane (`serve/fastlane.py`), the
   `diagnose` re-run (`serve/actions.py`) and MCP servers still get
@@ -340,6 +343,55 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   NixOS the profile under `/run/current-system` is gone with host `/run`.
   Such a host needs `extra_read_paths` (e.g. `/var/opt`) or denylist-only
   reads.
+
+## Data safety over hidden pointers (2026-11-23, review round 3)
+
+The narrowed git metadata (review round 1, W4, and the `worktrees/`
+exclusion) left `objects/`, which every checkout of the repo shares,
+writable. So the walk git uses to decide what is garbage ran on a partial
+view. In a strict run, on real bubblewrap, `git prune` in the run's worktree
+deleted both of the operator's stashes (`stash@{1}` lives only in the
+stash's reflog), a blob the operator had staged and not committed, a sibling
+run's staged blob, and the commit at that sibling's HEAD.
+`git repack -a -d` deleted the same five after they were packed. Before
+Phase 03, `--ro-bind / /` showed git all of it, so this was a regression.
+`git gc` itself dies first, on `gc.pid.lock` in the read-only common dir.
+
+Git's walk reads every ref (`refs/stash` included), every reflog (the
+stash's included), the index of every worktree (the main checkout's and each
+sibling's), and each sibling worktree's HEAD and reflogs from
+`worktrees/<id>/` (it finds them through `worktrees/<id>/gitdir`). It does
+not read `ORIG_HEAD`, `MERGE_HEAD` or `AUTO_MERGE`: host git prunes an
+object only they name, so those stay hidden, with the in-progress messages.
+
+So `refs/`, `logs/`, the main `index` and `worktrees/` are bound whole and
+read-only again, on every backend, from the one list in
+`worktree.git_metadata_readable_roots`. The run's own git dir is a writable
+root bound on top. `worktrees/` is bound as a directory, not entry by entry,
+so a run started after this one is in the walk too. A symlink inside these
+dirs resolves inside the wall, where the host's files are absent, so W4's
+rule (never bind a symlinked entry by name) still holds for the entries
+themselves. On Seatbelt, `refs/` is now read whole, so the M3 listing rule
+went away.
+
+What the run can now read that it could not: the operator's stash commits
+and the paths in their index, and the sibling runs' HEAD commits, staged
+paths and commit messages. Hiding them protected little. The objects they
+point to were already readable by hash (`git fsck --unreachable` in the
+wall listed them), while hiding the pointers let any `git prune` delete
+other people's work. Writes are still refused: a sibling's `HEAD`, the
+operator's `index` and `refs/stash` are read-only in the wall, and `git
+worktree prune` there sees the siblings as prunable (their checkouts are
+outside the wall) but fails to remove them. A config that refuses pruning
+was rejected: `git prune` ignores `gc.pruneExpire`, `git repack -a -d`
+ignores both gc keys, and a worker controls its own environment.
+Invariants: I8 (the readable list above is updated), I11 (the operator's
+data), I12.
+
+Proven by `tests/supervisor/test_sandbox_read_wall_r3.py` against real
+bubblewrap (the same test runs under Seatbelt on a Mac): `git prune` and
+`git repack -a -d` in the wall, then the stashes, the staged blobs and the
+sibling's HEAD are still there on the host.
 
 ## Consequences
 
