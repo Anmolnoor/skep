@@ -2857,10 +2857,15 @@ def test_doctor_names_a_verify_pin_this_host_cannot_run(
     # `unavailable`, not `failed` — the outcome the operator will actually see.
     assert "unavailable" in unrunnable[0]
 
-    # The v91-F1 advisory still fires, unchanged and separately.
-    unpinned = [a for a in advisories if "pin no verify_command" in a]
-    assert len(unpinned) == 1
-    assert "unpinned-proj" in unpinned[0] and "makefile-proj" not in unpinned[0]
+    # The v91-F1 finding still fires, separately — since Phase 05 5.2 as a
+    # Projects-needing-upgrade line, not an advisory.
+    assert not [a for a in advisories if "pin no verify_command" in a]
+    unpinned = [
+        u["project_id"]
+        for u in build_status(home)["project_upgrades"]
+        if "verify_command" in u["needs"]
+    ]
+    assert unpinned == ["unpinned-proj"]
 
     # Binary present: silence. A runnable pin is not a finding.
     monkeypatch.setattr("skep.status.shutil.which", lambda name: f"/usr/bin/{name}")

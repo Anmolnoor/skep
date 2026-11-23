@@ -50,6 +50,28 @@ uv run skep review <task_id>
 uv run skep review <task_id> --approve
 ```
 
+Check the machine at any point (it reads the same `SKEP_HOME`):
+
+```sh
+uv run skep doctor
+```
+
+It groups its checks into Health (pass or fail, and the exit code), Security
+posture (sandbox, read confinement, key relay, baseline lock) and Projects
+needing upgrade, which gives a `skep project setup …` command for each one.
+`uv run skep doctor --offline` skips the live provider probe and every other
+network call. On Linux the sandbox needs bubblewrap. If the sandbox line says
+`bwrap was not found on PATH`, install it:
+
+```sh
+sudo apt install bubblewrap   # Debian/Ubuntu
+sudo dnf install bubblewrap   # Fedora
+```
+
+To keep skep running on an always-on Linux host as a `systemd --user`
+service, reachable over Tailscale, follow
+[guide-ubuntu-server.md](guide-ubuntu-server.md).
+
 By default, `skep` dispatches its in-repo coding worker. To use another worker
 explicitly, pass `--worker-cmd` or set `SKEP_WORKER_CMD`. See
 `docs/workers.md` for the Claude Code adapter.

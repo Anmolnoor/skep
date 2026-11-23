@@ -120,11 +120,12 @@ project notes
     }
 ```
 
-`skep doctor` lists every project that has no pin:
+`skep doctor` lists every project that has no pin, with the command that
+pins one:
 
 ```text
-Advisories:
-- 1 project(s) pin no verify_command, so re-verification (G10) re-runs the command the worker nominated for itself and the maintain lane will not auto-land: bare. Re-run `skep project setup <repo>` to seed one from the repo's toolchain, or set verify_command in the project policy overlay.
+Projects needing upgrade:
+- bare: skep project setup /home/you/code/bare --project-id bare --verify-command '<your test command>'  # pins no verify_command, so G10 re-runs the worker's own nomination (no test entry point detected: put your test command in)
 ```
 
 ## 4. Watch it decide
