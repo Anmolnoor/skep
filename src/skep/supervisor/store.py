@@ -4537,12 +4537,27 @@ class RunStore:
             private=current.private if current.private is not None else private,
             untrusted=current.untrusted if current.untrusted is not None else untrusted,
         )
-        if merged != current:
-            self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
+        # Phase 04 review R2 (F4): ``untrusted`` names the row that sets the
+        # bit — recorded even once the sticky bit is on (never on an
+        # unreadable value: that stays as it is, both bits unknown).
+        record = untrusted is not None and merged.untrusted != UNKNOWN_TAINT_ORIGIN
+        if merged != current or record:
+            self._write_taint(
+                chat_id,
+                merged,
+                self.chat_trusted_through(chat_id),
+                contributor=untrusted if record else None,
+            )
         return merged
 
     def _write_taint(
-        self, chat_id: str, taint: ChatTaint, through: int, runs: Sequence[str] = ()
+        self,
+        chat_id: str,
+        taint: ChatTaint,
+        through: int,
+        runs: Sequence[str] = (),
+        *,
+        contributor: int | None = None,
     ) -> None:
         payload: dict[str, Any] = {"private": taint.private, "untrusted": taint.untrusted}
         if through:
@@ -4550,6 +4565,12 @@ class RunStore:
         runs = sorted({*self.chat_trusted_runs(chat_id), *runs})
         if runs:
             payload["trusted_runs"] = runs
+        # a cleared bit drops its record; the next setter starts a new one
+        rows = self.chat_untrusted_rows(chat_id) if taint.untrusted is not None else set()
+        if contributor is not None:
+            rows.add(contributor)
+        if rows:
+            payload["untrusted_rows"] = sorted(rows)
         self._conn.execute(
             "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
         )
@@ -4577,6 +4598,18 @@ class RunStore:
             return set()
         runs = raw.get("trusted_runs") if isinstance(raw, dict) else None
         return {r for r in runs if isinstance(r, str)} if isinstance(runs, list) else set()
+
+    @_locked
+    def chat_untrusted_rows(self, chat_id: str) -> set[int]:
+        """Phase 04 review R2 (F4): every row that set ``untrusted`` — or,
+        the sticky bit already on, would have — since the bit was last set."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return set()
+        rows = raw.get("untrusted_rows") if isinstance(raw, dict) else None
+        return {r for r in rows if type(r) is int} if isinstance(rows, list) else set()
 
     def covered_by_trust(self, chat_id: str, provenance: str) -> bool:
         """Does a row by this author leave the chat's bits alone? The trusted

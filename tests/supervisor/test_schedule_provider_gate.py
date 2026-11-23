@@ -449,6 +449,8 @@ def _fake_binaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, on_path: 
         (stubs / name).chmod(0o755)
     system = os.pathsep.join(("/usr/bin", "/bin"))
     monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{system}" if on_path else system)
+    # R2 F5: inside a root the strict wall binds (a detected per-user toolchain)
+    monkeypatch.setenv("UV_TOOL_DIR", str(stubs))
     return stubs
 
 
@@ -762,7 +764,7 @@ def test_a_runs_own_notice_never_refuses_its_schedules_next_tick(
     assert row["rule_id"] == "schedule.untrusted_taint"
 
 
-@pytest.mark.parametrize("foreign", ["tool", "other_run", "inherited"])
+@pytest.mark.parametrize("foreign", ["tool", "other_run", "inherited", "unrecorded"])
 def test_an_untrusted_bit_from_anything_but_the_schedules_own_runs_still_refuses(
     store: RunStore,
     config: SupervisorConfig,
@@ -770,9 +772,9 @@ def test_an_untrusted_bit_from_anything_but_the_schedules_own_runs_still_refuses
     monkeypatch: pytest.MonkeyPatch,
     foreign: str,
 ) -> None:
-    """R1 D2, fail closed: a tool row after the notice (it may have read
-    anything, and the sticky bit records only its first setter), another
-    run's notice, or a bit set by a row that is not in this chat."""
+    """R1 D2, fail closed: a tool row after the notice that read outside
+    content, another run's notice, a bit set by a row that is not in this
+    chat, or one whose setters were never recorded (R2 F4)."""
     chat_id = store.create_chat(title="c", model=None).chat_id
     _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
     store.record_schedule_outcome("nightly", task_id="t-0", state="completed")
@@ -780,8 +782,16 @@ def test_an_untrusted_bit_from_anything_but_the_schedules_own_runs_still_refuses
         store.add_chat_taint(chat_id, untrusted=10_000)
     else:
         store.add_chat_message(chat_id, role="user", content="t-0 done", provenance="worker:t-0")
-    if foreign == "tool":
-        store.add_chat_message(chat_id, role="tool", content="{}", tool_name="web_fetch")
+    if foreign == "tool":  # serve/taint.py marks the row that read outside content
+        tool = store.add_chat_message(chat_id, role="tool", content="{}", tool_name="web_fetch")
+        store.add_chat_taint(chat_id, untrusted=tool)
+    if foreign == "unrecorded":  # a bit set before its setters were recorded
+        store._conn.execute(
+            "UPDATE chats SET taint = ? WHERE chat_id = ?",
+            (__import__("json").dumps({"untrusted": store.get_chat_taint(chat_id).untrusted}),
+             chat_id),
+        )  # fmt: skip
+        store._conn.commit()
     if foreign == "other_run":
         store.add_chat_message(chat_id, role="user", content="x", provenance="worker:t-9")
     seen, dispatch = _capture()
@@ -903,3 +913,168 @@ def test_a_chat_bound_tick_hands_its_chat_to_the_run(
 
     run_due(store=store, config=config, now=NOW, dispatch=dispatch)
     assert handed == [chat_id]
+
+
+# Phase 04 review R2.
+
+
+def _during_resolution(monkeypatch: pytest.MonkeyPatch, act: Any) -> None:
+    """Run ``act`` inside the tick's policy resolution — between the early
+    engine lookup and the final gates."""
+    from skep.supervisor import scheduler
+    from skep.supervisor.policy_resolver import resolve_run_policy as real
+
+    def resolve(*args: Any, **kwargs: Any) -> Any:
+        act()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "resolve_run_policy", resolve)
+
+
+@pytest.mark.parametrize("engine", ["codex", "builtin"])
+def test_the_taint_is_read_at_the_last_moment_before_dispatch(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+) -> None:
+    """R2 F1 (I6): an outside row that lands while the tick resolves its
+    policy refuses the external tick — and the one snapshot that judged it
+    is the one a builtin tick's run carries."""
+    _probe(monkeypatch, READY)
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, coding_engine=engine, chat_id=chat_id)
+    _during_resolution(
+        monkeypatch,
+        lambda: store.add_chat_message(chat_id, role="user", content="hi", provenance="webhook:w"),
+    )
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    if engine == "builtin":
+        (run,) = seen
+        assert run["dispatch_decision"].constraints["chat_taint"] == ["untrusted"]
+        return
+    assert seen == [] and result.state.startswith("policy_blocked: ")
+    (row,) = _refusals(config)
+    assert row["rule_id"] == "schedule.untrusted_taint"
+
+
+@pytest.mark.parametrize("template", [False, True])
+def test_the_gates_judge_the_engine_the_resolved_launch_runs(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template: bool,
+) -> None:
+    """R2 F2 (I2, I12): a project switched from builtin to an external
+    engine while the tick resolves is gated as the engine it dispatches —
+    never waved through on the earlier lookup."""
+    import json
+
+    from skep.supervisor.templates import WorkflowTemplate
+
+    _probe(monkeypatch, READY)
+    nightly = WorkflowTemplate(name="n", instructions="x") if template else None
+    _bound(
+        store, tmp_path, monkeypatch, coding_engine="builtin", strict_read_confinement=False,
+        template=nightly,
+    )  # fmt: skip
+    flipped = json.dumps({**GATES_OPEN, "strict_read_confinement": False})
+
+    def flip() -> None:
+        store._conn.execute("UPDATE project_policies SET policy_json = ?", (flipped,))
+        store._conn.commit()
+
+    _during_resolution(monkeypatch, flip)
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("paused: ")
+    assert "gate strict_reads:" in result.state
+    (row,) = _refusals(config)
+    assert (row["rule_id"], row["engine"]) == ("schedule.strict_reads", "codex")
+
+
+def test_an_unregistered_acp_adapter_pauses_at_the_auth_gate(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 F3 (I6, I9): an ACP adapter no engine entry declares has no binary
+    or auth env skep could check — not builtin's empty ones. Unattended, it
+    pauses at engine_auth, naming the adapter it would have run."""
+    import sys
+
+    config = SupervisorConfig(
+        home=tmp_path / "home" / "supervisor",
+        worker_command=(sys.executable, "-m", "skep.workers.acp", "npx", "-y", "@x/odd-acp"),
+    )
+    _bound(store, tmp_path, monkeypatch, coding_engine="builtin")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("paused: ")
+    assert "gate engine_auth:" in result.state and "@x/odd-acp" in result.state
+    (row,) = _refusals(config)
+    assert (row["rule_id"], row["engine"]) == ("schedule.engine_auth", "acp")
+
+
+@pytest.mark.parametrize(
+    ("read", "refused"), [("private", False), (None, False), ("untrusted", True)]
+)
+def test_only_a_row_that_set_untrusted_after_a_self_notice_refuses(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read: str | None,
+    refused: bool,
+) -> None:
+    """R2 F4: the rows that CONTRIBUTE ``untrusted`` are recorded even while
+    the sticky bit is on, so a private-only read or a denied tool (no bit)
+    after the schedule's own notice no longer refuses its tick; a tool row
+    that read outside content still does."""
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    store.record_schedule_outcome("nightly", task_id="t-0", state="completed")
+    store.add_chat_message(chat_id, role="user", content="t-0 done", provenance="worker:t-0")
+    tool = store.add_chat_message(chat_id, role="tool", content="{}", tool_name="read_file")
+    if read is not None:
+        store.add_chat_taint(chat_id, **{read: tool})
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    if not refused:
+        assert len(seen) == 1 and _refusals(config) == []
+        return
+    assert seen == [] and f"message {tool}" in result.state
+
+
+@pytest.mark.parametrize("listed", [False, True])
+def test_the_binary_must_sit_inside_the_strict_walls_roots(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    listed: bool,
+) -> None:
+    """R2 F5 (I9, I12): on the worker's PATH is not enough — the strict
+    launch binds only the system dirs, the detected toolchains and the
+    project's extra_read_paths, so a binary elsewhere could never start."""
+    import json
+    import os
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "codex").write_text("#!/bin/sh\n")
+    (elsewhere / "codex").chmod(0o755)
+    _bound(store, tmp_path, monkeypatch)
+    if listed:  # the validator's home is pytest's basetemp, so the row is written as stored
+        policy = {**GATES_OPEN, "extra_read_paths": [str(elsewhere)]}
+        store._conn.execute("UPDATE project_policies SET policy_json = ?", (json.dumps(policy),))
+        store._conn.commit()
+    monkeypatch.setenv("PATH", f"{elsewhere}{os.pathsep}{os.environ['PATH']}")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    if listed:
+        assert len(seen) == 1 and _refusals(config) == []
+        return
+    assert seen == [] and "gate engine_auth:" in result.state
+    assert "strict read wall" in result.state and str(elsewhere) in result.state
