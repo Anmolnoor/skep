@@ -397,7 +397,7 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
         (
             "openai-compat",
             True,
-            "provider key relay: on — sandboxed builtin workers reach openai-compat",
+            "provider key relay: on — a sandboxed builtin worker reaches openai-compat",
         ),
         ("bedrock", True, "provider key relay: on, not used — bedrock signs"),
     ],
@@ -1063,6 +1063,66 @@ def test_a_copilot_relay_strips_the_github_token_its_bearer_came_from(
     env = seen["env"]
     assert env["SKEP_TEST_PLAIN"] == "kept"
     assert not any(github_token in v or bearer in v for v in env.values()), sorted(env)
+
+
+def test_a_copilot_renewal_between_selection_and_spawn_still_strips_the_github_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 03 review R2 (M5, I8): the GitHub token was looked up in the
+    shared bearer cache after the exchange. Another run's relay renewing the
+    same bearer (a 401: dropped, re-exchanged) in between emptied that
+    lookup, and the raw token reached a worker that allowlisted its
+    variable. The token is now captured with the bearer, at selection."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import provider_relay, spawner
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+    from skep.supervisor.serve import llm_copilot
+    from skep.worker_contract import Permissions
+
+    github_token = "CANARY-gh-" + secrets.token_hex(8)
+    bearers = iter(["CANARY-bearer-1", "CANARY-bearer-2"])
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        llm_copilot, "exchange_copilot_token", lambda token, *, timeout=10.0: (next(bearers), 4e9)
+    )
+    monkeypatch.setenv("SKEP_TEST_GH_TOKEN", github_token)
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="gpt-4o",
+        endpoint="https://api.githubcopilot.com",
+        api_key_env="SKEP_TEST_GH_TOKEN",
+    )
+    selected = provider_relay.relay_plan
+
+    def renewed_meanwhile(home: Path) -> tuple[Any, str]:
+        plan, why = selected(home)
+        assert plan is not None and plan[2] == "CANARY-bearer-1"
+        llm_copilot.forget_copilot_bearer(plan[2])  # another run's relay got a 401
+        assert llm_copilot.resolve_copilot_bearer(github_token) == "CANARY-bearer-2"
+        return plan, why
+
+    monkeypatch.setattr(provider_relay, "relay_plan", renewed_meanwhile)
+    relay, _model, note = provider_relay._relay_for(config, "task-1")
+    assert note == "on" and relay is not None and relay.key == "CANARY-bearer-1"
+    assert relay.sources == (github_token,)
+    task = mint_task(
+        workspace=tmp_path,
+        instructions="x",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"],
+            env_allowlist=["SKEP_TEST_GH_TOKEN"],
+        ),
+    )  # fmt: skip
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("subprocess.Popen", lambda argv, **kw: seen.update(kw))
+    spawner.spawn_worker(
+        config, task, tmp_path / "task.json", tmp_path / "out" / "result.json",
+        log_path=tmp_path / "log" / "worker.log", sandbox_enabled=False, relay=relay,
+    )  # fmt: skip
+    assert not any(github_token in value for value in seen["env"].values())
 
 
 def test_a_strict_allow_all_run_on_a_podman_host_is_still_relayed(

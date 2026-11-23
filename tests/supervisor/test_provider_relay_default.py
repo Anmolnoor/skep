@@ -319,10 +319,13 @@ def test_doctor_says_on_by_default_and_labels_each_external_engines_auth(
     report = format_doctor_report(build_status(config.home.parent, provider_timeout=0.1))
     (line,) = [ln for ln in report.splitlines() if ln.startswith("- provider key relay:")]
     assert line.startswith(
-        "- provider key relay: on — sandboxed builtin workers reach openai-compat through "
-        "their run's relay and hold no key; an unsandboxed (workspace-mode) run can still "
-        "read the key file, and the ollama worker (skep.workers.ollama) dials its own "
-        "endpoint with the daemon secret"
+        "- provider key relay: on — a sandboxed builtin worker reaches openai-compat through "
+        "its run's relay and holds no key, except on the runs dispatch keeps on the direct "
+        "path, whose worker holds the key (its record says `not used`): an allow-all run on "
+        "the podman backend (a strict-read run takes bubblewrap and is relayed) and a run "
+        "with no network. An unsandboxed (workspace-mode) run is relayed but can still read "
+        "the key file, and the ollama worker (skep.workers.ollama) dials its own endpoint "
+        "with the daemon secret"
     ), line
     assert "not relayed" in line and "auth: external-env" in line, line
     for named in (

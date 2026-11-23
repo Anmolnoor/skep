@@ -183,15 +183,47 @@ matching rule wins):
 
 ```
 (allow default)
+(deny lsopen) (deny job-creation) (deny appleevent-send) (deny mach-lookup <mds>)
 ...network and write rules, unchanged...
 (deny file-read* file-test-existence (with errno ENOENT))
 (allow file-read* file-test-existence (literal "/"))
 (allow file-read-metadata file-test-existence <every ancestor, literal>)
 (allow file-read-metadata file-test-existence (subpath "/etc") (subpath "/var/select") ...)
 (allow file-read* file-test-existence (subpath "/usr") (subpath "/System") ... <the run's roots>)
+(allow file-read* file-test-existence (literal <the repo's shared refs/>))
+(deny file-read* file-test-existence (subpath "/System/Volumes") (with errno ENOENT))
 (deny file-read* <the secret floor>) ... (deny file-read* (literal "/private/etc/sudoers")) ...
+(deny file-read* (subpath "/opt/homebrew/var")) ...
 (allow file-read* (literal <this run's own unmasked file>))
 ```
+
+- **Nothing starts outside the wall (review round 2, M9).** Every Seatbelt
+  profile, strict or not, denies `lsopen`: on macOS 27, `open` handed
+  LaunchServices an app (or a `.command`) that ran unsandboxed and copied a
+  fake-HOME canary into the worktree, under both profiles. `appleevent-send`
+  closes the same door through another app (`tell application "Terminal"
+  to do script`), `job-creation` a launchd job (launchd already refuses a
+  sandboxed `launchctl submit`, `bootstrap` and `load` on macOS 27; the
+  deny does not rely on that), and `com.apple.metadata.mds` Spotlight, an
+  index of the whole disk (macOS 27 filters its answers by the caller's
+  reads; the deny does not rely on that either). A lookup deny on
+  `com.apple.coreservices.launchservicesd` was tried and dropped: it did
+  not stop `open`, and LaunchServices also answers ordinary bundle lookups.
+- **`/System/Volumes` closed again (M4).** `/System` is reopened whole, and
+  that reached `/System/Volumes`: `Preboot`, `VM`, `Update` and the data
+  volume's own entries no firmlink maps back to the root (`mnt`, `sw`,
+  `.PreviousSystemInformation`). A firmlinked path is matched by its root
+  spelling, so `/Users/...` is never under it; dyld, Python, git, uv and
+  node still run.
+- **The shared `refs/` is listed (M3).** The git roots are `refs/`'s
+  entries, never the dir, so Seatbelt left it metadata-only and `git
+  for-each-ref` and `git branch` found nothing and exited 0. It is listed
+  now (names only); `refs/stash` stays unreadable, so git calls it a broken
+  ref: `for-each-ref` warns, and `git log --all` and `git prune` stop
+  (`bad object refs/stash`, `unable to parse object: refs/stash`) while the
+  operator's checkout has a stash. Before, `git prune --dry-run` in the wall
+  listed that stash's objects for deletion from the shared `objects/`,
+  which the worker can write.
 
 - **One global deny.** Not `(allow default)` with a narrow `/Users` deny,
   which would leave host `/tmp`, `/private/tmp` and `/var` readable. It
@@ -223,13 +255,21 @@ matching rule wins):
   `/var` is `/private/var`. Seatbelt matches the vnode's path, so the
   firmlink spelling `/System/Volumes/Data/Users/...` and
   `/Volumes/Macintosh HD/Users/...` reach the same denial. The tests probe
-  both.
+  both. Seatbelt also matches without case on APFS: an extra path
+  `/USERS/<me>` passed the check and reopened the home (review round 2,
+  M1). The checks on `extra_read_paths` and the detected roots now compare
+  `secret_floor.alias_key` spellings (case folded, data-volume prefix
+  dropped) against the home, the skep home and `/etc` resolved
+  (`/private/etc`), with both OSes' hidden entries.
 
 ### What a strict run reads on macOS (I8, stated plainly)
 
-- `/usr` (with `/usr/local`, so Intel Homebrew), `/System`, `/bin`,
-  `/sbin`, `/dev` (device nodes keep their Unix permissions; the raw disks
-  are root/operator only) and `/opt/homebrew`.
+- `/usr` (with `/usr/local`, so Intel Homebrew), `/System` but
+  `/System/Volumes`, `/bin`, `/sbin`, `/dev` (device nodes keep their Unix
+  permissions; the raw disks are root/operator only) and `/opt/homebrew`.
+  Homebrew's `var/` (`/opt/homebrew/var`, `/usr/local/var`: postgres,
+  mysql and redis data dirs) is masked last; its `etc/` stays readable
+  (below).
 - All of `/Library`. That includes `/Library/Keychains/System.keychain`
   (encrypted; its key is root-only), system-wide preferences and
   `/Library/Application Support`, and the CommandLineTools. It holds no
@@ -238,7 +278,7 @@ matching rule wins):
 - `/private/etc`, minus the auth entries above.
 - Three spots in `/private/var`: `select/` (the links `/bin/sh` and
   xcode-select read), `db/timezone/` (where `/etc/localtime` points) and
-  `run/resolv.conf`.
+  `run/resolv.conf`; and the `db/xcode_select_link` link itself.
 - The active developer dir. `/usr/bin/git` is xcrun's shim and runs git from
   it. When that dir is Xcode, the whole `Xcode.app` is read, because xcrun
   stats its `Info.plist` and loads its `SharedFrameworks`.
@@ -265,6 +305,18 @@ under the real `~/.gitconfig`, `uv run pytest`, node and the local timezone
 in the worker wall. The same tests run on Linux against bubblewrap.
 
 ## Not covered yet
+
+- Homebrew's `etc/` (`/opt/homebrew/etc`, `/usr/local/etc`) stays readable
+  on a Mac: its service configs can hold a password (`redis.conf`
+  `requirepass`, a `my.cnf`), but Homebrew's OpenSSL reads its CA bundle
+  from there (`etc/openssl@3/cert.pem`), so masking it would break TLS for
+  Homebrew's Python and curl. A project that needs it closed names
+  narrower paths itself, or runs denylist-only.
+- Under Seatbelt, `git log --all` and `git prune` stop on the unreadable
+  `refs/stash` while the operator's checkout has a stash (M3, above). The
+  stash's objects are readable by hash anyway (`git fsck --unreachable` in
+  the wall lists them; `objects/` is shared), so the exclusion hides the
+  ref, not the content.
 
 - Forged tools (`mcp_client.py`), the fast lane (`serve/fastlane.py`), the
   `diagnose` re-run (`serve/actions.py`) and MCP servers still get

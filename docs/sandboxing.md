@@ -50,7 +50,9 @@ own interpreter), the repo's git metadata minus the sibling worktrees, and the
 project's `extra_read_paths`. The run's own roots are bound as above, and the
 masks below still land last. The rest of `$HOME`, `/var`, `/mnt`, `/srv` and
 `/etc/pve` do not exist inside the sandbox. The G10 re-run of the patch uses
-the same wall. Podman refuses a strict run until it can enforce one.
+the same wall. Podman cannot enforce it yet, so a host configured for podman
+runs a strict project's runs on native bubblewrap instead (loudly in the
+log); only an explicit podman profile write refuses one.
 `skep doctor` names the sandboxed projects still on the denylist below;
 `skep project setup <repo> --strict-reads` moves one.
 
@@ -58,17 +60,30 @@ Since 2026-11-23, Seatbelt enforces it too, and new sandboxed projects on
 macOS get it by default. The profile denies every read globally, with
 ENOENT, so a denied path looks absent as it does under bwrap. git skips a
 missing `~/.gitconfig`, but dies on an unreadable one. The profile then
-reopens `/usr`, `/System`, `/Library`, `/opt/homebrew`, `/bin`, `/sbin`,
-`/dev`, `/private/etc` minus `master.passwd`/`sudoers`/`ssh`/`kcpassword`,
-`/private/var`'s `select/`, `db/timezone/` and `run/resolv.conf`, and the
-active Xcode bundle or CommandLineTools (`/usr/bin/git` is xcrun's shim). It
-also reopens the same toolchains, git metadata, run roots and
-`extra_read_paths` as on Linux. The ancestors of those get metadata only, so
-`getcwd()` and `realpath()` work without listing anything. The masks still
-come last. Host `/tmp` (`/private/tmp`), `/private/var/folders`, the rest of
-`$HOME` and `/Users/Shared` are unreadable, and so is any of them spelled
-through the `/System/Volumes/Data` firmlink. ADR 0068 lists what a Mac run
-still reads, and why.
+reopens `/usr`, `/System` minus `/System/Volumes`, `/Library`,
+`/opt/homebrew`, `/bin`, `/sbin`, `/dev`, `/private/etc` minus
+`master.passwd`/`sudoers`/`ssh`/`kcpassword`, `/private/var`'s `select/`,
+`db/timezone/` and `run/resolv.conf`, the xcode-select links and the active
+Xcode bundle or CommandLineTools (`/usr/bin/git` is xcrun's shim). It also
+reopens the same toolchains, git metadata, run roots and `extra_read_paths`
+as on Linux, and lets git list the repo's shared `refs/` (names only, so
+`git branch` and `for-each-ref` see every branch; `refs/stash` stays
+unreadable). The ancestors of those get metadata only, so `getcwd()` and
+`realpath()` work without listing anything. The masks still come last, with
+Homebrew's `var/` (`/opt/homebrew/var`, `/usr/local/var`: local databases
+and service state). Host `/tmp` (`/private/tmp`), `/private/var/folders`,
+the rest of `$HOME` and `/Users/Shared` are unreadable, and so is any of
+them spelled through the `/System/Volumes/Data` firmlink. An extra path is
+judged by every spelling macOS opens it by (`/etc` as `/private/etc`, any
+case, the firmlink), so none of them names the home, the skep home or
+`/etc`'s auth entries. ADR 0068 lists what a Mac run still reads, and why.
+
+Every Seatbelt profile, strict or not, denies `lsopen`, `job-creation`,
+`appleevent-send` and Spotlight's `com.apple.metadata.mds`: `open` (an app,
+a `.command`), a launchd job and `tell application "Terminal" to do script`
+would each start a process outside the wall, and Spotlight, an index of
+the whole disk, is closed rather than trusted to filter its answers by what
+the run may read.
 
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
@@ -107,8 +122,8 @@ and is bound back for its own run) and that is deleted when it ends — the
 real `~/.codex/auth.json` stays masked and the refresh token never enters the
 sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
 
-In denylist-only mode (a project without `strict_read_confinement`, and
-every Seatbelt run), everything else outside the workspace stays readable,
+In denylist-only mode (a project without `strict_read_confinement`),
+everything else outside the workspace stays readable,
 including other runs' worktrees under the skep home: no profile masks them.
 Treat such a worker as able to read any file the lists above do not name. A
 strict-read run reads only its allowlist (ADR 0068).
