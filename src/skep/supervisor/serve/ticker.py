@@ -182,6 +182,25 @@ class Ticker(threading.Thread):
                 f"⏰ card auto-denied: {card.tool} — timed out after {timeout}s",
             )
 
+    def _supersede_orphan_acp_cards(self) -> None:
+        """A14 (ADR 0058 D3): only a run's own ACP engine answers its
+        ``acp_permission`` card, and the engine lives in the serve that
+        dispatched the run. Once the run has ended (a restart cut the
+        session) nobody ever will — superseded, honestly, never left
+        waiting."""
+        from skep.worker_contract import TERMINAL_STATES
+
+        from .actions import ACP_PERMISSION_TOOL
+
+        ended = {state.value for state in TERMINAL_STATES}
+        for card in self._store.proposed_chat_actions():
+            if card.tool != ACP_PERMISSION_TOOL:
+                continue
+            run = self._store.get_run(str(card.args.get("task_id") or ""))
+            if run is not None and run.state in ended:
+                note = f"the run ended ({run.state}) before an answer; its ACP engine is gone"
+                self._store.supersede_chat_action(card.action_id, note=note)
+
     def _probe_provider_health(self) -> None:
         """v59-F6: record real provider health on an interval so routing has
         data — the checks existed since v14 but nothing ever called them.
@@ -322,6 +341,10 @@ class Ticker(threading.Thread):
                 self._expire_cards()
             except Exception:
                 logger.exception("card timeout sweep failed")
+            try:
+                self._supersede_orphan_acp_cards()
+            except Exception:
+                logger.exception("orphaned ACP card sweep failed")
             # ES B27: at most one schedule pass in flight; a slow one makes the
             # next tick skip it, never queue behind it. Each job inside has its
             # own ceiling: scripts SCRIPT_TIMEOUT_SECONDS, prompt turns

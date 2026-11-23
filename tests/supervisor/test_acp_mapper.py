@@ -132,7 +132,7 @@ def test_request_shapes_without_a_readable_operation_are_never_decided(tmp_path:
     assert probe({"kind": "read"}, s) == NoOpinion("kind 'read': no rule in skep's vocabulary")
     assert probe({}, s) == NoOpinion("no kind")
     assert probe({"kind": "fetch", "rawInput": {"url": "https://docs.example/x"}}, s) == Decided(
-        (("network", "fetch", "docs.example"),), str(tmp_path)
+        (("network", "fetch", "docs.example"),), str(tmp_path), "https://docs.example/x"
     )
 
 

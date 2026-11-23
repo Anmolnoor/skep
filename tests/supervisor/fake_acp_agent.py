@@ -68,6 +68,8 @@ def _step(n: int, step: dict[str, Any]) -> None:
     rid = 500 + n
     _send(id=rid, method="session/request_permission",
           params={"sessionId": "s1", "toolCall": call, "options": options})  # fmt: skip
+    if step.get("then_exit"):  # the adapter dies with its ask still open
+        raise SystemExit(0)
     outcome = _answer(rid).get("result", {}).get("outcome", {})
     if outcome.get("optionId") != "yes":
         _update(tid, status="failed")

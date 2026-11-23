@@ -4,7 +4,10 @@
 2026-11-06 draft in the design archive and amended: the governor runs
 **outside** the sandbox (the draft put it inside, with the store mounted
 read-only — rejected, see D2/D6). C0–C2 are built; C3's patch-card ask
-counts and the `skep approval answer` CLI face are not.
+counts and the `skep approval answer` CLI face are not. Amended by the Phase
+04 review round 1 (4C, 2026-11-23): engine identity by module, strict reads
+required, run-bound stacks, port-aware wall, card expiry at the claim, the
+worker's claim kept beside the supervisor's verdict.
 **Depends on:** ADR 0054 (the governor: `acp/proxy.py`, `acp/mapper.py`,
 `acp/govern.py`), ADR 0047 (CLI-agent engines), ADR 0059 (`decide()`),
 ADR 0061 (unlocked mode), ADR 0068 (strict reads).
@@ -56,6 +59,17 @@ and so can the scheduled external-engine preflight (Phase 04 4.2).
 `skep project setup --engine acp:codex-acp` and `skep run --engine …` accept
 them.
 
+*R1 (A1):* a worker command is recognised by the module it runs, never by
+its last argv token (an ACP entry's is the adapter's name, so `my-tool
+codex-acp` matched and `python -m skep.workers.acp npx …` did not).
+`engines.external_agent_for_command` answers `acp:<adapter>` when the token
+after `skep.workers.acp` is a registered adapter, else `acp` — an
+unregistered adapter, still an ACP engine. That one answer drives the
+scheduler's external-engine gates, dispatch's sandbox coercion, pin, pipes
+and governor, and the spawner's key masks (no `llm-secret` for an ACP
+worker). Its rows name `acp:<agent>` (the mapper's name for the adapter
+argv); the run record keeps `builtin`, as for any `--worker-cmd`.
+
 ### D2 — amended: the governor is outside the wall
 
 *Draft:* the worker spawns `skep acp govern` inside the sandbox, which reads
@@ -73,6 +87,16 @@ in the sandbox, and `supervisor.sqlite3` is never mounted there.
   `Governor` in engine mode (`EngineBinding`). Every frame passes the same
   `Proxy` and handlers the T3 face uses (I5: one implementation of
   "answer the hop").
+
+*R1 (A2):* the wall is not optional. An ACP dispatch is refused before any
+run record unless the project's `strict_read_confinement` is on (the I9
+message names `skep project setup <repo> --strict-reads`) and the backend a
+strict run launches is usable with the sandbox on. Strict reads stay a
+project choice for every other engine; for this one they are the engine's.
+
+*R1 (A7, A15):* `AcpEngine.finish()` joins the session and every forwarded
+ask; dispatch calls it before the store closes (in its `finally` too). A
+session still running at the timeout is a stated failure, never "none".
 
 ### D3 — a forwarded ask is an approval card; a timeout denies
 
@@ -92,6 +116,21 @@ confirm already running wins the claim), answers `reject_once` — the ask, not
 the run (open question 2) — and the `forwarded` row's actor is
 `auto:card-timeout`, never a human.
 
+*R1 (A5, A6, A10, A13, A14):*
+
+- The card carries its deadline (`expires_at`). A confirm past it never
+  claims the card: the commands face denies it (auto) and answers 409. A
+  card stuck `executing` (a confirm that died mid-claim) is denied once the
+  deadline or the session's end passes and one more poll finds it so.
+- The chat is the one `run_task(chat_id=…)` names (a schedule's — the
+  scheduler passing `schedule.chat_id` is Phase 04 4.2's half), else the
+  chat whose action dispatched the run, else ONE fallback chat per run,
+  reused by every later ask.
+- A forwarded ask the engine itself failed answers `cancelled` with actor
+  `auto:engine-error`, never `human@skep`.
+- A card whose run has ended (the serve that held its engine restarted) is
+  superseded by the ticker with the run's state — nobody can answer it.
+
 *Not built:* `skep approval answer <id>`. REST + chat already satisfy ADR
 0050; a CLI face for `chat_actions` is still overdue.
 
@@ -105,6 +144,25 @@ the run with the reason (`… offers no asking mode … ADR 0058 D4, I9`) —
 recorded as the run's failure detail, never a silent observe-only run.
 `acp_agent_mode` as a project key (open question 3) is not built.
 
+*Measured (R1, A11, 2026-11-23, macOS, `@agentclientprotocol/codex-acp`
+2.10.0 / codex 0.171.0, inside skep's strict Seatbelt profile, fake
+`CODEX_HOME`, a dummy key, deny-all network):* the adapter starts,
+authenticates from the env, offers its modes and accepts `read-only`.
+Codex's own sandbox cannot start there — `codex sandbox -- ls` exits 71
+with `sandbox_apply: Operation not permitted` (nested Seatbelt; ES-F220 saw
+the same for bwrap inside Landlock), while `sandbox_mode=
+"danger-full-access"` runs. No codex-acp mode both asks and runs without
+codex's sandbox: the four built-in modes send their own sandbox policy on
+every turn (config.toml cannot override it), `agent-full-access` never
+asks, a `[permissions.<id>]` profile still sandboxes (and may not extend
+`:danger-full-access`), and `approval_policy = "untrusted"` is no longer
+accepted. So `read-only` stays the pin: each command codex runs fails in
+its own sandbox first and codex's on-request approval then asks to run it
+without one — an ask skep decides, inside skep's wall. *Owed:* that
+escalation with a real model (Test 4.1 on `acp:codex-acp`); if codex gives
+up instead of asking, the honest answer is to refuse `acp:codex-acp` and
+point at `codex` (headless, its sandbox off, skep's wall).
+
 ### D5 — every decision is bound to the run, never to the adapter
 
 `actions.acp_engine_decide` decides with the dispatched run's repo (its
@@ -113,6 +171,12 @@ with Phase 02's blame — `task_id`, `engine: acp:<adapter>`,
 `caste: coding` — plus `tool_call_id` when the frame names one, and
 `actor: acp-engine:<adapter>`. Observed and forwarded rows carry the same
 blame and the run's repo. `skep run forensics <task_id>` shows them.
+
+*R1 (A3):* the stack is the dispatched run's own binding
+(`project_context`) first — a template-bound run is judged by its project,
+never by whatever its repo path resolves to — and the policy cwd (the
+floor's for shell paths) is the run's worktree, not the operator's
+checkout.
 
 **Paths and hosts are the supervisor's.** The session's cwd is bound to the
 worktree, whatever the adapter sends. An item the running wall would refuse
@@ -125,7 +189,13 @@ never allowed or carded:
 - a fetch of a host the run's proxy was not started with — even one a rule
   or a human would allow ("add the host to the project's network policy and
   dispatch again"). Approving it would not open the proxy, and nothing
-  widens a running sandbox;
+  widens a running sandbox. *R1 (A4):* the fetch's URL rides the decision
+  (its scheme and port), and the check is the proxy's own admission
+  (`netproxy.admit_target`: port pins, loopback ports, serve's port) — its
+  DNS check stays the proxy's at connect time;
+- *R1 (A12):* a read outside the worktree and outside the run's recorded
+  read allowlist (the `dispatched` line's `read_allowlist`), worded as a
+  read;
 - any `terminal/create` or `fs/write_text_file`: the engine's client
   advertises neither capability, and running one would run on the host.
   Each is still put to `decide()` (a floor deny stays the floor's) and then
@@ -151,8 +221,12 @@ Nothing lands through the wire. The worker exits, the patch is the worktree
 diff against the startup baseline, G10 re-verifies with the pinned command,
 the human approves, landing is the commit (I1, I2). A session failure the
 worker inside could not see (no asking mode, an adapter error, a `refusal`
-stop) downgrades a completed or failed result to failed with that reason
-(I8); it never upgrades anything.
+stop) makes the run failed with that reason (I8); it never upgrades
+anything. *R1 (A9):* the worker's own result is ingested as it made it (the
+store's result fields and the audit's `result.json` agree); the
+supervisor's verdict is its own record — a `failed` transition with
+`skep acp: <reason>` and `supervisor_verdict.json` (`status`, `reason`,
+`worker_status`) beside the worker's result.
 
 ## Mediated vs observed (I8)
 
@@ -162,6 +236,7 @@ stop) downgrades a completed or failed result to failed with that reason
 | a wall refusal | `layer: wall`, `verdict: deny` | **mediated**: refused, with why the sandbox would refuse it too |
 | a forwarded ask | `forwarded`, `outcome`, actor `human@skep` or `auto:card-timeout` | **mediated** by a human (or by the timeout) |
 | a tool call that finished without asking | `observed`, no verdict | **observed only**: it ran unasked inside the sandbox; never claimed as pre-approved |
+| one skep has no rule for (a read, a search — R1 A8, engine runs) | `observed`, `scope` null, `value` its title, `kind` | **observed only**, with what the agent called it |
 
 Adapters run read-only commands unasked even in asking modes; those rows are
 the honest record of that, and the sandbox is what bounded them.

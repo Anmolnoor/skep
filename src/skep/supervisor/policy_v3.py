@@ -403,12 +403,19 @@ CHANNEL_CHATS: set[str] = set()
 
 
 def load_stack(
-    holder: ConfigHolder, store: RunStore, *, repo: str | None = None, chat: str | None = None
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str | None = None,
+    chat: str | None = None,
+    binding: tuple[str, str] | None = None,
 ) -> Stack:
     """The stack for one request. With a repo, the run policy a dispatch
     there would run under; a repo that resolves to no run policy keeps the
     operator lane and says why (I8). An ambiguous repo name raises the
-    registry's HTTPException, as ``why`` always has."""
+    registry's HTTPException, as ``why`` always has. ``binding`` (Phase 04
+    R1, A3): a dispatched run's own project binding, tried first — a run
+    bound by template name is invisible to the repo lookup (W10)."""
     from .policy_layers import baseline_guard
     from .serve.actions import _project_summary, _repo_project_for_view, _resolve_for_view
     from .serve.fileio import operator_roots
@@ -430,7 +437,7 @@ def load_stack(
     )
     if not repo:
         return stack
-    resolved_repo, candidates, project_row = _repo_project_for_view(holder, store, repo)
+    resolved_repo, candidates, project_row = _repo_project_for_view(holder, store, repo, binding)
     project = _project_summary(project_row)
     # B123: a shell line is judged from the repo the arg names (a slug is
     # not a path under the process cwd, v87-F1).

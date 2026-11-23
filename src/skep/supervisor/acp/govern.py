@@ -55,8 +55,10 @@ def _dict(value: Any) -> dict[str, Any]:
 
 
 Ring = Literal["advisory", "hard"]
-# (item, the cwd the frame names, ring, toolCallId, client_side) -> the decision row
-EngineDecide = Callable[[tuple[str, str, str], str, Ring, str | None, bool], dict[str, Any]]
+# (item, the cwd the frame names, ring, toolCallId, client_side, a fetch's URL) -> the row
+EngineDecide = Callable[
+    [tuple[str, str, str], str, Ring, str | None, bool, str | None], dict[str, Any]
+]
 
 
 @dataclass
@@ -135,9 +137,10 @@ class Governor:
         ring: Ring = "advisory",
         tool_call_id: str | None = None,
         client_side: bool = False,
+        url: str | None = None,
     ) -> dict[str, Any]:
         if self.engine is not None:
-            return self.engine.decide(item, cwd, ring, tool_call_id, client_side)
+            return self.engine.decide(item, cwd, ring, tool_call_id, client_side, url)
         if self.holder is None or self.store is None:
             raise RuntimeError(self.store_error or "no store")
         scope, action, value = item
@@ -159,14 +162,25 @@ class Governor:
         if call.get("status") not in _RAN or tid in self.session.asked:
             return None  # observed means "ran unasked"; an asked call has its decision rows
         pr = probe(call, self.session)
-        if isinstance(pr, Decided) and self.session.mark_observed(tid):
-            for scope, action, value in pr.items:
-                policy_note(
-                    self.audit_dir, source="observed", actor=self.actor,
-                    repo=self.engine.repo if self.engine else pr.cwd,
-                    scope=scope, action=action, value=value, agent=self.agent,
-                    session_id=params.get("sessionId"), tool_call_id=tid, **self._blame,
-                )  # fmt: skip
+        if not isinstance(pr, Decided) and self.engine is None:
+            return None  # ADR 0054's face records the calls it can map (its goldens)
+        if not self.session.mark_observed(tid):
+            return None
+        # Phase 04 R1 (A8, I8): in a dispatched run, a call skep has no rule
+        # for (an ordinary read, a search) ran unasked all the same — one row
+        # with what the agent called it and the run's blame, never silence.
+        items: tuple[tuple[str | None, str | None, str | None], ...] = (
+            pr.items if isinstance(pr, Decided) else ((None, None, call.get("title")),)
+        )
+        meta = {} if isinstance(pr, Decided) else {"kind": call.get("kind"), "note": pr.reason}
+        cwd = pr.cwd if isinstance(pr, Decided) else self.session.cwd
+        for scope, action, value in items:
+            policy_note(
+                self.audit_dir, source="observed", actor=self.actor,
+                repo=self.engine.repo if self.engine else cwd,
+                scope=scope, action=action, value=value, agent=self.agent,
+                session_id=params.get("sessionId"), tool_call_id=tid, **meta, **self._blame,
+            )  # fmt: skip
         return None
 
     def _permission(self, msg: dict[str, Any]) -> Reply | Forward:
@@ -187,7 +201,7 @@ class Governor:
                 note = pr.reason
             else:
                 cwd, item = pr.cwd, pr.items[0]
-                records = [self._decide(i, cwd, tool_call_id=tid) for i in pr.items]
+                records = [self._decide(i, cwd, tool_call_id=tid, url=pr.url) for i in pr.items]
                 if any(r["verdict"] == "deny" for r in records):
                     if "reject_once" in kinds:
                         return _selected(kinds["reject_once"])

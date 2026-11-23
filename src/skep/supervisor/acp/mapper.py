@@ -91,6 +91,7 @@ class Decided:
 
     items: tuple[tuple[str, str, str], ...]
     cwd: str
+    url: str | None = None  # a fetch's URL: its scheme and port are the proxy's to judge
 
 
 @dataclass(frozen=True)
@@ -172,10 +173,11 @@ def probe(tool_call: Mapping[str, Any], session: Session) -> Probe:
         items = tuple(("filesystem", "write", workspace_value(p, session.cwd)) for p in paths)
         return Decided(items, session.cwd)
     if kind == "fetch":
-        host = urlsplit(str(raw.get("url") or "")).hostname
+        url = str(raw.get("url") or "")
+        host = urlsplit(url).hostname
         if not host:
             return Unreadable(f"rawInput.url missing for kind=fetch (agent {agent})")
-        return Decided((("network", "fetch", host),), session.cwd)
+        return Decided((("network", "fetch", host),), session.cwd, url)
     return NoOpinion(f"kind {kind!r}: no rule in skep's vocabulary")
 
 

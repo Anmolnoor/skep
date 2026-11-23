@@ -4224,6 +4224,18 @@ def add_chat_routes(
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
+        if (
+            confirm
+            and action.tool == actions.ACP_PERMISSION_TOOL
+            and actions.acp_permission_expired(action.args)
+        ):
+            # A5 (I6): the run's engine has denied this ask, or is about to —
+            # a confirm past the card's deadline never claims it.
+            actions.expire_acp_permission(run_store, action_id, "auto-denied: card timed out")
+            raise HTTPException(
+                status_code=409,
+                detail="this ask timed out and was denied (I6) — the agent was told no",
+            )
         if confirm or gate_mirror:
             # ES-F1 (B15): the same claim as verdict_events — a double /land
             # confirm ran land_run twice.

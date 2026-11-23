@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -1918,12 +1919,13 @@ def workon(
 
 
 def _repo_project_for_view(
-    holder: ConfigHolder, store: RunStore, repo: str
+    holder: ConfigHolder, store: RunStore, repo: str, binding: tuple[str, str] | None = None
 ) -> tuple[Path, list[tuple[str, str]], Any]:
-    """The resolved repo path, the binding candidates a dispatch would offer,
-    and the project they bind to (None when unbound)."""
+    """The resolved repo path, the binding candidates a dispatch would offer
+    (a run's own ``binding`` first), and the project they bind to (None when
+    unbound)."""
     resolved_repo = resolve_repo_arg(repo, repos_root(holder), store)
-    binding_candidates: list[tuple[str, str]] = []
+    binding_candidates: list[tuple[str, str]] = [binding] if binding else []
     if (repos_root(holder) / repo / ".git").exists():
         binding_candidates.append(("repo_slug", repo))
     project = None
@@ -4079,29 +4081,54 @@ ACP_PERMISSION_TOOL = "acp_permission"
 ACP_TIMEOUT_ACTOR = "auto:card-timeout"
 
 
+def _no_dns(*_: Any, **__: Any) -> list[Any]:
+    raise OSError("resolved by the proxy at connect time, not here")
+
+
 def _outside_wall(
-    task: CodingWorkerTask, item: tuple[str, str, str], cwd: str, client_side: bool
+    store: RunStore,
+    task: CodingWorkerTask,
+    item: tuple[str, str, str],
+    cwd: str,
+    client_side: bool,
+    *,
+    url: str | None,
+    home: Path,
 ) -> str | None:
     """ADR 0058 (I9, I12): why the running wall would refuse ``item`` whatever
     policy says, or None. Everything here is the supervisor's — the run's
-    worktree and the hosts its proxy was started with — never an adapter's
-    claim. Answering such an ask "allow" would be a lie the sandbox then
-    refuses; answering it with a card would ask a human for something that
-    cannot happen. Neither widens the running sandbox."""
-    from ..netproxy import domain_allowed
+    worktree, its recorded read wall and the hosts its proxy was started
+    with — never an adapter's claim. Answering such an ask "allow" would be a
+    lie the sandbox then refuses; answering it with a card would ask a human
+    for something that cannot happen. Neither widens the running sandbox."""
+    from ..netproxy import admit_target, control_plane_ports, run_loopback_ports
     from ..policy_paths import workspace_value
+    from ..reverify import _recorded_read_wall
     from ..spawner import effective_network_domains
 
-    scope, _action, value = item
+    scope, action, value = item
     if client_side:
         return (
             "the engine's ACP client runs no tools: one run for the agent would run on "
             "this host, outside the run's sandbox (I12) — the agent runs it itself, inside"
         )
     worktree = task.workspace
-    if scope == "filesystem" and value != "workspace":
+    if scope == "filesystem" and value != "workspace" and action != "read":
         return (
             f"{value} is outside this run's worktree — the sandbox lets the agent write only "
+            "there, so an approval could not take effect (I9)"
+        )
+    if scope == "filesystem" and value != "workspace":
+        # A12: a strict run reads its worktree and its recorded read wall.
+        # ponytail: the OS and toolchain roots the profile also opens are not
+        # consulted — such a read is refused here; read sandbox.strict_read_roots
+        # if the mapper ever forwards reads.
+        wall = _recorded_read_wall(store, task.task_id)
+        if wall is None or any(Path(value).is_relative_to(root) for root in wall):
+            return None
+        return (
+            f"{value} is outside this run's worktree and its read allowlist "
+            f"({', '.join(map(str, wall)) or 'none'}) — the sandbox lets the agent read only "
             "there, so an approval could not take effect (I9)"
         )
     if scope == "shell" and cwd and workspace_value(cwd, worktree) != "workspace":
@@ -4110,16 +4137,28 @@ def _outside_wall(
             "work only there, so an approval could not take effect (I9)"
         )
     hosts = effective_network_domains(task)
-    if scope == "network" and not (
-        domain_allowed(value, hosts) or domain_allowed(value, hosts, port=443)
-    ):
-        return (
-            f"{value} is not among this run's network hosts ({', '.join(hosts) or 'none'}): "
-            "its proxy would refuse it, so skep refuses the ask instead of approving what "
-            "cannot happen (I9) — add the host to the project's network policy and dispatch "
-            "again"
-        )
-    return None
+    if scope != "network" or hosts == ("*",):
+        return None
+    # A4: the authority asked for, judged by the proxy's own admission (port
+    # pins, loopback ports, serve's port) — its DNS check stays the proxy's.
+    split = urllib.parse.urlsplit(url or "")
+    try:
+        port = split.port or (80 if split.scheme == "http" else 443)
+    except ValueError:
+        port = 0
+    status, why, _ = admit_target(
+        value, port, hosts, denied_ports=control_plane_ports(home), resolve=_no_dns,
+        loopback_ports=run_loopback_ports(
+            task.permissions.loopback_ports, task.permissions.provider_hosts, home
+        ),
+    )  # fmt: skip
+    if status != 403:
+        return None
+    return (
+        f"{value}:{port} is not among this run's network hosts ({', '.join(hosts) or 'none'}): "
+        f"its proxy would refuse it ({why}), so skep refuses the ask instead of approving what "
+        "cannot happen (I9) — add the host to the project's network policy and dispatch again"
+    )
 
 
 def acp_engine_decide(
@@ -4129,17 +4168,21 @@ def acp_engine_decide(
     item: tuple[str, str, str],
     *,
     actor: str,
+    engine: str,
     cwd: str,
     ring: Literal["advisory", "hard"],
     tool_call_id: str | None,
     client_side: bool,
     walled: bool,
+    url: str | None = None,
 ) -> dict[str, Any]:
     """ADR 0058 (Phase 04 4.1): one ACP frame of a dispatched run, decided
     outside its sandbox and recorded with the run's blame and the tool call.
 
-    Bound to the run, never to the adapter: the stack is the run's repo, the
-    role and chain its delegation's. ``sandboxed`` (ADR 0061) is True only
+    Bound to the run, never to the adapter: the stack is the run's own
+    project binding (A3: a template-bound run is its project's, not the
+    repo path's) judged in the run's worktree (the floor's cwd), the role
+    and chain its delegation's. ``sandboxed`` (ADR 0061) is True only
     when dispatch launched the adapter behind the wall (``walled``) and the
     run is its own unlocked project's (the R3 rule ``unlocked_gate_allowed``
     keeps) — the one decide() caller besides the worker-gate auto-answer
@@ -4148,7 +4191,9 @@ def acp_engine_decide(
     the wall's deny with the reason (``_outside_wall``)."""
     run = store.get_run(task.task_id)
     repo = str(run.repo) if run is not None else None
-    stack = load_stack(holder, store, repo=repo)
+    context = task.project_context
+    binding = None if context is None else (context.binding_kind, context.binding_value)
+    stack = replace(load_stack(holder, store, repo=repo, binding=binding), cwd=task.workspace)
     delegation = _delegation_of(task)
     chain, role = delegation_inputs(
         holder,
@@ -4156,17 +4201,22 @@ def acp_engine_decide(
         (delegation or {}).get("role"),
         team=(delegation or {}).get("team"),
     )
-    own = task.project_context is not None and task.project_context.project_id == stack.unlocked
+    own = context is not None and context.project_id == stack.unlocked
     sandboxed = walled and own and run is not None and run.execution_mode == "sandbox"
     req = Request(*item)
-    verdict = decide_v3(req, stack=stack, role=role, chain=chain, face=ring, sandboxed=sandboxed)
-    wall = None if verdict.verdict == "deny" else _outside_wall(task, item, cwd, client_side)
+    verdict = decide_v3(
+        req, stack=stack, role=role, chain=chain, face=ring, sandboxed=sandboxed, url=url
+    )
+    wall = None
+    if verdict.verdict != "deny":
+        home = holder.current.home
+        wall = _outside_wall(store, task, item, cwd, client_side, url=url, home=home)
     if wall is not None:
         rule = "client-side" if client_side else "outside-wall"
         verdict = Verdict("deny", "wall", rule, f"wall/{rule}", verdict.source, wall)
     row = _decision_row(
-        verdict, stack, actor=actor, repo=repo, req=item, role=role, task_id=task.task_id,
-        engine=run.coding_engine if run else None, caste=task.worker_kind,
+        verdict, stack, actor=actor, repo=repo, req=item, role=role, url=url,
+        task_id=task.task_id, engine=engine, caste=task.worker_kind,
     )  # fmt: skip
     if tool_call_id:
         row["tool_call_id"] = tool_call_id
@@ -4175,12 +4225,20 @@ def acp_engine_decide(
 
 
 def propose_acp_permission(
-    store: RunStore, task: CodingWorkerTask, ask: dict[str, Any], *, chat_id: str | None
-) -> str:
+    store: RunStore,
+    task: CodingWorkerTask,
+    ask: dict[str, Any],
+    *,
+    chat_id: str | None,
+    expires_at: float,
+) -> tuple[str, str]:
     """ADR 0058 D3: an ask the governor could not decide becomes the run's
     approval card — ``source='gate'``: a run waits on it, like a worker gate,
     and it resolves on the commands faces (chat card + REST, ADR 0050).
-    The dispatching chat holds it; a run no chat started gets its own."""
+    The dispatching chat holds it; a run no chat started gets its own.
+    ``expires_at`` (A5, epoch seconds) rides the card so the claim can
+    refuse a confirm the engine's timeout already denied. Returns
+    ``(chat_id, action_id)``."""
     if chat_id is None or store.get_chat(chat_id) is None:
         chat_id = store.create_chat(
             title=f"ACP asks · run {task.task_id[:8]}", model=None, source="acp",
@@ -4188,11 +4246,18 @@ def propose_acp_permission(
         ).chat_id  # fmt: skip
     from .cards import boundary
 
-    args = {"task_id": task.task_id, **ask}
+    args = {"task_id": task.task_id, **ask, "expires_at": expires_at}
     label, _ = boundary(ACP_PERMISSION_TOOL, args, store=store)
-    return store.add_chat_action(
+    action_id = store.add_chat_action(
         chat_id, tool=ACP_PERMISSION_TOOL, args=args, source="gate", card={"boundary": label}
     )
+    return chat_id, action_id
+
+
+def acp_permission_expired(args: dict[str, Any]) -> bool:
+    """A5 (I6): the card's own deadline has passed — no confirm may claim it."""
+    expires = args.get("expires_at")
+    return isinstance(expires, (int, float)) and time.time() > expires
 
 
 def expire_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
