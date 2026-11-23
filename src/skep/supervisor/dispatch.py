@@ -851,8 +851,10 @@ def run_task(
         # go through a relay route on this same proxy, which holds the key.
         # An allow-all run gets a relay-only proxy (empty allowlist): it
         # reaches the port because allow-all permits loopback.
+        # E4: a worker command that runs an external agent or the shell
+        # worker (``wrapped``) is not builtin either.
         relay, relay_model, relay_note = provider_relay_for_run(
-            run_store, config, task, builtin=worker_argv is None
+            run_store, config, task, builtin=worker_argv is None and wrapped is None
         )
         if relay is not None and not domains:
             relay, relay_note = None, "not used: the run has no network"
@@ -866,6 +868,10 @@ def run_task(
             # A podman run has its own network namespace; a domain-list run
             # already falls back to the native backend, an allow-all one not.
             relay, relay_note = None, "not used: a podman run cannot reach the host loopback"
+        if relay is not None and not (execution_mode == "sandbox" and config.sandbox):
+            # E2 (I8): the relay still keeps the key out of its env, but no
+            # wall masks llm-secret* from an unsandboxed worker.
+            relay_note = "on, but an unsandboxed run can read the key file"
         if (domains and domains != ("*",)) or relay is not None:
             if (
                 execution_mode == "sandbox"
@@ -908,7 +914,7 @@ def run_task(
             }
         if relay_note != "off":  # off: the record reads as it did before ADR 0062
             dispatched_fields["provider_key_relay"] = relay_note
-        if worker_argv is not None:
+        if worker_argv is not None or wrapped is not None:
             # ADR 0062 delta (I8): an external engine authenticates from its
             # own env (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, the Codex
             # ChatGPT login) — never through the relay, whatever the switch.

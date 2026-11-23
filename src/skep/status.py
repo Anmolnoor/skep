@@ -1136,7 +1136,12 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     plan, why = relay_plan(home)
     if plan is None:
         return {"on": True, "relayed": False, "label": f"on, not used — {why}{not_relayed}"}
-    label = f"on — builtin workers reach {plan[1]} through their run's relay and hold no key"
+    # E3 (I8): the guarantee is the wall's, not the provider plan's alone.
+    label = (
+        f"on — sandboxed builtin workers reach {plan[1]} through their run's relay and hold "
+        "no key; an unsandboxed (workspace-mode) run can still read the key file, and the "
+        "ollama worker (skep.workers.ollama) dials its own endpoint with the daemon secret"
+    )
     return {"on": True, "relayed": True, "label": label + not_relayed}
 
 

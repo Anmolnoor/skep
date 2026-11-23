@@ -140,12 +140,20 @@ def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | 
     endpoint, protocol, key, model = plan
     token = relay_token(config.home, task_id)
     from .providers import provider_host
-    from .serve.llm_copilot import COPILOT_HOST
+    from .serve.llm_copilot import COPILOT_HOST, copilot_github_token
 
     renew = None
+    sources: tuple[str, ...] = ()
     if provider_host(endpoint) == COPILOT_HOST:
         renew = functools.partial(_renewed_copilot_key, config.home.parent, endpoint)
-    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew)
+        # Phase 03 review E1 (I8): the GitHub token the bearer came from is a
+        # key too; spawn_worker drops both from the worker env. None: ``key``
+        # was never exchanged, so it is the token itself.
+        github_token = copilot_github_token(key)
+        sources = (github_token,) if github_token else ()
+    relay = ProviderRelay(
+        upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew, sources=sources
+    )
     return relay, model, "on"
 
 
@@ -174,7 +182,8 @@ def readopted_relay(
     says now (its worker holds a token, not the key). Nothing was stored: the
     token is recomputed and the provider resolved again."""
     detail = next((d for st, d, _ in store.transitions_for(task_id) if st == "dispatched"), None)
-    if json.loads(detail or "{}").get("provider_key_relay") != "on":
+    # "on", or E2's "on, but an unsandboxed run can read the key file"
+    if not str(json.loads(detail or "{}").get("provider_key_relay", "")).startswith("on"):
         return None
     return _relay_for(config, task_id)[0]
 

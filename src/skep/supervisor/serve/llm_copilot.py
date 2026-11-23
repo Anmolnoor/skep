@@ -71,6 +71,12 @@ def resolve_copilot_bearer(github_token: str) -> str:
     return bearer
 
 
+def copilot_github_token(bearer: str) -> str | None:
+    """The GitHub token ``bearer`` was exchanged from, while it is cached."""
+    with _lock:
+        return next((token for token, (b, _) in _cache.items() if b == bearer), None)
+
+
 def forget_copilot_bearer(bearer: str) -> None:
     """ES-F263: drop a bearer the provider refused, so the next resolve
     re-exchanges instead of handing back the same dead token until expiry."""

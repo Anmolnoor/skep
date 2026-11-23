@@ -246,7 +246,24 @@ operator's own config for aider and pi. Their dispatched line says
 `"auth": "external-env"` whatever the switch says, next to the
 `provider_key_relay` note, and `skep doctor` names each engine's credential as
 `auth: external-env, not relayed`. With the default ON, every other dispatched
-line carries the `provider_key_relay` note (`on`, or `not used: <why>`).
+line carries the `provider_key_relay` note (`on`, `on, but an unsandboxed run
+can read the key file`, or `not used: <why>`).
+
+**Honest scope, review round 1.** "Holds no key" is the wall's claim, not the
+provider plan's: it holds for a builtin worker whose run is both relayed and
+sandboxed. A workspace-mode run, or any run with the sandbox off, is still
+relayed (its env carries no key, and a key kept only in the supervisor's env
+stays out of its client's hands), but nothing masks `llm-secret*` from it and
+it can dial the provider itself; its line says `on, but an unsandboxed run can
+read the key file`, and re-adoption treats both `on` notes as relayed. `skep
+doctor` and the knob's help text say "sandboxed builtin workers" and name the
+workspace-mode case and the ollama-worker exception above. Two holes closed in
+the same round: a Copilot relay holds the exchanged bearer, and the GitHub
+token it was exchanged from is now dropped from the worker env by value too,
+under any allowlisted name (`ProviderRelay.sources`). A `--worker-cmd` /
+`SKEP_WORKER_CMD` that runs an external agent's module or the shell worker
+(D36's `wrapped`) is an external engine here as well: never relayed, its line
+says `auth: external-env`, and it gets no B125 key-file carve-out.
 
 **Unchanged.** The old path (key files readable to unrelayed LLM castes,
 `api_key_env` passthrough) stays until the default has run through the

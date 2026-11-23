@@ -25,6 +25,7 @@ from skep.workers.cli_adapter import SANDBOX_MARKER_ENV
 from . import sandbox
 from .castes import CASTES
 from .config import SupervisorConfig
+from .engines import external_agent_for_command
 from .netproxy import ProviderRelay, run_loopback_ports
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
@@ -259,9 +260,11 @@ def spawn_worker(
             backend=backend,
             skep_home=config.home.parent,
             # B125: only skep's own LLM-calling workers read the LLM key; an
-            # external engine (worker_argv) authenticates from its env, and an
+            # external engine (worker_argv, or a worker command that runs one
+            # or the shell worker: E4) authenticates from its env, and an
             # unregistered caste falls back to the coding worker.
             worker_llm_key=worker_argv is None
+            and external_agent_for_command(argv) is None
             and relay is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
@@ -291,8 +294,10 @@ def spawn_worker(
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
     if relay is not None:
         # ADR 0062: by value, so the key leaves under any name (api_key_env,
-        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named.
-        env = {name: value for name, value in env.items() if relay.key not in value}
+        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named —
+        # and so does what it was made from (E1: a Copilot bearer's GitHub token).
+        held = (relay.key, *relay.sources)
+        env = {name: value for name, value in env.items() if not any(k in value for k in held)}
     # Needed: the builtin worker reads its provider profile, LLM key and
     # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
     # secrets under it are hidden by the profile (ES-F4), not by omission.
