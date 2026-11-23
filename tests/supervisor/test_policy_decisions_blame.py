@@ -303,15 +303,14 @@ def test_a_dispatch_that_fails_before_creation_logs_its_rows_once_id_less(
 def test_a_timed_out_dispatch_that_still_starts_logs_its_rows_with_the_id(
     home: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import threading
-
-    go = threading.Event()
+    import time
 
     def fake_run_task(repo: Path, instructions: str, **kwargs: Any) -> None:
-        go.wait(5)  # set only after the dispatch has timed out
+        # The delay starts with the run itself, so it always outlasts the
+        # 0.05 s id timeout — a timer started with the test raced slow CI setup.
+        time.sleep(0.5)
         kwargs["on_run_created"]("task-late")
 
-    threading.Timer(0.5, go.set).start()
     with pytest.raises(HTTPException):
         _serve_dispatch(home, repo, monkeypatch, fake_run_task, id_timeout=0.05)
     rows = _dispatch_rows(home)  # never flushed id-less while the run could still start
