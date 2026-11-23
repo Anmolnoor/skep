@@ -16,7 +16,7 @@ import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve.chat import _request_too_large
-from skep.supervisor.serve.llm import OllamaError
+from skep.supervisor.serve.llm import OllamaError, store_assistant_key
 
 from .fake_ollama import FakeOllama
 from .test_serve_chat import configured_client, sse_events
@@ -184,7 +184,13 @@ def test_a_bad_key_says_check_the_key_and_never_shrinks(
     """Lane M1-16: a 401 drew the halved retry, a [replay halved…] row and
     "outgrown the provider"."""
     client = configured_client(config, ollama)
-    client.put("/api/llm/config", json={"api_key": "sk-bogus"})
+    # a key revoked after it was saved (Phase 05: Settings refuses to SAVE a
+    # refused key, so the stored one is swapped underneath, like a revocation)
+    store = RunStore(config.db_path)
+    try:
+        store_assistant_key(store, config.home, "sk-bogus")
+    finally:
+        store.close()
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).text)
     assert events[-1][0] == "error"

@@ -31,6 +31,7 @@ from skep.supervisor.serve.llm import (
     provider_secret_path,
     resolve_active_api_key,
     resolve_provider_api_key,
+    save_assistant_llm,
     store_api_key,
     store_provider_api_key,
 )
@@ -154,7 +155,7 @@ def test_config_view_reports_the_login_not_a_key(
         assert login["present"] and login["plan"] == "pro" and login["problem"] is None
         assert login["expires_at"]
         assert _access_token(codex_home) not in json.dumps(view)
-        store.set_setting(LLM_BASE_URL, "https://ollama.com")
+        save_assistant_llm(store, tmp_path, base_url="https://ollama.com")  # Phase 05: one writer
         ollama_view = llm_config_view(store, tmp_path)
         assert ollama_view["api_key_set"] is True and "chatgpt_login" not in ollama_view
     finally:

@@ -5963,13 +5963,7 @@ def _execute_mutation(
         # (Settings / PUT /api/llm/config), so a chat turn can never move a
         # secret. scope 'chat' touches one row; scope 'default' writes the
         # shared settings every chat AND default worker inherits.
-        from .llm import (
-            LLM_BASE_URL,
-            LLM_DEFAULT_MODEL,
-            LLM_PROTOCOL,
-            _write_through_profile,
-            refresh_model_ctx,
-        )
+        from .llm import refresh_model_ctx, save_assistant_llm
 
         model = str(args["model"]).strip()
         if not model:
@@ -5988,14 +5982,16 @@ def _execute_mutation(
         if protocol is not None and protocol not in get_args(LLMProtocol):
             names = ", ".join(repr(value) for value in get_args(LLMProtocol))
             raise ValueError(f"protocol must be one of {names}")
-        store.set_setting(LLM_DEFAULT_MODEL, model)
+        # Phase 05 (5.1): the one write path — the active profile, then its mirrors.
         base_url = args.get("base_url")
-        if base_url is not None:
-            store.set_setting(LLM_BASE_URL, str(base_url).strip().rstrip("/") or None)
-        if protocol is not None:
-            store.set_setting(LLM_PROTOCOL, protocol)
+        save_assistant_llm(
+            store,
+            holder.current.home,
+            base_url=None if base_url is None else str(base_url).strip().rstrip("/"),
+            model=model,
+            protocol=protocol,
+        )
         refresh_model_ctx(store, holder.current.home, model)  # v74-F2
-        _write_through_profile(store, holder.current.home.parent)
         return {
             "default_model": model,
             "note": "chats and default workers use this from their next turn",

@@ -90,21 +90,25 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
         "tool_delivery": "indexed",  # v74-F3: index + core + on-demand schemas
     }
 
-    # A dead local URL (nothing listens on port 9): the save-time context
-    # detection (v74-F2) must fail silently and never break the save — and
-    # the suite stays offline.
-    updated = client.put(
-        "/api/llm/config",
-        json={
-            "base_url": "http://127.0.0.1:9/",
-            "default_model": "qwen3",
-            "protocol": "ollama",
-            "api_key": "sk-sec-1",
-        },
-    ).json()
+    # A local fake that takes exactly this key: Phase 05 probes a new key
+    # (one 1-token completion) before saving it, and the save-time context
+    # detection (v74-F2) skips a loopback ollama — the suite stays offline.
+    server = FakeOllama(api_key="sk-sec-1").start()
+    try:
+        updated = client.put(
+            "/api/llm/config",
+            json={
+                "base_url": f"{server.base_url}/",
+                "default_model": "qwen3",
+                "protocol": "ollama",
+                "api_key": "sk-sec-1",
+            },
+        ).json()
+    finally:
+        server.stop()
     assert updated == {
         "configured": True,
-        "base_url": "http://127.0.0.1:9",
+        "base_url": server.base_url,
         "default_model": "qwen3",
         "protocol": "ollama",
         "api_key_set": True,
@@ -124,7 +128,7 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
     # A partial update leaves the other fields alone; an empty key clears it.
     assert (
         client.put("/api/llm/config", json={"default_model": "llama3.2"}).json()["base_url"]
-        == "http://127.0.0.1:9"
+        == server.base_url
     )
     cleared = client.put("/api/llm/config", json={"api_key": ""}).json()
     assert cleared["api_key_set"] is False

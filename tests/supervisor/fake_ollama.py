@@ -14,12 +14,21 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tests.supervisor.strict_wire import check, ollama_chat_errors
+from tests.supervisor.strict_wire import check, is_probe, ollama_chat_errors
 
 
 class FakeOllama:
-    def __init__(self, *, api_key: str | None = None, models: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        models: list[str] | None = None,
+        public_listing: bool = False,
+    ) -> None:
         self.api_key = api_key
+        # Phase 05: ollama.com serves its model list to anyone and refuses the
+        # completion — a dead key passed every listing-only probe.
+        self.public_listing = public_listing
         self.models = models if models is not None else ["llama3.2", "qwen3:8b"]
         # Each entry scripts one POST /api/chat: the chunks of its reply stream.
         self.chat_scripts: list[list[dict[str, Any]]] = []
@@ -39,6 +48,9 @@ class FakeOllama:
         # typo or an unpulled model draws from the daemon and ollama.com.
         self.missing_models: set[str] = set()
         self.requests: list[dict[str, Any]] = []
+        # Phase 05: 1-token liveness probes (strict_wire.is_probe), kept apart
+        # so the requests a test indexes are its own turns.
+        self.probes: list[dict[str, Any]] = []
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -171,7 +183,7 @@ class FakeOllama:
                 fake.requests.append(
                     {"path": self.path, "headers": dict(self.headers), "body": None}
                 )
-                if not self._authorized():
+                if not (self._authorized() or fake.public_listing):
                     self._send(401, b'{"error": "unauthorized"}')
                 elif self.path == "/api/tags":
                     # Alternate "name"/"model" keys — both shapes occur in the wild.
@@ -186,7 +198,7 @@ class FakeOllama:
             def do_POST(self) -> None:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 body = json.loads(raw) if raw else None
-                fake.requests.append(
+                (fake.probes if is_probe(body) else fake.requests).append(
                     {
                         "path": self.path,
                         "headers": dict(self.headers),
@@ -228,6 +240,10 @@ class FakeOllama:
                     if model in fake.missing_models:
                         missing = f'model "{model}" not found, try pulling it first'
                         self._send(404, json.dumps({"error": missing}).encode())
+                        return
+                    if is_probe(body):
+                        pong = {"model": model, "message": {"role": "assistant", "content": "pong"}}
+                        self._send(200, (json.dumps({**pong, "done": True}) + "\n").encode())
                         return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')

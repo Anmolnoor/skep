@@ -33,6 +33,22 @@ def check(provider: str, problem: str | None) -> str | None:
     return problem
 
 
+def is_probe(body: Any) -> bool:
+    """Phase 05: the 1-token liveness probe (``llm.probe_completion``) — one
+    user "ping", no tools. The fakes answer it without spending a scripted
+    turn, so a save that probes first leaves the test's script intact; the
+    key is still checked first, so a refused key still draws its 401."""
+    if not isinstance(body, dict) or body.get("tools"):
+        return False
+    turns = [t for t in body.get("messages") or body.get("input") or [] if isinstance(t, dict)]
+    if len(turns) != 1 or turns[0].get("role") != "user":
+        return False
+    content = turns[0].get("content")
+    if isinstance(content, list):
+        content = "".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+    return content == "ping"
+
+
 def _messages(body: Any, key: str = "messages") -> list[Any] | str:
     if not isinstance(body, dict):
         return "body must be a JSON object"

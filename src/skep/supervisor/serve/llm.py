@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from ..store import RunStore
 
 if TYPE_CHECKING:
-    from ..providers import ProviderProfile
+    from ..providers import ProviderHealth, ProviderProfile
 
 LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses", "bedrock"]
 _PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
@@ -323,14 +323,43 @@ def resolve_active_api_key(
     return resolve_provider_api_key(home, active, store)
 
 
+def assistant_llm(store: RunStore) -> tuple[str | None, str | None, LLMProtocol]:
+    """Phase 05 (5.1): THE read of the assistant's provider — (base_url,
+    model, wire protocol) of the ACTIVE registry profile. The legacy llm_*
+    settings are its mirrors; they are read only while no profile is active
+    (a first save still staging, or a home whose active profile was removed —
+    ``remove_provider`` keeps the Queen on what it spoke). Chat, setup,
+    channels, the model list and builtin workers all read through here."""
+    active = store.active_provider_profile()
+    if active is not None and active.protocol in REGISTRY_PROTOCOLS:
+        return active.base_url, active.model, REGISTRY_PROTOCOLS[active.protocol]
+    base_url, model = store.get_setting(LLM_BASE_URL), store.get_setting(LLM_DEFAULT_MODEL)
+    return (
+        base_url if isinstance(base_url, str) and base_url else None,
+        model if isinstance(model, str) and model else None,
+        _protocol(store.get_setting(LLM_PROTOCOL)),
+    )
+
+
+def _assistant_key_set(store: RunStore, home: Path) -> bool:
+    """Whether the active profile has a credential — the one chat sends."""
+    from ..codex_login import uses_codex_login
+
+    active = store.active_provider_profile()
+    if active is None or uses_codex_login(active.base_url):
+        return resolve_api_key(home) is not None
+    return _raw_provider_api_key(home, active, store) is not None
+
+
 def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
-    base_url = store.get_setting(LLM_BASE_URL)
     # v14: seed the provider registry from legacy config on first use (side
     # effect; the registry is surfaced through the dedicated provider views, so
-    # the public /api/llm/config shape stays stable).
+    # the public /api/llm/config shape stays stable). Phase 05: and, once,
+    # adopt settings that drifted from it — then read the registry.
     from ..providers import migrate_legacy_provider
 
     migrate_legacy_provider(store, home)
+    base_url, model, protocol = assistant_llm(store)
     num_ctx, num_ctx_source = resolved_num_ctx(store)
     from ..codex_login import uses_codex_login
 
@@ -339,9 +368,9 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
     return {
         "configured": bool(base_url),
         "base_url": base_url,
-        "default_model": store.get_setting(LLM_DEFAULT_MODEL),
-        "protocol": _protocol(store.get_setting(LLM_PROTOCOL)),
-        "api_key_set": resolve_api_key(home) is not None,
+        "default_model": model,
+        "protocol": protocol,
+        "api_key_set": _assistant_key_set(store, home),
         **({"chatgpt_login": chatgpt_login_view()} if codex else {}),
         "vision": store.get_setting(LLM_VISION) is True,
         "num_ctx": num_ctx,
@@ -372,7 +401,7 @@ def resolved_num_ctx(store: RunStore, model: str | None = None) -> tuple[int, st
     value = store.get_setting(LLM_NUM_CTX)
     if _valid_ctx(value):
         return int(value), "override"
-    name = model or store.get_setting(LLM_DEFAULT_MODEL)
+    name = model or assistant_llm(store)[1]
     if isinstance(name, str) and name and not _loopback_ollama(store):
         detected = store.get_setting(MODEL_CTX_PREFIX + name)
         if _valid_ctx(detected):
@@ -394,9 +423,8 @@ def _loopback_ollama(store: RunStore) -> bool:
     """v82-F1: on a local daemon the window is the operator's call, never
     auto-matched — requesting a 128k+ num_ctx there allocates that much
     KV cache in RAM and can OOM the machine the Queen runs on."""
-    return _protocol(store.get_setting(LLM_PROTOCOL)) == "ollama" and _is_loopback(
-        store.get_setting(LLM_BASE_URL)
-    )
+    base_url, _model, protocol = assistant_llm(store)
+    return protocol == "ollama" and _is_loopback(base_url)
 
 
 def chat_num_ctx(store: RunStore, model: str | None = None) -> int:
@@ -444,10 +472,9 @@ def detect_model_ctx(
 def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
     """Detect + cache ``model``'s context length. Runs where the model
     changes (config save, set_assistant_model) — never per turn."""
-    base_url = store.get_setting(LLM_BASE_URL)
-    if not (isinstance(base_url, str) and base_url and model):
+    base_url, _model, protocol = assistant_llm(store)
+    if not (base_url and model):
         return
-    protocol = _protocol(store.get_setting(LLM_PROTOCOL))
     if protocol == "ollama" and _is_loopback(base_url):
         return  # v82-F1: local RAM — never probed or auto-matched
     from ..codex_login import uses_codex_login
@@ -1189,10 +1216,108 @@ class LlmTestRequest(BaseModel):
     base_url: str | None = None
     protocol: LLMProtocol | None = None
     api_key: str | None = None
+    default_model: str | None = None  # Phase 05: the model the 1-token probe asks
+
+
+def _registry_protocol(protocol: LLMProtocol) -> str:
+    return next(key for key, value in REGISTRY_PROTOCOLS.items() if value == protocol)
+
+
+def probe_candidate(
+    store: RunStore,
+    home: Path,
+    *,
+    base_url: str,
+    model: str | None,
+    protocol: LLMProtocol,
+    api_key: str | None,
+) -> ProviderHealth:
+    """Phase 05 (5.1): the staged live probe of a candidate — its model list
+    and one 1-token completion with ITS key, before anything is saved
+    (``providers.check_provider_health``). With no model named yet, the
+    first one the provider lists takes the token. Returns the ProviderHealth;
+    writes nothing."""
+    from datetime import UTC, datetime
+
+    from ..providers import ProviderProfile, check_provider_health, live_probes
+
+    active = store.active_provider_profile()
+    candidate = ProviderProfile(
+        provider_id=active.provider_id if active is not None else "default",
+        protocol=_registry_protocol(protocol),
+        base_url=base_url,
+        model=model or "",
+    )
+    probes = live_probes(home, store, key_for=lambda _p: api_key)
+    listed: list[str] = []
+
+    def _list(profile: ProviderProfile) -> list[str]:
+        listed[:] = probes["list_models"](profile)
+        return listed
+
+    def _probe(profile: ProviderProfile) -> None:
+        named = profile.model or (listed[0] if listed else "")
+        probes["probe"](dataclasses.replace(profile, model=named))
+
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return check_provider_health(candidate, list_models=_list, probe=_probe, now=now)
+
+
+def save_assistant_llm(
+    store: RunStore,
+    home: Path,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    protocol: LLMProtocol | None = None,
+) -> None:
+    """Phase 05 (5.1): THE write of the assistant's provider/model — Web
+    Settings and the Queen's model dial land here, ``use_provider`` (CLI
+    ``skep provider``, onboard) activates a profile. The active registry
+    profile is written; the llm_* settings and profile.json are mirrored from
+    it. With no active profile the settings stage the save, and a complete
+    config on an empty registry seeds the ``default`` profile. ``home`` is
+    the supervisor home."""
+    from ..providers import migrate_legacy_provider
+
+    active = store.active_provider_profile()
+    if active is None:
+        for key, value in ((LLM_BASE_URL, base_url), (LLM_DEFAULT_MODEL, model)):
+            if value is not None:
+                store.set_setting(key, value or None)
+        if protocol is not None:
+            store.set_setting(LLM_PROTOCOL, protocol)
+        migrate_legacy_provider(store, home)
+    else:
+        updated = dataclasses.replace(
+            active,
+            base_url=base_url or active.base_url,
+            model=model or active.model,
+            protocol=_registry_protocol(protocol) if protocol else active.protocol,
+        )
+        if updated != active:
+            store.upsert_provider_profile(updated)
+    _write_through_profile(store, home.parent)
+
+
+def store_assistant_key(store: RunStore, home: Path, value: str) -> None:
+    """Phase 05 (5.1): a key saved from Settings is the ACTIVE profile's —
+    its own 0600 file, which ``resolve_active_api_key`` reads first (a key
+    saved only to llm-secret lost to an older per-profile file) — with
+    ``llm-secret`` kept as the legacy mirror. Empty clears both."""
+    from ..codex_login import uses_codex_login
+
+    active = store.active_provider_profile()
+    if active is not None and not uses_codex_login(active.base_url):
+        store_provider_api_key(home, active.provider_id, value)
+    store_api_key(home, value)
 
 
 def _write_through_profile(store: RunStore, personal_home: Path) -> None:
-    """v19-F9: mirror the sqlite provider settings into ``profile.json``.
+    """v19-F9: mirror the assistant's provider into ``profile.json`` — and,
+    Phase 05, into the llm_* settings: with an active registry profile it is
+    the source and both are mirrors written from it; with none, the staged
+    settings are mirrored into profile.json as before.
 
     Only writes a complete config (base URL + model). ``api_key_env`` is None:
     the daemon manages its own secret in ``supervisor/llm-secret``, and
@@ -1200,6 +1325,16 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
     """
     from skep.profile import run_personal_setup
 
+    active = store.active_provider_profile()
+    if active is not None and active.protocol in REGISTRY_PROTOCOLS:
+        wire = REGISTRY_PROTOCOLS[active.protocol]
+        for key, value in (
+            (LLM_BASE_URL, active.base_url),
+            (LLM_DEFAULT_MODEL, active.model),
+            (LLM_PROTOCOL, wire),
+        ):
+            if store.get_setting(key) != value:
+                store.set_setting(key, value)
     base_url = store.get_setting(LLM_BASE_URL)
     model = store.get_setting(LLM_DEFAULT_MODEL)
     protocol = store.get_setting(LLM_PROTOCOL)
@@ -1219,23 +1354,9 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
             endpoint=base_url.strip(),
             api_key_env=None,
         )
-    # v115-F5: the registry's ACTIVE profile is the third copy of this truth
-    # — routing and `skep provider health` read it. It was seeded once
-    # (migrate_legacy_provider) and never followed the settings: the field
-    # registry said deepseek-v4-pro while chat ran glm-5.3, so routing
-    # logged no_healthy_provider for every run. One writer, mirrored here.
-    active = store.active_provider_profile()
-    if active is not None:
-        serve_protocol = _protocol(protocol)
-        registry_protocol = next(
-            (key for key, value in REGISTRY_PROTOCOLS.items() if value == serve_protocol),
-            active.protocol,
-        )
-        mirrored = dataclasses.replace(
-            active, base_url=base_url.strip(), model=model.strip(), protocol=registry_protocol
-        )
-        if mirrored != active:
-            store.upsert_provider_profile(mirrored)
+    # v115-F5: the field registry said deepseek-v4-pro while chat ran
+    # glm-5.3. Phase 05 closes it from the other side: the registry's active
+    # profile is the source (save_assistant_llm) and these are its mirrors.
 
 
 def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
@@ -1245,14 +1366,38 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
 
     @app.put("/api/llm/config")
     def put_llm_config(body: LlmConfigUpdate) -> dict[str, Any]:
-        if body.base_url is not None:
-            run_store.set_setting(LLM_BASE_URL, body.base_url.strip().rstrip("/") or None)
-        if body.default_model is not None:
-            run_store.set_setting(LLM_DEFAULT_MODEL, body.default_model.strip() or None)
-        if body.protocol is not None:
-            run_store.set_setting(LLM_PROTOCOL, body.protocol)
-        if body.api_key is not None:
-            store_api_key(home, body.api_key.strip())
+        base_url = body.base_url.strip().rstrip("/") if body.base_url is not None else None
+        model = body.default_model.strip() if body.default_model is not None else None
+        key = body.api_key.strip() if body.api_key is not None else None
+        if key:
+            # Phase 05 (5.1): a new key is tested — with the provider and
+            # model this save would leave — BEFORE anything is written, so a
+            # refused key never replaces a working one (I8).
+            current_url, current_model, current_protocol = assistant_llm(run_store)
+            target = base_url or current_url
+            from ..codex_login import uses_codex_login
+
+            if target and not uses_codex_login(target):
+                health = probe_candidate(
+                    run_store,
+                    home,
+                    base_url=target,
+                    model=model or current_model,
+                    protocol=body.protocol or current_protocol,
+                    api_key=key,
+                )
+                if not health.ok:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{health.error} — nothing changed: the saved provider "
+                        "and key are as they were",
+                    )
+        if (base_url, model, body.protocol) != (None, None, None):
+            save_assistant_llm(
+                run_store, home, base_url=base_url, model=model, protocol=body.protocol
+            )
+        if key is not None:
+            store_assistant_key(run_store, home, key)
         if body.vision is not None:
             run_store.set_setting(LLM_VISION, body.vision)
         if body.num_ctx is not None:
@@ -1280,23 +1425,36 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
     @app.post("/api/llm/test")
     def test_llm(body: LlmTestRequest) -> dict[str, Any]:
         """Always 200: the verdict is the payload, so the UI shows it inline."""
-        base_url = (body.base_url or "").strip() or run_store.get_setting(LLM_BASE_URL)
+        saved_url, saved_model, saved_protocol = assistant_llm(run_store)
+        base_url = (body.base_url or "").strip().rstrip("/") or saved_url
         if not base_url:
             return {"ok": False, "detail": "no base URL configured"}
-        protocol = body.protocol or _protocol(run_store.get_setting(LLM_PROTOCOL))
+        protocol = body.protocol or saved_protocol
         try:
             from ..codex_login import uses_codex_login
 
             # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
             api_key = (
-                _codex_login_key(str(base_url))
-                if uses_codex_login(str(base_url))
-                else (body.api_key or "").strip() or resolve_api_key(home)
+                _codex_login_key(base_url)
+                if uses_codex_login(base_url)
+                else (body.api_key or "").strip()
+                or resolve_active_api_key(run_store, home, base_url=base_url)
             )
-            models = list_models(str(base_url), api_key, protocol=protocol)
         except OllamaError as exc:
             return {"ok": False, "detail": str(exc)}
-        return {"ok": True, "models": len(models)}
+        # Phase 05 (5.1): the listing AND one 1-token completion — the probe
+        # a dead key cannot pass (ollama.com lists models to anyone).
+        health = probe_candidate(
+            run_store,
+            home,
+            base_url=base_url,
+            model=(body.default_model or "").strip() or saved_model,
+            protocol=protocol,
+            api_key=api_key,
+        )
+        if not health.ok:
+            return {"ok": False, "detail": health.error, "http_status": health.http_status}
+        return {"ok": True, "models": len(health.models)}
 
     @app.get("/api/llm/usage")
     def get_llm_usage(chat_id: str | None = None) -> dict[str, Any]:
@@ -1329,10 +1487,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
 
     @app.get("/api/llm/models")
     def get_llm_models() -> dict[str, Any]:
-        base_url = run_store.get_setting(LLM_BASE_URL)
+        base_url, _model, protocol = assistant_llm(run_store)
         if not base_url:
             raise HTTPException(status_code=409, detail="configure the LLM base URL first")
-        protocol = _protocol(run_store.get_setting(LLM_PROTOCOL))
         try:
             # v108-F4: the active profile's own credential, when settings match it.
             api_key = resolve_active_api_key(run_store, home, base_url=str(base_url))

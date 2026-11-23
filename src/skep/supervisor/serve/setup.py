@@ -48,6 +48,18 @@ def _has_live_binding(
 def setup_status_view(
     run_store: RunStore, config: SupervisorConfig, *, home: Path
 ) -> dict[str, Any]:
+    """Phase 05 (5.1): readiness IS ``onboard.onboard_status`` — the same
+    record ``/api/onboard`` and ``skep onboard`` read, reconciled on an
+    older home, with the baseline and the work folder verified live. The
+    2026-11-18 split (this said "complete" since 07-08 while onboard said
+    "0 of 5", no baseline approved) cannot recur: ``missing`` is onboard's
+    pending steps, and ``onboard`` is its whole view. The other blocks
+    describe the configuration; each ``ready`` mirrors its onboard step. The
+    legacy ``setup_completed_at`` flag is reported, read-only."""
+    from ..onboard import STEPS, onboard_status
+
+    onboard = onboard_status(home)
+    steps = onboard["steps"]
     llm = llm_config_view(run_store, home)
     default_model = llm.get("default_model")
     projects = list_projects(run_store)
@@ -63,30 +75,14 @@ def setup_status_view(
             and mode in READY_EXECUTION_MODES
         }
     )
-
-    llm_ready = bool(llm.get("configured"))
-    default_model_ready = isinstance(default_model, str) and bool(default_model.strip())
-    workspace_project_ready = bool(bound_projects)
-    policy_ready = policy.get("default_execution_mode") in READY_EXECUTION_MODES or bool(
-        project_execution_modes
-    )
-    missing = []
-    if not llm_ready:
-        missing.append("llm")
-    if not default_model_ready:
-        missing.append("default_model")
-    if not workspace_project_ready:
-        missing.append("workspace_project")
-    if not policy_ready:
-        missing.append("policy")
-
     completed_at = run_store.get_setting(SETUP_COMPLETED_AT)
     workspace = default_workspace_path()
     return {
-        "complete": not missing,
+        "complete": onboard["done"],
         "marked_complete": isinstance(completed_at, str) and bool(completed_at),
         "completed_at": completed_at if isinstance(completed_at, str) else None,
-        "missing": missing,
+        "missing": [step for step in STEPS if steps[step] is None],
+        "onboard": onboard,
         "default_workspace": {
             "path": str(workspace),
             "exists": workspace.is_dir(),
@@ -95,20 +91,20 @@ def setup_status_view(
             "phase": DEFAULT_WORKSPACE_PHASE,
         },
         "llm": {
-            "ready": llm_ready,
+            "ready": steps["model"] is not None,
             "configured": llm.get("configured") is True,
             "protocol": llm.get("protocol"),
             "base_url": llm.get("base_url"),
             "api_key_set": llm.get("api_key_set") is True,
         },
-        "default_model": {"ready": default_model_ready, "model": default_model},
+        "default_model": {"ready": steps["model"] is not None, "model": default_model},
         "workspace_project": {
-            "ready": workspace_project_ready,
+            "ready": steps["workdir"] is not None,
             "projects": len(projects),
             "bound_projects": len(bound_projects),
         },
         "policy": {
-            "ready": policy_ready,
+            "ready": steps["template"] is not None,
             "default_execution_mode": policy.get("default_execution_mode"),
             "project_execution_modes": project_execution_modes,
         },

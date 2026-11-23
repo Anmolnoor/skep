@@ -18,11 +18,9 @@ from skep.supervisor.netproxy import domain_allowed
 from skep.supervisor.provider_relay import RELAY_ENV
 from skep.supervisor.serve.llm import (
     DEFAULT_LLM_PROTOCOL,
-    LLM_BASE_URL,
-    LLM_DEFAULT_MODEL,
-    LLM_PROTOCOL,
     LLMProtocol,
     OllamaError,
+    assistant_llm,
     chat_stream,
     resolve_api_key,
 )
@@ -203,9 +201,9 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         return None
     store = RunStore(db_path, readonly=True)
     try:
-        base_url = store.get_setting(LLM_BASE_URL)
-        model = store.get_setting(LLM_DEFAULT_MODEL)
-        protocol = store.get_setting(LLM_PROTOCOL)
+        # Phase 05 (5.1): the one read — the active registry profile, the
+        # llm_* settings only while none is active.
+        base_url, model, protocol = assistant_llm(store)
         if not isinstance(base_url, str) or not base_url.strip():
             return None
         if not isinstance(model, str) or not model.strip():

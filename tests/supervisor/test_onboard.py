@@ -132,10 +132,12 @@ def test_the_model_step_makes_a_test_call_and_says_where_prompts_go(tmp_path: Pa
             assert store.get_setting(LLM_DEFAULT_MODEL) == "llama3.2"
         assert record["egress"] == "LOCAL (Ollama (local)) — nothing leaves this machine"
         assert record["test"].startswith("provider ready")
-        # no scripted reply left → the completion probe fails → no record
+        # the completion is refused (ollama.com: a 401 after a public listing)
+        # → the probe fails before anything is written → no record
+        fake.fail_statuses = [401]
         with (
             _holder(tmp_path / "home2") as (holder, store),
-            pytest.raises(ValueError, match="test call failed"),
+            pytest.raises(ValueError, match=r"test call failed.*401"),
         ):
             onboard_model(
                 holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
@@ -804,7 +806,8 @@ def test_a_new_provider_that_fails_its_test_leaves_the_old_one_active(tmp_path: 
     from skep.supervisor.serve.llm import LLM_PROTOCOL
 
     home = tmp_path / "home"
-    working, broken = FakeOllama(models=["llama3.2"]).start(), FakeOllama(models=["m"]).start()
+    working = FakeOllama(models=["llama3.2"]).start()
+    broken = FakeOllama(api_key="k1", models=["m"], public_listing=True).start()  # ollama.com
     try:
         _working_provider(home, working, replies=1)
         before = (home / "profile.json").read_bytes()
@@ -821,17 +824,18 @@ def test_a_new_provider_that_fails_its_test_leaves_the_old_one_active(tmp_path: 
                 assert [store.get_setting(key) for key in keys] == settings
                 assert (home / "profile.json").read_bytes() == before
             assert store.get_provider_profile("openai-compatible") is None
-            # an interrupt during the test call rolls back too, and stays an interrupt
-            import skep.status
+            # an interrupt mid-switch (after the probe passed and the row was
+            # written) rolls back too, and stays an interrupt
+            import skep.supervisor.serve.actions as actions
 
-            def interrupted(*_a: Any) -> dict[str, Any]:
+            def interrupted(*_a: Any, **_k: Any) -> dict[str, Any]:
                 raise KeyboardInterrupt
 
             with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(skep.status, "worker_provider_check", interrupted)
+                patch.setattr(actions, "use_provider", interrupted)
                 with pytest.raises(KeyboardInterrupt):
                     onboard_model(
-                        holder, store, provider="ollama", model="m", endpoint=broken.base_url
+                        holder, store, provider="ollama", model="m", endpoint=working.base_url
                     )
             assert store.active_provider_profile() == active
             assert (home / "profile.json").read_bytes() == before
@@ -864,7 +868,7 @@ def test_a_failed_first_switch_leaves_no_setting_rows(tmp_path: Path) -> None:
     from skep.supervisor.serve.llm import LLM_PROTOCOL
 
     home = tmp_path / "home"
-    broken = FakeOllama(models=["m"]).start()
+    broken = FakeOllama(api_key="k1", models=["m"], public_listing=True).start()  # ollama.com
     try:
         with _holder(home) as (holder, store):
             with pytest.raises(ValueError, match="no provider was active before"):
