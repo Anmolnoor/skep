@@ -117,6 +117,11 @@ _COUNTABLE_EXITS = (0, 1, 5)
 _NOT_RUNNERS = frozenset({"echo", "printf", "grep", "rg", "which"})
 
 
+# pytest, py.test, pytest-3 (Fedora/Debian); grouped flags like -mpytest, -Impytest.
+_PYTEST_WORD = re.compile(r"^py\.?test(-3(\.\d+)*)?$")
+_PYTEST_FLAGS = re.compile(r"^-[A-Za-z]*m(pytest|py\.test)$")
+
+
 def _is_pytest_pin(command: str) -> bool:
     """V1 (review R1, F4): does the pin run pytest? Read from shell words —
     quotes undone, `;` `&&` `||` `|` split off, an `sh -c '...'` program read
@@ -126,6 +131,7 @@ def _is_pytest_pin(command: str) -> bool:
     lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace = " \t\r"  # a newline separates commands, like `;`
     lexer.whitespace_split = True
+    lexer.commenters = ""  # review R3 (H4): `FOO=a#b pytest` is no comment
     try:
         words = list(lexer)
     except ValueError:
@@ -137,15 +143,12 @@ def _is_pytest_pin(command: str) -> bool:
                 segment.pop(0)
             if segment and segment[0] not in _NOT_RUNNERS:
                 for w in segment:
-                    if os.path.basename(w) in ("pytest", "py.test") or w in (
-                        "-mpytest",
-                        "-mpy.test",
-                    ):
+                    if _PYTEST_WORD.match(os.path.basename(w)) or _PYTEST_FLAGS.match(w):
                         return True
                     # an `sh -c` program, spaced or not (`sh -c "pytest;true"`)
                     if (
                         w != command
-                        and any(c.isspace() or c in ";&|'\"" for c in w)
+                        and any(c.isspace() or c in ";&|<>()'\"" for c in w)
                         and (_is_pytest_pin(w))
                     ):
                         return True
@@ -237,10 +240,6 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
     changed = patch_paths(repo, patch_path)
     if not changed:
         return []
-    flags = [
-        f"test_config_changed:{path}"
-        for path in test_config_changes(repo, patch_path, base, changed)
-    ]
     with tempfile.TemporaryDirectory(prefix="skep-v1-") as tmp:
         # Literal pathspecs: a test path with `*` or `[` names itself only.
         env = {
@@ -256,9 +255,19 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
             git("read-tree", base).returncode
             or git("apply", "--cached", str(patch_path)).returncode
         ):
-            return flags  # the re-run already says the patch does not apply
+            # the re-run already says the patch does not apply
+            return [
+                f"test_config_changed:{p}"
+                for p in test_config_changes(repo, patch_path, base, changed)
+            ]
         fields = git("diff", "--cached", "--no-renames", "--name-status", "-z", base).stdout
         names = [f.decode("utf-8", "surrogateescape") for f in fields.split(b"\0") if f]
+        # Review R3 (H3): the config scan reads these unquoted names too — a
+        # git-quoted `.github/workflows/é.yml` matched no prefix.
+        flags = [
+            f"test_config_changed:{path}"
+            for path in test_config_changes(repo, patch_path, base, tuple(names[1::2]))
+        ]
         for code, path in zip(names[::2], names[1::2], strict=True):
             if _is_test_file(path):
                 if code == "D":
@@ -579,8 +588,9 @@ def _run_command(
     profile_path: Path | None,
     timeout: float = _REVERIFY_TIMEOUT_SECONDS,
 ) -> tuple[int, str, str]:
-    """``(exit code, stdout+stderr tail, stdout tail)`` — V1 counts read
-    stdout alone, where pytest writes its summary (review R1, F2)."""
+    """``(exit code, stdout+stderr tail, stdout)`` — V1 counts read stdout
+    alone, where pytest writes its summary (review R1, F2), and all of it:
+    a tail could drop the real summary and keep a fake one (review R3, H1)."""
     argv: list[str] = ["/bin/sh", "-c", command]
     if profile_path is not None:
         argv = sandbox.wrap_command(argv, profile_path)
@@ -600,7 +610,7 @@ def _run_command(
     return (
         proc.returncode,
         combined.strip()[-_OUTPUT_EVIDENCE_CHARS:],
-        (proc.stdout or "")[-_OUTPUT_EVIDENCE_CHARS:],
+        proc.stdout or "",
     )
 
 
@@ -612,10 +622,12 @@ _BASELINE_KEEP = (".venv", "node_modules", ".reverify-tmp", ".uv-cache", ".node-
 
 
 def _untracked(worktree: Path) -> set[str]:
-    """Untracked and ignored paths in ``worktree`` (whole new directories as
-    one entry), minus the primed environments and re-verify scratch."""
+    """Untracked and ignored FILES in ``worktree`` — one entry per file, so a
+    file the baseline adds inside a directory the prime made is seen (review
+    R3) — minus the primed environments and re-verify scratch."""
     out = subprocess.run(
-        ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--directory"],
+        ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--", "."]
+        + [f":(top,exclude){keep}" for keep in _BASELINE_KEEP],
         capture_output=True,
         check=False,
     ).stdout.decode("utf-8", "surrogateescape")
@@ -909,17 +921,11 @@ def reverify(
             reset = subprocess.run(
                 ["git", "-C", str(worktree), "reset", "-q", "--hard", "HEAD"], check=False
             )
-            added = _untracked(worktree) - pre_baseline
-            cleaned = (
-                subprocess.run(
-                    ["git", "-C", str(worktree), "clean", "-ffdxq", "--", *sorted(added)],
-                    check=False,
-                )
-                if added
-                else reset
-            )
+            for path in _untracked(worktree) - pre_baseline:
+                with contextlib.suppress(OSError):  # what stays is caught below
+                    (worktree / path).unlink()
             leftover = baseline_tmp.exists() or _untracked(worktree) - pre_baseline
-            if reset.returncode or cleaned.returncode or leftover:
+            if reset.returncode or leftover:
                 # Review R2 (Terra): a tree git could not reset is not a clean
                 # baseline for the patched run — confirm nothing (I2).
                 return ReverifyOutcome(

@@ -537,10 +537,15 @@ def test_a_quoted_pytest_pin_is_still_counted(repo: Path, config: SupervisorConf
         ("sh -c 'pytest -q'", True),
         ("/usr/bin/pytest", True),
         ("python -mpytest -q", True),
+        ('sh -c "pytest>out"', True),
+        ("pytest-3 -q", True),
+        ("python3 -Impytest", True),
+        ("pytest-cov-report x", False),
         ("echo starting\npytest -q", True),
         ('sh -c "pytest;true"', True),
         ("sh -c \"'pytest'\"", True),
         ("python -mpy.test", True),
+        ("FOO=a#b pytest", True),  # review R3 (H4): `#` mid-word is no comment
         ("grep pytest x", False),
         ("echo pytest-ish", False),
         ("npm test", False),
@@ -690,7 +695,59 @@ def test_baseline_cleanup_removes_only_what_the_baseline_added(tmp_path: Path) -
     (wt / ".venv").mkdir()
     primed = reverify_mod._untracked(wt)
     assert "ext.so" in primed and not any(p.startswith(".venv") for p in primed)
-    (wt / "state.txt").write_text("baseline")
     (wt / "build").mkdir()
-    (wt / "build" / "out").write_text("baseline")
-    assert reverify_mod._untracked(wt) - primed == {"state.txt", "build/"}
+    (wt / "build" / "primed").write_text("prime")  # a directory the prime made
+    primed = reverify_mod._untracked(wt)
+    (wt / "state.txt").write_text("baseline")
+    (wt / "build" / "out").write_text("baseline")  # review R3: inside a primed dir
+    (wt / ".venv" / "x").write_text("baseline")
+    assert reverify_mod._untracked(wt) - primed == {"state.txt", "build/out"}
+
+
+def test_a_fake_summary_after_a_burst_of_output_fails_closed(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Review R3 (H1): the real summary, then more output than the evidence
+    keeps, then a fake — counts read the whole stdout, so both are seen."""
+    _seed(repo)
+    junk = reverify_mod._OUTPUT_EVIDENCE_CHARS + 1
+    fake = (
+        "import atexit\n\n"
+        f"atexit.register(lambda: print('x' * {junk} + '\\n==== 9 passed in 0.01s ===='))\n\n\n"
+    )
+    patch = _patch(repo, "burst", lambda r: (r / "tests" / "test_b.py").write_text(fake + TEST_B))
+    outcome, record, approved, blocked = _run(repo, config, patch)
+    assert record.test_counts["status"] == "unparseable", outcome.detail
+    assert approved is None
+    assert "test counts could not be read" in blocked[VERIFIED_PATCH_RULE.name]
+
+
+def test_a_non_ascii_workflow_file_is_flagged(repo: Path, config: SupervisorConfig) -> None:
+    """Review R3 (H3): git quotes `é`; the config scan reads the unquoted name."""
+    _seed(repo)
+
+    def edit(r: Path) -> None:
+        (r / ".github" / "workflows").mkdir(parents=True)
+        (r / ".github" / "workflows" / "é.yml").write_text("on: push\n")
+
+    _assert_tampered(
+        _run(repo, config, _patch(repo, "wf", edit)), "test_config_changed:.github/workflows/é.yml"
+    )
+
+
+def test_a_tox_testenv_commands_edit_is_tampering(repo: Path, config: SupervisorConfig) -> None:
+    """Review R3 (H6): tox's `[testenv*] commands` decide what tox tests run."""
+    _seed(repo)
+    (repo / "tox.ini").write_text(
+        "[testenv]\ncommands = pytest\n\n[testenv:ci]\ncommands = pytest\n"
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "tox")
+    patch = _patch(
+        repo,
+        "tox",
+        lambda r: (r / "tox.ini").write_text(
+            "[testenv]\ncommands = pytest\n\n[testenv:ci]\ncommands = pytest tests/test_a.py\n"
+        ),
+    )
+    _assert_tampered(_run(repo, config, patch), "test_config_changed:tox.ini")

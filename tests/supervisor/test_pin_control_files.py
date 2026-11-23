@@ -299,7 +299,9 @@ def test_a_maintain_run_that_edits_conftest_waits_for_a_human(
         ({"pyproject.toml": _PYPROJECT.replace("2.31.0", "2.32.0")}, ()),
         ({"pyproject.toml": _PYPROJECT.replace('"-q"', '"-q -k fast"')}, None),
         ({"tox.ini": "[pytest\n"}, None),  # unparseable: flagged
-        ({"tox.ini": "[testenv]\ncommands = pytest\n"}, ()),
+        # review R3 (H6): tox's test commands are runner config; its deps are not
+        ({"tox.ini": "[testenv]\ncommands = pytest\n"}, None),
+        ({"tox.ini": "[testenv]\ndeps = requests\n"}, ()),
         ({"Makefile": "test:\n\ttrue\n"}, ()),
     ],
 )

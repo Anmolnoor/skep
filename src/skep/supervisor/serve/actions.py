@@ -538,6 +538,15 @@ def tamper_note(reverify: Any) -> str | None:
     if reverify is None:
         return None
     counts = reverify.test_counts or {}
+    failed = [
+        f.partition(":")[2] for f in reverify.tamper_flags if f.startswith("tamper_check_failed")
+    ]
+    if failed and len(failed) == len(reverify.tamper_flags):
+        # Review R3 (H7, I8): the guard could not look — say that, not "changes"
+        return (
+            f"the test-tamper check could not inspect this patch ({', '.join(failed)}); "
+            "auto-landing is blocked — review the patch before landing it by hand"
+        )
     if reverify.tamper_flags:
         totals = ""
         if counts.get("status") == "ok":
@@ -3859,6 +3868,29 @@ def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
     return delegation if isinstance(delegation, dict) else None
 
 
+PIN_DRIFT_NOTE = (
+    "verify pin changed while the gate waited — auto-landing is off for the "
+    "successor; a human lands it"
+)
+
+
+def pin_drifted(
+    store: RunStore, config: SupervisorConfig, repo: Path, original: CodingWorkerTask
+) -> bool:
+    """Review R3 (H5, I2): a resume re-runs the AUDITED pin. When the project's
+    current pin for the run's binding differs, that check is superseded, so
+    the successor must not land by itself under it. Unresolvable = drifted."""
+    ctx = original.project_context
+    candidates = [] if ctx is None else [(ctx.binding_kind, ctx.binding_value)]
+    try:
+        policy = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+    except PolicyResolutionError:
+        return True
+    current = policy.get("verify_command") or ""
+    audited = (original.verify_command or "").strip()  # R3: strip both, as G10 does
+    return not isinstance(current, str) or current.strip() != audited
+
+
 def resume_past_gate(
     store: RunStore,
     config: SupervisorConfig,
@@ -3923,6 +3955,7 @@ def resume_past_gate(
         decision=None if decision is None else decision.to_payload(),
         commands=approval_commands,
     )
+    drifted = pin_drifted(store, config, Path(str(run["repo"])), original)
     # B142: claim the gate before dispatching — check-then-act let two
     # approves (web + a messenger button) each dispatch a resume.
     if not store.claim_approval(review_id):
@@ -3933,7 +3966,7 @@ def resume_past_gate(
             str(run["instructions"]),
             permissions=permissions,
             budget=original.budget,
-            auto_apply_verified_patch=original.auto_apply_verified_patch,
+            auto_apply_verified_patch=False if drifted else original.auto_apply_verified_patch,
             project_context=original.project_context,
             dispatch_decision=resume_after_approval_decision(
                 resumed_from_task_id=task_id, delegation=delegation
@@ -3959,7 +3992,7 @@ def resume_past_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {resumed_id} (dispatched)",
+        note=f"resumed as {resumed_id} (dispatched)" + (f"; {PIN_DRIFT_NOTE}" if drifted else ""),
         remembered=remembered,
         claimed=True,
     )
@@ -4009,7 +4042,13 @@ def unlocked_gate_allowed(
     if stack.unlocked is None:
         return None
     audit_task = holder.current.audit_dir / task_id / "task.json"
-    delegation = _delegation_of(CodingWorkerTask.model_validate_json(audit_task.read_text()))
+    task = CodingWorkerTask.model_validate_json(audit_task.read_text())
+    if task.project_context is None or task.project_context.project_id != stack.unlocked:
+        # Review R3 (H2, I5, I6): the stack is the repo's own project; a run
+        # that ran under another policy (a template bound to a locked project,
+        # --minimal, no project) learns through a human, not this step.
+        return None
+    delegation = _delegation_of(task)
     chain, role = delegation_inputs(
         holder,
         (delegation or {}).get("chain") or (),
