@@ -1382,6 +1382,8 @@ def run_due(
                         coding_engine=coding_engine,
                         auto_apply_branch=auto_apply_branch,
                         planning_protocol=planning_protocol,
+                        # Phase 04 A10: an ACP run's cards land in the chat that made the schedule
+                        chat_id=schedule.chat_id,
                     )
             else:
                 repo = Path(schedule.repo).expanduser().resolve()
@@ -1482,6 +1484,8 @@ def run_due(
                         coding_engine=coding_engine,
                         auto_apply_branch=auto_apply_branch,
                         planning_protocol=planning_protocol,
+                        # Phase 04 A10: an ACP run's cards land in the chat that made the schedule
+                        chat_id=schedule.chat_id,
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state

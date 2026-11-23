@@ -883,3 +883,23 @@ def test_re_enabling_a_paused_schedule_clears_its_gate_reason(
         store.close()
     lines = status._repo_registry_advisories(config.home.parent)
     assert not [line for line in lines if "nightly" in line]
+
+
+def test_a_chat_bound_tick_hands_its_chat_to_the_run(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 04 A10 (ADR 0058 D3): a scheduled ACP run files its cards in the
+    chat that made the schedule, not a fallback chat the operator never sees."""
+    _probe(monkeypatch, READY)
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    handed: list[Any] = []
+
+    def dispatch(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        handed.append(kwargs.get("chat_id"))
+        return SimpleNamespace(
+            record=SimpleNamespace(task_id="t-1", state="completed", summary=None)
+        )
+
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert handed == [chat_id]
