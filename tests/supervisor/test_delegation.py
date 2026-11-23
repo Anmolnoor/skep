@@ -386,9 +386,11 @@ def test_a_delegated_dispatch_drops_the_grants_beyond_the_delegator(
     }
     assert "uv sync" in {r["value"] for r in rows}
     assert len(rows) == len(plain["permissions"].shell_allowlist) - len(allowlist)
-    # Everything else about the dispatch is today's.
-    rest = {k: v for k, v in delegated.items() if k not in ("permissions", "dispatch_decision")}
-    assert rest == {k: v for k, v in plain.items() if k not in ("permissions", "dispatch_decision")}
+    # Everything else about the dispatch is today's (``on_created``: a recorder per dispatch).
+    skip = ("permissions", "dispatch_decision", "on_created")
+    assert {k: v for k, v in delegated.items() if k not in skip} == {
+        k: v for k, v in plain.items() if k not in skip
+    }
 
 
 def test_a_delegator_denied_workspace_writes_cannot_dispatch_a_writer(

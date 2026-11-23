@@ -9,6 +9,7 @@ returns it as-is, the chat layer catches it and shows the model the failure.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -214,6 +215,8 @@ _NONNEGATIVE_POLICY_FIELDS = {"default_max_provider_calls", "card_timeout_second
 
 if TYPE_CHECKING:
     from ..policy_schema import LearnedRule, PolicyDocument, Scope
+
+logger = logging.getLogger(__name__)
 
 
 def _require_string_list(value: Any, *, field: str) -> list[str]:
@@ -2183,7 +2186,9 @@ def _decision_row(
     paths there), and a fetch the ``url`` a url_prefix grant matches on
     (``logged_url``: no query, no userinfo; redacted like the value), so the
     write-time replay can re-decide them. Phase 02 (I13): a run's row names
-    its ``task_id``, ``engine`` and ``caste`` — each only when known."""
+    its ``task_id``, ``engine`` and ``caste`` — each only when known; the
+    engine only for the coding caste, the rule ``run_task`` records
+    ``runs.coding_engine`` by (v101-F4) — no other caste runs one (I8)."""
     scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2207,6 +2212,7 @@ def _decision_row(
         record["role"] = role.name
     if verdict.chain:
         record["delegation_chain"] = list(verdict.chain)
+    engine = engine if caste == "coding" else None
     blame = {"task_id": task_id, "engine": engine, "caste": caste}
     record.update({key: value for key, value in blame.items() if value is not None})
     if verdict.source == "run":
@@ -4950,7 +4956,7 @@ def submit_run(
     delegation_note = compiled.note
     auto_apply_verified_patch = compiled.auto_apply_verified_patch
     auto_apply_branch = compiled.auto_apply_branch
-    minted: dict[str, str] = {}
+    record = _dispatch_recorder(holder.current.audit_dir, held, delegation, resolved)
     try:
         effective_dispatch_decision = dispatch_decision
         if effective_dispatch_decision is None:
@@ -5030,16 +5036,42 @@ def submit_run(
             # (authwapi acceptance, 019fc724: confirmed=true on git diff
             # --check while verify_command="npm test" sat pinned).
             verify_command=str(resolved_policy.policy.get("verify_command") or ""),
+            on_created=record,
         )
-        minted["task_id"] = task_id
     except DispatchError as exc:
+        # the dispatcher owns the rows now: logged at creation, or id-less once
+        # it ends without a run — a timed-out run may still start (I8)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:  # I13: logged either way; with the id once the run has one
-        for row in held:
-            log_decision(holder.current.audit_dir, {**row, **minted})
-    if delegation is not None:
-        record_delegation(holder.current.audit_dir, delegation, repo=str(resolved), task=task_id)
+    except Exception:
+        record(None)  # refused before the dispatcher took it: no run will come
+        raise
+    record(task_id)  # a runner that never called back; a no-op after the dispatcher's
     return task_id
+
+
+def _dispatch_recorder(
+    audit_dir: Path, held: list[dict[str, Any]], delegation: dict[str, Any] | None, repo: Path
+) -> Callable[[str | None], None]:
+    """Review R1 (I8, I13): writes a dispatch's held rows, then its hop row,
+    exactly once — with the id when the run is created (the dispatcher calls
+    it there, before the worker spawns), id-less when the dispatch ended
+    without a run. A failed write is logged, never raised: the run it
+    describes may already be live, and must not read as a failed dispatch."""
+    pending = [True]  # the calls are sequenced (create → return), never concurrent
+
+    def record(task_id: str | None) -> None:
+        if not pending:
+            return
+        pending.clear()
+        try:
+            for row in held:
+                log_decision(audit_dir, {**row, "task_id": task_id} if task_id else row)
+            if delegation is not None and task_id is not None:
+                record_delegation(audit_dir, delegation, repo=str(repo), task=task_id)
+        except Exception:
+            logger.exception("dispatch decision rows for %s were not logged", task_id or "no run")
+
+    return record
 
 
 def _preanswer(
@@ -5895,7 +5927,7 @@ def dispatch_run_decision(
         chain = parse_delegation_chain(delegation_chain, holder.current.home)
         worker_role = resolve_role(role, holder.current.home) if role else None
         resolved = resolve_repo_arg(repo, repos_root(holder), store)
-        write = resolve_run_policy(
+        run_policy = resolve_run_policy(
             store=store,
             config=holder.current,
             repo=resolved,
@@ -5910,10 +5942,13 @@ def dispatch_run_decision(
             # mode ("ask") must not hide the refusal behind its own card
             execution_mode=execution_mode or "workspace",
             engine=engine,
-        ).permissions.write
+        )
     except (ValueError, HTTPException, PolicyResolutionError):
         return decision  # the dispatch itself answers with the honest error
-    refusal = _delegated_write_refusal(holder, store, resolved, chain, write, role=worker_role)
+    refusal = _delegated_write_refusal(
+        holder, store, resolved, chain, run_policy.permissions.write, role=worker_role,
+        engine=run_policy.coding_engine, caste=caste,
+    )  # fmt: skip
     if refusal is None:
         return decision
     return AutonomyDecision(
