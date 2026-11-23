@@ -323,7 +323,9 @@ def test_a_worker_cmd_that_runs_an_external_agent_is_not_held_to_skeps_key(
     store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--worker-cmd / SKEP_WORKER_CMD running claude_code's module IS that
-    engine (the resolver's ``wrapped``): it authenticates from its own env."""
+    engine (the resolver's ``wrapped``): it authenticates from its own env,
+    so skep's key is never probed — and, Phase 04 4.2, it is held to the
+    external gates instead: an unbound repo has no strict reads and no pin."""
     import sys
 
     config = SupervisorConfig(
@@ -333,8 +335,10 @@ def test_a_worker_cmd_that_runs_an_external_agent_is_not_held_to_skeps_key(
     calls = _probe(monkeypatch, DEAD)
     _add(store, tmp_path, "a")
     seen, dispatch = _dispatch()
-    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
-    assert (calls, seen) == ([], ["coding"])
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert (calls, seen) == ([], [])
+    assert result.state.startswith("paused: ") and "'claude_code'" in result.state
+    assert "strict_reads" in result.state and "verify_pin" in result.state
 
 
 def test_a_template_schedule_is_judged_on_the_live_template(
@@ -364,3 +368,272 @@ def test_a_template_schedule_is_judged_on_the_live_template(
     seen, dispatch = _dispatch()
     run_due(store=store, config=config, now=NOW, dispatch=dispatch)
     assert (calls, seen) == ([], ["audit"])
+
+
+# Phase 04 4.2 (I1, I2, I4, I12): an unattended run on an external coding
+# agent — its own commands never pass the capability layer (ADR 0047) —
+# needs all five gates; one that fails any pauses, with the gate named.
+
+GATES_OPEN: dict[str, Any] = {
+    "coding_engine": "codex",
+    "verify_command": "uv run pytest -q",
+    "default_execution_mode": "sandbox",
+    "strict_read_confinement": True,
+    "auto_dispatch_allowed": True,
+}
+READY = {"status": "ready", "label": "ok", "detail": "ok"}
+
+
+def _bound(
+    store: RunStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    usable: bool = True,
+    binary: bool = True,
+    chat_id: str | None = None,
+    **policy: Any,
+) -> Path:
+    """A due schedule on a project with every gate open except what the
+    arguments close: a usable sandbox, the engine's binary, its auth env."""
+    from skep.supervisor import scheduler
+    from skep.supervisor.sandbox import SandboxAvailability
+
+    from ..fixtures.toy_repo import create_audit_toy_repo
+
+    repo = create_audit_toy_repo(tmp_path / "work").resolve()
+    store.add_project_policy(
+        project_id="p", name="p", strategy="trusted_local_dev", phase="build",
+        policy={**GATES_OPEN, **policy},
+    )  # fmt: skip
+    store.add_project_binding(project_id="p", binding_kind="repo_path", binding_value=str(repo))
+    probe = SandboxAvailability(True, backend="seatbelt")
+    if not usable:
+        probe = SandboxAvailability(False, "missing_binary", "sandbox-exec not found")
+    monkeypatch.setattr(scheduler, "sandbox_availability", lambda backend=None: probe)
+    monkeypatch.setattr(
+        scheduler,
+        "engine_available",
+        lambda engine: (binary, "/usr/bin/x" if binary else f"{engine.binary!r} not on PATH"),
+    )
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.setenv(var, "k-fake")
+    store.add_schedule(
+        make_schedule(
+            name="nightly", repo=repo, instructions="x", interval_seconds=86400,
+            start_at="2026-06-11T00:00:00Z", chat_id=chat_id,
+        )
+    )  # fmt: skip
+    return repo
+
+
+def _refusals(config: SupervisorConfig) -> list[dict[str, Any]]:
+    import json
+
+    path = config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+    return [row for row in rows if row.get("scope") == "schedule"]
+
+
+@pytest.mark.parametrize(
+    ("engine", "auth"),
+    [("codex", "OPENAI_API_KEY"), ("claude_code", "CLAUDE_CODE_OAUTH_TOKEN")],
+)
+def test_all_five_gates_open_runs_the_external_engine(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    auth: str,
+) -> None:
+    calls = _probe(monkeypatch, DEAD)
+    _bound(store, tmp_path, monkeypatch, coding_engine=engine)
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        if var != auth:
+            monkeypatch.delenv(var)
+    captured: dict[str, Any] = {}
+
+    def dispatch(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(record=SimpleNamespace(task_id="t-1", state="completed"))
+
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert (result.task_id, result.state, calls) == ("t-1", "completed", [])
+    assert captured["coding_engine"] == engine and captured["execution_mode"] == "sandbox"
+    assert _refusals(config) == []
+    schedule = store.get_schedule("nightly")
+    assert schedule is not None and schedule.enabled
+
+
+@pytest.mark.parametrize(
+    ("gate", "closed", "says"),
+    [
+        ("sandbox", {"default_execution_mode": "workspace"}, "--execution-mode sandbox"),
+        ("sandbox", {"usable": False}, "sandbox-exec not found"),
+        ("strict_reads", {"strict_read_confinement": False}, "--strict-reads"),
+        ("verify_pin", {"verify_command": "git diff --check"}, "--verify-command"),
+        ("verify_pin", {"verify_command": ""}, "--verify-command"),
+        ("engine_auth", {"binary": False}, "'codex' not on PATH"),
+        ("engine_auth", {"auth": False}, "OPENAI_API_KEY"),
+        ("landing", {"auto_apply_branch": "main"}, "skep/<slug>"),
+    ],
+)
+def test_each_closed_gate_pauses_the_schedule_and_names_itself(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate: str,
+    closed: dict[str, Any],
+    says: str,
+) -> None:
+    """Fail closed: no run, the schedule paused (not re-tried each tick), the
+    gate and its fix named, and one decisions.jsonl row carrying the blame."""
+    closed = dict(closed)
+    auth = closed.pop("auth", True)
+    landing = closed.pop("auto_apply_branch", None)
+    _bound(store, tmp_path, monkeypatch, **closed)
+    if not auth:
+        monkeypatch.delenv("OPENAI_API_KEY")
+    if landing is not None:  # the policy validator refuses it on write; a stale row is not
+        store._conn.execute(
+            "UPDATE project_policies SET policy_json = ?",
+            (__import__("json").dumps({**GATES_OPEN, "auto_apply_branch": landing}),),
+        )
+        store._conn.commit()
+    seen, dispatch = _dispatch()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.task_id is None
+    assert result.state.startswith("paused: ") and f"gate {gate}:" in result.state
+    assert says in result.state
+    schedule = store.get_schedule("nightly")
+    health = store.schedule_health("nightly")
+    assert schedule is not None and not schedule.enabled
+    assert health is not None and health.disabled_reason == result.state
+    (row,) = _refusals(config)
+    assert (row["verdict"], row["rule_id"], row["decided_by"]) == (
+        "deny", f"schedule.{gate}", f"schedule/{gate}"
+    )  # fmt: skip
+    assert (row["actor"], row["engine"], row["caste"], row["schedule"]) == (
+        "schedule:nightly", "codex", "coding", "nightly"
+    )  # fmt: skip
+    assert "task_id" not in row  # no run was minted (I8)
+    # paused, so the next tick does not even look at it
+    assert run_due(store=store, config=config, now="2026-06-12T09:00:00Z", dispatch=dispatch) == []
+
+
+def test_a_codex_plan_login_opens_the_auth_gate(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F122: the only login that reaches the sandbox is the opted-in plan
+    login — valid for the run's budget, it passes with no API key."""
+    from skep.supervisor import codex_login
+
+    _bound(store, tmp_path, monkeypatch, codex_chatgpt_login=True)
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setattr(
+        codex_login, "login_status", lambda min_seconds=0: codex_login.LoginStatus(True, "plus")
+    )
+    seen, dispatch = _dispatch()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == ["coding"]
+
+
+def test_an_acp_engine_is_held_to_the_same_gates(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate keys on ``external`` and the engine's own auth env, so an
+    engine registered later (4A's acp:* adapters) is covered unchanged."""
+    from dataclasses import replace
+
+    from skep.supervisor import engines
+
+    acp = replace(engines.CODING_ENGINES["codex"], name="acp:codex-acp", binary="codex-acp")
+    monkeypatch.setitem(engines.CODING_ENGINES, "acp:codex-acp", acp)
+    _bound(
+        store, tmp_path, monkeypatch, coding_engine="acp:codex-acp", strict_read_confinement=False
+    )
+    seen, dispatch = _dispatch()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and "'acp:codex-acp'" in result.state and "gate strict_reads:" in result.state
+    (row,) = _refusals(config)
+    assert row["engine"] == "acp:codex-acp"
+
+
+def test_a_builtin_schedule_is_not_held_to_the_external_gates(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """skep's own worker passes the capability layer on every action: no
+    strict reads, no pin, no sandbox — it still runs, as before."""
+    _probe(monkeypatch, READY)
+    _bound(
+        store, tmp_path, monkeypatch, usable=False, coding_engine="builtin",
+        strict_read_confinement=False, verify_command="",
+    )  # fmt: skip
+    seen, dispatch = _dispatch()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == ["coding"] and _refusals(config) == []
+
+
+@pytest.mark.parametrize("chat", ["untrusted", "gone"])
+def test_an_untrusted_or_unknown_chat_taint_refuses_the_unattended_run(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chat: str,
+) -> None:
+    """ADR 0059 D5: untrusted → a dispatch asks; nobody is there to answer,
+    so the tick refuses — on the final dispatch path, not as metadata only.
+    A chat that is gone counts as both bits (get_chat_taint fails closed)."""
+    _probe(monkeypatch, READY)
+    chat_id = "gone"
+    if chat == "untrusted":
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        store.add_chat_taint(chat_id, untrusted=7)
+    _bound(store, tmp_path, monkeypatch, coding_engine="builtin", chat_id=chat_id)
+    seen, dispatch = _dispatch()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.task_id is None
+    assert result.state.startswith("policy_blocked: ") and "untrusted" in result.state
+    assert ("message 7" if chat == "untrusted" else "unknown") in result.state
+    (row,) = _refusals(config)
+    assert (row["rule_id"], row["chat"], row["caste"], row["engine"]) == (
+        "schedule.untrusted_taint", chat_id, "coding", "builtin"
+    )  # fmt: skip
+    assert "untrusted" in row["taint"]
+
+
+def test_a_private_only_chat_still_runs(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mail chat that only read private data is not an injection risk on
+    its own: the private bit alone never stops a scheduled run."""
+    _probe(monkeypatch, READY)
+    chat_id = store.create_chat(title="mail", model=None).chat_id
+    store.add_chat_taint(chat_id, private=3)
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    seen, dispatch = _dispatch()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == ["coding"] and _refusals(config) == []
+
+
+def test_doctor_lists_a_paused_external_schedule_with_its_upgrade_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing external schedule on a project without strict reads
+    pauses on its next tick, and doctor says which gate and the fix — not
+    "auto-disabled after repeated failures"."""
+    config = SupervisorConfig(home=tmp_path / "skep" / "supervisor", worker_command=("false",))
+    config.home.mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        _bound(store, tmp_path, monkeypatch, strict_read_confinement=False)
+        run_due(store=store, config=config, now=NOW, dispatch=_dispatch()[1])
+    finally:
+        store.close()
+    lines = status._repo_registry_advisories(config.home.parent)
+    (line,) = [line for line in lines if "nightly" in line]
+    assert "paused" in line and "gate strict_reads:" in line and "--strict-reads" in line
+    assert "repeated failures" not in line
