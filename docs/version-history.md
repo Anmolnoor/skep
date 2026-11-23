@@ -3223,7 +3223,7 @@ Everything merged since 1.6.0 (#121–#122):
   managed clone. `skep project set-phase` keeps the settings the operator set
   outside the phase's control; phase-owned settings are re-derived and the
   unlock is turned off. Project setup skips seeded schedules the operator
-  deleted. `skep review` shows where a run landed, or the recorded reason it
-  did not land automatically. A worker artifact with a reserved supervisor
+  deleted. `skep review` shows the landing branch or any recorded auto-landing
+  block reason. A worker artifact with a reserved supervisor
   audit filename is refused, and a Telegram photo captioned `/update` no
   longer triggers an update.
