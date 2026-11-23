@@ -89,16 +89,19 @@ class Dispatcher:
         ``on_created`` (review R1, I13) is called exactly once, on the pool
         thread: with the id right after ``create_run``, before the worker
         spawns — or with None once the dispatch ended without a run, even
-        after a timeout. It must not raise.
+        after a timeout. It must not raise. R2 G5: the id is returned first —
+        a blocked audit write must not time out a run that already exists
+        (a client retry would start a second one) — so it may still be
+        running when this returns.
         """
         created = threading.Event()
         box: dict[str, str] = {}
 
         def _on_created(task_id: str) -> None:
             box["task_id"] = task_id
+            created.set()
             if on_created is not None:
                 on_created(task_id)
-            created.set()
 
         future = self._pool.submit(
             run_task,

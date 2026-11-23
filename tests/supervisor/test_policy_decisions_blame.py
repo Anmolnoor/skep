@@ -318,6 +318,38 @@ def test_a_timed_out_dispatch_that_still_starts_logs_its_rows_with_the_id(
     assert rows and {r.get("task_id") for r in rows} == {"task-late"} and _no_duplicates(rows)
 
 
+def test_a_blocked_audit_write_never_times_out_a_minted_dispatch(
+    home: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 G5: the id is minted, then the decision log blocks (a held flock).
+    The dispatch must answer with that id, not time out — the run goes on,
+    so a client retry would start a second one — and the rows still land
+    before the worker spawns."""
+    import threading
+
+    from skep.supervisor.policy_v3 import log_decision as real
+    from skep.supervisor.serve import actions
+
+    released = threading.Event()
+
+    def blocked(*args: Any, **kwargs: Any) -> None:
+        released.wait(5)
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(actions, "log_decision", blocked)
+    seen: list[list[dict[str, Any]]] = []
+
+    def fake_run_task(repo: Path, instructions: str, **kwargs: Any) -> None:
+        kwargs["on_run_created"]("task-slow")
+        seen.append(_dispatch_rows(home))  # the worker spawns here
+
+    threading.Timer(0.5, released.set).start()
+    assert _serve_dispatch(home, repo, monkeypatch, fake_run_task, id_timeout=0.1) == "task-slow"
+    (at_spawn,) = seen
+    assert at_spawn and {r["task_id"] for r in at_spawn} == {"task-slow"}
+    assert _no_duplicates(_dispatch_rows(home))
+
+
 def test_a_decision_log_failure_never_fails_a_started_dispatch(
     home: SupervisorConfig,
     repo: Path,
@@ -422,3 +454,91 @@ def test_a_researcher_schedules_rows_name_no_coding_engine(
     _schedule_tick(home, repo, SimpleNamespace(record=record), caste="researcher")
     rows = _dispatch_rows(home)
     assert rows and all(r["caste"] == "researcher" and "engine" not in r for r in rows)
+
+
+# --- review R2 G6: a dispatch that skipped policy resolution still names its engine
+
+
+def _mint_run(store: RunStore, repo: Path, engine: str | None, caste: str = "coding") -> str:
+    """A real run row, as run_task's create_run writes it (engine None off coding)."""
+    from skep.supervisor import mint_task
+
+    task = mint_task(workspace=repo, instructions="x", worker_kind=caste)
+    store.create_run(
+        task, repo=repo, ref=None, execution_mode="sandbox", coding_engine=engine
+    )  # fmt: skip
+    return task.task_id
+
+
+def test_a_cli_template_runs_rows_take_the_engine_the_run_recorded(
+    home: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unbound ``--template`` run never resolves a policy: its held rows
+    had no engine, so ``--engine builtin`` missed them."""
+    from skep.supervisor import cli_cmds
+
+    minted: list[str] = []
+
+    def fake_run_task(repo: Path, instructions: str, **kwargs: Any) -> Any:
+        store = RunStore(home.db_path)
+        try:
+            minted.append(_mint_run(store, repo, "claude_code"))
+        finally:
+            store.close()
+        kwargs["on_run_created"](minted[0])
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+    repo = tmp_path / "unbound"
+    (repo / ".git").mkdir(parents=True)
+    base = ["--home", str(home.home.parent)]
+    add = [*base, "template", "add", "t", "--caste", "coding", "--instructions", "x"]
+    assert main([*add, "--network", "example.com"]) == 0
+    main(
+        [*base, "run", "--template", "t", str(repo), "--quiet", "--delegated-by", "queen@operator"]
+    )
+    rows = _dispatch_rows(home)
+    assert rows and {tuple(r.get(k) for k in BLAME) for r in rows} == {
+        (minted[0], "claude_code", "coding")
+    }
+
+
+@pytest.mark.parametrize(("caste", "engine"), [("coding", "claude_code"), ("researcher", None)])
+def test_an_unbound_role_schedules_rows_take_the_engine_the_run_recorded(
+    home: SupervisorConfig, tmp_path: Path, caste: str, engine: str | None
+) -> None:
+    """An unbound schedule resolves no policy, so no engine reached its rows;
+    the run's recorded engine fills it — never for a non-coding caste (I8)."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.scheduler import make_schedule, run_due
+
+    from .test_delegation import _custom_role
+
+    _custom_role(home, "ops", policy_layer="operator")
+    unbound = tmp_path / "unbound"
+    (unbound / ".git").mkdir(parents=True)
+    store = RunStore(home.db_path)
+    try:
+
+        def dispatch(repo: Path, instructions: str, **kwargs: Any) -> Any:
+            task_id = _mint_run(kwargs["store"], repo, engine, caste)
+            return SimpleNamespace(
+                record=SimpleNamespace(task_id=task_id, state="completed", summary=None)
+            )
+
+        nightly = make_schedule(
+            name="nightly", repo=unbound, instructions="x", interval_seconds=86400,
+            start_at="2026-06-11T00:00:00Z", role="ops", worker_kind=caste,
+            network=["example.com"],
+        )  # fmt: skip
+        store.add_schedule(nightly)
+        holder = ConfigHolder(home, store)
+        run_due(
+            store=store, config=home, now="2026-06-11T09:00:00Z", dispatch=dispatch, holder=holder
+        )
+    finally:
+        store.close()
+    rows = _dispatch_rows(home)
+    assert rows and all(r["caste"] == caste and r["task_id"] for r in rows)
+    assert {r.get("engine") for r in rows} == {engine}

@@ -1028,9 +1028,16 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
 
         def on_run_created(task_id: str) -> None:
             from .policy_v3 import log_decision
+            from .serve.actions import with_run_blame
 
+            run_store = RunStore(config.db_path, readonly=True)
+            try:  # R2 G6: the engine the run recorded, when no policy resolved one
+                run = run_store.get_run(task_id)
+            finally:
+                run_store.close()
+            engine = run.coding_engine if run is not None else None
             for row in held:  # 2.1: the dispatch rows, now with the run's id
-                log_decision(config.audit_dir, {**row, "task_id": task_id})
+                log_decision(config.audit_dir, with_run_blame(row, task_id, engine))
             held.clear()
             record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 

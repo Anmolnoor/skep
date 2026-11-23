@@ -58,3 +58,22 @@ def test_a_log_call_with_bad_format_args_never_raises_and_is_still_redacted(
         logger.warning("delivery failed %s %s", f"https://api.example{token}/getUpdates")
     assert "AAfakeTOKENfakevalue" not in caplog.text
     assert "delivery failed" in caplog.text
+
+
+def test_the_dispatch_recorders_failure_log_is_redacted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 02 R2 G7: serve/actions logged on ``getLogger(__name__)``, a
+    name no RedactFilter sits on — a failed dispatch-row write leaked."""
+    import skep.supervisor  # noqa: F401  (installs the filter)
+    from skep.supervisor.serve import actions
+
+    def broken(*_: object, **__: object) -> None:
+        raise OSError(f"Client error for url '{_URL}'")
+
+    monkeypatch.setattr(actions, "log_decision", broken)
+    record = actions._dispatch_recorder(tmp_path, [{"value": "x"}], None, tmp_path)
+    with caplog.at_level(logging.DEBUG, logger="skep.serve"):
+        record("task-1")
+    assert "dispatch decision rows for task-1 were not logged" in caplog.text
+    assert _SECRET not in caplog.text, caplog.text

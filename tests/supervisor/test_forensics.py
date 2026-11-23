@@ -414,6 +414,30 @@ def test_forensics_on_a_store_at_rest_creates_no_sidecar(
     assert _store_files(config) == before
 
 
+def test_forensics_reads_an_uncheckpointed_wal_without_its_shm(
+    config: SupervisorConfig, passing: str, capsys: Any
+) -> None:
+    """R2 G2: a writer that died leaves ``-wal`` with no ``-shm``. ``immutable=1``
+    ignores the WAL (stale rows); the read must see the committed summary and
+    leave the database and its WAL byte-for-byte as they were."""
+    import sqlite3
+
+    _quiesce(config)
+    conn = sqlite3.connect(config.db_path)
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("UPDATE runs SET summary = 'only in the wal' WHERE task_id = ?", (passing,))
+    conn.commit()
+    crashed = {s: Path(f"{config.db_path}{s}").read_bytes() for s in ("", "-wal")}
+    conn.close()  # the last close checkpoints; put back what a crash leaves
+    for suffix, data in crashed.items():
+        Path(f"{config.db_path}{suffix}").write_bytes(data)
+    Path(f"{config.db_path}-shm").unlink(missing_ok=True)
+    assert main(["--home", str(config.home.parent), "run", "forensics", passing, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"]["summary"] == "only in the wal"
+    for suffix, data in crashed.items():
+        assert Path(f"{config.db_path}{suffix}").read_bytes() == data
+
+
 def test_forensics_never_migrates_an_older_store(
     config: SupervisorConfig, passing: str, capsys: Any
 ) -> None:
@@ -477,6 +501,45 @@ def test_a_worker_side_git_push_refusal_is_in_the_trail(
     assert "BLOCKED" in out and "git push" in out and block["decision"]["reason"] in out
 
 
+def test_large_successful_command_outputs_do_not_accumulate(
+    config: SupervisorConfig, passing: str
+) -> None:
+    """R2 G4: only refusals are kept — every successful command.result (its
+    full stdout) must not be buffered before the filter drops it."""
+    import tracemalloc
+
+    from skep.supervisor.forensics import _policy_blocks
+
+    def result(seq: int, *, verdict: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "command": f"cmd {seq}",
+            "exit_code": 0 if verdict == "allow" else 1,
+            "duration_ms": 1,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "stdout": "x" * (1 << 20) if verdict == "allow" else None,
+            "capability_id": "shell.run",
+            "decision": {"verdict": verdict, "reason": f"r{seq}"},
+        }
+        return {
+            "contract_version": "0.2", "event_id": f"e{seq}", "seq": seq, "task_id": passing,
+            "trace_id": "t", "ts": "2026-11-23T10:00:00Z", "type": "command.result",
+            "payload": payload,
+        }  # fmt: skip
+
+    events = config.audit_dir / passing / "events.ndjson"
+    rows = [result(n, verdict="allow") for n in range(1, 25)] + [result(25, verdict="deny")]
+    events.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    tracemalloc.start()
+    try:
+        blocks = _policy_blocks(events, passing)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert [b["command"] for b in blocks] == ["cmd 25"]
+    assert peak < 12 * (1 << 20), peak  # 24 MB of stdout read, a few held at once
+
+
 def test_unlocked_actor_and_taint_come_from_the_whole_chain_and_task_json(
     config: SupervisorConfig, tmp_path: Path
 ) -> None:
@@ -502,6 +565,23 @@ def test_unlocked_actor_and_taint_come_from_the_whole_chain_and_task_json(
     plain = _run(config, tmp_path, state="completed", reason="dispatch.allowed")
     assert _report(config, plain)["identity"]["unlocked"] == "unknown"
     assert _report(config, plain)["identity"]["taint"] == "unknown"
+
+
+def test_a_resume_successor_inherits_the_nearest_ancestors_chat_taint(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 G3: an approval resume's dispatch decision carries no chat_taint;
+    the run it resumes recorded it, so the successor is not "unknown"."""
+    tainted = {"chat_taint": ["untrusted"]}
+    first = _run(config, tmp_path, state="pending_approval", constraints=tainted)
+    second = _run(config, tmp_path, state="pending_approval", resume_of=first)
+    third = _run(config, tmp_path, state="completed", resume_of=second)
+    assert _report(config, third)["identity"]["taint"] == "untrusted"
+    assert _report(config, second)["identity"]["taint"] == "untrusted"
+    clean = _run(config, tmp_path, state="pending_approval", constraints={"chat_taint": []})
+    after = _run(config, tmp_path, state="completed", resume_of=clean, constraints=tainted)
+    assert _report(config, clean)["identity"]["taint"] == "unknown"  # never a successor's
+    assert _report(config, after)["identity"]["taint"] == "untrusted"
 
 
 @pytest.mark.parametrize(

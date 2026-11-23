@@ -142,15 +142,17 @@ def _heartbeat_gaps(events_path: Path, *, active: bool) -> list[dict[str, Any]]:
 def _policy_blocks(events_path: Path, task_id: str) -> list[dict[str, Any]]:
     """R1 D3: a refusal the worker's own capability layer makes (the floor's
     ``git push`` deny) is a command.result event, not a decisions.jsonl row."""
-    events = []
-    for raw in _json_lines(events_path):
-        if raw.get("type") != EventType.COMMAND_RESULT.value:
-            continue
-        try:
-            events.append(Event.model_validate(raw))
-        except ValidationError:
-            continue
-    return [{"task_id": task_id, **block} for block in policy_block_views(events)]
+
+    def events() -> Iterator[Event]:  # R2 G4: streamed, so only refusals accumulate
+        for raw in _json_lines(events_path):
+            if raw.get("type") != EventType.COMMAND_RESULT.value:
+                continue
+            try:
+                yield Event.model_validate(raw)
+            except ValidationError:
+                continue
+
+    return [{"task_id": task_id, **block} for block in policy_block_views(events())]
 
 
 def _sandbox_backend(profile: Path) -> str:
@@ -236,7 +238,15 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
     own = [row for row in trail if row.get("task_id") == task_id]
     dispatch = {tid: _dispatch_decision(audit_dir, store, tid) for tid in chain}
     delegation = _dict(dispatch[task_id].get("delegation"))
-    chat_taint = _dict(dispatch[task_id].get("constraints")).get("chat_taint")
+    # R2 G3: a resume's decision carries no chat_taint; the nearest ancestor's holds
+    chat_taint = next(
+        (
+            taint
+            for tid in reversed(chain[: chain.index(task_id) + 1])
+            if isinstance(taint := _dict(dispatch[tid].get("constraints")).get("chat_taint"), list)
+        ),
+        None,
+    )
     transitions = [
         {"state": state, "detail": detail, "ts": ts}
         for state, detail, ts in store.transitions_for(task_id)

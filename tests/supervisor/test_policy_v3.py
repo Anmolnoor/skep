@@ -1214,3 +1214,55 @@ def test_redact_json_fields_keep_what_is_not_a_credential() -> None:
     keep = '{"max_tokens": 4096, "token_count": 12, "secret_name": "prod", "keys": 3}'
     assert policy_v3.redact(keep) == keep
     assert policy_v3.redact("Authorization: Bearer CANARY") == "Authorization: Bearer ***"
+
+
+@pytest.mark.parametrize(
+    ("line", "kept"),
+    [
+        ("{'password': 'it\\'s CANARY-esc-1', 'user': 'bob'}", "'user': 'bob'"),
+        ('{"accessToken": "CANARY-camel-2"}', "accessToken"),
+        ('{"refreshToken":"CANARY-camel-3"}', "refreshToken"),
+        ("{'clientSecret': 'CANARY-camel-4'}", "clientSecret"),
+        ('{"userPassword": "CANARY-camel-5"}', "userPassword"),
+        ("apiKey: CANARY-camel-6", "apiKey"),
+        ("password: token CANARY-yaml-7", "password: ***"),
+        ("secret: basic CANARY-yaml-8", "secret: ***"),
+    ],
+)
+def test_redact_r2_masks_escaped_camel_and_scheme_worded_values(line: str, kept: str) -> None:
+    """Phase 02 R2 G1a: an escaped quote inside a single-quoted repr value, a
+    camelCase key, and a YAML value that starts with a scheme word all leak."""
+    from skep.supervisor import policy_v3
+
+    masked = policy_v3.redact(line)
+    assert "CANARY" not in masked and kept in masked, masked
+    assert policy_v3.redact(masked) == masked
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://oauth2.googleapis.com/token:revoke",
+        "http://auth-token:8080/health",
+        "ghcr.io/org/auth-token:v1.2",
+        "podman run auth-token:v1.2",
+        '{"maxTokens": 4096, "tokenCount": 12, "secretName": "prod"}',
+    ],
+)
+def test_redact_r2_keeps_urls_ports_and_image_tags(value: str) -> None:
+    """Phase 02 R2 G1b: a path segment, host:port or name:tag that ends in a
+    credential word is not a key — masking it made the row unreplayable."""
+    from skep.supervisor import policy_v3
+    from skep.supervisor.policy_write import _unreplayable
+
+    assert policy_v3.redact(value) == value
+    row = {"scope": "network", "action": "fetch", "value": value, "url": policy_v3.redact(value)}
+    assert _unreplayable(row) is None
+
+
+def test_redact_r2_header_scheme_stays_readable() -> None:
+    from skep.supervisor import policy_v3
+
+    assert policy_v3.redact("Authorization: Bearer CANARY") == "Authorization: Bearer ***"
+    assert policy_v3.redact("authorization: token CANARY") == "authorization: token ***"
+    assert policy_v3.redact("password: bearer CANARY") == "password: bearer ***"

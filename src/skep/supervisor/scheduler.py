@@ -1206,8 +1206,14 @@ def run_due(
                 # failure. The disabled row + reason is the record of what happened.
                 store.set_schedule_enabled(schedule.name, enabled=False)
                 store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
-            for row in rows:  # 2.1 (I13): with the run's id once it has one
-                log_decision(config.audit_dir, {**row, "task_id": task_id} if task_id else row)
+            if rows and task_id is not None:  # 2.1 (I13): with the run's id once it has one
+                from .serve.actions import with_run_blame
+
+                run = store.get_run(task_id)
+                engine = run.coding_engine if run is not None else None
+                rows = [with_run_blame(row, task_id, engine) for row in rows]
+            for row in rows:
+                log_decision(config.audit_dir, row)
             if held is not None and task_id is not None:
                 # v123-F1 review (I13, R3): one ``delegated`` row naming
                 # ``schedule:<name>@<role>``, as submit_run writes it — last,

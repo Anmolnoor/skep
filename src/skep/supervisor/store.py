@@ -1106,7 +1106,12 @@ class RunStore:
         Phase 02 R1 D2: ``strict`` (forensics) also never creates the WAL
         sidecars — ``mode=ro`` makes ``-wal``/``-shm`` when they are absent —
         so a store at rest (no sidecars: fully checkpointed, no writer) opens
-        ``immutable=1``; and the caller raises instead of falling back."""
+        ``immutable=1``; and the caller raises instead of falling back.
+
+        R2 G2: only when NEITHER sidecar exists. ``immutable=1`` ignores a
+        ``-wal``, so a writer that died (``-wal`` kept, ``-shm`` gone) would read
+        stale rows; ``mode=ro`` replays it and writes only a fresh ``-shm``
+        index — never the database or the WAL (read-only never checkpoints)."""
         self._lock = threading.RLock()
         if not db_path.exists():
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1114,7 +1119,7 @@ class RunStore:
             self._migrate()
             self._seed_fresh()  # reads see what a fresh home would hold
             return True
-        at_rest = not all(Path(f"{db_path}{s}").exists() for s in ("-wal", "-shm"))
+        at_rest = not any(Path(f"{db_path}{s}").exists() for s in ("-wal", "-shm"))
         # ponytail: a writer that starts mid-read under immutable=1 can show a torn
         # read; forensics is one short read, re-run it.
         flags = "immutable=1" if strict and at_rest else "mode=ro"

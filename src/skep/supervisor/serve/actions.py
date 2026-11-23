@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.parse
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -216,7 +217,7 @@ _NONNEGATIVE_POLICY_FIELDS = {"default_max_provider_calls", "card_timeout_second
 if TYPE_CHECKING:
     from ..policy_schema import LearnedRule, PolicyDocument, Scope
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("skep.serve")  # R2 G7: a RedactFilter logger
 
 
 def _require_string_list(value: Any, *, field: str) -> list[str]:
@@ -2863,7 +2864,7 @@ def approval_view(
     return row
 
 
-def policy_block_views(events: list[Event]) -> list[dict[str, Any]]:
+def policy_block_views(events: Iterable[Event]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for event in events:
         if event.type is not EventType.COMMAND_RESULT:
@@ -5084,31 +5085,51 @@ def submit_run(
     except Exception:
         record(None)  # refused before the dispatcher took it: no run will come
         raise
-    record(task_id)  # a runner that never called back; a no-op after the dispatcher's
+    record(task_id, wait=False)  # a runner that never called back; else a no-op
     return task_id
+
+
+def with_run_blame(row: dict[str, Any], task_id: str, engine: str | None) -> dict[str, Any]:
+    """R2 G6 (I13): a held dispatch row once its run exists — the id, and the
+    engine the run recorded when the dispatch resolved none (an unbound
+    schedule, a ``--template``/``--minimal`` CLI run). A coding row only: the
+    run records no engine for any other caste (I8)."""
+    stamped = {**row, "task_id": task_id}
+    if engine and "engine" not in row and row.get("caste") == "coding":
+        stamped["engine"] = engine
+    return stamped
 
 
 def _dispatch_recorder(
     audit_dir: Path, held: list[dict[str, Any]], delegation: dict[str, Any] | None, repo: Path
-) -> Callable[[str | None], None]:
+) -> Callable[..., None]:
     """Review R1 (I8, I13): writes a dispatch's held rows, then its hop row,
     exactly once — with the id when the run is created (the dispatcher calls
     it there, before the worker spawns), id-less when the dispatch ended
     without a run. A failed write is logged, never raised: the run it
     describes may already be live, and must not read as a failed dispatch."""
-    pending = [True]  # the calls are sequenced (create → return), never concurrent
+    pending = [True]
+    # R2 G5: the dispatcher returns the id before its call writes, so the
+    # caller's fallback (``wait=False``) can overlap it. The dispatcher's call
+    # waits for a fallback mid-write (the worker never spawns before the rows);
+    # the fallback skips a dispatcher mid-write (the id is already answered).
+    lock = threading.Lock()
 
-    def record(task_id: str | None) -> None:
-        if not pending:
+    def record(task_id: str | None, *, wait: bool = True) -> None:
+        if not lock.acquire(blocking=wait):
             return
-        pending.clear()
         try:
+            if not pending:
+                return
+            pending.clear()
             for row in held:
                 log_decision(audit_dir, {**row, "task_id": task_id} if task_id else row)
             if delegation is not None and task_id is not None:
                 record_delegation(audit_dir, delegation, repo=str(repo), task=task_id)
         except Exception:
             logger.exception("dispatch decision rows for %s were not logged", task_id or "no run")
+        finally:
+            lock.release()
 
     return record
 

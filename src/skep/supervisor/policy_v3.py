@@ -1049,19 +1049,33 @@ _SECRET_SHAPES = (
     # Discord's /interactions|webhooks/<id>/<token> (an httpx error quotes it).
     re.compile(r"(/bot\d+:)([-_A-Za-z0-9]+)"),
     re.compile(r"(/(?:interactions|webhooks)/\d+/)([^/\s?#'\"]+)"),
-    # Phase 02 R1 D1: a credential named by its key in JSON, a dict repr or YAML
-    # ("access_token": "…", api_key: …). The key must END in the credential word
-    # (max_tokens, secret_name stay); a header's "Bearer/Basic ***" stays readable.
-    re.compile(r"(?i)((?<![\w-])[\"']?(?:[a-z0-9]+[_-])*(?:token|api[_-]?key|apikey|secret|"
-               r"password|passwd|authorization)[\"']?\s*[:=]\s*(?!(?:bearer|basic|token)\s))"
-               r"(\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^\s,;})\]'\"]+)"),
+)  # fmt: skip
+# Phase 02 R1 D1 / R2 G1: a credential named by its key in JSON, a dict repr or
+# YAML ("access_token": "…", accessToken, api_key: …). The key ENDS in the
+# credential word, snake/kebab or camelCase (max_tokens, secretName stay), and
+# never starts after "/", ":" or "@" (a URL path or host).
+_CRED_KEY = (
+    r"(?<![\w/:@-])(?:[a-z0-9]+[_-])*(?:[a-z0-9]+(?-i:(?=[A-Z])))?"
+    r"(?:token|api[_-]?key|apikey|secret|password|passwd|authorization)"
+)
+# An earlier shape already masked a header's credential: keep "Bearer ***" readable.
+_NOT_SCHEME = r"(?!(?:bearer|basic|token)\s+\*\*\*)"
+_QUOTED = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'"
+_KEYED = (
+    # A quoted key (JSON, a dict repr) or key=value: the value is one token.
+    re.compile(rf"(?i)((?:([\"']){_CRED_KEY}\2\s*[:=]|{_CRED_KEY}\s*=)\s*{_NOT_SCHEME})"
+               rf"({_QUOTED}|[^\s,;}})\]'\"]+)"),
+    # A YAML plain key needs the space after ":" (so name:tag and host:port stay),
+    # and its plain value runs to the line's end.
+    re.compile(rf"(?i)({_CRED_KEY}:[ \t]+{_NOT_SCHEME})"
+               rf"({_QUOTED}|[^\s,;}})\]'\"][^\n,;}})\]'\"]*)"),
 )  # fmt: skip
 
 
 def redact(value: str) -> str:
     """``value`` with every inline credential replaced by ``***``. A path or
     a host stays readable; a secret's VALUE never reaches the log."""
-    for shape in _SECRET_SHAPES:
+    for shape in (*_SECRET_SHAPES, *_KEYED):
         value = shape.sub(lambda m: m.group(1) + _MASK, value)
     return value
 
