@@ -1012,9 +1012,11 @@ async function route() {
   main.className = "";
   main.replaceChildren();
   main.dataset.route = String(++routeGeneration);
+  const live = routeLive(main); // R2 I8: a newer navigation owns #main and the header
   let setup = null;
   try { setup = await setupStatus(); }
   catch { return; }
+  if (!live()) return;
   if (!setup.complete && !setupRouteAllowed(hash)) {
     location.hash = "#/setup";
     return;
@@ -1029,9 +1031,11 @@ async function route() {
     if (match) {
       // Phase 10 10.1: a 404 is a page state ("not found"), not a toast.
       await view(main, ...match.slice(1)).catch(e => {
+        if (!live()) return; // R2 I8: the operator moved on; this page's error is moot
         if (e.status === 404) { header(main, "Not found"); main.replaceChildren(notFound(e.message)); }
         else flash("bad", e.message);
       });
+      if (!live()) return;
       // H1-G2: the list filter shows only on a view that has a list to filter.
       const filter = document.getElementById("app-search")?.closest(".topbar-search");
       if (filter) filter.hidden = !main.querySelector(".searchable");
