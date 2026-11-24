@@ -485,7 +485,13 @@ def _config_changes(
         return []
     hits = []
     with tempfile.TemporaryDirectory(prefix="skep-pinctl-") as tmp:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        # R5 (Neon): literal pathspecs — `:x/tox.ini` and `?/setup.cfg` are
+        # file names here, never magic or a glob the mode probe would misread.
+        env = {
+            **os.environ,
+            "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+            "GIT_LITERAL_PATHSPECS": "1",
+        }
         applied = head is not None or (
             _git_text(repo, "read-tree", base, env=env) is not None
             and _git_text(

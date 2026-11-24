@@ -209,7 +209,7 @@ def _resume(ctx: CommandContext, args: str) -> Reply:
     chats are reachable: a web chat or another conversation's may have read
     private files the desk mirror withholds from a messenger (I6/I7)."""
     chat_ids = ctx.store.channel_session_chats(ctx.message.session_key)
-    if args.isdigit():
+    if args.isdigit() and len(args) < 8:  # 8 digits is an id as /sessions lists it
         n = int(args)
         matches = [chat_ids[n - 1]] if 1 <= n <= len(chat_ids) else []
     else:
