@@ -19,7 +19,8 @@
 # there means its main must carry the marker, or nothing is pushed. A failed
 # probe refuses. Every push is leased to the SHA the probe saw (atomic), and
 # --move-head pushes only to the remote this run names (DIR/origin.git, or the
-# --github URL), checked against the checkout's origin. Commits are dated and
+# --github URL), checked against the checkout's origin, and says it moved only
+# once that remote shows the new commit (a re-run retries a failed push). Commits are dated and
 # authored fixedly, so a re-run gives the same SHAs (given one uv).
 set -euo pipefail
 
@@ -84,7 +85,7 @@ EOF
 
 remote_url() {
   if [ -n "$GITHUB" ]; then
-    gh repo view "$GITHUB" --json url --jq .url \
+    gh repo view "github.com/$GITHUB" --json url --jq .url \
       || refuse "gh cannot see $GITHUB — create it first: gh repo create $GITHUB --private"
   else
     echo "$DIR/origin.git"
@@ -122,14 +123,23 @@ if [ "$MOVE" -eq 1 ]; then
   probe "$URL"
   branch="$(echo "${SHAPES[3]}" | cut -d'|' -f2)"
   g checkout -q "$branch"
-  if [ "$(g log -1 --format=%s)" = "$MOVE_MSG" ]; then
-    echo "shape (d) already moved: $branch at $(g rev-parse HEAD)"
+  if [ "$(g log -1 --format=%s)" != "$MOVE_MSG" ]; then
+    fakelib 1.0.3 "a + b"
+    commit "2026-01-02T00:00:00Z" "$MOVE_MSG"
+  fi
+  # R4 (S8): the remote is the truth, never the local log — a push that
+  # failed last run left the new commit here only.
+  new="$(g rev-parse HEAD)" old="$(g rev-parse HEAD^)" seen="$(sha_of "$branch")"
+  if [ "$seen" = "$new" ]; then
+    echo "shape (d) already moved: $branch at $new"
     exit 0
   fi
-  fakelib 1.0.3 "a + b"
-  commit "2026-01-02T00:00:00Z" "$MOVE_MSG"
+  [ "$seen" = "$old" ] || refuse "$URL has $branch at ${seen:-nothing}, neither its old head $old nor the moved $new"
   g push -q "$(lease "$branch")" "$URL" "refs/heads/$branch:refs/heads/$branch"
-  echo "moved shape (d): $branch is now $(g rev-parse HEAD) — confirm its merge_pr card: GitHub must refuse it"
+  probe "$URL"
+  [ "$(sha_of "$branch")" = "$new" ] \
+    || refuse "the push said done but $URL still holds $branch at $(sha_of "$branch"), not $new; run --move-head again"
+  echo "moved shape (d): $branch is now $new — confirm its merge_pr card: GitHub must refuse it"
   exit 0
 fi
 

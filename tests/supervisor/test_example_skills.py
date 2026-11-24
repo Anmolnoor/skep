@@ -310,7 +310,7 @@ def fakes(tmp_path: Path) -> dict[str, str]:
     (bin_dir / "gh").write_text(
         "#!/bin/sh\n"
         'case "$1 $2" in\n'
-        '  "repo view") echo "$FAKE_GH_REMOTE" ;;\n'
+        '  "repo view") echo "$*" >> "$FAKE_GH_LOG.view"; echo "$FAKE_GH_REMOTE" ;;\n'
         '  "pr list") echo "$*" >> "$FAKE_GH_LOG.list"\n'
         '    cat "$FAKE_GH_OPEN" 2>/dev/null || echo 0 ;;\n'
         '  "pr create") echo "$*" >> "$FAKE_GH_LOG" ;;\n'
@@ -517,6 +517,65 @@ def test_move_head_pushes_one_more_commit_to_shape_d(tmp_path: Path, fakes: dict
     assert "already moved" in again.stdout and _git(origin, "rev-parse", branch) == after
 
 
+def _push_shim(tmp_path: Path, fakes: dict[str, str], action: str) -> dict[str, str]:
+    """``git push`` replaced by ``action`` (sh); every other git call is real."""
+    import shutil
+
+    shim = tmp_path / "push-shim"
+    shim.mkdir(exist_ok=True)
+    (shim / "git").write_text(
+        f'#!/bin/sh\ncase " $* " in *" push "*) {action} ;; esac\nexec "$REAL_GIT" "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    return {
+        **fakes,
+        "PATH": f"{shim}{os.pathsep}{fakes['PATH']}",
+        "REAL_GIT": str(shutil.which("git")),
+    }
+
+
+def test_move_head_retries_a_push_that_failed_and_proves_the_remote_moved(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """R4 (S8): a --move-head whose push failed left the new commit local
+    only, and the re-run said "already moved" from the local log. It now
+    reads the remote: still the old head → the leased push is retried, and
+    success is reported only once the remote holds the local commit."""
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target)).returncode == 0
+    origin, branch = target / "origin.git", SHAPES["d"]
+    before = _git(origin, "rev-parse", branch)
+
+    failed = _seed(_push_shim(tmp_path, fakes, "exit 1"), str(target), "--move-head")
+    assert failed.returncode != 0 and _git(origin, "rev-parse", branch) == before
+    local = _git(target / "repo", "rev-parse", branch)
+    assert local != before
+
+    retried = _seed(fakes, str(target), "--move-head")
+    assert retried.returncode == 0, retried.stderr
+    assert _git(origin, "rev-parse", branch) == local and local in retried.stdout
+    assert "already moved" in _seed(fakes, str(target), "--move-head").stdout
+
+
+def test_move_head_never_reports_a_push_the_remote_does_not_show(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """R4 (S8): a push that exits 0 but leaves the remote where it was is
+    a failure, and a remote at neither the old nor the new head is refused."""
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target)).returncode == 0
+    origin, branch = target / "origin.git", SHAPES["d"]
+    before = _git(origin, "rev-parse", branch)
+
+    silent = _seed(_push_shim(tmp_path, fakes, "exit 0"), str(target), "--move-head")
+    assert silent.returncode != 0 and "moved shape (d)" not in silent.stdout
+    assert "still holds" in silent.stderr and _git(origin, "rev-parse", branch) == before
+
+    _git(origin, "update-ref", f"refs/heads/{branch}", _git(origin, "rev-parse", "main"))
+    elsewhere = _seed(fakes, str(target), "--move-head")
+    assert elsewhere.returncode == 2 and "neither" in elsewhere.stderr, elsewhere.stderr
+
+
 def test_move_head_needs_a_seeded_fixture(tmp_path: Path, fakes: dict[str, str]) -> None:
     done = _seed(fakes, str(tmp_path / "empty"), "--move-head")
     assert done.returncode == 2 and "seed it first" in done.stderr
@@ -536,6 +595,11 @@ def test_github_mode_pushes_and_opens_each_pr_once(tmp_path: Path, fakes: dict[s
     listed = Path(fakes["FAKE_GH_LOG"] + ".list").read_text().splitlines()
     for line in created + listed:
         assert "--repo github.com/me/dependabot-fixture " in line, line
+    # R4 (N7): and gh repo view names it the same way.
+    viewed = Path(fakes["FAKE_GH_LOG"] + ".view").read_text().splitlines()
+    assert viewed and all(
+        v.startswith("repo view github.com/me/dependabot-fixture ") for v in viewed
+    )
     assert not (target / "origin.git").exists()
 
     Path(fakes["FAKE_GH_OPEN"]).write_text("1\n")  # every PR is open now
