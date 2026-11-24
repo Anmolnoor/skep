@@ -115,10 +115,14 @@
       "name": "browser",
       "usage": "/browser",
       "help": "register the built-in Playwright browser under the browse scope (confirm card)"
+    },
+    {
+      "name": "status",
+      "usage": "/status",
+      "help": "what is running and what waits on you"
     }
   ],
   "refusals": {
-    "status": "/status is not available on web; it runs on cli, discord, slack, telegram",
     "model": "/model is not available on web; it runs on cli, discord, slack, telegram",
     "stop": "/stop is not available on web; it runs on cli, discord, slack, telegram",
     "exit": "/exit is not available on web; it runs on cli",

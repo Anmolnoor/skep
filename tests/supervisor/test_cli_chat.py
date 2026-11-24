@@ -373,7 +373,7 @@ def test_python_deck_and_executor_cannot_drift() -> None:
 def test_python_deck_matches_the_web_deck() -> None:
     """Web↔CLI parity: neither deck may quietly grow a command the other lacks.
     CLI_ONLY commands exist only in the terminal (web has equivalent surfaces:
-    /status -> status page + health dot, /model -> composer select, /exit -> close tab).
+    /model -> composer select, /exit -> close tab; /status runs on the web too).
     Phase 10 10.3: the web deck is the registry's web slice (app.js reads it
     over GET /api/commands; test_command_deck pins its executors to it)."""
     from skep import cli_chat
@@ -381,7 +381,7 @@ def test_python_deck_matches_the_web_deck() -> None:
 
     web = {row.name for row in commands_for(WEB)}
     # CLI_ONLY commands are terminal-only; the rest must match exactly.
-    assert {"status", "model", "exit", "replay", "stop"} == cli_chat.CLI_ONLY
+    assert {"model", "exit", "replay", "stop"} == cli_chat.CLI_ONLY
     assert set(cli_chat.COMMANDS) - cli_chat.CLI_ONLY == web
 
 
@@ -1279,6 +1279,8 @@ def test_status_reprints_the_banner_mid_session(
     out = capsys.readouterr().out
     assert out.count("nothing waiting on you") == 2  # entry banner + /status
     assert "daemon: http://unused" in out
+    # Test 10.5: the same status text the web deck and a messenger print.
+    assert "skep: 0 running · 0 approval(s) waiting" in out
 
 
 def test_model_no_arg_names_the_effective_model_and_meter(

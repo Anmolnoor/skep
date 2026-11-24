@@ -218,10 +218,10 @@ COMMANDS: dict[str, dict[str, str]] = {
 }
 
 # CLI_ONLY: commands that exist ONLY in the terminal — the web has equivalent
-# surfaces but no deck rows (v77-F3 parity pin): /status -> web status page +
-# topbar health dot; /model -> composer model select; /exit -> close tab;
-# /replay -> the web transcript is always on screen (v77-F5); /stop -> the
-# stop button on the working line (v130-F10: typing there queues mid-turn).
+# surfaces but no deck rows (v77-F3 parity pin): /model -> composer model
+# select; /exit -> close tab; /replay -> the web transcript is always on
+# screen (v77-F5); /stop -> the stop button on the working line (v130-F10:
+# typing there queues mid-turn).
 CLI_ONLY = frozenset(row.name for row in commands_for(CLI) if WEB not in row.surfaces)
 
 
@@ -922,6 +922,8 @@ class ChatRepl:
         if name == "status":
             # v77-F3: re-print the banner on demand — "what needs me?" mid-session.
             _print_banner(self.client)
+            # Test 10.5: then the status text the web deck and messengers print.
+            print(self.client.get("/api/status").get("summary", ""))
             print(_c(DIM, f"daemon: {self.url}"))
             return
         if name == "model":

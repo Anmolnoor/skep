@@ -52,11 +52,11 @@ test("/help lists the registry's web rows, in its order", async () => {
 
 test("a command another surface carries is refused here, before anything runs", async () => {
   const { calls, type, said } = await chat();
-  await type("/status");
+  await type("/stop");
   // The one request is the deck itself: no executor, no card, no model turn.
   assert.deepEqual(calls, ["GET /api/commands"]);
-  assert.equal(said(), DECK.refusals.status);
-  assert.match(DECK.refusals.status, /^\/status is not available on web; it runs on cli/);
+  assert.equal(said(), DECK.refusals.stop);
+  assert.match(DECK.refusals.stop, /^\/stop is not available on web; it runs on cli/);
   await type("/warp");
   assert.deepEqual(calls, []); // the deck is cached: nothing at all ran
   assert.equal(said(), "unknown command: /warp");
@@ -68,6 +68,16 @@ test("a web row still reaches its executor", async () => {
   await type("/runs 5");
   assert.deepEqual(calls, ["GET /api/commands", "GET /api/runs?limit=5"]);
   assert.match(main.textContent, /"task_id": "t1"/);
+});
+
+test("/status shows the status text every surface answers, read-only", async () => {
+  const summary = "skep: 1 running · 2 approval(s) waiting\n⏸ run t-abc… needs your approval";
+  const { main, calls, type } = await chat({ "/api/status": { status: "ok", summary } });
+  await type("/status");
+  // One read, the same route the login check uses: no card, no model turn.
+  assert.deepEqual(calls, ["GET /api/commands", "GET /api/status"]);
+  const block = main.querySelectorAll(".command-status").at(-1);
+  assert.deepEqual(texts(block, "note"), summary.split("\n"));
 });
 
 test("completion offers the web rows by prefix, with the registry's help", async () => {

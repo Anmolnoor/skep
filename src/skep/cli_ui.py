@@ -141,3 +141,28 @@ def print_decisions(view: dict[str, Any]) -> None:
     print_table(("at", "verdict", "what", "value", "actor", "task"), rows)
     counts = ", ".join(f"{key} {n}" for key, n in view["summary"].items() if n)
     console().print(f"total {view['total']}" + (f": {counts}" if counts else ""))
+
+
+class PhaseSpinner:
+    """``skep run`` on a terminal (Phase 10 R1): a live spinner naming the
+    current phase, fed by the run's phase tail. Each phase still prints as the
+    plain tail's ``  → `` line above it, so the scrollback reads the same and
+    nothing is truncated (I8). Off a terminal the caller never builds one."""
+
+    def __init__(self, text: str = "dispatching") -> None:
+        from rich.text import Text
+
+        self._console = console()
+        self._status = self._console.status(Text(text), spinner="dots")
+        self._status.start()
+
+    def phase(self, text: str) -> None:
+        from rich.text import Text
+
+        self._console.print(Text(f"  → {text}"))  # Text: a command is never markup
+        # The scrollback line above carries it whole; the spinner keeps one row.
+        room = max(10, self._console.width - 4)
+        self._status.update(Text(text if len(text) <= room else text[: room - 1] + "…"))
+
+    def stop(self) -> None:
+        self._status.stop()

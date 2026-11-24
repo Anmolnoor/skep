@@ -184,7 +184,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         _DESK,
         verb="setup_browser",
     ),
-    _row("status", "/status", "what is running and what waits on you", _CLI, CHANNELS),
+    _row("status", "/status", "what is running and what waits on you", _ALL),
     _row(
         "model",
         "/model [name] [--scope chat|default]",

@@ -2918,6 +2918,14 @@ async function viewChat(main, chatId) {
       if (!spec) { commandHelp(deckRefusal(deck, name)); return; }
       if (name === "help") { commandHelp(); return; }
       if (name === "repos") { commandResult("/repos", await api("GET", "/api/repos")); return; }
+      if (name === "status") {
+        // Phase 10 R1 (Test 10.5): the messengers' own status text, read-only.
+        const { summary } = await api("GET", "/api/status");
+        log.append(el("div", { class: "command-help command-status" },
+          summary.split("\n").map(line => el("p", { class: "note" }, line))));
+        scrollBottom();
+        return;
+      }
       if (name === "skills") { commandResult("/skills", await api("GET", "/api/skills")); return; }
       if (name === "approvals") {
         commandResult("/approvals", await api("GET", "/api/approvals"));
