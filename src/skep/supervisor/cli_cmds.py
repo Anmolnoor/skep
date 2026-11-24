@@ -2025,6 +2025,7 @@ class _ReviewCard:
     lines: list[str]
     patch: str | None
     shown: _Shown
+    batch: int = 0  # R2 I2: how many commands approving this card's gate grants
 
 
 def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
@@ -2122,14 +2123,27 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             label, style = "NOTHING TO RE-VERIFY", "cyan"  # v65: benign, never a scream
         else:
             label, style = "NOT CONFIRMED", "red"
+        open_review = store.pending_or_enqueue_approval(
+            record.task_id, action="apply_patch", reason="", create=False
+        )
         lines = [
             f"state:    {record.state}",
             f"summary:  {record.summary or '-'}",
             f"waiting:  {notice[0]}",
         ]
+        batch = 0
         for gate in store.approvals_for(record.task_id):
             if gate.status == "pending":
                 lines.append(f"card:     review {gate.review_id} — {gate.action}: {gate.reason}")
+                # R2 I2 (I8): an approve grants EVERY stored command (ES-F8),
+                # not only the reason's first — the card shows each one.
+                commands = store.approval_commands(gate.review_id) or []
+                if commands:
+                    many = "command" if len(commands) == 1 else "commands"
+                    lines.append(f"grants:   {len(commands)} {many}")
+                    lines += [f"            {shlex.join(argv)}" for argv in commands]
+                if gate.review_id == open_review:
+                    batch = len(commands)
         if reverify is not None:
             lines += _g10_lines(reverify)
         note = tamper_note(reverify)
@@ -2137,9 +2151,6 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             lines.append(f"V1:       {note}")
         patch = patch_path(store, record.task_id)
         raw = patch.read_bytes() if patch is not None else None
-        open_review = store.pending_or_enqueue_approval(
-            record.task_id, action="apply_patch", reason="", create=False
-        )
         cards.append(
             _ReviewCard(
                 record.task_id,
@@ -2154,6 +2165,7 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
                     None if raw is None else hashlib.sha256(raw).hexdigest(),
                     tuple(a.review_id for a in store.approvals_for(record.task_id)),
                 ),
+                batch,
             )
         )
     return cards
@@ -2221,7 +2233,11 @@ def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
             if card.patch:
                 print(card.patch)
         act = "resume" if card.label == "ASK" else "land"
-        keys = f"  [a] approve & {act}  [d] deny  [f] forensics  [p] receipt  [s] skip  [q] quit"
+        every = f" all {card.batch}" if card.batch > 1 else ""
+        keys = (
+            f"  [a] approve{every} & {act}  [d] deny  [f] forensics  [p] receipt"
+            "  [s] skip  [q] quit"
+        )
         while True:
             print(keys)
             choice = _read_approval_choice()

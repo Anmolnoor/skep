@@ -770,3 +770,31 @@ def test_interactive_resume_claims_the_shown_gate_only(
         assert len(store.recent_runs(10)) == 1  # nothing resumed
     finally:
         store.close()
+
+
+def test_a_batch_gate_card_lists_every_command_the_approval_grants(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I2 (I8): approving a batch card grants every stored command
+    (ES-F8) — the card prints each one and the key says how many."""
+    import sqlite3
+    from contextlib import closing
+
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    task_id = _only_task_id(home)
+    batch = [["uv", "sync"], ["uv", "run", "pytest", "-q"], ["npm", "ci"]]
+    with closing(sqlite3.connect(build_config(home, None).db_path)) as conn, conn:
+        conn.execute(
+            "UPDATE approvals SET commands_json = ? WHERE task_id = ?",
+            (json.dumps(batch), task_id),
+        )
+    capsys.readouterr()
+    _interactive(monkeypatch, [])
+    assert _run_cli(home, "review") == 0
+    out = capsys.readouterr().out
+    assert "grants:   3 commands" in out
+    for argv in batch:
+        assert f"  {' '.join(argv)}" in out
+    assert "[a] approve all 3 & resume" in out
