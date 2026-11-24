@@ -3241,9 +3241,10 @@ you upgrade a home that is in use.
   the CLI answers up to ten gates in a row. Floor denials are refused
   outright; opaque shell commands, host and network gates and `--minimal`
   runs still need a human when they ask. V1 flags deleted or emptied test
-  files, added skip or xfail markers and test-runner configuration edits;
-  when a pinned pytest check passes, V1 also compares its counts with a fresh
-  or cached baseline. A `tampered` G10 verdict leaves the patch unconfirmed
+  files, added skip or xfail markers and test-runner configuration edits.
+  When a pinned pytest check passes and both counts are readable, V1 compares
+  the run's counts with a fresh or cached baseline; unreadable counts block
+  automatic landing. A `tampered` G10 verdict leaves the patch unconfirmed
   and blocks automatic landing.
 - **Phase 02 (#125): decisions name their run, and one command tells the
   story.** Run decision rows record the task id and caste when known, plus
@@ -3314,9 +3315,11 @@ you upgrade a home that is in use.
 
 **Behaviour changes**
 
-- Script schedules get a temporary `HOME`. Name each host file a script reads
-  by absolute path in its command, so skep can mount it read-only, and list
-  concrete hosts in the schedule for any network access (#132).
+- Script schedules get a temporary `HOME`. To make an additional host file
+  readable, name its absolute path in the command: skep mounts eligible
+  regular files read-only, and files reached through symlinks or under
+  protected paths are not eligible. List concrete hosts in the schedule for
+  any network access (#132).
 - Prompt schedules now read only stored data. Move GitHub, checkout, MCP
   discovery and live run evidence checks to an attended turn (#132).
 - Before merging a PR through skep, refresh and review its current head and
@@ -3324,9 +3327,15 @@ you upgrade a home that is in use.
 - Mail tools now verify TLS certificates and hostnames. Install the right CA
   or correct the configured hostname if your mail server fails verification
   (#132).
-- Forged tools activated before #130 stop running until promoted again, and
-  forged tool calls always ask unless `allow_mcp_tool` covers them;
-  `extract_document` takes content, not URLs — URLs go to `read_url` (#130).
+- Forged tools activated before #130 stop running until promoted again.
+  Forged-tool calls ask by default, and `allow_mcp_tool` can grant standing
+  permission subject to policy. Pass document content to `extract_document`
+  and URLs to `read_url` (#130).
+- New sandboxed projects default to strict reads where the backend supports
+  them; existing projects keep their saved settings. Run
+  `skep project setup <repo> --project-id <id> --strict-reads` to turn strict
+  reads on for an existing project before it runs scheduled external coding
+  jobs (#126, #127).
 - A legacy home marked complete without an approved baseline or role now
   reads as setup incomplete. Re-registering a provider id at a new URL is
   refused. Activation requires a successful check, including working
