@@ -781,7 +781,10 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     assert "stagedConnection({ protocol, baseUrl, apiKey })" in chat_model
     provider = (STATIC_DIR / "js" / "pages" / "settings-provider.js").read_text()
     assert 'api("POST", "/api/llm/probe", body)' in provider
-    assert 'api("PUT", "/api/llm/config", { ...body, default_model: answered })' in provider
+    assert (  # R4 K6: Save is bound to the endpoint its Test resolved
+        'api("PUT", "/api/llm/config", { ...body, default_model: answered, tested: endpoint })'
+        in provider
+    )
     assert 'api("GET", "/api/llm/models")' in chat_model
     assert 'api("PUT", "/api/llm/config"' in chat_model
     assert 'api("PUT", "/api/llm/config"' not in page  # not a second time

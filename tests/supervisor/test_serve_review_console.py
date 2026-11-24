@@ -1047,3 +1047,47 @@ def test_the_queue_sends_inline_approve_on_each_item(
     rows = {i["id"]: i for i in serve_client(config).get("/api/review-queue").json()["items"]}
     assert rows[review]["inline_approve"] is True
     assert rows[card]["inline_approve"] is False
+
+
+def test_save_binds_to_the_endpoint_its_test_resolved(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R4 K6: the probe says which endpoint it resolved; Save sends that back
+    and a save that would now resolve elsewhere — a blank URL after the saved
+    connection moved — is refused ("test again"), nothing written."""
+    other = FakeOllama(api_key="sk-other").start()
+    try:
+        client = serve_client(config)
+        put = {"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"}
+        assert client.put("/api/llm/config", json=put).is_success
+        probed = client.post("/api/llm/probe", json={"protocol": "ollama"}).json()
+        assert probed["ok"] and probed["endpoint"] == {
+            "base_url": ollama.base_url.rstrip("/"),
+            "protocol": "ollama",
+        }
+        same = client.put(
+            "/api/llm/config",
+            json={
+                "protocol": "ollama",
+                "default_model": probed["model"],
+                "tested": probed["endpoint"],
+            },
+        )
+        assert same.status_code == 200, same.text
+        moved = {"base_url": other.base_url, "default_model": "qwen3", "api_key": "sk-other"}
+        assert client.put("/api/llm/config", json=moved).is_success
+        refused = client.put(
+            "/api/llm/config",
+            json={
+                "protocol": "ollama",
+                "default_model": probed["model"],
+                "tested": probed["endpoint"],
+            },
+        )
+        assert refused.status_code == 409
+        assert "test again" in refused.json()["detail"]
+        assert client.get("/api/llm/config").json()["base_url"].rstrip(
+            "/"
+        ) == other.base_url.rstrip("/")
+    finally:
+        other.stop()

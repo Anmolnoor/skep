@@ -20,9 +20,11 @@ const WINDOW_SOURCE = {
 };
 
 // The form's three inputs, as the routes take them; an empty key is not sent
-// (the endpoint's saved key is used, as /api/llm/test does).
+// (the endpoint's saved key is used, as /api/llm/test does), nor an empty URL
+// (R4 K6: the saved endpoint, resolved — and bound — by the server).
 function staged({ protocol, baseUrl, apiKey }) {
-  const body = { base_url: baseUrl.value.trim(), protocol: protocol.value };
+  const body = { protocol: protocol.value };
+  if (baseUrl.value.trim()) body.base_url = baseUrl.value.trim();
   if (apiKey.value.trim()) body.api_key = apiKey.value.trim();
   return body;
 }
@@ -35,6 +37,7 @@ export function stagedConnection(fields) {
   save.disabled = true;
   let passed = null; // the JSON of the values that last passed, or null
   let answered = null; // R3 J11: the model that answered that probe — Save persists it
+  let endpoint = null; // R4 K6: the endpoint that probe resolved — Save is bound to it
   const show = (tone, ...text) => {
     result.className = `probe-result note tone-${tone}`;
     result.replaceChildren(...text);
@@ -75,6 +78,7 @@ export function stagedConnection(fields) {
       const ctx = verdict.context_window || {};
       passed = JSON.stringify(body);
       answered = verdict.model;
+      endpoint = verdict.endpoint;
       save.disabled = false;
       show("ok",
         `✓ ${reach}; ${verdict.model} answered the 1-token probe (the model Save activates); `
@@ -92,10 +96,16 @@ export function stagedConnection(fields) {
     try {
       // R3 J11: the model the probe said Save activates, saved with it — a
       // fresh profile has no default model of its own to fall back on.
-      await api("PUT", "/api/llm/config", { ...body, default_model: answered });
-      flash("ok", `saved — the Queen now uses ${body.base_url}`);
+      // R4 K6: the server refuses ("test again") a save that no longer
+      // resolves to the endpoint this test reached.
+      await api("PUT", "/api/llm/config", { ...body, default_model: answered, tested: endpoint });
+      flash("ok", `saved — the Queen now uses ${endpoint.base_url}`);
       route();
-    } catch (e) { flash("bad", e.message); save.disabled = false; }
+    } catch (e) {
+      flash("bad", e.message);
+      passed = null; // a refused save is tested again before another try
+      show("warn", e.message);
+    }
   });
   return { buttons: el("div", { class: "actions" }, test, save), result };
 }

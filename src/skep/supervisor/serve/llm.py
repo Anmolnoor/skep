@@ -1645,6 +1645,7 @@ class LlmConfigUpdate(BaseModel):
     vision: bool | None = None  # v44-F9: the model accepts image input
     num_ctx: int | None = None  # v56-F1: requested ollama context window; 0 = auto (v74-F2)
     tool_delivery: Literal["indexed", "full"] | None = None  # v74-F3: the escape hatch
+    tested: dict[str, Any] | None = None  # R4 K6: the endpoint the probe resolved
 
 
 class LlmTestRequest(BaseModel):
@@ -2023,6 +2024,14 @@ def _stage(
         else (None, False)
     )
     return _Staged(target, wire, active, same, saved_model, candidate, registered)
+
+
+def _staged_endpoint(staged: _Staged) -> dict[str, Any]:
+    """R4 K6: the endpoint a staged request resolves to — what Test probed,
+    and what Save must still resolve to when it sends this back."""
+    candidate = staged.candidate
+    protocol = REGISTRY_PROTOCOLS[candidate.protocol] if candidate is not None else staged.wire
+    return {"base_url": staged.target, "protocol": protocol}
 
 
 def _candidate_probe(
@@ -2452,6 +2461,7 @@ def probe_staged(
         return {"ok": False, "detail": health.error, "http_status": health.http_status}
     verdict: dict[str, Any] = {"ok": True, "models": len(health.models)}
     if window:
+        verdict["endpoint"] = _staged_endpoint(plan)  # R4 K6: what Save sends back
         from ..provider_presets import MODEL_CONTEXT_WINDOWS
 
         model = probe["model"] or (health.models[0] if health.models else "")
@@ -2504,6 +2514,19 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if body.tool_delivery is not None:
             settings[TOOL_DELIVERY_SETTING] = body.tool_delivery
         provider = (base_url, model, body.protocol, key) != (None, None, None, None)
+        if body.tested is not None:
+            # R4 K6: Save writes only the endpoint its Test resolved
+            plan = _stage(
+                _staged_view(run_store, home),
+                base_url=base_url, model=model, protocol=body.protocol, api_key=key,
+            )  # fmt: skip
+            if _staged_endpoint(plan) != body.tested:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"this save would go to {plan.target}, not the "
+                    f"{body.tested.get('base_url')} the test reached: test again. "
+                    "Nothing was saved",
+                )
         try:
             if provider:
                 # a new key, endpoint or protocol is probed before any write

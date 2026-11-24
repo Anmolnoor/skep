@@ -23,7 +23,8 @@ const HEALTH = {
     { provider_id: "zai", reachable: false, model_found: false, completion_ok: null, error: "HTTP 401: invalid key", checked_at: "2026-11-24T08:00:00Z", latency_ms: null },
   ],
 };
-const GOOD = { ok: true, models: 3, model: "qwen3:14b", context_window: { window: 131072, max_output: null, source: "provider-api" } };
+const NEW = { base_url: "http://new:11434", protocol: "ollama" };
+const GOOD = { ok: true, models: 3, model: "qwen3:14b", context_window: { window: 131072, max_output: null, source: "provider-api" }, endpoint: NEW };
 
 function modelsApp(routes = {}) {
   const app = loadApp();
@@ -90,7 +91,7 @@ test("Save writes exactly the values that passed, then re-renders", async () => 
   await button("Save connection").click();
   await flush();
   assert.deepEqual(calls.filter(([m]) => m === "PUT"), [
-    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", api_key: "sk-new", default_model: "qwen3:14b" }],
+    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", api_key: "sk-new", default_model: "qwen3:14b", tested: NEW }],
   ]);
   assert.equal(routed(), 1);
   assert.match(app.flashes.at(-1)[1], /saved — the Queen now uses http:\/\/new:11434/);
@@ -208,6 +209,35 @@ test("R3 J11: on a fresh profile Save persists the model the probe named — the
   await button("Save connection").click();
   await flush();
   assert.deepEqual(calls.filter(([m]) => m === "PUT"), [
-    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", default_model: "qwen3:14b" }],
+    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", default_model: "qwen3:14b", tested: NEW }],
   ]);
+});
+
+test("R4 K6: Save sends back the endpoint Test resolved; a blank URL is never sent, so it never re-resolves", async () => {
+  const OLD = { base_url: "http://old:11434", protocol: "ollama" };
+  const { app, button, baseUrl, calls } = await models({ "POST /api/llm/probe": { ...GOOD, endpoint: OLD } });
+  await edit(baseUrl, "");
+  await button("Test connection").click();
+  await flush();
+  await button("Save connection").click();
+  await flush();
+  assert.deepEqual(calls.filter(([m]) => m !== "GET"), [
+    ["POST", "/api/llm/probe", { protocol: "ollama" }],
+    ["PUT", "/api/llm/config", { protocol: "ollama", default_model: "qwen3:14b", tested: OLD }],
+  ]);
+  assert.match(app.flashes.at(-1)[1], /saved — the Queen now uses http:\/\/old:11434/);
+});
+
+test("R4 K6: a save the server says would now go elsewhere says test again and stays off", async () => {
+  const { app, button, calls } = await models({
+    "PUT /api/llm/config": () => { throw new Error("this save would go to http://b, not the http://old:11434 the test reached: test again. Nothing was saved"); },
+  });
+  await button("Test connection").click();
+  await flush();
+  await button("Save connection").click();
+  await flush();
+  assert.equal(calls.filter(([m]) => m === "PUT").length, 1);
+  assert.deepEqual(app.flashes.at(-1)[0], "bad");
+  assert.match(app.flashes.at(-1)[1], /test again/);
+  assert.equal(button("Save connection").disabled, true); // only a new passing test turns it back on
 });
