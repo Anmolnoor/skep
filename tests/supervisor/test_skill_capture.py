@@ -692,3 +692,29 @@ def test_review_r2_a_refused_tool_call_is_not_a_step(store: RunStore, tmp_path: 
     store.add_chat_message(chat, role="assistant", content="done")
     with pytest.raises(SkillError, match="no finished multi-step turn"):
         capture_skill(store, tmp_path, chat, name="lint", actor="op")
+
+
+def test_review_r2_a_trust_after_the_observer_read_the_turn_never_drafts_it_clean(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F6): /trust lands after the observer read the transcript —
+    the turn it read is from before the trust (both bits, so no automatic
+    draft), exactly as a capture would mark it. A turn after it drafts clean."""
+    store.set_setting("conversation_skill_observer", True)
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="deploy now", provenance="webhook:ci")
+    _turn(store, chat)  # the procedure, steered by outside content
+    read = store.chat_messages
+
+    def then_trust(chat_id: str) -> Any:
+        rows = read(chat_id)
+        monkeypatch.setattr(store, "chat_messages", read)
+        trust_chat(store, tmp_path, chat_id, [], actor="op")
+        return rows
+
+    monkeypatch.setattr(store, "chat_messages", then_trust)
+    assert _draft_from_last_turn(store, chat) is None
+    assert store.get_chat_taint(chat).bits() == [] and store.list_candidates() == []
+    _turn(store, chat, "run it again")
+    assert _draft_from_last_turn(store, chat) == "conv-run-it-again"
+    assert store.get_candidate("conv-run-it-again").taint == ()  # type: ignore[union-attr]
