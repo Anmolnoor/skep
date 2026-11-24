@@ -822,7 +822,10 @@ def test_a_latin_1_patch_neither_500s_the_queue_nor_the_diff(
 
     from skep.supervisor import RunStore
 
-    raw = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1 +1,2 @@\n x\n+caf\xe9\n"
+    raw = (
+        "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1,2 +1,2 @@\n x\n"
+        "-caf\xe8\n+caf\xe9\n"
+    )
     data = raw.encode("latin-1")
     store = RunStore(config.db_path)
     try:
@@ -850,9 +853,11 @@ def test_a_latin_1_patch_neither_500s_the_queue_nor_the_diff(
         (i["kind"], i["id"]) for i in badge["items"]
     ]
     rows = {i["id"]: i for i in full.json()["items"]}
-    assert rows[latin]["files"] == [{"path": "n.txt", "added": 1, "removed": 0}]
+    assert rows[latin]["files"] == [{"path": "n.txt", "added": 1, "removed": 1}]
     diff = client.get(f"/api/runs/{latin}/diff")
-    assert diff.status_code == 200 and "+caf�" in diff.text
+    # R5-5: decoded reversibly — the two sides differ on screen, byte for byte
+    assert diff.status_code == 200
+    assert "-caf\\xe8\n+caf\\xe9" in diff.text and "\ufffd" not in diff.text
 
 
 def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(

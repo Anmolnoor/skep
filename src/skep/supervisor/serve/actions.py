@@ -3211,7 +3211,7 @@ def patch_digest(store: RunStore, task_id: str) -> dict[str, Any] | None:
     if patch is None:
         return None
     try:
-        text = patch.read_text(encoding="utf-8", errors="replace")
+        text = patch.read_text(encoding="utf-8", errors="backslashreplace")  # R5-5
     except OSError:
         return None
     files: list[dict[str, Any]] = []
