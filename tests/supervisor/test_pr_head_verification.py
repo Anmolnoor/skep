@@ -1841,6 +1841,41 @@ def test_the_receipt_and_forensics_carry_the_verified_pr_tuple(
     )
 
 
+def test_an_early_g10_refusal_still_names_the_pr_it_refused(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (S13): the read-wall/sandbox refusals return before the PR block —
+    the patchless review's verdict still carries its dispatch pin (merge-base
+    None), and the receipt never labels the PR head "baseline"."""
+    from skep.supervisor.ledger_proof import build_receipt
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo.parent / "ws-wall", instructions="review PR 7")
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        wall = json.dumps({"read_allowlist": [str(repo)]})  # ADR 0068: a strict wall
+        store.transition(task.task_id, "dispatched", wall)
+        store.transition(task.task_id, "completed", None)
+        outcome = reverify_run(
+            store=store, task_id=task.task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=replace(config, sandbox=False), changed_files=(), verify_command=PIN,
+        )  # fmt: skip
+        record = store.reverification_for(task.task_id)
+        receipt = build_receipt(store, config.home, config.audit_dir, task.task_id)
+    finally:
+        store.close()
+
+    assert outcome.outcome == "unavailable" and "strict read wall" in outcome.detail
+    assert record is not None and record.pr == {**_pair(base, head), "merge_base": None}
+    assert record.head_commit == head and record.base_commit == base
+    assert receipt["baseline_sha"] == "merge-base unavailable"
+
+
 # --- 5. the failure paths say what happened and move nothing --------------------
 
 

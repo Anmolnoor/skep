@@ -1265,6 +1265,15 @@ def reverify_run(
     pr_pin = store.run_pr(task_id)
     pr_head: str | None = None  # set once this is a PR-head verdict
     verdict_pr: dict[str, Any] | None = None
+    pr = PR_HEAD_REF.fullmatch(ref or "")
+    patchless_pr = (
+        bool(pr) and not changed_files and (patch_path is None or not patch_path.is_file())
+    )
+    if patchless_pr and pr_pin is not None:
+        # R3 (S13): the dispatch pin is the verdict's PR from the start, so
+        # every refusal below — the sandbox and read-wall ones included —
+        # names the PR it refused; merge-base None until found (R2 S9).
+        pr_head, verdict_pr = pr_pin["head_commit"], {**pr_pin, "merge_base": None}
 
     def unavailable(detail: str) -> ReverifyOutcome:
         outcome = ReverifyOutcome(
@@ -1341,9 +1350,8 @@ def reverify_run(
         else resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
     )
 
-    pr = PR_HEAD_REF.fullmatch(ref or "")
     checkout: str | None = None
-    if pr and not changed_files and (patch_path is None or not patch_path.is_file()):
+    if pr and patchless_pr:
         # Phase 09 (9.0, I2): a review run that changed nothing on a fetched
         # PR head — the PR itself is what G10 verifies. R1 (D2): the pinned
         # command runs on the exact head commit; V1 reads the PR's own diff,
@@ -1355,8 +1363,7 @@ def reverify_run(
                 f"so there is nothing G10 may verify — refresh_repo pr={pr[1]} and dispatch "
                 "the review again"
             )
-        # R2 (S9, N3): None until found — a refusal below records that.
-        pr_head, verdict_pr = pr_pin["head_commit"], {**pr_pin, "merge_base": None}
+        assert verdict_pr is not None and pr_head is not None  # set above (R3 S13)
         if not pinned:
             # v88-F4: a PR is never confirmed by a command the worker chose.
             return unavailable(
