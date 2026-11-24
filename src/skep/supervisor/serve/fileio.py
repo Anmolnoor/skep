@@ -72,12 +72,6 @@ def queen_filesystem_decision(
     realpath before any document is read (ES-F1)."""
     if not path.strip():
         return AutonomyDecision(verdict="deny", reason="filesystem.deny.missing_path", detail=path)
-    try:
-        target = Path(path).expanduser().resolve()
-    except OSError as exc:
-        return AutonomyDecision(
-            verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
-        )
     floor = queen_floor(holder, Request("filesystem", action, path), role=role)
     if floor is not None:
         return AutonomyDecision(
@@ -85,6 +79,31 @@ def queen_filesystem_decision(
             reason="filesystem.deny.secret_floor",
             detail=floor["reason"],
             decided_by=floor["decided_by"],
+        )
+    if not Path(path).expanduser().is_absolute():
+        # ADR 0068 (I9), after the floor: a bare name ("read
+        # canary-downloads.txt") would resolve against serve's cwd — often the
+        # home — so it is refused with the roots the Queen does read.
+        roots = ", ".join(str(root) for root in operator_roots(store, holder))
+        return AutonomyDecision(
+            verdict="deny",
+            reason="filesystem.deny.outside_root_lookup",
+            detail=(
+                f"{path!r} is a name, not a path: the Queen reads inside its operator roots "
+                f"({roots}) and never searches your home or ~/Downloads for a file name. "
+                "Give its absolute path — one outside these roots asks the operator on a card."
+            ),
+            decided_by="default/root-boundary",
+        )
+    expanded = Path(path).expanduser()
+    try:  # W7: only an absolute path gets this far — nothing resolves a name against the cwd
+        # strict: from Python 3.13 a plain resolve() returns a symlink loop unresolved
+        target = expanded.resolve(strict=True)
+    except FileNotFoundError:  # not there (yet): resolved as far as it exists
+        target = expanded.resolve()
+    except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop (Python < 3.13)
+        return AutonomyDecision(
+            verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
         )
     verdict = queen_decide(holder, store, Request("filesystem", action, str(target)), role=role)
     unmatched = verdict.layer == "default" or verdict.layer.startswith("role:")

@@ -3080,6 +3080,7 @@ class RunStore:
             bindings=[],
             pack_name=pack_name,
             pack_version=pack_version,
+            skep_home=self.db_path.parent.parent,  # G4: this store's own home
         )
         project_id = definition.project_id
         name = definition.name

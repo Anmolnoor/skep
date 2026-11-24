@@ -36,6 +36,7 @@ from ..policy_layers import baseline_guard
 from ..projects import (
     PROJECT_STRATEGIES,
     ProjectBinding,
+    default_strict_reads,
     first_party_project_policy,
     first_party_schedule_seeds,
     list_projects,
@@ -1248,6 +1249,12 @@ def setup_project_record(
         overrides=policy_overrides or {},
         notes=notes,
     )
+    default_strict_reads(  # ADR 0068
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        backend=new_project_sandbox_probe().backend,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
@@ -1285,6 +1292,7 @@ def setup_project_record(
             bindings=bindings,
             pack_name=None if pack is None else pack.name,
             pack_version=None if pack is None else pack.version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1466,6 +1474,7 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
             bindings=list(project.bindings),
             pack_name=project.pack_name,
             pack_version=project.pack_version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1522,6 +1531,12 @@ def preview_project_setup(
         overrides=policy_overrides,
         notes=notes,
     )
+    default_strict_reads(  # ADR 0068
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        backend=new_project_sandbox_probe().backend,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
@@ -1557,6 +1572,7 @@ def preview_project_setup(
             bindings=bindings,
             pack_name=None if pack is None else pack.name,
             pack_version=None if pack is None else pack.version,
+            skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2077,6 +2093,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 ],
                 pack_name=body.pack_name,
                 pack_version=body.pack_version,
+                skep_home=run_store.db_path.parent.parent,  # G4: the daemon's own home
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

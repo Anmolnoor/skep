@@ -370,13 +370,18 @@ class ProviderRelay:
     ``renew`` (ES-F263): for a provider whose key is a short-lived exchanged
     token (GitHub Copilot), called with the key the provider refused (401) to
     get a fresh one; the relay then retries the request once with it. A long
-    run outlives the token, and the worker cannot renew what it never held."""
+    run outlives the token, and the worker cannot renew what it never held.
+
+    ``sources``: credentials ``key`` was made from (the GitHub token behind a
+    Copilot bearer). The relay never sends them; the spawner keeps them out
+    of the worker env like ``key``."""
 
     upstream: str
     token: str = field(repr=False)
     key: str = field(repr=False)
     protocol: str
     renew: Callable[[str], str] | None = field(default=None, repr=False, compare=False)
+    sources: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def auth(self, secret: str) -> tuple[bytes, str]:
         """The protocol's credential header name and its value for ``secret``."""

@@ -939,7 +939,9 @@ def test_a_readopted_relayed_run_still_reaches_its_model_through_its_relay(
     try:
         assert recovered == [task_id]
         details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
-        assert '"provider_key_relay": "on"' in details, details
+        # Phase 03 review E2: workspace mode has no wall over the key file (I8).
+        note = "on" if mode == "sandbox" else "on, but an unsandboxed run can read the key file"
+        assert f'"provider_key_relay": "{note}"' in details, details
         probe = config.result_path(task_id).parent / "relay-probe.txt"
         assert probe.read_text() == "200"
         assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"

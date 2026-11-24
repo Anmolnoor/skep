@@ -170,7 +170,7 @@
       "network",
       "shell"
     ],
-    "provider_key_relay": false,
+    "provider_key_relay": true,
     "sandbox_backend": "auto",
     "sandbox_required_for": [
       "email",

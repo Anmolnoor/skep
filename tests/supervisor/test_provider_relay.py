@@ -18,6 +18,7 @@ import urllib.parse
 from collections.abc import Callable, Iterator
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -213,7 +214,7 @@ def test_the_token_is_per_run_stable_and_its_secret_is_masked_from_workers(
     assert stat.S_IMODE(os.stat(secret).st_mode) == 0o600
 
 
-def test_the_kill_switch_is_off_by_default_and_set_like_every_policy_field(
+def test_the_kill_switch_is_on_by_default_and_set_like_every_policy_field(
     tmp_path: Path,
 ) -> None:
     from fastapi import HTTPException
@@ -226,9 +227,11 @@ def test_the_kill_switch_is_off_by_default_and_set_like_every_policy_field(
     config = SupervisorConfig(home=tmp_path / "home" / "supervisor", worker_command=("true",))
     store = RunStore(config.db_path)
     holder = ConfigHolder(config, store)
-    assert policy_view(store, holder.current)["provider_key_relay"] is False
-    assert update_policy(store, holder, {"provider_key_relay": True})["provider_key_relay"]
-    assert store.get_setting("provider_key_relay") is True
+    assert policy_view(store, holder.current)["provider_key_relay"] is True
+    assert (
+        update_policy(store, holder, {"provider_key_relay": False})["provider_key_relay"] is False
+    )
+    assert store.get_setting("provider_key_relay") is False
     with pytest.raises(HTTPException):
         update_policy(store, holder, {"provider_key_relay": "yes"})
     store.close()
@@ -308,7 +311,10 @@ def test_a_builtin_worker_reaches_its_model_through_the_relay_only_when_the_swit
     # The model's plan arrived (workspace mode then asks before running verify).
     assert (record.summary or "").startswith("created relayed.py"), record.summary
     assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"
-    assert '"provider_key_relay": "on"' in (dispatched[0] or "")
+    # Phase 03 review E2: workspace mode has no wall over the key file (I8).
+    assert '"provider_key_relay": "on, but an unsandboxed run can read the key file"' in (
+        dispatched[0] or ""
+    )
 
 
 def test_the_worker_takes_its_relay_and_admits_only_that_loopback_url(
@@ -374,6 +380,7 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
     store = RunStore(config.db_path)
     try:
         task = mint_task(workspace=tmp_path, instructions="x")
+        store.set_setting("provider_key_relay", False)  # the kill switch (ON by default)
         assert provider_relay_for_run(store, config, task, builtin=builtin)[2] == "off"
         store.set_setting("provider_key_relay", True)
         relay, _model, got = provider_relay_for_run(store, config, task, builtin=builtin)
@@ -387,7 +394,11 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
     ("provider", "relay_on", "expected"),
     [
         ("openai-compat", False, "provider key relay: off — builtin workers hold the provider key"),
-        ("openai-compat", True, "provider key relay: on — builtin workers reach openai-compat"),
+        (
+            "openai-compat",
+            True,
+            "provider key relay: on — a sandboxed builtin worker reaches openai-compat",
+        ),
         ("bedrock", True, "provider key relay: on, not used — bedrock signs"),
     ],
 )
@@ -985,3 +996,194 @@ def test_a_copilot_renewal_never_sends_another_profiles_key(
     )
     with pytest.raises(ValueError, match="worker provider changed"):
         provider_relay._renewed_copilot_key(tmp_path, "https://api.githubcopilot.com", "stale")
+
+
+def test_a_copilot_relay_strips_the_github_token_its_bearer_came_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 03 review E1 (I8, I12): an env-backed Copilot provider's relay
+    holds the exchanged bearer; the worker env dropped that value only, so
+    the operator's GitHub token itself reached a worker that allowlisted its
+    variable. Both values leave the env, under any name."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import spawner
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+    from skep.supervisor.provider_relay import provider_relay_for_run
+    from skep.supervisor.serve import llm_copilot
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    github_token = "CANARY-gh-" + secrets.token_hex(8)
+    bearer = "CANARY-bearer-" + secrets.token_hex(8)
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        llm_copilot,
+        "exchange_copilot_token",
+        lambda token, *, timeout=10.0: (bearer if token == github_token else "", 4e9),
+    )
+    monkeypatch.setenv("SKEP_TEST_GH_TOKEN", github_token)
+    monkeypatch.setenv("SKEP_TEST_GH_COPY", github_token)  # the same token, another name
+    monkeypatch.setenv("SKEP_TEST_PLAIN", "kept")
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="gpt-4o",
+        endpoint="https://api.githubcopilot.com",
+        api_key_env="SKEP_TEST_GH_TOKEN",
+    )
+    task = mint_task(
+        workspace=tmp_path,
+        instructions="x",
+        permissions=Permissions(
+            read=["workspace"],
+            write=["workspace"],
+            network=["*"],
+            env_allowlist=["SKEP_TEST_GH_TOKEN", "SKEP_TEST_GH_COPY", "SKEP_TEST_PLAIN"],
+        ),
+    )
+    store = RunStore(config.db_path)
+    try:
+        relay, _model, note = provider_relay_for_run(store, config, task, builtin=True)
+    finally:
+        store.close()
+    assert note == "on" and relay is not None and relay.key == bearer
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("subprocess.Popen", lambda argv, **kw: seen.update(kw))
+    spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "task.json",
+        tmp_path / "out" / "result.json",
+        log_path=tmp_path / "log" / "worker.log",
+        sandbox_enabled=False,
+        relay=relay,
+    )
+    env = seen["env"]
+    assert env["SKEP_TEST_PLAIN"] == "kept"
+    assert not any(github_token in v or bearer in v for v in env.values()), sorted(env)
+
+
+def test_a_copilot_renewal_between_selection_and_spawn_still_strips_the_github_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 03 review R2 (M5, I8): the GitHub token was looked up in the
+    shared bearer cache after the exchange. Another run's relay renewing the
+    same bearer (a 401: dropped, re-exchanged) in between emptied that
+    lookup, and the raw token reached a worker that allowlisted its
+    variable. The token is now captured with the bearer, at selection."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import provider_relay, spawner
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+    from skep.supervisor.serve import llm_copilot
+    from skep.worker_contract import Permissions
+
+    github_token = "CANARY-gh-" + secrets.token_hex(8)
+    bearers = iter(["CANARY-bearer-1", "CANARY-bearer-2"])
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        llm_copilot, "exchange_copilot_token", lambda token, *, timeout=10.0: (next(bearers), 4e9)
+    )
+    monkeypatch.setenv("SKEP_TEST_GH_TOKEN", github_token)
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="gpt-4o",
+        endpoint="https://api.githubcopilot.com",
+        api_key_env="SKEP_TEST_GH_TOKEN",
+    )
+    selected = provider_relay.relay_plan
+
+    def renewed_meanwhile(home: Path) -> tuple[Any, str]:
+        plan, why = selected(home)
+        assert plan is not None and plan[2] == "CANARY-bearer-1"
+        llm_copilot.forget_copilot_bearer(plan[2])  # another run's relay got a 401
+        assert llm_copilot.resolve_copilot_bearer(github_token) == "CANARY-bearer-2"
+        return plan, why
+
+    monkeypatch.setattr(provider_relay, "relay_plan", renewed_meanwhile)
+    relay, _model, note = provider_relay._relay_for(config, "task-1")
+    assert note == "on" and relay is not None and relay.key == "CANARY-bearer-1"
+    assert relay.sources == (github_token,)
+    task = mint_task(
+        workspace=tmp_path,
+        instructions="x",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"],
+            env_allowlist=["SKEP_TEST_GH_TOKEN"],
+        ),
+    )  # fmt: skip
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("subprocess.Popen", lambda argv, **kw: seen.update(kw))
+    spawner.spawn_worker(
+        config, task, tmp_path / "task.json", tmp_path / "out" / "result.json",
+        log_path=tmp_path / "log" / "worker.log", sandbox_enabled=False, relay=relay,
+    )  # fmt: skip
+    assert not any(github_token in value for value in seen["env"].values())
+
+
+def test_a_strict_allow_all_run_on_a_podman_host_is_still_relayed(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0068 W5 + 0062: a strict run takes native bubblewrap even on a
+    podman host, so the relay check must ask for THAT backend — else it
+    turned the relay off and handed the worker the key file instead."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import dispatch, sandbox
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    started: list[object] = []
+
+    class _Proxy:
+        def __init__(self, *_: object, **kwargs: object) -> None:
+            started.append(kwargs.get("relay"))
+            self.port = 1
+
+        def start(self) -> _Proxy:
+            raise OSError("stop after proxy start")
+
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    monkeypatch.setattr(dispatch, "FilteringProxy", _Proxy)
+    monkeypatch.setattr(
+        dispatch,
+        "resolve_sandbox_backend",
+        lambda *_a, strict_reads=False, **_k: None if strict_reads else sandbox.PODMAN,
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "sandbox_availability",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend=backend),
+    )
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="m",
+        endpoint="http://127.0.0.1:9",
+        api_key_env="SKEP_TEST_RELAY_KEY",
+    )
+    store = RunStore(config.db_path)
+    store.set_setting("provider_key_relay", True)
+    store.add_project_policy(
+        project_id="strict", name="strict", strategy="trusted_local_dev", phase="build",
+        policy={"strict_read_confinement": True},
+    )  # fmt: skip
+    store.add_project_binding(
+        project_id="strict", binding_kind="repo_path", binding_value=str(repo.resolve())
+    )
+    store.close()
+    dispatch.run_task(
+        repo,
+        "x",
+        config=config,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        execution_mode="sandbox",
+    )
+    assert started and started[0] is not None  # the relay rides the native run

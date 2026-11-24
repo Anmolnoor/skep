@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .profile import PersonalProfile, load_profile, profile_path
+from .supervisor.sandbox import STRICT_READ_BACKENDS, STRICT_READS_KEY, socket_gap
 from .supervisor.sandbox import availability as sandbox_availability
-from .supervisor.sandbox import socket_gap
 from .supervisor.store import RETIRED_STORE_FILES
 
 _STALE_PENDING_DAYS = 7
@@ -42,7 +42,7 @@ def build_status(
             home,
             None,
             required,
-            sandbox=_sandbox_check(),
+            sandbox=_sandbox_check(home),
             coding_worker=worker_provider_check(home, provider_timeout),
         )
         payload["advisories"] = (
@@ -83,7 +83,7 @@ def build_status(
         home,
         profile,
         required,
-        sandbox=_sandbox_check(),
+        sandbox=_sandbox_check(home),
         coding_worker=worker_provider_check(home, provider_timeout),
     )
     payload["advisories"] = (
@@ -1103,28 +1103,50 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     engines the relay does not cover. Names and protocols only, never a key."""
     from skep.supervisor.engines import CODING_ENGINES
     from skep.supervisor.provider_relay import relay_plan
-    from skep.supervisor.serve.settings import PROVIDER_KEY_RELAY
+    from skep.supervisor.serve import settings
 
     from .supervisor.store import RunStore
 
     external = [name for name, engine in CODING_ENGINES.items() if engine.external]
     engines = ", ".join(external[:-1]) + f" and {external[-1]}" if len(external) > 1 else ""
-    not_relayed = f"; {engines} authenticate from their own auth env (not relayed)"
+    # ADR 0062 delta (I8): name each engine's own credential — OAuth tokens
+    # and the ChatGPT login included — so nobody reads them as relayed.
+    auth = ", ".join(
+        f"{e.name} {'/'.join(e.auth_env)}" + (" or its ChatGPT login" if e.login_host else "")
+        for e in CODING_ENGINES.values()
+        if e.external and e.auth_env
+    )
+    not_relayed = (
+        f"; {engines} authenticate from their own auth env "
+        f"(auth: external-env, not relayed: {auth})"
+    )
     db = home / "supervisor" / "supervisor.sqlite3"
-    on = False
-    if db.is_file():
-        store = RunStore(db, readonly=True)
-        try:
-            on = store.get_setting(PROVIDER_KEY_RELAY) is True
-        finally:
+    store = RunStore(db, readonly=True) if db.is_file() else None
+    try:
+        on = settings.provider_key_relay_enabled(store)
+    finally:
+        if store is not None:
             store.close()
     if not on:
-        label = "off — builtin workers hold the provider key (set provider_key_relay to relay it)"
+        label = (
+            "off — builtin workers hold the provider key (the kill switch is set: "
+            "set provider_key_relay to true to relay it)"
+        )
         return {"on": False, "relayed": False, "label": label + not_relayed}
     plan, why = relay_plan(home)
     if plan is None:
         return {"on": True, "relayed": False, "label": f"on, not used — {why}{not_relayed}"}
-    label = f"on — builtin workers reach {plan[1]} through their run's relay and hold no key"
+    # E3 (I8): the guarantee is the wall's, not the provider plan's alone.
+    # R2 M6: and dispatch's — the runs it keeps direct (dispatch.py) are named.
+    label = (
+        f"on — a sandboxed builtin worker reaches {plan[1]} through its run's relay and "
+        "holds no key, except on the runs dispatch keeps on the direct path, whose worker "
+        "holds the key (its record says `not used`): an allow-all run on the podman "
+        "backend (a strict-read run takes bubblewrap and is relayed) and a run with no "
+        "network. An unsandboxed (workspace-mode) run is relayed but can still read the "
+        "key file, and the ollama worker (skep.workers.ollama) dials its own endpoint "
+        "with the daemon secret"
+    )
     return {"on": True, "relayed": True, "label": label + not_relayed}
 
 
@@ -1262,16 +1284,40 @@ def _provider_check(
     return _probe_provider_endpoint(provider.name, provider.endpoint, timeout)
 
 
-def _sandbox_check() -> dict[str, Any]:
+def _sandbox_check(home: Path) -> dict[str, Any]:
     probe = sandbox_availability()
     if probe.usable:
         backend = probe.backend or "native"
         gap = f" {residual}" if (residual := socket_gap(backend)) else ""
-        return {
+        # ADR 0068 (I8): what a sandboxed run can read, said plainly — W6: the
+        # wall's effect (which projects have it, which lanes never do), not
+        # only what the backend could do.
+        strict = probe.backend in STRICT_READ_BACKENDS
+        confinement = "strict-allowlist" if strict else "denylist-only"
+        projects = _sandboxed_projects(home)
+        n_strict = sum(projects.values())
+        effect = (
+            f" available; {n_strict} of {len(projects)} sandboxed projects strict; forged tools, "
+            "MCP servers, the fast lane and diagnose re-runs stay denylist-only"
+            if strict
+            else " (reads stay open but the secret floor)"
+        )
+        check: dict[str, Any] = {
             "status": "ready",
-            "detail": f"{backend} backend is usable.{gap}",
+            "detail": f"{backend} backend is usable; read confinement: {confinement}{effect}.{gap}",
             "backend": probe.backend,
+            "read_confinement": confinement,
+            "strict_projects": n_strict,
+            "sandboxed_projects": len(projects),
         }
+        open_reads = [name for name, on in sorted(projects.items()) if strict and not on]
+        if open_reads:
+            check["next_step"] = (
+                f"{len(open_reads)} sandboxed project(s) still read the whole disk but the "
+                f"secret floor: {', '.join(open_reads)}. Confine one to an allowlist: "
+                f"`skep project setup <repo> --project-id {open_reads[0]} --strict-reads`."
+            )
+        return check
 
     reason = probe.reason or "unavailable"
     detail = reason
@@ -1283,6 +1329,25 @@ def _sandbox_check() -> dict[str, Any]:
         "reason": probe.reason,
         "backend": probe.backend,
     }
+
+
+def _sandboxed_projects(home: Path) -> dict[str, bool]:
+    """ADR 0068: each sandboxed project → whether it reads strictly (the
+    unsandboxed ones are ``_workspace_mode_advisories``' to name)."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return {}
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        return {
+            record.project_id: record.policy.get(STRICT_READS_KEY) is True
+            for record in store.list_project_policies()
+            if record.policy.get("default_execution_mode") == "sandbox"
+        }
+    finally:
+        store.close()
 
 
 def _probe_provider_endpoint(provider: str, endpoint: str, timeout: float) -> dict[str, Any]:

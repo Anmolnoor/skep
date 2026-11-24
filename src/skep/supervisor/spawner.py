@@ -25,27 +25,31 @@ from skep.workers.cli_adapter import SANDBOX_MARKER_ENV
 from . import sandbox
 from .castes import CASTES
 from .config import SupervisorConfig
+from .engines import external_agent_for_command
 from .netproxy import ProviderRelay, run_loopback_ports
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
 logger = logging.getLogger("skep.spawner")
 
 
-def resolve_sandbox_backend(config: SupervisorConfig, network: sandbox.NetworkPolicy) -> str | None:
+def resolve_sandbox_backend(
+    config: SupervisorConfig, network: sandbox.NetworkPolicy, *, strict_reads: bool = False
+) -> str | None:
     """v44-F7: which backend wraps this worker; None = the native host backend.
 
     An opted-in podman backend falls back to native — loudly, never silently —
     when podman is unusable here or the run needs a concrete domain allowlist
-    (the filtering-proxy bridge is bubblewrap-specific). Fail-open toward the
-    STRICTER native backend, never toward no sandbox.
+    (the filtering-proxy bridge is bubblewrap-specific) or strict reads (ADR
+    0068, W5: podman cannot confine reads to an allowlist). Fail-open toward
+    the STRICTER native backend, never toward no sandbox.
     """
     if config.sandbox_backend in ("auto", "", "none"):
         return None
     backend = config.sandbox_backend
-    if backend == sandbox.PODMAN and network.is_domain_list:
+    if backend == sandbox.PODMAN and (network.is_domain_list or strict_reads):
         logger.warning(
-            "sandbox_backend=podman cannot enforce a domain allowlist; "
-            "using the native backend for this run"
+            "sandbox_backend=podman cannot enforce %s; using the native backend for this run",
+            "a domain allowlist" if network.is_domain_list else "strict reads",
         )
         return None
     probe = sandbox.availability(backend)
@@ -189,6 +193,7 @@ def spawn_worker(
     write_denied: Iterable[Path] = (),
     unmasked: Iterable[Path] = (),
     relay: ProviderRelay | None = None,
+    read_allowlist: tuple[Path, ...] | None = None,
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -207,6 +212,9 @@ def spawn_worker(
     ``relay`` (ADR 0062): the run's provider-key relay. A relayed worker
     holds no copy of the key: its key files stay masked (no B125 carve-out)
     and no env variable carrying the key reaches it.
+
+    ``read_allowlist`` (ADR 0068): the project's read wall
+    (``sandbox.read_allowlist_for``); None keeps reads denylist-only.
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -228,7 +236,8 @@ def spawn_worker(
         network = sandbox.ALLOW_ALL_NETWORK
     else:
         network = sandbox.NetworkPolicy(allow=domains)
-    backend = resolve_sandbox_backend(config, network) if use_sandbox else None
+    strict = read_allowlist is not None
+    backend = resolve_sandbox_backend(config, network, strict_reads=strict) if use_sandbox else None
     if use_sandbox:
         # ES-F1 (B47): no usable backend raises here — the worker never starts
         # unconfined under a "sandbox" record.
@@ -248,16 +257,23 @@ def spawn_worker(
             log_path.parent / "sandbox.profile.sb",
             workspace=workspace,
             extra_writable=writable,
-            extra_readable=git_metadata_readable_roots(workspace),
+            extra_readable=(
+                *git_metadata_readable_roots(workspace),
+                # W8 (I9): the operator chose this command; its own script must
+                # not die as ENOENT behind the wall (its siblings stay out).
+                *(_command_files(argv) if strict else ()),
+            ),
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
             backend=backend,
             skep_home=config.home.parent,
             # B125: only skep's own LLM-calling workers read the LLM key; an
-            # external engine (worker_argv) authenticates from its env, and an
+            # external engine (worker_argv, or a worker command that runs one
+            # or the shell worker: E4) authenticates from its env, and an
             # unregistered caste falls back to the coding worker.
             worker_llm_key=worker_argv is None
+            and external_agent_for_command(argv) is None
             and relay is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
@@ -273,6 +289,7 @@ def spawn_worker(
                 ),
             ),
             unmasked=unmasked,
+            read_allowlist=read_allowlist,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
         if bubblewrap and config.readopt_workers:
@@ -286,8 +303,10 @@ def spawn_worker(
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
     if relay is not None:
         # ADR 0062: by value, so the key leaves under any name (api_key_env,
-        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named.
-        env = {name: value for name, value in env.items() if relay.key not in value}
+        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named —
+        # and so does what it was made from (E1: a Copilot bearer's GitHub token).
+        held = (relay.key, *relay.sources)
+        env = {name: value for name, value in env.items() if not any(k in value for k in held)}
     # Needed: the builtin worker reads its provider profile, LLM key and
     # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
     # secrets under it are hidden by the profile (ES-F4), not by omission.
@@ -317,3 +336,11 @@ def spawn_worker(
         )
     finally:
         log_handle.close()
+
+
+def _command_files(argv: Iterable[str]) -> list[Path]:
+    """The worker argv's own absolute files (its script; the task file sits in
+    the workspace already), not links: a venv's python is a link into a bound
+    root already, and a file bound over a link breaks bwrap."""
+    return [Path(arg) for arg in argv if os.path.isabs(arg) and os.path.isfile(arg)
+            and not os.path.islink(arg)]  # fmt: skip

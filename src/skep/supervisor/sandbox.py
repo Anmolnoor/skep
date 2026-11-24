@@ -17,28 +17,35 @@ workspace/results/temp boundary. Reads are left open so the Python/git/test
 toolchain keeps working — except the secret floor (ES-F4, V3): the operator's
 credential dirs and skep's own serve-token/serve.env/``*-secret`` files are
 hidden on every backend (``secret_paths``). Env secrets are closed by the G2
-env allowlist.
+env allowlist. A strict-read project (ADR 0068) reads an allowlist instead:
+bwrap's empty root with the system dirs, the detected toolchains and the
+run's own roots bound back; on Seatbelt a global read deny reopening the
+same set. The masks still land last.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from .. import landlock
-from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
+from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, alias_key, other_homes
 from .store import RETIRED_STORE_FILES
+
+logger = logging.getLogger(__name__)
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -163,10 +170,8 @@ def _bubblewrap_binary() -> str | None:
 # grandchild that killpg alone used to miss. --die-with-parent ties the tree
 # to bwrap; --new-session blocks TIOCSTI keystroke injection into a terminal;
 # --unshare-ipc keeps SysV IPC / mqueues private.
-_BUBBLEWRAP_BASE_ARGS = (
-    "--ro-bind",
-    "/",
-    "/",
+_HOST_ROOT = ("--ro-bind", "/", "/")
+_BUBBLEWRAP_WALLS = (
     "--dev",
     "/dev",
     "--unshare-pid",
@@ -180,6 +185,378 @@ _BUBBLEWRAP_BASE_ARGS = (
     "--die-with-parent",
     "--new-session",
 )
+_BUBBLEWRAP_BASE_ARGS = (*_HOST_ROOT, *_BUBBLEWRAP_WALLS)
+
+# ADR 0068: strict read confinement. The backends that enforce it.
+STRICT_READ_BACKENDS = frozenset({"bubblewrap", "seatbelt"})
+STRICT_READS_KEY = "strict_read_confinement"
+# The empty root's system half (bwrap): a usr-merge link is recreated as a
+# link, a real directory is bound read-only, an absent one skipped.
+_SYSTEM_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/opt", "/nix")
+# /etc comes back entry by entry, minus these: the host's auth secrets and
+# Proxmox's cluster tree (never mounted over: a FUSE mount we may not stat).
+_ETC_HIDDEN = frozenset(
+    {"pve", "shadow", "shadow-", "gshadow", "gshadow-", "sudoers", "sudoers.d", "ssh"}
+)
+_SITE_DIRS = ("site-packages", "dist-packages")
+# Per-user toolchains: (the variable that moves one, its default under $HOME).
+_HOME_TOOLCHAINS = (
+    (None, ".local/bin"),  # uv/uvx and the claude launcher (their installers' default)
+    ("UV_PYTHON_INSTALL_DIR", ".local/share/uv/python"),
+    ("UV_TOOL_DIR", ".local/share/uv/tools"),
+    (None, ".local/share/claude"),  # the claude_code engine's versions
+    ("CARGO_HOME", ".cargo"),
+    ("RUSTUP_HOME", ".rustup"),
+    ("NVM_DIR", ".nvm"),
+    ("PYENV_ROOT", ".pyenv"),
+)
+
+
+def read_allowlist_for(policy: Mapping[str, Any]) -> tuple[Path, ...] | None:
+    """ADR 0068: None keeps a project's reads denylist-only; a strict
+    project's ``extra_read_paths`` (often none) turn the allowlist on."""
+    if policy.get(STRICT_READS_KEY) is not True:
+        return None
+    return tuple(Path(path) for path in policy.get("extra_read_paths") or ())
+
+
+def resolved_read_allowlist(paths: Iterable[Path], skep_home: Path) -> tuple[Path, ...]:
+    """ADR 0068 (G1): each extra path judged, then resolved ONCE at dispatch.
+    The run records these targets, so a link the operator retargets later
+    never moves the wall G10 builds. Refuses like ``write_profile`` does.
+    3I: only the ones that exist, as the worker's profile binds them — one
+    made after dispatch is never in G10's wall."""
+    paths = _validated_extra(paths, skep_home)
+    return tuple(dict.fromkeys(path.resolve() for path in paths if _exists(path)))
+
+
+def strict_read_roots(
+    skep_home: Path, *, worker_llm_key: bool = False, extra: Iterable[Path] = ()
+) -> list[Path]:
+    """ADR 0068: what a strict run reads beyond the OS's system roots and its
+    own workspace/git roots — the half every backend's profile shares.
+
+    The detected toolchains (skep's own interpreter and package, the usual
+    per-user installs, ``<skep home>/tools/.venvs``), the skep-home files the
+    builtin worker reads (``profile.json``, ``worker_plugins``; the store and
+    its own LLM key only with ``worker_llm_key``) and the operator's
+    ``extra_read_paths``. Resolved, existing paths only. A detected root at
+    or above the home, on /etc's reserved entries, or (a per-user toolchain)
+    itself a link, is dropped, as is a skep-home root reached through a link
+    (G2); an extra path at or above the home, in or over
+    the skep home, or on /etc's reserved entries refuses the run
+    (``extra_read_path_problem``). The secret masks still land after every one."""
+    roots = _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=extra)
+    return list(dict.fromkeys(path.resolve() for path in roots))
+
+
+def _in_place(path: Path, skep_home: Path) -> bool:
+    """G2: a skep-home root is bound only where it sits in the home, never
+    through a link of its own or a linked parent — a ``worker_plugins``
+    linked to ~/Downloads would bind the downloads, past every broad-root
+    check. A relocated shelf is named in ``extra_read_paths``, which are."""
+    real = skep_home.resolve() / path.relative_to(skep_home)
+    if os.path.realpath(real) == str(real):
+        return True
+    logger.warning(
+        "strict reads: %s is reached through a link (to %s), so it is not bound; name the "
+        "target in the project's extra_read_paths if the run needs it",
+        path,
+        os.path.realpath(real),
+    )
+    return False
+
+
+def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
+    """Each hop in ``executable``'s symlink chain: its env when the hop sits in
+    a verified one (``pyvenv.cfg``), else the interpreter file alone — never a
+    plain bin dir and its siblings (Sol C2-1)."""
+    hops: list[Path] = []
+    current = executable
+    for _ in range(limit):
+        env = current.parent.parent
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    return hops
+
+
+def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
+    """The links on the interpreter's path — a hop that is one, or a dir it is
+    reached through (uv's ``cpython-3.12-…`` minor-version link to its patch
+    dir) — whose target a ``bound`` root already holds. bwrap's empty root
+    gets them as links ONLY (``_alias_links``), never as bind roots: a
+    retarget after this check can leave one dangling, never widen a read
+    (Sol C2-2); without them exec by the linked path is ENOENT."""
+    roots = [Path(root) for root in bound]
+    system = [Path(root) for root in _SYSTEM_ROOTS]
+    links = dict.fromkeys(
+        path
+        for hop in _interpreter_chain(Path(sys.executable))
+        for path in (hop, *hop.parents)
+        # as walked (C3-1: never a name `..` collapsed into); not one the strict
+        # root already makes (C3-2: a second /bin link makes bwrap refuse)
+        if ".." not in path.parts
+        and not any(path.is_relative_to(root) for root in system)
+        and path.is_symlink()
+    )
+    return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
+
+
+def _found_file(found: str | None) -> Path | None:
+    """A PATH lookup's hit, resolved once (C5-1: a ``..`` walked, never
+    collapsed) and kept only as the regular file that passed the check — C6-1:
+    never the link, which a retarget during the build could point at a dir."""
+    if found is None:
+        return None
+    real = Path(found).resolve()
+    return real if real.is_file() else None
+
+
+def _found_link(found: str | None) -> list[Path]:
+    """The hit's written name when it is a link (~/.local/bin/uv to a versioned
+    file): bwrap's empty root gets it as an alias only (``_alias_links``)."""
+    if found is None or ".." in Path(found).parts:
+        return []
+    path = Path(os.path.abspath(found))
+    return [path] if path.is_symlink() else []
+
+
+def _strict_candidates(
+    skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
+) -> list[Path]:
+    """``strict_read_roots`` as written (absolute, not resolved): bwrap
+    recreates a written path that is a link (uv's ``cpython-3.12-…`` minor
+    version link, which a venv's python points through) as a symlink to the
+    resolved root, so the masks on the resolved path still hold."""
+    home = Path.home().resolve()
+    chain = _interpreter_chain(Path(sys.executable))
+    # Sol C-1 (W2): a hop reached through a link is no bind root of its own;
+    # its links are recreated as links only (``_interpreter_links``). C3-1: the
+    # hop as walked, never ``..``-collapsed — a hop is a root only when it is
+    # already its own real path (a ``..`` after a linked dir names another one)
+    linked = [hop for hop in chain if hop.resolve() != hop]
+    detected = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(sys.exec_prefix),
+        Path(__file__).resolve().parents[2],
+        # what .pth files chain in (uv's `run --with` overlay env, an editable install)
+        *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
+        # every env along the interpreter's link chain: CI's `uv run --with`
+        # overlay python links to an activated .venv's python, which links on
+        # to the base one — an unbound middle hop dangles inside the wall
+        *(hop for hop in chain if hop not in linked),
+        # the uv binary itself (never its directory): G10's pinned
+        # `uv run pytest` needs it wherever it was installed
+        *(uv for uv in [_found_file(shutil.which("uv"))] if uv),
+    ]
+    toolchains = [
+        Path(os.environ.get(env) or home / rel) if env else home / rel
+        for env, rel in _HOME_TOOLCHAINS
+    ]
+    for root in toolchains:
+        # W2: bound where it is, never through a link of its own — a
+        # ~/.local/bin linked to ~/Downloads would bind the downloads. The
+        # operator follows such a link on purpose with extra_read_paths.
+        if root.is_symlink():
+            logger.warning(
+                "strict reads: %s is a link (to %s), so it is not bound; name it in the "
+                "project's extra_read_paths if the run needs it",
+                root,
+                root.resolve(),
+            )
+        else:
+            detected.append(root)
+    supervisor = skep_home / "supervisor"
+    own = [skep_home / "profile.json", skep_home / "worker_plugins", skep_home / "tools" / ".venvs"]
+    if worker_llm_key:
+        names = (*_LIVE_STORE_FILES, "llm-secret", *_active_llm_key_names(supervisor))
+        own += [supervisor / name for name in names]
+    own = [path for path in own if _in_place(path, skep_home)]
+    extra = _validated_extra(extra, skep_home)
+    # R4 (Sol R3-2): ``extra`` is the run's RECORDED wall (resolved, existing at
+    # dispatch). One that vanished since must not just drop out of this
+    # profile — it could return before G10 and widen G10's reads past the
+    # worker's. Refuse instead (the worker: sandbox_unavailable; G10: unavailable).
+    if gone := [str(path) for path in extra if not _exists(path)]:
+        raise SandboxUnavailableError(
+            f"recorded extra read root(s) {', '.join(gone)} vanished after dispatch; "
+            "refusing to build a narrower wall than the run recorded — re-dispatch the run"
+        )
+    # C5-1: a ``..`` is walked through the real dirs, never collapsed first —
+    # after a linked dir it names another path entirely
+    detected = [
+        root.resolve() if ".." in root.parts else Path(os.path.abspath(root)) for root in detected
+    ]
+    found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
+    # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
+    # above makes the bind fail closed instead of narrowing the worker's wall.
+    return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))
+
+
+def _etc_reserved(real: Path) -> bool:
+    """/etc, a dir that holds it (3I: /private on macOS, with the host's /tmp
+    and /var), or one of its hidden entries, by either OS's list and every
+    spelling macOS opens it by (/private/etc, case, the data volume):
+    binding any of them reopens them."""
+    key, etc = alias_key(real), alias_key(Path("/etc").resolve())
+    return etc.is_relative_to(key) or any(key.is_relative_to(etc / n) for n in _ALL_ETC_HIDDEN)
+
+
+def _over(real: Path, inner: Path) -> bool:
+    """``real`` is ``inner`` or above it, by any spelling APFS opens."""
+    return alias_key(inner).is_relative_to(alias_key(real))
+
+
+def _detected_root_ok(real: Path, home: Path) -> bool:
+    """W2/W11: never the home or above it, never /etc's reserved entries."""
+    return not _over(real, home) and not _etc_reserved(real)
+
+
+def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
+    """ADR 0068 (W2, W11): why ``path`` cannot be an extra read root, judged
+    where it resolves — at or above the home (``/`` included), in or over the
+    skep home, /etc or its reserved entries — or None."""
+    real = Path(path).resolve()
+    home = Path.home().resolve()
+    skep = skep_home.resolve()
+    if _over(real, home):
+        return (
+            f"{path} resolves to {real}, at or above the home {home}: that reopens every file "
+            f"strict reads close. Name a subdirectory instead, e.g. {home / 'datasets'}"
+        )
+    if _over(skep, real) or _over(real, skep):
+        return (
+            f"{path} resolves to {real}, in or over the skep home {skep} (other runs' "
+            "worktrees, results and audit trails). Name a directory outside it"
+        )
+    if _etc_reserved(real):
+        return (
+            f"{path} resolves to {real}: /etc comes back without "
+            f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them or a "
+            "dir that holds /etc (on macOS, /private holds the host's /tmp and /var too)"
+        )
+    if sys.platform == "darwin" and (
+        var := next((v for v in _HOMEBREW_VAR if _over(Path(v), real)), None)
+    ):  # R4 (Sol): bwrap honours these; only Seatbelt masks them
+        return (
+            f"{path} resolves to {real}, in Homebrew's var/ ({var}): a strict run on macOS "
+            "masks it (local databases and service state), so the path would read as "
+            "missing. Name a directory outside it"
+        )
+    return None
+
+
+def _validated_extra(extra: Iterable[Path], skep_home: Path) -> list[Path]:
+    """The extra paths, absolute, each checked before anything walks or binds
+    it (W13: a link to / used to walk the whole host first) — or refused."""
+    paths = [Path(os.path.abspath(path)) for path in extra]
+    for path in paths:
+        if problem := extra_read_path_problem(path, skep_home):
+            raise SandboxUnavailableError(
+                f"extra_read_paths: {problem}. The run is refused rather than run with "
+                "that read open; change the project's extra_read_paths."
+            )
+    return paths
+
+
+def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
+    """A written root that is a link becomes a link to its resolved root in
+    bwrap's empty root — unless a bound root already holds it (the link is
+    there, read-only). ponytail: only a link in a real parent — one under a
+    linked parent dir (Fedora Atomic's /home) stays unreachable by that name."""
+    # C4-1: nor under a system mount (/usr/local/bin/uv) — that mount holds the
+    # link already, and a second one there makes bwrap refuse the wall
+    bound = [*map(Path, bound), *map(Path, _SYSTEM_ROOTS)]
+    args: list[str] = []
+    for path in paths:
+        real = path.resolve()
+        if (
+            real != path
+            and path.parent.resolve() == path.parent
+            and not any(path.is_relative_to(root) for root in bound)
+        ):
+            args += ["--symlink", str(real), str(path)]
+    return args
+
+
+# ADR 0068 on Seatbelt: what a strict run reads of macOS itself. Of
+# /private/var only sh's and xcode-select's links, the zone files
+# /etc/localtime points into and resolv.conf; /private/etc minus its auth
+# entries (masked last, after every allow).
+_SEATBELT_SYSTEM_ROOTS = (
+    "/usr", "/System", "/Library", "/opt/homebrew", "/bin", "/sbin", "/dev", "/private/etc",
+    "/private/var/select", "/private/var/db/timezone", "/private/var/run/resolv.conf",
+)  # fmt: skip
+_SEATBELT_ETC_HIDDEN = ("master.passwd", "sudoers", "sudoers.d", "ssh", "kcpassword")
+_ALL_ETC_HIDDEN = _ETC_HIDDEN | set(_SEATBELT_ETC_HIDDEN)
+# M8: Homebrew's (Apple silicon, Intel) local databases and service state,
+# under roots reopened whole; masked last with the /etc entries.
+_HOMEBREW_VAR = ("/opt/homebrew/var", "/usr/local/var")
+# /usr/bin/git is xcrun's shim: it runs git from the selected developer dir
+_XCODE_SELECT_LINKS = ("/private/var/select/developer_dir", "/private/var/db/xcode_select_link")
+
+
+def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
+    """ADR 0068: deny every read, then reopen macOS's system roots, the
+    developer dir (the whole Xcode.app: xcrun stats its Info.plist) and
+    ``roots``; metadata alone on each one's ancestors, so getcwd/realpath
+    resolve without listing anything, and on a /private root's /etc, /var or
+    /tmp link spelling (libc stats /etc/localtime's /var/db/timezone target
+    by that name). ``/`` itself is read whole: dyld aborts every process
+    without it. A denied path is ENOENT, as under bwrap's empty root — git
+    dies on an EPERM ~/.gitconfig, not on a missing one.
+    /System/Volumes is closed again last (M4): /System reopened it, with the
+    data volume's entries no firmlink maps back to the root."""
+    allowed = [Path(root) for root in _SEATBELT_SYSTEM_ROOTS]
+    for link in _XCODE_SELECT_LINKS:
+        if os.path.islink(link):
+            dev = Path(link).resolve()
+            # M10: the link itself too — xcrun reads the selection through it
+            allowed += [Path(link), dev.parents[1] if dev.parent.name == "Contents" else dev]
+    allowed += [Path(root).resolve() for root in roots]
+    allowed = list(dict.fromkeys(allowed))
+    links = [
+        Path("/", *root.parts[2:])
+        for root in allowed
+        if root.parts[1:2] == ("private",) and root.parts[2:3] in (("etc",), ("var",), ("tmp",))
+    ]
+    named = [*allowed, *links]
+    ancestors = sorted({parent for root in named for parent in root.parents} - {Path("/")})
+
+    rules = [
+        "(deny file-read* file-test-existence (with errno ENOENT))",
+        '(allow file-read* file-test-existence (literal "/"))',
+    ]
+    for ops, kind, paths in (
+        ("file-read-metadata", "literal", ancestors),
+        ("file-read-metadata", "subpath", links),
+        ("file-read*", "subpath", allowed),
+    ):
+        if paths:  # an allow with no filter would reopen every path
+            filters = " ".join(f'({kind} "{_sbpl_quote(path)}")' for path in paths)
+            rules.append(f"(allow {ops} file-test-existence {filters})")
+    rules.append(
+        '(deny file-read* file-test-existence (subpath "/System/Volumes") (with errno ENOENT))'
+    )
+    return rules
+
+
+def _strict_root_args() -> list[str]:
+    """ADR 0068: the system half of bwrap's empty root, read-only."""
+    paths = [*_SYSTEM_ROOTS, *(f"/etc/{name}" for name in sorted(os.listdir("/etc")))]
+    args: list[str] = []
+    for path in paths:
+        if path.removeprefix("/etc/") in _ETC_HIDDEN:
+            continue
+        if os.path.islink(path):
+            args += ["--symlink", os.readlink(path), path]
+        elif os.path.exists(path):
+            args += ["--ro-bind", path, path]
+    return args
 
 
 def _run_rebinds() -> list[str]:
@@ -440,7 +817,7 @@ def _sockets_under(roots: Iterable[Path]) -> list[Path]:
     common dir): bound read-only they stay connectable, so each gets
     /dev/null laid over it. ponytail: ``objects/`` is skipped — git keeps
     only object files there, and it is the one big subtree."""
-    found = []
+    found = [Path(root) for root in roots if _is_socket(Path(root))]  # a root that IS one
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [name for name in dirnames if name != "objects"]
@@ -488,6 +865,10 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += _env_sockets()
+    # W3: the credentials where $CARGO_HOME moved them — the root the strict
+    # wall binds whole (the default ~/.cargo ones are in HOME_SECRETS).
+    cargo = Path(os.environ.get("CARGO_HOME") or home / ".cargo")
+    candidates += [cargo / "credentials", cargo / "credentials.toml"]
     # W33 where the operator moved it: skep reads the Codex login from
     # $CODEX_HOME when set (codex_login.auth_file), so the mask follows it.
     from .codex_login import auth_file
@@ -692,7 +1073,13 @@ def _bubblewrap_args(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    strict: bool = False,
+    aliases: Iterable[Path] = (),
 ) -> list[str]:
+    # ADR 0068: ``strict`` starts from bwrap's empty root instead of the
+    # host's: the system dirs, then ``readable_roots`` (which the caller has
+    # widened with strict_read_roots), are all a run sees outside its own;
+    # ``aliases`` are their written names (``_alias_links``).
     # D6: the netns has its own loopback, so the host's is reachable only
     # through the proxy bridge, which admits the run's loopback ports alone;
     # netshim presents each of them on the netns loopback over that bridge.
@@ -708,14 +1095,20 @@ def _bubblewrap_args(
             "socket to enforce per-domain rules on bubblewrap. Start a FilteringProxy with "
             "a unix_socket_path and pass both, or use deny-all / allow-all."
         )
-    args = [*_BUBBLEWRAP_BASE_ARGS, *_run_rebinds()]
+    base = _strict_root_args() if strict else list(_HOST_ROOT)
+    args = [*base, *_BUBBLEWRAP_WALLS, *_run_rebinds()]
     if network.is_deny_all or network.is_domain_list:
         args.append("--unshare-net")
     writable_roots = list(writable_roots)
     readable_roots = list(readable_roots)
     tmp_mountpoints: dict[str, None] = {}
     for root in [*readable_roots, *writable_roots]:
-        for mountpoint in _tmp_mountpoints_for_bind(Path(root)):
+        # an existing non-dir root (a git common dir entry: a file, an
+        # fsmonitor socket) needs only its parents — a --dir at a socket's
+        # path broke the bind (W12); a root not made yet is a dir to be
+        node = Path(root)
+        dir_root = node.parent if node.exists() and not node.is_dir() else node
+        for mountpoint in _tmp_mountpoints_for_bind(dir_root):
             tmp_mountpoints.setdefault(mountpoint, None)
     for mountpoint in tmp_mountpoints:
         args.extend(["--dir", mountpoint])
@@ -729,6 +1122,7 @@ def _bubblewrap_args(
     for pinned in write_denied:
         # W31: read-only over its writable root (the run's git pin).
         args.extend(["--ro-bind", str(pinned), str(pinned)])
+    args.extend(_alias_links(aliases, [*readable_roots, *writable_roots]))
     for denied in read_denied:
         # ES-F4: after the writable binds, so a mask wins inside one too.
         # /tmp and /run are fresh tmpfs here: their host paths do not exist,
@@ -746,6 +1140,10 @@ def _bubblewrap_args(
         )
     for own in unmasked:  # after the masks: this run's own file in a masked dir
         args.extend(["--ro-bind", str(own), str(own)])
+    if network.is_domain_list and unix_socket_path is not None:
+        args.extend(["--ro-bind", str(Path(unix_socket_path).parent), SANDBOX_PROXY_DIR])
+    if strict:  # the empty root's own dirs, made read-only once every bind is in
+        args.extend(["--remount-ro", "/"])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         # ES-F251: netshim binds each port inside the worker's own netns,
@@ -764,7 +1162,6 @@ def _bubblewrap_args(
                 "runs a sandbox run unconfined."
             )
         socket_path = Path(unix_socket_path)
-        args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
         # appends the trailing "--" that separates it from the worker argv.
         args.extend(
@@ -923,8 +1320,13 @@ def build_profile(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    read_allowlist: Iterable[Path] | None = None,
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
+
+    ``read_allowlist`` (ADR 0068): None keeps reads open but ``read_denied``;
+    otherwise reads are confined to macOS's system roots, the writable roots
+    and these (``_seatbelt_read_rules``), with ``read_denied`` still last.
 
     Last-matching-rule-wins SBPL: ``allow default`` keeps reads/exec/IPC working,
     then network is denied (deny-all) and writes are denied everywhere and
@@ -938,6 +1340,13 @@ def build_profile(
     lines = [
         "(version 1)",
         "(allow default)",
+        # M9: no process outside the wall — LaunchServices (`open`, an app or
+        # a .command), launchd jobs, Apple events (`tell application
+        # "Terminal" to do script`) — and no Spotlight name/content queries.
+        "(deny lsopen)",
+        "(deny job-creation)",
+        "(deny appleevent-send)",
+        '(deny mach-lookup (global-name "com.apple.metadata.mds"))',
         # ES-F4 (B05) + D6: serve's port never opens, even when a project lists
         # it — dropped from the allows (the loopback deny covers it), never a
         # trailing per-port deny (see _network_rules).
@@ -956,6 +1365,8 @@ def build_profile(
     lines.append(f"(allow file-write* {dev_nodes})")
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
+    if read_allowlist is not None:
+        lines += _seatbelt_read_rules([*roots, *read_allowlist])
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
@@ -1000,6 +1411,7 @@ def write_profile(
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
+    read_allowlist: Iterable[Path] | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1013,7 +1425,7 @@ def write_profile(
     secrets. Every caller passes the home its own config names.
 
     ``extra_readable`` is bound read-only where a backend hides the host
-    (bwrap/podman's tmpfs /tmp); Seatbelt leaves reads open and ignores it.
+    (bwrap/podman's tmpfs /tmp); Seatbelt reads it on a strict run alone.
 
     ``worker_llm_key`` leaves the worker's own LLM key readable (B125): only
     a worker whose caste calls the LLM passes it.
@@ -1027,10 +1439,37 @@ def write_profile(
     ``unmasked`` (ES-F122 follow-up): files inside a masked directory that
     THIS run alone may read, bound back read-only after the masks — a codex
     run's own login copy under the audit dir every other run cannot see.
+
+    ``read_allowlist`` (ADR 0068, ``read_allowlist_for``): None keeps reads
+    open but the secret floor (denylist-only); a tuple — the project's
+    ``extra_read_paths`` — confines reads to an allowlist: the system dirs,
+    ``strict_read_roots`` and the run's own roots. A backend outside
+    ``STRICT_READ_BACKENDS`` refuses it rather than run with open reads.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
+    read_allowlist = None if read_allowlist is None else tuple(read_allowlist)
     probe = require_usable(backend)
+    if read_allowlist is not None and probe.backend not in STRICT_READ_BACKENDS:
+        raise SandboxUnavailableError(
+            f"strict read confinement (ADR 0068) is enforced on bubblewrap and Seatbelt "
+            f"only; the {probe.backend} backend cannot confine reads to an allowlist yet, "
+            "so this run is refused rather than run with open reads. Use the native "
+            "bubblewrap backend, or turn it off for this project: `skep project setup "
+            "<repo> --no-strict-reads`."
+        )
+    from .worktree import git_metadata_masked, git_walk_links
+
+    if read_allowlist is not None and (links := git_walk_links(workspace)):
+        shown = ", ".join(f"{link} (a link to {os.path.realpath(link)})" for link in links)
+        raise SandboxUnavailableError(
+            f"strict reads (ADR 0068): {shown} in the repo's shared git dir. git's "
+            "reachability walk reads it, and inside the wall the link leads nowhere, so a "
+            "`git prune` there would delete objects only it points to. The run is refused "
+            f"rather than run with hidden pointers. Move the target back into {links[0].parent} "
+            "in place of the link, or turn strict reads off for this project: `skep project "
+            "setup <repo> --no-strict-reads`."
+        )
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     # ES-F264: the mask list holds only files that exist now. relay-secret
     # used to appear on the first relayed dispatch, readable by every run
@@ -1042,9 +1481,29 @@ def write_profile(
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
+    git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
+        # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
+        # linked message file refuses the wall rather than going unmasked (R5, Sol)
+        if linked := [str(p) for p in git_masked if p.is_symlink()]:
+            raise SandboxUnavailableError(
+                f"{', '.join(linked)} is a symlink, so the sandbox cannot mask it and the "
+                "in-progress git message would be readable; replace it with a regular file"
+            )
+        read_denied += [p for p in git_masked if _exists(p)]
         extra_readable = list(extra_readable)
-        read_denied += _sockets_under(extra_readable)
+        # ponytail: the detected toolchains are not walked for sockets (~/.rustup
+        # alone is tens of thousands of files); the operator's paths are.
+        extra_roots = [path.resolve() for path in _validated_extra(read_allowlist or (), skep_home)]
+        read_denied += _sockets_under([*extra_readable, *extra_roots])
+        aliases = (
+            _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist)
+            if read_allowlist is not None
+            else []
+        )
+        extra_readable += dict.fromkeys(path.resolve() for path in aliases)
+        if read_allowlist is not None:
+            aliases += [*_interpreter_links(extra_readable), *_found_link(shutil.which("uv"))]
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(
@@ -1072,6 +1531,8 @@ def write_profile(
             write_denied=write_denied,
             loopback_ports=loopback_ports,
             unmasked=unmasked,
+            strict=read_allowlist is not None,
+            aliases=aliases,
         )
         # After the netshim when there is one (it alone needs the proxy
         # bridge); wrap_command's "--" then ends the step's options.
@@ -1086,6 +1547,19 @@ def write_profile(
     if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
         live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
         read_denied = list(dict.fromkeys([*read_denied, *live]))
+    read_denied = [*read_denied, *git_masked]  # a literal deny holds for a file made later
+    strict_roots = None
+    if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
+        strict_roots = [
+            *strict_read_roots(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist),
+            *extra_readable,
+            *unmasked,  # still masked but for the literal allow after the masks
+        ]
+        read_denied = [
+            *read_denied,
+            *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN),
+            *map(Path, _HOMEBREW_VAR),
+        ]
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(
@@ -1098,6 +1572,7 @@ def write_profile(
             write_denied=write_denied,
             loopback_ports=loopback_ports,
             unmasked=unmasked,
+            read_allowlist=strict_roots,
         )
     )
     return profile_path

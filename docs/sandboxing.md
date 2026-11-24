@@ -40,6 +40,49 @@ run's tools read points inside the workspace: `TMPDIR`, zsh's `TMPPREFIX`,
 ignores `TMPDIR`), and on macOS `XDG_RUNTIME_DIR` (on Linux bubblewrap gives each run a private
 `/tmp` instead).
 
+A strict-read project (`strict_read_confinement`, ADR 0068) reads an
+allowlist instead. It is on by default for new sandboxed projects on Linux,
+and bubblewrap enforces it with an empty root. Bound back, read-only: `/usr`,
+`/opt`, `/nix`, `/etc` minus `pve`/`shadow`/`gshadow`/`sudoers`/`ssh`, the
+detected toolchains (`~/.local/bin`, uv's pythons and tools,
+`~/.local/share/claude`, `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.pyenv`, skep's
+own interpreter), the repo's git metadata (never another checkout), and the
+project's `extra_read_paths`. The run's own roots are bound as above, and the
+masks below still land last. The rest of `$HOME`, `/var`, `/mnt`, `/srv` and
+`/etc/pve` do not exist inside the sandbox. The G10 re-run of the patch uses
+the same wall. Podman cannot enforce it yet, so a host configured for podman
+runs a strict project's runs on native bubblewrap instead (loudly in the
+log); only an explicit podman profile write refuses one.
+`skep doctor` names the sandboxed projects still on the denylist below;
+`skep project setup <repo> --strict-reads` moves one.
+
+Since 2026-11-23, Seatbelt enforces it too, and new sandboxed projects on
+macOS get it by default. The profile denies every read globally, with
+ENOENT, so a denied path looks absent as it does under bwrap. git skips a
+missing `~/.gitconfig`, but dies on an unreadable one. The profile then
+reopens `/usr`, `/System` minus `/System/Volumes`, `/Library`,
+`/opt/homebrew`, `/bin`, `/sbin`, `/dev`, `/private/etc` minus
+`master.passwd`/`sudoers`/`ssh`/`kcpassword`, `/private/var`'s `select/`,
+`db/timezone/` and `run/resolv.conf`, the xcode-select links and the active
+Xcode bundle or CommandLineTools (`/usr/bin/git` is xcrun's shim). It also
+reopens the same toolchains, git metadata, run roots and `extra_read_paths`
+as on Linux. The ancestors of those get metadata only, so `getcwd()` and
+`realpath()` work without listing anything. The masks still come last, with
+Homebrew's `var/` (`/opt/homebrew/var`, `/usr/local/var`: local databases
+and service state). Host `/tmp` (`/private/tmp`), `/private/var/folders`,
+the rest of `$HOME` and `/Users/Shared` are unreadable, and so is any of
+them spelled through the `/System/Volumes/Data` firmlink. An extra path is
+judged by every spelling macOS opens it by (`/etc` as `/private/etc`, any
+case, the firmlink), so none of them names the home, the skep home or
+`/etc`'s auth entries. ADR 0068 lists what a Mac run still reads, and why.
+
+Every Seatbelt profile, strict or not, denies `lsopen`, `job-creation`,
+`appleevent-send` and Spotlight's `com.apple.metadata.mds`: `open` (an app,
+a `.command`), a launchd job and `tell application "Terminal" to do script`
+would each start a process outside the wall, and Spotlight, an index of
+the whole disk, is closed rather than trusted to filter its answers by what
+the run may read.
+
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
 backend: `~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials
@@ -55,15 +98,16 @@ run's audit trail) and `supervisor/chat-attachments/`. One carve-out: a
 worker whose caste calls the LLM (coding, document, reviewer) reads
 `llm-secret` and the active provider profile's `llm-secret-<id>`, its own
 model credential; external engines and every other sandboxed lane see no LLM
-key. With the provider-key relay on (`provider_key_relay`, ADR 0062; off by
-default), a builtin worker gets no carve-out: its model calls go through a
-token-checked route on its run's filtering proxy, which adds the key, so the
+key. With the provider-key relay on (`provider_key_relay`, ADR 0062; on by
+default since 2026-11-23, `false` is the kill switch), a builtin worker gets
+no carve-out: its model calls go through a token-checked route on its run's filtering proxy, which adds the key, so the
 key files stay masked and no variable carrying the key reaches its env. Not
 relayed: bedrock (SigV4 signs with the key), a provider with no key, and the
-external engines, which keep their own auth env (`skep doctor` says which). `supervisor/supervisor.sqlite3` stays readable (that worker reads its
-provider settings from it). So does `~/.npmrc` (npm install): the sandbox
-leaves it readable, while the policy floor still refuses every Queen and
-worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
+external engines, which keep their own auth env (`skep doctor` says which). Only a worker that holds its own key (an LLM-calling caste, no relay) reads
+`supervisor/supervisor.sqlite3`, for its provider settings; every other
+sandboxed worker, a relayed one included, gets the store masked. `~/.npmrc`
+stays readable to every worker (npm install needs it), while the policy floor
+still refuses every Queen and worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
 logins — `~/Library/Keychains`, `~/.claude/.credentials.json`,
 `~/.codex/auth.json` — are masked like every other credential (W33): an
 external engine's config dir is redirected per run and it authenticates only
@@ -76,9 +120,11 @@ and is bound back for its own run) and that is deleted when it ends — the
 real `~/.codex/auth.json` stays masked and the refresh token never enters the
 sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
 
-Everything else outside the workspace stays readable, including other runs'
-worktrees under the skep home: no profile masks them. Treat a sandboxed worker
-as able to read any file the lists above do not name.
+In denylist-only mode (a project without `strict_read_confinement`),
+everything else outside the workspace stays readable,
+including other runs' worktrees under the skep home: no profile masks them.
+Treat such a worker as able to read any file the lists above do not name. A
+strict-read run reads only its allowlist (ADR 0068).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets).

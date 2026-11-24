@@ -114,30 +114,49 @@ def provider_relay_for_run(
     """(relay, model, note) for one run. ``note`` is what the run record says
     about the relay; "off" leaves the record as it was before ADR 0062."""
     from .castes import CASTES
-    from .serve.settings import PROVIDER_KEY_RELAY
+    from .serve import settings
 
-    if store.get_setting(PROVIDER_KEY_RELAY) is not True:
+    if not settings.provider_key_relay_enabled(store):
         return None, "", "off"
     if not builtin:
+        # I8: dispatch also labels the run ``auth: external-env`` — the
+        # engine's own tokens and logins never pass this relay.
         return None, "", "not used: an external engine authenticates from its own auth env"
     if not getattr(CASTES.get(task.worker_kind), "needs_provider", True):
         return None, "", "not used: this caste calls no model"
+    if "skep.workers.ollama" in config.command_for(task.worker_kind):
+        # Its SKEP_OLLAMA_URL override (the operator's or provider routing's)
+        # dials that endpoint with the daemon secret, not through
+        # worker_provider_from_env. ponytail: argv spelling only, like
+        # engines.external_agent_for_command; a wrapper script is not seen.
+        return None, "", "not used: the ollama worker dials its own endpoint with the daemon secret"
     return _relay_for(config, task.task_id)
 
 
 def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | None, str, str]:
-    plan, why = relay_plan(config.home.parent)
+    from .providers import provider_host
+    from .serve.llm_copilot import COPILOT_HOST, copilot_sources
+
+    with copilot_sources() as exchanged:
+        plan, why = relay_plan(config.home.parent)
     if plan is None:
         return None, "", f"not used: {why}"
     endpoint, protocol, key, model = plan
     token = relay_token(config.home, task_id)
-    from .providers import provider_host
-    from .serve.llm_copilot import COPILOT_HOST
 
     renew = None
+    sources: tuple[str, ...] = ()
     if provider_host(endpoint) == COPILOT_HOST:
         renew = functools.partial(_renewed_copilot_key, config.home.parent, endpoint)
-    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew)
+        # Phase 03 review E1 (I8): the GitHub token the bearer came from is a
+        # key too; spawn_worker drops both from the worker env. Captured as
+        # the bearer was resolved (R2 M5), not looked up in the shared cache.
+        # None: ``key`` was never exchanged, so it is the token itself.
+        github_token = exchanged.get(key)
+        sources = (github_token,) if github_token else ()
+    relay = ProviderRelay(
+        upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew, sources=sources
+    )
     return relay, model, "on"
 
 
@@ -166,7 +185,8 @@ def readopted_relay(
     says now (its worker holds a token, not the key). Nothing was stored: the
     token is recomputed and the provider resolved again."""
     detail = next((d for st, d, _ in store.transitions_for(task_id) if st == "dispatched"), None)
-    if json.loads(detail or "{}").get("provider_key_relay") != "on":
+    # "on", or E2's "on, but an unsandboxed run can read the key file"
+    if not str(json.loads(detail or "{}").get("provider_key_relay", "")).startswith("on"):
         return None
     return _relay_for(config, task_id)[0]
 
