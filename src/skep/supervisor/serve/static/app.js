@@ -4029,7 +4029,13 @@ async function viewRunDetail(main, taskId) {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
     if (!live()) return;
     main.append(el("h2", {}, "diff"), renderDiff(diff).node);
-  } catch { /* no patch artifact — nothing to show */ }
+  } catch (e) {
+    // R5 item 7: only a missing artifact (404) is quiet; anything else — the
+    // route's 409 "patch unreadable: …" — is said, as the review page says it.
+    if (e.status !== 404 && live()) {
+      main.append(el("h2", {}, "diff"), el("p", { class: "error" }, `the patch could not be read: ${e.message}`));
+    }
+  }
   if (!live()) return; // R3 J10: a failed diff read after navigation draws nothing either
   // Phase 10 10.1: the forensics report (G10, V1, ledger, blame), on demand.
   main.append(forensicsSection(taskId));
