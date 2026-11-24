@@ -234,14 +234,25 @@ def _deferred_landing(runner: Runner, pid: PrId, branch: str, live: dict[str, An
         _gh_api("graphql", "-f", f"query={_MERGE_QUEUE}", "-f", f"owner={owner}",
                 "-f", f"name={name}", "-f", f"branch={branch}"),
     )  # fmt: skip
+    # R3 (S5/N3): a token lacking "Merge queues: Read" gets mergeQueue null
+    # AND an error — only a clean answer with a repository object says none.
     try:
-        queue = json.loads(asked.stdout)["data"]["repository"]["mergeQueue"]
-    except (ValueError, KeyError, TypeError):
-        why = (asked.stderr or asked.stdout).strip() or "no answer"
-        return (
-            f"could not check whether {branch} has a merge queue ({why}); if it does, it "
-            + _DEFERRED
+        answer = json.loads(asked.stdout)
+        errors, found = answer.get("errors"), answer["data"]["repository"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        errors, found = None, None
+    if asked.returncode != 0 or errors or not isinstance(found, dict) or "mergeQueue" not in found:
+        said = (
+            [e.get("message") for e in errors if isinstance(e, dict)]
+            if isinstance(errors, list)
+            else []
         )
+        why = "; ".join(str(m) for m in said if m) or (asked.stderr or asked.stdout).strip()
+        return (
+            f"could not check whether {branch} has a merge queue (GitHub said: "
+            f"{why[:300] or 'nothing'}); if it does, it " + _DEFERRED
+        )
+    queue = found["mergeQueue"]
     return None if queue is None else f"{branch} {_DEFERRED}"
 
 

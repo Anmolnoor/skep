@@ -1342,6 +1342,44 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
     assert not [c for c in calls if "PUT" in c]
 
 
+@pytest.mark.parametrize(
+    ("code", "answer", "needle"),
+    [
+        (
+            1,
+            {
+                "data": {"repository": {"mergeQueue": None}},
+                "errors": [{"message": "Resource not accessible by personal access token"}],
+            },
+            "Resource not accessible by personal access token",
+        ),
+        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}, "no repo"),
+        (0, {"data": {"repository": None}}, "could not check"),
+        (0, {"data": {"repository": "x"}}, "could not check"),
+    ],
+    ids=["exit-1-with-null-queue", "errors-with-exit-0", "repository-null", "repository-not-dict"],
+)
+def test_a_merge_queue_probe_that_failed_is_never_read_as_no_queue(
+    repo: Path, code: int, answer: Any, needle: str
+) -> None:
+    """R3 (S5/N3): a fine-grained token without Merge queues: Read gets
+    ``mergeQueue: null`` AND an error — the probe checks the exit code,
+    ``errors`` and that ``data.repository`` is an object, and refuses
+    naming GitHub's own words."""
+    calls: list[list[str]] = []
+
+    def graphql(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, code, json.dumps(answer), "gh: error")
+
+    result = github.merge_pull_request(
+        repo=repo, pin=PIN_7, runner=_merge_gh(calls, graphql=graphql)
+    )
+
+    assert not result.merged and needle in result.detail and "nothing merged" in result.detail
+    assert "merge it on GitHub" in result.detail
+    assert not [c for c in calls if "PUT" in c]
+
+
 @pytest.mark.parametrize("strategy", ["merge", "squash"])
 def test_a_merge_that_landed_on_another_base_says_so_loudly(repo: Path, strategy: str) -> None:
     """R2 (D4, S1): GitHub pins only the head. If the base moved in the
