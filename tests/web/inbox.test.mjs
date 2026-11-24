@@ -293,7 +293,7 @@ test("H5: a card the web cannot confirm is read-only with where to answer it; it
 
 test("H6: an inline verdict reports what really happened — ok:false, a warning, a failed or partial stream", async () => {
   const operator = { ...CARD, id: "a2", source: "operator", tool: "setup_project", headline: "setup_project — app" };
-  const fold = { ...CARD, id: "a3" };
+  const fold = { ...CARD, id: "a3", items: ["read_url — https://x.dev", "read_url — https://y.dev"] };
   const silent = { ...CARD, id: "a4" };
   const { app, rows, routed } = await render([GATE, operator, CARD, fold, silent], {
     "POST /api/approvals/r1/approve": { action: "resumed", warning: "the base moved" },
@@ -307,7 +307,7 @@ test("H6: an inline verdict reports what really happened — ok:false, a warning
     },
   });
   const flashes = [];
-  for (const row of rows) { await button(row, "Approve").click(); flashes.push(app.flashes.at(-1)); }
+  for (const row of rows) { await row.querySelectorAll("button")[0].click(); flashes.push(app.flashes.at(-1)); }
   assert.equal(flashes[0][0], "warn");
   assert.match(flashes[0][1], /approved network\.fetch · run abcdef12 — ⚠ the base moved/);
   assert.deepEqual(flashes[1], ["bad", "setup_project — app: no such project"]);
@@ -371,4 +371,31 @@ test("R3 J2: a folded card lists every item, approves 'all N' bound to that coun
   assert.match(rows[1].querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
   assert.match(rows[1].textContent, /11 items — every one runs on approve/);
   assert.ok(button(rows[1], "Deny"));
+});
+
+test("R3 J5: only the card's verdict events count; the Queen's follow-up never turns a verdict red", async () => {
+  const land = { ...CARD, id: "L1", tool: "land_run", headline: "land_run — run x", boundary: "patch-landing" };
+  const llm = { ...land, id: "L2" };
+  const warned = { ...land, id: "L3" };
+  const { app, rows } = await render([land, llm, warned], {
+    sse: {
+      // the verdict, then the continuation: the Queen calls get_run, which "fails"
+      "/api/chats/c1/actions/L1/confirm": [
+        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x" } } }],
+        ["tool", { tool: "get_run", args: { task_id: "x" }, result: { ok: false, error: "no run" } }],
+        ["done", {}]],
+      "/api/chats/c1/actions/L2/confirm": [
+        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x" } } }],
+        ["error", { detail: "model offline" }]],
+      // chat.py's real shape: the landing warning rides payload.result, beside ok
+      "/api/chats/c1/actions/L3/confirm": [
+        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x", warning: "re-verification could not run" } } }],
+        ["done", {}]],
+    },
+  });
+  const flashes = [];
+  for (const row of rows) { await button(row, "Approve").click(); flashes.push(app.flashes.at(-1)); }
+  assert.deepEqual(flashes[0], ["ok", "approved land_run — run x"]);
+  assert.deepEqual(flashes[1], ["warn", "approved land_run — run x — ⚠ the Queen's follow-up failed: model offline"]);
+  assert.deepEqual(flashes[2], ["warn", "approved land_run — run x — ⚠ re-verification could not run"]);
 });

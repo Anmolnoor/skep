@@ -117,6 +117,7 @@ function verdicts(item) {
       elsewhere: away ? [`#/chat/${item.chat_id}`, "Open the full card in its thread →"] : null,
       deny: [`${base}/deny`, operator ? undefined : {}],
       stream: !operator,
+      items: count,
     };
   }
   if (item.kind === "memory") {
@@ -141,13 +142,24 @@ function verdicts(item) {
 // each route answers: the Queen's card lane is an SSE stream (one "tool" event
 // per item, or "error"), the command lane can be 200 {ok:false,error}, and an
 // approve may carry a warning. A 2xx alone is never taken as success.
-async function send(path, body, stream) {
+// R3 J5: the stream goes on into the Queen's turn after the verdicts — only
+// the card's own verdict events count (a "tool" event with no `args`, before
+// the continuation, at most one per item); a continuation's error after the
+// verdicts is a warning about the follow-up, never a failed verdict.
+const warningOf = r => r.warning || r.result?.warning; // a payload is {ok, error | result: {…, warning}}
+
+async function send(path, body, stream, items = 1) {
   if (stream) {
     const results = [];
     const errors = [];
+    const followUp = [];
+    let continued = false;
     await streamSse(path, body, {
-      tool: d => results.push(d.result || {}),
-      error: d => errors.push(d.detail),
+      tool: d => {
+        if (continued || "args" in d || results.length >= items) continued = true;
+        else results.push(d.result || {});
+      },
+      error: d => (results.length ? followUp : errors).push(d.detail),
     });
     const failed = results.filter(r => !r.ok && !r.denied);
     if (errors.length) return { failed: errors.join("; ") };
@@ -156,17 +168,19 @@ async function send(path, body, stream) {
       const why = failed.map(r => r.error || r.note || "failed").join("; ");
       return { failed: results.length > 1 ? `${failed.length} of ${results.length} items failed — ${why}` : why };
     }
-    return { warning: results.map(r => r.result?.warning).filter(Boolean).join("; ") };
+    const notes = results.map(warningOf).filter(Boolean);
+    if (followUp.length) notes.push(`the Queen's follow-up failed: ${followUp.join("; ")}`);
+    return { warning: notes.join("; ") };
   }
   const reply = await api("POST", path, body);
   if (reply && reply.ok === false && !reply.denied) return { failed: reply.error || reply.note || "failed" };
-  return { warning: reply?.warning || reply?.result?.warning };
+  return { warning: reply && warningOf(reply) };
 }
 
 function reviewRow(item) {
   const face = FACE[item.kind](item);
   const loud = item.tamper || item.warning || item.high;
-  const { approve, label, elsewhere, deny, stream } = verdicts(item);
+  const { approve, label, elsewhere, deny, stream, items } = verdicts(item);
   const decide = (text, verb, call) => {
     const node = el("button", { type: "button", class: verb === "approve" ? "primary" : "danger ghost" }, text);
     node.addEventListener("click", async () => {
@@ -178,7 +192,7 @@ function reviewRow(item) {
       }
       node.disabled = true;
       let outcome;
-      try { outcome = await send(path, body, stream); }
+      try { outcome = await send(path, body, stream, items); }
       catch (e) { flash("bad", e.message); node.disabled = false; return; }
       const done = `${verb === "approve" ? "approved" : "denied"} ${face.title}`;
       if (outcome.failed) flash("bad", `${face.title}: ${outcome.failed}`);
