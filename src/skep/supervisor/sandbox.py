@@ -289,7 +289,10 @@ def _strict_candidates(
     version link, which a venv's python points through) as a symlink to the
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
-    chain = _interpreter_chain(Path(sys.executable))
+    chain = [Path(os.path.abspath(hop)) for hop in _interpreter_chain(Path(sys.executable))]
+    # Sol C-1 (W2): a hop reached through a link is no bind root of its own —
+    # its links are recreated below only where an approved root covers them
+    linked = [hop for hop in chain if hop.resolve() != hop]
     detected = [
         Path(sys.prefix),
         Path(sys.base_prefix),
@@ -300,7 +303,7 @@ def _strict_candidates(
         # every env along the interpreter's link chain: CI's `uv run --with`
         # overlay python links to an activated .venv's python, which links on
         # to the base one — an unbound middle hop dangles inside the wall
-        *chain,
+        *(hop for hop in chain if hop not in linked),
         # the uv binary itself (never its directory): G10's pinned
         # `uv run pytest` needs it wherever it was installed
         *(Path(found) for found in [shutil.which("uv")] if found),
@@ -345,11 +348,8 @@ def _strict_candidates(
     # (_alias_links recreates it) — but only one whose target a root above already
     # binds: a linked ~/.local never opens its whole target (W2)
     bound = [root.resolve() for root in found]
-    found += [
-        link
-        for link in dict.fromkeys(p for hop in chain for p in hop.parents if p.is_symlink())
-        if any(link.resolve().is_relative_to(root) for root in bound)
-    ]
+    links = dict.fromkeys(p for hop in linked for p in (hop, *hop.parents) if p.is_symlink())
+    found += [link for link in links if any(link.resolve().is_relative_to(r) for r in bound)]
     # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
     # above makes the bind fail closed instead of narrowing the worker's wall.
     return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))

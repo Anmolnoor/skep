@@ -406,5 +406,24 @@ def test_a_linked_dir_on_the_interpreter_s_path_never_opens_its_whole_target(
     (overlay / "bin" / "python").symlink_to(tmp_path / "linked" / "bin" / "python3.12")
     monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
     roots = sandbox.strict_read_roots(tmp_path / "skep")
-    assert (broad / "bin").resolve() in roots
-    assert broad.resolve() not in roots
+    # nothing approved covers the link's target, so neither it nor the hop is bound
+    assert broad.resolve() not in roots and (broad / "bin").resolve() not in roots
+
+
+def test_a_linked_interpreter_dir_never_opens_its_whole_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C-1 (W2): a hop that is itself a linked dir is no bind root of its
+    own — its target (here a dir holding more than the interpreter) stays closed."""
+    real = Path(os.path.realpath(sys.executable))
+    broad = tmp_path / "broad"
+    broad.mkdir()
+    (broad / "python3.12").symlink_to(real)
+    (broad / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linkbin").symlink_to(broad)
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linkbin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    assert broad.resolve() not in sandbox.strict_read_roots(tmp_path / "skep")
