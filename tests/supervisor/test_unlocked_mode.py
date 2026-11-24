@@ -516,7 +516,9 @@ def _gated_run(
         "execution_mode": execution_mode,
     })  # fmt: skip
     assert sent.status_code == 202, sent.text
-    return client, wait_terminal(client, sent.json()["task_id"])["task_id"]
+    # a real sandboxed run with its gate answered and G10: on the macOS CI
+    # runner (17-minute suite) it outlived the default 30 s twice (PR #126, #130)
+    return client, wait_terminal(client, sent.json()["task_id"], timeout=120.0)["task_id"]
 
 
 def _decisions(config: SupervisorConfig) -> list[dict[str, Any]]:
