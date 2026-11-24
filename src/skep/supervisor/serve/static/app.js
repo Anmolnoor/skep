@@ -7,10 +7,10 @@ import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
 import { el, iconButton, notFound } from "./js/dom.js";
 import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
-import { liveSource, streamSse } from "./js/sse.js";
+import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
 import { viewInbox } from "./js/pages/inbox.js";
-import { forensicsSection, viewReview } from "./js/pages/run-detail.js";
+import { forensicsSection, routeLive, viewReview } from "./js/pages/run-detail.js";
 import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
 import { viewSchedules } from "./js/pages/schedules.js";
 
@@ -954,6 +954,7 @@ document.getElementById("token-save").addEventListener("click", async () => {
 // ---------- router ----------
 
 let cleanup = null; // per-view teardown (closes EventSources, timers)
+let routeGeneration = 0; // Phase 10 R1 D7: stamps #main per navigation (routeLive)
 
 const routes = [
   [/^#\/home$/, viewHome],
@@ -1009,6 +1010,7 @@ async function route() {
   const main = document.getElementById("main");
   main.className = "";
   main.replaceChildren();
+  main.dataset.route = String(++routeGeneration);
   let setup = null;
   try { setup = await setupStatus(); }
   catch { return; }
@@ -1697,7 +1699,9 @@ function renderWorkerActivity(log, taskId, options = {}) {
     }
     const source = new EventSource(`/api/runs/${taskId}/events?stream=1`);
     liveWorkerSources.add(source);
-    source.onmessage = (message) => feed(JSON.parse(message.data));
+    // D7: the browser's own reconnect replays the run from its first event.
+    const feedOnce = onceByEventId(feed);
+    source.onmessage = (message) => feedOnce(JSON.parse(message.data));
     source.addEventListener("done", (message) => {
       source.close();
       liveWorkerSources.delete(source);
@@ -3738,7 +3742,9 @@ function buildRunTimeline(transitions) {
 }
 
 async function viewRunDetail(main, taskId) {
+  const live = routeLive(main); // D7: a late read draws nothing once the operator moved on
   const detail = await api("GET", `/api/runs/${taskId}`);
+  if (!live()) return;
   const run = detail.run;
   header(main, `run ${taskId.slice(0, 12)}`, run.instructions.slice(0, 120));
 
@@ -3905,13 +3911,16 @@ async function viewRunDetail(main, taskId) {
   };
   if (TERMINAL.has(run.state)) {
     const { events } = await api("GET", `/api/runs/${taskId}/events`);
+    if (!live()) return;
     events.forEach(append);
   } else {
-    const live = liveSource(`/api/runs/${taskId}/events?stream=1`, {
-      message: (message) => append(JSON.parse(message.data)),
-      done: () => { live.close(); route(); },
+    // D7: a reopened stream replays from the first event — draw each once.
+    const appendOnce = onceByEventId(append);
+    const stream = liveSource(`/api/runs/${taskId}/events?stream=1`, {
+      message: (message) => appendOnce(JSON.parse(message.data)),
+      done: () => { stream.close(); route(); },
     });
-    cleanup = () => live.close();
+    cleanup = () => stream.close();
   }
 
   if (detail.commands.length) {
@@ -3965,6 +3974,7 @@ async function viewRunDetail(main, taskId) {
   // Phase 10 10.1: drawn file by file (js/diff.js).
   if ((detail.artifacts || []).some((a) => a.kind === "patch")) try {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
+    if (!live()) return;
     main.append(el("h2", {}, "diff"), renderDiff(diff).node);
   } catch { /* no patch artifact — nothing to show */ }
   // Phase 10 10.1: the forensics report (G10, V1, ledger, blame), on demand.

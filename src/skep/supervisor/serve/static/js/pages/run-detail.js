@@ -112,6 +112,15 @@ export function forensicsPanel(report) {
       el("span", { class: "note mono" }, ` skep proof export ${report.task_id}`)));
 }
 
+// Phase 10 R1 D7: route() stamps the view container on every navigation. A
+// view takes the stamp it started under; after each await it asks live() and
+// stops if the operator has moved on — a late fetch never paints into, or
+// takes focus from, the page they moved to.
+export function routeLive(main) {
+  const at = main.dataset.route;
+  return () => main.dataset.route === at;
+}
+
 // Run detail's panel: fetched the first time it is opened — verifying the
 // ledger reads the whole decision log, so it is not paid on every page view.
 export function forensicsSection(taskId) {
@@ -132,7 +141,9 @@ export function forensicsSection(taskId) {
 const REVIEW_KEYS = "j / k next / previous file · f forensics · a approve · d deny · i back to the Inbox";
 
 export async function viewReview(main, reviewId) {
+  const live = routeLive(main);
   const { approvals } = await api("GET", "/api/approvals");
+  if (!live()) return;
   const queue = reviewQueue(approvals);
   const at = queue.findIndex(gate => gate.review_id === reviewId);
   if (at < 0) {
@@ -149,11 +160,13 @@ export async function viewReview(main, reviewId) {
     api("GET", `/api/runs/${taskId}`),
     api("GET", `/api/runs/${taskId}/forensics`).catch(e => ({ error: e.message })),
   ]);
+  if (!live()) return;
   let diff = null;
   let diffError = null;
   if ((detail.artifacts || []).some(a => a.kind === "patch")) {
     try { diff = renderDiff(await api("GET", `/api/runs/${taskId}/diff`)); }
     catch (e) { diffError = `the patch could not be read: ${e.message}`; }
+    if (!live()) return;
   }
 
   const root = el("div", { class: "review", tabindex: "-1", "aria-label": "review this approval" });
@@ -185,6 +198,7 @@ export async function viewReview(main, reviewId) {
       for (const b of buttons) b.disabled = true;
       try {
         const result = await api("POST", `/api/approvals/${reviewId}/${path}`, body);
+        if (!live()) return; // the verdict stands; the page the operator left does not redraw
         if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
         outcome.replaceChildren(el("p", { class: "flash ok" }, done(result)),
           el("a", { class: "home-link", href: next ? `#/review/${next.review_id}` : "#/inbox" },

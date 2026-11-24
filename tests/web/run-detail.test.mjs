@@ -100,3 +100,108 @@ test("run detail's G10 row says 'ran' only when a command executed", async () =>
   assert.equal(unrun["re-verify ran"], undefined);
   assert.equal(unrun["re-verify recorded (not run)"], "uv run pytest");
 });
+
+// ---------- D7: a render belongs to the route that started it ----------
+
+const GATE = { review_id: "r1", task_id: "t1", action: "apply_patch", reason: "land it",
+  requested_at: "2026-11-24T10:00:00Z", status: "pending" };
+
+// The review page's reads; `during` runs inside the named request — the
+// operator navigating away while it is in flight.
+function reviewReads(app, main, { during = {}, post } = {}) {
+  app.header = () => { main.headed = (main.headed || 0) + 1; };
+  app.api = async (method, path) => {
+    if (during[path]) during[path]();
+    if (path === "/api/approvals") return { approvals: [GATE] };
+    if (path === "/api/runs/t1") return { run: { state: "completed", instructions: "x" }, artifacts: [{ kind: "patch" }] };
+    if (path === "/api/runs/t1/forensics") return report(g10());
+    if (path === "/api/runs/t1/diff") return "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n";
+    if (method === "POST") return post(path);
+    throw new Error(`unstubbed ${method} ${path}`);
+  };
+}
+const navigateAway = main => () => { main.dataset.route = "2"; };
+
+test("a review page whose reads finish after navigation draws nothing and takes no focus", async () => {
+  for (const path of ["/api/approvals", "/api/runs/t1/forensics", "/api/runs/t1/diff"]) {
+    const app = loadApp();
+    const focused = [];
+    Object.getPrototypeOf(app.el("div")).focus = function focus() { focused.push(this); };
+    const main = app.el("main");
+    main.dataset.route = "1";
+    reviewReads(app, main, { during: { [path]: navigateAway(main) } });
+    await app.viewReview(main, "r1");
+    assert.equal(main.children.length, 0, path);
+    assert.deepEqual(focused, [], path);
+  }
+});
+
+test("a verdict that resolves after navigation does not draw or steal focus", async () => {
+  const app = loadApp();
+  const focused = [];
+  Object.getPrototypeOf(app.el("div")).focus = function focus() { focused.push(this); };
+  const main = app.el("main");
+  main.dataset.route = "1";
+  reviewReads(app, main, { post: () => { main.dataset.route = "2"; return { branch: "skep/t1" }; } });
+  await app.viewReview(main, "r1");
+  focused.length = 0;
+  await main.querySelector(".review-verdict").querySelectorAll("button")[0].click();
+  assert.doesNotMatch(main.textContent, /Approved/);
+  assert.deepEqual(focused, []);
+});
+
+const RUNNING = {
+  run: { task_id: "t1", instructions: "go", state: "running", repo: "/r" },
+  transitions: [], artifacts: [], commands: [], approvals: [], policy_blocks: [],
+};
+
+test("a run page whose read finishes after navigation opens no stream and draws nothing", async () => {
+  const app = loadApp();
+  const main = app.el("main");
+  main.dataset.route = "1";
+  const opened = [];
+  app.liveSource = url => { opened.push(url); return { close() {} }; };
+  app.api = async () => { main.dataset.route = "2"; return RUNNING; };
+  await app.viewRunDetail(main, "t1");
+  assert.equal(main.children.length, 0);
+  assert.deepEqual(opened, []);
+});
+
+test("the run stream draws an event once, though a reconnect replays it", async () => {
+  const app = loadApp();
+  const main = app.el("main");
+  main.dataset.route = "1";
+  let handlers = null;
+  app.liveSource = (url, h) => { handlers = h; return { close() {} }; };
+  app.api = async () => RUNNING;
+  await app.viewRunDetail(main, "t1");
+  const event = id => ({ data: JSON.stringify({ event_id: id, ts: "2026-11-24T10:00:00Z", type: "heartbeat", payload: {} }) });
+  handlers.message(event("e1"));
+  handlers.message(event("e2"));
+  handlers.message(event("e1")); // the reopened stream starts from the top
+  handlers.message(event("e2"));
+  handlers.message(event("e3"));
+  assert.equal(main.querySelectorAll(".event").length, 3);
+});
+
+test("onceByEventId: one call per event_id; an event without one always passes", () => {
+  const app = loadApp();
+  const seen = [];
+  const once = app.onceByEventId(e => seen.push(e.event_id ?? "none"));
+  [{ event_id: "a" }, { event_id: "a" }, {}, {}, { event_id: "b" }].forEach(once);
+  assert.deepEqual(seen, ["a", "none", "none", "b"]);
+});
+
+test("the chat's worker block counts a replayed command once", async () => {
+  const app = loadApp();
+  const made = [];
+  app.EventSource = class { constructor(url) { this.url = url; made.push(this); } addEventListener() {} close() {} };
+  app.api = async () => ({ run: { state: "running", repo: "/r" } });
+  const log = app.el("div");
+  app.renderWorkerActivity(log, "t1");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const command = { data: JSON.stringify({ event_id: "c1", type: "command.result", payload: { exit_code: 0, command: "ls" } }) };
+  made[0].onmessage(command);
+  made[0].onmessage(command); // the browser reconnected; the server replayed
+  assert.deepEqual(texts(log, "worker-activity-row-summary"), ["ran 1 command"]);
+});

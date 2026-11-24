@@ -36,6 +36,22 @@ export async function streamSse(path, body, handlers) {
   }
 }
 
+// Phase 10 R1 D7: a run stream starts from the run's first event on every
+// connection (the server keeps no cursor), so a reconnect — the browser's own
+// retry or liveSource's reopen — replays what was drawn. Wrap a handler with
+// this and each event_id is drawn once across connections.
+export function onceByEventId(fn) {
+  const seen = new Set();
+  return (event) => {
+    const id = event && event.event_id;
+    if (id) {
+      if (seen.has(id)) return;
+      seen.add(id);
+    }
+    fn(event);
+  };
+}
+
 // The browser retries a dropped EventSource by itself; it gives up for good
 // (readyState CLOSED) only on an HTTP error or a wrong content type — a
 // daemon restart mid-run. That is the case this reopens, backing off to 30 s,
