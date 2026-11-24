@@ -1941,6 +1941,39 @@ def test_an_early_g10_refusal_still_names_the_pr_it_refused(
     assert receipt["baseline_sha"] == "merge-base unavailable"
 
 
+def test_a_pr_worker_that_failed_before_g10_still_names_its_pr_everywhere(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R4 (S5): a PR review whose worker failed before G10 has no verdict —
+    the receipt and the forensics read the dispatch pin (merge-base
+    unavailable), and the PR head is never labelled the baseline."""
+    from skep.supervisor.forensics import build_run_forensics, render_forensics
+    from skep.supervisor.ledger_proof import build_receipt
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo.parent / "ws-fail", instructions="review PR 7")
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        store.transition(task.task_id, "dispatched", None)
+        store.transition(task.task_id, "failed", "tests failed")
+        receipt = build_receipt(store, config.home, config.audit_dir, task.task_id)
+        report = build_run_forensics(store, config.audit_dir, task.task_id)
+    finally:
+        store.close()
+
+    pinned = {**_pair(base, head), "merge_base": None}
+    assert receipt["g10"] is None and receipt["pr"] == pinned
+    assert receipt["baseline_sha"] == "merge-base unavailable"
+    assert report["outcome"]["g10"] is None and report["outcome"]["pr"] == pinned
+    text = render_forensics(report, markdown=False)
+    assert f"PR {ORIGIN}#7: head {head} on main {base} (merge-base unavailable)" in text
+
+
 def test_a_crash_before_g10_never_strands_a_patchless_pr_review(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
