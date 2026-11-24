@@ -315,3 +315,130 @@ def test_the_sidebar_active_indicator_stays_inside_the_sidebar() -> None:
     assert item_left + int(offset.group(1)) >= 0, (
         f"active bar renders at x={item_left + int(offset.group(1))} — outside the sidebar"
     )
+
+
+# -- Phase 10 R1 G1: the light theme -------------------------------------------
+# Test 10.1 asks for "clean dark/light ergonomics". The light palette is token
+# overrides only — two identical blocks: one follows the OS preference unless
+# the page pins dark, the other is the explicit `data-theme="light"` pin — so
+# no rule forks per theme and dark stays the default for dark-preferring OSes.
+LIGHT_MEDIA = '@media (prefers-color-scheme: light) {\n  :root:not([data-theme="dark"]) {'
+LIGHT_PIN = ':root[data-theme="light"] {'
+_COLOUR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(|color-mix\(")
+
+
+def _block(css: str, opener: str) -> str:
+    assert opener in css, f"missing block: {opener!r}"
+    return css.split(opener, 1)[1].split("}", 1)[0]
+
+
+def _declared(body: str) -> dict[str, str]:
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    return {k: v.strip() for k, v in re.findall(r"(--[\w-]+):\s*([^;]+);", body)}
+
+
+def _themes() -> dict[str, dict[str, str]]:
+    css = _css()
+    return {
+        "dark": _declared(css.split(":root {", 1)[1].split("\n}", 1)[0]),
+        "light": _declared(_block(css, LIGHT_MEDIA)),
+        "light-pin": _declared(_block(css, LIGHT_PIN)),
+    }
+
+
+def _mix(fg: str, bg: str, alpha: float) -> str:
+    """`color-mix(in srgb, fg alpha, transparent)` painted over an opaque bg."""
+    a, b = (fg.lstrip("#"), bg.lstrip("#"))
+    out = [
+        round(int(a[i : i + 2], 16) * alpha + int(b[i : i + 2], 16) * (1 - alpha))
+        for i in (0, 2, 4)
+    ]
+    return "#" + "".join(f"{c:02x}" for c in out)
+
+
+def test_light_blocks_redefine_every_colour_token_identically() -> None:
+    themes = _themes()
+    colour = {k for k, v in themes["dark"].items() if _COLOUR.search(v)}
+    assert {"--bg", "--text", "--ok", "--syntax-kw", "--scrollbar"} <= colour
+    for name in ("light", "light-pin"):
+        missing = sorted(colour - set(themes[name]))
+        assert not missing, f"{name} block leaves dark colour tokens: {missing}"
+    assert themes["light"] == themes["light-pin"], "the two light blocks drifted"
+    css = _css()
+    assert "color-scheme: dark;" in css.split(":root {", 1)[1].split("\n}", 1)[0]
+    assert "color-scheme: light;" in _block(css, LIGHT_MEDIA)
+    assert "color-scheme: light;" in _block(css, LIGHT_PIN)
+    assert '<meta name="color-scheme" content="dark light">' in _html()
+
+
+def _pairs(t: dict[str, str]) -> list[tuple[str, str, str]]:
+    """(label, fg, bg) for every text-on-surface pair the UI paints."""
+    surfaces = ("--bg", "--chrome", "--panel", "--panel-2", "--panel-3")
+    out = [
+        (f"{fg} on {bg}", t[fg], t[bg])
+        for fg in ("--text", "--text-strong", "--muted", "--muted-2")
+        for bg in surfaces
+    ]
+    out += [("--on-accent on --accent", t["--on-accent"], t["--accent"])]
+    for fg in ("--accent", "--ok", "--warn", "--bad", "--info", "--accent-2"):
+        out += [(f"{fg} on {bg}", t[fg], t[bg]) for bg in ("--bg", "--panel")]
+    for kind in ("kw", "str", "num", "key", "com"):
+        out += [
+            (f"--syntax-{kind} on {bg}", t[f"--syntax-{kind}"], t[bg])
+            for bg in ("--bg", "--panel", "--panel-2", "--panel-3")
+        ]
+    # Badges, banners, flashes and diff lines: every rule that paints status
+    # text on a tint of a token, read from the rules themselves, over each
+    # surface such a pill can sit on.
+    for body in re.findall(r"\{([^{}]*)\}", _css()):
+        tint = re.search(r"background: color-mix\(in srgb, var\((--[\w-]+)\) ([\d.]+)%", body)
+        text = re.search(r"(?<![-\w])color: var\((--[\w-]+)\)", body)
+        if tint and text:
+            fg, bg_token, pct = text.group(1), tint.group(1), float(tint.group(2))
+            for bg in ("--bg", "--panel", "--panel-2"):
+                mixed = _mix(t[bg_token], t[bg], pct / 100)
+                out.append((f"{fg} on {bg_token} {pct:g}% over {bg}", t[fg], mixed))
+    return out
+
+
+def test_light_and_dark_text_pairs_clear_aa() -> None:
+    themes = _themes()
+    failures = []
+    for name in ("dark", "light"):
+        t = themes[name]
+        # The derived tint pairs are real: badges, banners, flashes, diff lines.
+        assert sum(" over " in label for label, _, _ in _pairs(t)) >= 60
+        failures += [
+            f"{name}: {label} {_contrast(fg, bg):.2f}"
+            for label, fg, bg in _pairs(t)
+            if _contrast(fg, bg) < 4.5
+        ]
+        # The focus ring is a non-text indicator: WCAG 1.4.11 asks 3:1.
+        for bg in ("--bg", "--panel"):
+            if _contrast(t["--focus"], t[bg]) < 3:
+                failures.append(f"{name}: --focus on {bg}")
+    assert not failures, f"below AA: {failures}"
+
+
+# Colour literals allowed outside the token blocks, each with its reason.
+LITERAL_ALLOWLIST = {
+    # A mask reads only alpha: #000 here is "opaque", not a colour anyone sees.
+    "mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 0)",
+}
+
+
+def test_no_colour_literal_outside_the_token_blocks() -> None:
+    css = re.sub(r"/\*.*?\*/", "", _css(), flags=re.S)
+    css = css.replace(css.split(":root {", 1)[1].split("\n}", 1)[0], "")
+    for opener in (LIGHT_MEDIA, LIGHT_PIN):
+        css = css.replace(_block(css, opener), "")
+    offenders = []
+    for decl in re.findall(r"[\w-]+\s*:[^;{}]+", css):
+        literal = re.search(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", decl)
+        if literal and not any(ok in decl for ok in LITERAL_ALLOWLIST):
+            offenders.append(decl.strip())
+    assert not offenders, f"colour literals outside the tokens: {offenders}"
+    static = STYLE.parent
+    for path in [*static.glob("*.js"), *static.glob("js/**/*.js"), static / "index.html"]:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"#[0-9a-fA-F]{6}\b|\brgba?\(|\bhsla?\(", text), path.name
