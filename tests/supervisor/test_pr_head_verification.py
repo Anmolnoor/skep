@@ -1876,6 +1876,49 @@ def test_an_early_g10_refusal_still_names_the_pr_it_refused(
     assert receipt["baseline_sha"] == "merge-base unavailable"
 
 
+def test_a_crash_before_g10_never_strands_a_patchless_pr_review(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S14): ingest committed a PR review `completed`, then the
+    supervisor died before G10. A patchless review has no patch on disk by
+    design — recovery (startup and on demand) still re-verifies its pinned
+    head, inside the same orphan-sweep shield the live dispatch uses."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.worktree import create_worktree
+
+    reverify_module = sys.modules[reverify_run.__module__]
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    shielded: list[bool] = []
+
+    def spy(repo_: Path, root: Path, name: str, ref: str | None = None) -> Path:
+        shielded.append(name in dispatch._ACTIVE.snapshot())
+        return create_worktree(repo_, root, name, ref)
+
+    monkeypatch.setattr(reverify_module, "create_worktree", spy)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(
+            workspace=repo.parent / "ws-crash", instructions="review PR 7", verify_command=PIN
+        )
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        store.transition(task.task_id, "completed", None)
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        done = dispatch.reverify_unverified_runs(store, config)
+        record = store.reverification_for(task.task_id)
+    finally:
+        store.close()
+
+    assert done == [task.task_id]
+    assert record is not None and record.outcome == "passed" and record.head_commit == head
+    assert record.pr == {**_pair(base, head), "merge_base": base}
+    assert shielded == [True]
+
+
 # --- 5. the failure paths say what happened and move nothing --------------------
 
 
