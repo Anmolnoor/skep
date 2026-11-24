@@ -300,3 +300,30 @@ test("R3 J10: a diff request that fails after navigation appends no Forensics pa
     assert.equal(main.querySelectorAll(".forensics-section").length, 0, `fail=${fail}`);
   }
 });
+
+// R4 K8: the stored argv this review grants (command_lines, shlex-joined by
+// the server) leads; the run event's list only for a review that stored none.
+test("R4 K8: run detail and Approvals list a batch from command_lines, falling back to commands", async () => {
+  const app = loadApp();
+  const batch = { review_id: "r1", task_id: "t1", action: "shell.run", reason: "batch",
+    status: "pending", requested_at: "2026-11-24T10:00:00Z",
+    commands: [["npm", "install"], ["npm", "run", "build:it", "a b"]],
+    command_lines: ["npm install", "npm run build:it 'a b'"] };
+  const legacy = { ...batch, review_id: "r2", command_lines: undefined, commands: ["make a", "make b"] };
+  const body = approvals => ({
+    run: { task_id: "t1", instructions: "x", state: "pending_approval", repo: "/r" },
+    transitions: [], artifacts: [], commands: [], approvals, policy_blocks: [], reverification: null,
+  });
+  const listed = async (path, payload, view, ...args) => {
+    app.api = async (_m, p) => (p === path ? payload : p === "/api/ledger/suggestions" ? { suggestions: [] } : { events: [] });
+    const main = app.document.createElement("main");
+    main.dataset.route = "1";
+    await app[view](main, ...args);
+    return main.querySelectorAll("code").map(n => n.textContent);
+  };
+  assert.deepEqual(await listed("/api/runs/t1", body([batch]), "viewRunDetail", "t1"),
+    ["npm install", "npm run build:it 'a b'"]);
+  assert.deepEqual(await listed("/api/runs/t1", body([legacy]), "viewRunDetail", "t1"), ["make a", "make b"]);
+  assert.deepEqual(await listed("/api/approvals", { approvals: [batch] }, "viewApprovals"),
+    ["npm install", "npm run build:it 'a b'"]);
+});

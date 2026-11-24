@@ -677,7 +677,7 @@ def test_approvals_card_renders_v19_f1_batch_commands() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert "const batchCommands = Array.isArray(approval.commands)" in source
+    assert "const batchCommands = approvalCommands(approval)" in source  # R4 K8
     assert 'class: "command-list mono"' in source
     assert "`Approve all ${batchCommands.length}`" in source
     assert ".command-list" in styles

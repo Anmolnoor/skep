@@ -285,6 +285,15 @@ function cardRuns(card) {
       !run.warning && !run.tamper ? " · no G10 or V1 warning" : null))));
 }
 
+// R4 K8: the commands a review grants, as text — the stored argv the server
+// shlex-joined (command_lines) first; the run event's list only for a review
+// that stored none.
+function approvalCommands(approval) {
+  if (Array.isArray(approval?.command_lines)) return approval.command_lines;
+  const commands = Array.isArray(approval?.commands) ? approval.commands : [];
+  return commands.map(cmd => (Array.isArray(cmd) ? cmd.join(" ") : String(cmd)));
+}
+
 // L11 (ADR 0059 D3, V7): a delegated ask is approve-once for that run — the
 // server refuses to remember it (409), so no "& remember" button offers it.
 function offersRemember(approval) {
@@ -3865,7 +3874,7 @@ async function viewRunDetail(main, taskId) {
     pending.length ? pending[0].review_id
       : (await api("POST", `/api/runs/${taskId}/approvals`)).review_id;
   // v19-F1: one approval can carry a batch of shell commands.
-  const batchCommands = Array.isArray(pending[0]?.commands) ? pending[0].commands : null;
+  const batchCommands = pending.length ? approvalCommands(pending[0]) : null;
   const isBatch = batchCommands && batchCommands.length > 1;
   // Phase 10 10.1: a pending gate opens in the review flow (diff → forensics → verdict).
   if (pending.length) {
@@ -3911,12 +3920,11 @@ async function viewRunDetail(main, taskId) {
       main.append(el("p", { class: "note" }, `policy: ${formatDecision(approval.decision)}`));
     }
     // v19-F1: list every command a batch approval would grant.
-    if (Array.isArray(approval.commands) && approval.commands.length > 1) {
+    const granted = approvalCommands(approval);
+    if (granted.length > 1) {
       const list = el("ul", { class: "note mono" });
-      for (const cmd of approval.commands) {
-        list.append(el("li", {}, el("code", {}, Array.isArray(cmd) ? cmd.join(" ") : String(cmd))));
-      }
-      main.append(el("p", { class: "note" }, `${approval.commands.length} commands in this plan:`), list);
+      for (const cmd of granted) list.append(el("li", {}, el("code", {}, cmd)));
+      main.append(el("p", { class: "note" }, `${granted.length} commands in this plan:`), list);
     }
     if (approval.policy_block) {
       main.append(el("p", { class: "note mono" }, formatPolicyBlock(approval.policy_block)));
@@ -4135,13 +4143,11 @@ async function viewApprovals(main) {
     }
     // v19-F1: one approval can carry a batch of shell commands — list each so
     // the operator sees exactly what "Approve all" would grant.
-    const batchCommands = Array.isArray(approval.commands) ? approval.commands : [];
+    const batchCommands = approvalCommands(approval);
     const isBatch = batchCommands.length > 1;
     if (isBatch) {
       const list = el("ul", { class: "command-list mono" });
-      for (const cmd of batchCommands) {
-        list.append(el("li", {}, el("code", {}, Array.isArray(cmd) ? cmd.join(" ") : String(cmd))));
-      }
+      for (const cmd of batchCommands) list.append(el("li", {}, el("code", {}, cmd)));
       card.append(el("p", { class: "note" }, `${batchCommands.length} commands in this plan:`), list);
     }
     const actions = el("div", { class: "actions" });
