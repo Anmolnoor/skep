@@ -140,8 +140,9 @@ def _gh_fake(
 
 
 def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
-    """v47-F5: the only base-branch advance — gh pr merge, honest on failure.
-    Phase 09 R1 (D3): it merges only a pinned, verified head."""
+    """v47-F5: the only base-branch advance, honest on failure.
+    Phase 09 R1 (D3): it merges only a pinned, verified head (R3 D8: via
+    GitHub's REST merge endpoint, pinned to that head's SHA)."""
     import json
 
     from skep.supervisor.github import merge_pull_request
@@ -155,18 +156,19 @@ def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> 
 
     def gh(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
+        if "PUT" in args:  # R3 (D8): the REST merge endpoint, --include
+            body = json.dumps({"merged": True, "sha": "c" * 40})
+            return _cp(args, 0, f"HTTP/2.0 200 OK\nContent-Type: application/json\n\n{body}")
         if args[1] == "api":  # R2 (D4, D5): no merge queue; the commit's parent
             answer = {"data": {"repository": {"mergeQueue": None}}, "parents": [{"sha": "b" * 40}]}
             return _cp(args, 0, json.dumps(answer))
-        merged = any(call[1:3] == ["pr", "merge"] for call in calls)
-        state = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}} if merged else {}
-        return _cp(args, 0, json.dumps({**live, "state": "OPEN", **state}))
+        return _cp(args, 0, json.dumps({**live, "state": "OPEN"}))
 
     result = merge_pull_request(repo=tmp_path, pin=pin, strategy="squash", runner=gh)
     assert result.merged and "7" in result.detail
     assert calls[2] == [
-        "gh", "pr", "merge", "--repo", "github.com/me/repo", "--squash", "--match-head-commit",
-        "a" * 40, "--", "7",
+        "gh", "api", "--hostname", "github.com", "--include", "-X", "PUT",
+        "repos/me/repo/pulls/7/merge", "-f", f"sha={'a' * 40}", "-f", "merge_method=squash",
     ]  # fmt: skip
 
     broken = _gh_fake(1, "", "not mergeable")

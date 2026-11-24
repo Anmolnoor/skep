@@ -252,10 +252,10 @@ def test_every_gh_call_names_the_repo_and_ends_with_the_bare_number(repo: Path) 
     for call in calls:
         if call[1] == "api":
             assert call[2:4] == ["--hostname", "github.com"], call
+            assert f"repos/{ORIGIN}/" in " ".join(call) or "graphql" in call, call
             continue
         assert call[3:5] == ["--repo", HOST_ORIGIN] and call[-2:] == ["--", "7"], call
-    merge = ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--merge", "--match-head-commit", sha]
-    assert [*merge, "--", "7"] in calls
+    assert [*MERGE_PUT, "-f", "merge_method=merge"] in calls  # R3 (D8): REST, no selector
     assert ["gh", "pr", "close", "--repo", HOST_ORIGIN, "--delete-branch", "--", "7"] in calls
 
 
@@ -1184,55 +1184,111 @@ PIN_7 = {**_pair("b" * 40, "a" * 40), "merge_base": "b" * 40, "task_id": "t"}
 def _merge_gh(
     calls: list[list[str]],
     live: dict[str, Any] | None = None,
-    after: dict[str, Any] | None = None,
-    merge_code: int = 0,
+    merge_status: int = 200,
+    merge_body: Any = None,
     queue: Any = None,
     landed_on: str = "b" * 40,
     api_code: int = 0,
+    graphql: Any = None,
 ) -> github.Runner:
     """gh as GitHub answers: the PR now (``live``), the base branch's merge
-    queue (``queue``), then the PR after the merge and its merge commit,
-    whose first parent is ``landed_on``."""
+    queue (``queue``), the REST merge endpoint (``merge_status`` and its
+    JSON body, R3 D8), then the merge commit, whose first parent is
+    ``landed_on``."""
     now = {
         "headRefOid": "a" * 40, "baseRefOid": "b" * 40, "baseRefName": "main", "state": "OPEN",
         "autoMergeRequest": None, **(live or {}),
     }  # fmt: skip
-    merged = after or {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
+    body = {"sha": "c" * 40, "merged": True, "message": "Pull Request successfully merged"}
 
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[0] != "gh":
             return subprocess.run(args, **kwargs)
         calls.append(list(args))
+        if "PUT" in args:  # gh api --include: status line, headers, body
+            answer = body if merge_body is None else merge_body
+            text = answer if isinstance(answer, str) else json.dumps(answer)
+            out = f"HTTP/2.0 {merge_status} X\r\nContent-Type: application/json\r\n\r\n{text}"
+            return subprocess.CompletedProcess(args, 0 if merge_status == 200 else 1, out, "")
         if args[1] == "api":
             if api_code:
                 return subprocess.CompletedProcess(args, api_code, "", "HTTP 401")
             if args[4] == "graphql":
-                answer: Any = {"data": {"repository": {"mergeQueue": queue}}}
+                if graphql is not None:
+                    return graphql(args)
+                answer = {"data": {"repository": {"mergeQueue": queue}}}
             else:
                 answer = {"sha": "c" * 40, "parents": [{"sha": landed_on}, {"sha": "a" * 40}]}
             return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
-        if args[2] == "merge":
-            return subprocess.CompletedProcess(args, merge_code, "", "" if not merge_code else "no")
-        answer = merged if any(c[1:3] == ["pr", "merge"] for c in calls) else now
-        return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
+        return subprocess.CompletedProcess(args, 0, json.dumps(now), "")
 
     return run
 
 
+MERGE_PUT = [
+    "gh", "api", "--hostname", "github.com", "--include", "-X", "PUT",
+    f"repos/{ORIGIN}/pulls/7/merge", "-f", f"sha={'a' * 40}",
+]  # fmt: skip
+
+
 def test_merge_pull_request_merges_exactly_the_pinned_head(repo: Path) -> None:
+    """R3 (D8): GitHub's REST merge endpoint — immediate only (it never
+    queues or enables auto-merge) and atomically pinned to the head SHA."""
     calls: list[list[str]] = []
 
     result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls))
 
     assert result.merged, result.detail
-    assert "c" * 40 in result.detail  # the merge commit GitHub reports
-    merge = [c for c in calls if c[2] == "merge"]
-    assert merge == [
-        ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--merge", "--match-head-commit", "a" * 40,
-         "--", "7"],
-    ]  # fmt: skip
+    assert "c" * 40 in result.detail  # the merge commit GitHub returned
+    assert [c for c in calls if "PUT" in c] == [[*MERGE_PUT, "-f", "merge_method=merge"]]
+    assert [f"repos/{ORIGIN}/commits/{'c' * 40}"] == [c[4] for c in calls if "commits" in c[4]]
     assert result.landed_base == "b" * 40 and "re-verify" not in result.detail
-    assert not any(flag in c for c in calls for flag in ("--auto", "--admin"))
+    assert not [c for c in calls if c[1:3] == ["pr", "merge"]]
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (405, "Changes must be made through the merge queue"),
+        (409, "Head branch was modified. Review and try the merge again."),
+        (405, "Pull Request is not mergeable"),  # merged by someone else meanwhile
+        (422, "Pull Request is already merged"),
+    ],
+    ids=["merge-queue-required", "sha-mismatch", "merged-by-someone-else", "already-merged"],
+)
+def test_a_merge_github_refuses_claims_nothing(repo: Path, status: int, message: str) -> None:
+    """R3 (D8): 405/409/422 are GitHub's refusals — its message, nothing
+    merged, and a merge someone else made is never credited to skep."""
+    calls: list[list[str]] = []
+    runner = _merge_gh(calls, merge_status=status, merge_body={"message": message})
+
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+
+    assert not result.merged and result.landed_base is None
+    assert message in result.detail and "nothing merged" in result.detail
+    assert f"HTTP {status}" in result.detail
+    assert not [c for c in calls if "commits" in " ".join(c)]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, "<html>gateway</html>"),
+        (200, {"merged": False, "message": "?"}),
+        (200, {"merged": True}),
+        (502, {"message": "Bad Gateway"}),
+    ],
+    ids=["unparseable", "merged-false", "no-sha", "server-error"],
+)
+def test_an_unreadable_merge_answer_is_unknown_never_merged(
+    repo: Path, status: int, body: Any
+) -> None:
+    runner = _merge_gh([], merge_status=status, merge_body=body)
+
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+
+    assert not result.merged and "queued" not in result.detail
+    assert "outcome unknown — check GitHub" in result.detail
 
 
 @pytest.mark.parametrize(
@@ -1273,8 +1329,9 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
     repo: Path, live: dict[str, Any] | None, queue: Any, api_code: int
 ) -> None:
     """R2 (D5, S2/N7): auto-merge or a merge queue lands later, at whatever
-    the base is then — skep refuses before gh pr merge, and a queue it
-    cannot rule out counts as one."""
+    the base is then — skep refuses before it merges, and a queue it
+    cannot rule out counts as one (R3: the REST merge is the safety; this
+    pre-check names the reason)."""
     calls: list[list[str]] = []
     runner = _merge_gh(calls, live, queue=queue, api_code=api_code)
 
@@ -1282,35 +1339,7 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
 
     assert not result.merged and "nothing merged" in result.detail
     assert "merge it on GitHub" in result.detail
-    assert not [c for c in calls if c[1:3] == ["pr", "merge"]]
-
-
-def test_a_merge_that_set_auto_merge_instead_is_disabled(repo: Path) -> None:
-    """R2 (D5): gh exited 0 but GitHub holds an auto-merge request — skep
-    disables it, and says not merged (never "queued")."""
-    calls: list[list[str]] = []
-    after = {"state": "OPEN", "mergeCommit": None, "autoMergeRequest": {"enabledAt": "x"}}
-
-    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls, after=after))
-
-    assert not result.merged and "queued" not in result.detail
-    assert "not merged; the auto-merge request was disabled" in result.detail
-    assert ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--disable-auto", "--", "7"] in calls
-
-
-def test_an_unreadable_outcome_is_unknown_never_queued(repo: Path) -> None:
-    calls: list[list[str]] = []
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        done = _merge_gh(calls)(args, **kwargs)
-        if any(c[1:3] == ["pr", "merge"] for c in calls[:-1]) and args[1:3] == ["pr", "view"]:
-            return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
-        return done
-
-    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=run)
-
-    assert not result.merged and "queued" not in result.detail
-    assert "outcome unknown — check GitHub" in result.detail
+    assert not [c for c in calls if "PUT" in c]
 
 
 @pytest.mark.parametrize("strategy", ["merge", "squash"])
@@ -1347,8 +1376,6 @@ def test_merge_pull_request_refuses_when_the_pr_cannot_be_read(repo: Path) -> No
     assert not result.merged and "HTTP 502" in result.detail and "nothing merged" in result.detail
     incomplete = github.merge_pull_request(repo=repo, pin={"repo": ORIGIN}, runner=broken)
     assert not incomplete.merged and "propose merge_pr again" in incomplete.detail
-    failed = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh([], merge_code=1))
-    assert not failed.merged and "gh pr merge failed" in failed.detail
 
 
 # --- faces: chat (refresh_repo pr=) and CLI (skep repo refresh --pr, skep pr merge)

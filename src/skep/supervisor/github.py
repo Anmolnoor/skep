@@ -38,7 +38,7 @@ class MergeResult:
     merged: bool
     detail: str
     # R2 (D4): the base tip the merge commit's base-side parent names, when
-    # GitHub exposes one (merge, squash) — compared with the pinned base.
+    # it names one (merge, squash) — compared with the pinned base.
     landed_base: str | None = None
 
 
@@ -245,15 +245,16 @@ def _deferred_landing(runner: Runner, pid: PrId, branch: str, live: dict[str, An
     return None if queue is None else f"{branch} {_DEFERRED}"
 
 
-def _landed_base(
-    runner: Runner, pid: PrId, commit: object, strategy: str
-) -> tuple[str | None, str]:
+def _landed_base(runner: Runner, pid: PrId, commit: str, strategy: str) -> tuple[str | None, str]:
     """R2 (D4): the base tip the merge landed on — the merge commit's
-    first parent (merge, squash) — and why it could not be read."""
+    first parent (merge, squash) — and why it could not be read. R3 (D8): a
+    rebase merge returns the last rebased commit, whose first parent is the
+    PR's previous commit, not the base, so it is not compared."""
     if strategy == "rebase":
-        return None, "GitHub does not expose the base tip a rebase merge landed on"
-    if not isinstance(commit, str) or not commit:
-        return None, "GitHub reported no merge commit"
+        return None, (
+            f"a rebase merge's commit {commit} has the PR's own commits as parents, not the "
+            "base tip, so GitHub's answer does not say which base it landed on"
+        )
     read = _run(runner, _gh_api(f"repos/{pid.repo}/commits/{commit}"))
     try:
         return str(json.loads(read.stdout)["parents"][0]["sha"]), ""
@@ -380,7 +381,34 @@ def open_pull_request(
     return PullRequestResult(True, url, f"opened PR: {url}" if url else "opened PR")
 
 
-_MERGE_FLAGS = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}
+_MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
+# R3 (D8): what GitHub's merge endpoint answers when it will not merge — not
+# mergeable (incl. "merge queue required", already merged), head moved past
+# ``sha``, conflict/invalid. Anything else is not an answer skep can read.
+_MERGE_REFUSED = frozenset({405, 409, 422})
+_HTTP_STATUS = re.compile(r"HTTP/[0-9.]+ ([0-9]{3})\b")
+
+
+def _rest_merge(
+    runner: Runner, pid: PrId, head: str, strategy: str
+) -> tuple[int | None, dict[str, Any], str]:
+    """R3 (D8): ``PUT repos/<o>/<n>/pulls/<N>/merge`` pinned to ``head`` —
+    the HTTP status, the JSON body (``{}`` when it is not one) and gh's own
+    words. GitHub merges immediately or refuses: this endpoint never queues
+    and never enables auto-merge."""
+    put = _run(
+        runner,
+        _gh_api("--include", "-X", "PUT", f"repos/{pid.repo}/pulls/{pid.number}/merge",
+                "-f", f"sha={head}", "-f", f"merge_method={strategy}"),
+    )  # fmt: skip
+    text = put.stdout.replace("\r\n", "\n")
+    status = _HTTP_STATUS.match(text)
+    try:
+        body = json.loads(text.partition("\n\n")[2])
+    except ValueError:
+        body = None
+    gh_said = (put.stderr or put.stdout).strip() or "no answer"
+    return (int(status[1]) if status else None), body if isinstance(body, dict) else {}, gh_said
 
 
 def merge_pull_request(
@@ -390,7 +418,7 @@ def merge_pull_request(
     strategy: str = "merge",
     runner: Runner = subprocess.run,
 ) -> MergeResult:
-    """v47-F5: merge an open PR via gh. Honest failure, never raises.
+    """v47-F5: merge an open PR on GitHub. Honest failure, never raises.
 
     The ONLY path that advances a base branch, and it runs solely behind an
     explicit operator confirm on the operator's own gh credentials — workers
@@ -400,19 +428,19 @@ def merge_pull_request(
     was proposed with (``cards.merge_pin``): repo, number, head_commit,
     base_commit, base_branch. The live PR is re-read first and the merge is
     refused, naming both SHAs, if its head, its base branch or that branch's
-    tip moved since. gh then merges with ``--match-head-commit`` (never
-    ``--auto``/``--admin``), and the result says merged only when GitHub
-    reports the PR MERGED.
+    tip moved since; R2 (D5): so is a PR with an auto-merge request or a
+    merge queue on its base (one skep cannot rule out counts).
 
-    R2 (D4, D5): a PR that would land later — an auto-merge request, or a
-    merge queue on its base (one skep cannot rule out counts) — is refused
-    before gh merges. GitHub enforces only the head atomically: the base can
-    still move between the re-read and the merge, so the merge commit's
-    base-side parent is compared with the pinned base afterwards and a
-    mismatch is reported loudly. An auto-merge request gh set instead of
-    merging is disabled; an unreadable outcome is "unknown", never "queued"."""
-    flag = _MERGE_FLAGS.get(strategy)
-    if flag is None:
+    R3 (D8): those checks give clearer refusals; the safety is the merge
+    itself — GitHub's REST merge endpoint, called with ``sha=<pinned head>``:
+    it merges at once or refuses (never queues, never enables auto-merge),
+    and only if the head is still that SHA. Only its answer is read: 200
+    with ``merged: true`` and a ``sha`` is a merge skep made; 405/409/422 is
+    GitHub's refusal, quoted; anything else is "outcome unknown". The base is
+    NOT checked atomically: it can move between the re-read and the merge,
+    so the merge commit's base-side parent is compared with the pinned base
+    afterwards and a mismatch is reported loudly."""
+    if strategy not in _MERGE_METHODS:
         return MergeResult(False, f"unknown merge strategy {strategy!r}")
     try:
         pid = PrId(str(pin["repo"]), int(pin["number"]))
@@ -464,43 +492,18 @@ def merge_pull_request(
     deferred = _deferred_landing(runner, pid, branch, live)
     if deferred is not None:
         return MergeResult(False, f"refused: {deferred}; nothing merged")
-    # GitHub enforces only the head atomically (--match-head-commit); the
-    # base can move between the re-read above and the merge. That window is
-    # reported after the fact (D4), never claimed closed.
-    merged = _run(runner, _gh_pr("merge", pid, flag, "--match-head-commit", head), cwd=repo)
-    if merged.returncode != 0:
-        why = (merged.stderr or merged.stdout).strip()
-        return MergeResult(False, f"gh pr merge failed: {why}")
-    after = _run(runner, _gh_pr("view", pid, "--json", "state,mergeCommit,autoMergeRequest"))
-    try:
-        landed: dict[str, Any] = json.loads(after.stdout) if after.returncode == 0 else {}
-        final, commit = str(landed["state"]), (landed.get("mergeCommit") or {}).get("oid")
-    except (ValueError, KeyError, TypeError, AttributeError):
-        why = (after.stderr or after.stdout).strip() or "no answer"
+    status, answer, gh_said = _rest_merge(runner, pid, head, strategy)
+    commit = answer.get("sha") if answer.get("merged") is True else None
+    if status in _MERGE_REFUSED:
+        said = answer.get("message") or gh_said
         return MergeResult(
-            False,
-            f"gh pr merge exited 0, but {pid.repo}#{n} could not be read back ({why}): "
-            "outcome unknown — check GitHub",
+            False, f"refused by GitHub (HTTP {status}): {said}; nothing merged at head {head}"
         )
-    if final != "MERGED":
-        if final == "OPEN" and landed.get("autoMergeRequest"):
-            off = _run(runner, _gh_pr("merge", pid, "--disable-auto"), cwd=repo)
-            if off.returncode == 0:
-                return MergeResult(
-                    False,
-                    f"not merged; the auto-merge request was disabled — GitHub took PR #{n} "
-                    f"as auto-merge instead of merging it: {branch} {_DEFERRED}",
-                )
-            why = (off.stderr or off.stdout).strip()
-            return MergeResult(
-                False,
-                f"not merged, and an auto-merge request is now set on PR #{n} that skep could "
-                f"not disable ({why}) — disable it on GitHub",
-            )
+    if status != 200 or not isinstance(commit, str) or not commit:
         return MergeResult(
             False,
-            f"not merged: gh pr merge exited 0, but GitHub reports {pid.repo}#{n} as {final} — "
-            "check GitHub",
+            f"GitHub's answer to merging {pid.repo}#{n} could not be read (HTTP {status}: "
+            f"{gh_said[:300]}): outcome unknown — check GitHub",
         )
     done = f"merged {pid.repo}#{n} at head {head} ({strategy}): merge commit {commit}"
     landed_on, unread = _landed_base(runner, pid, commit, strategy)
