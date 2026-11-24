@@ -92,9 +92,11 @@ def test_an_unknown_role_never_switches_the_chat(
 def test_role_command_is_on_both_decks() -> None:
     from skep import cli_chat
     from skep.supervisor.serve.app import STATIC_DIR
+    from skep.supervisor.serve.commands import WEB, resolve
 
     source = (STATIC_DIR / "app.js").read_text()
-    assert "  role: {" in source and 'proposeCommand("set_role"' in source
+    assert resolve(WEB, "role").name == "role"  # the web deck's row
+    assert 'name === "role"' in source and 'proposeCommand("set_role"' in source
     assert "role" in cli_chat.COMMANDS
     assert "/role" in SYSTEM_PROMPT
 

@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.packs import get_policy_pack
 from skep.supervisor.serve import actions
+from skep.supervisor.serve.commands import WEB, commands_for
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import COMMAND_TOOL_NAMES, execute_mutation
@@ -401,14 +402,17 @@ def test_chat_composer_intercepts_slash_commands() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert "const COMMANDS" in source
     assert "function parseSlashCommand" in source
     assert 'content.startsWith("/")' in source
     assert "await runSlashCommand(content)" in source
-    # /help and unknown commands render from the same COMMANDS table.
-    assert "Object.values(COMMANDS)" in source
+    # Phase 10 10.3: /help, completion and refusals render from the registry's
+    # web slice (GET /api/commands), never from a table of app.js's own.
+    assert 'api("GET", "/api/commands")' in source
+    assert "deck.commands.map(command =>" in source
+    assert "commandHelp(deckRefusal(deck, name))" in source
     assert "commandHelp(`unknown command: /${name}`)" in source
-    # The plan's command set is all present (F2 adds /workon).
+    # The plan's command set is all on the web surface (F2 adds /workon).
+    web = {row.name for row in commands_for(WEB)}
     for command in (
         "help:",
         "policy:",
@@ -424,7 +428,7 @@ def test_chat_composer_intercepts_slash_commands() -> None:
         "deny:",
         "schedule:",
     ):
-        assert command in source, command
+        assert command[:-1] in web, command
     # Mutations go through the operator-command card endpoints, reads direct.
     assert "`/api/chats/${activeChatId}/commands`" in source
     assert "/api/chats/${activeChatId}/commands/${d.action_id}/${verb}" in source
@@ -444,22 +448,23 @@ def test_deck_reads_map_to_existing_routes() -> None:
     assert "dangerous_grant_warnings" in source
 
 
-def test_help_table_and_executor_cannot_drift() -> None:
-    """v25-F3 drift guard: every command in COMMANDS has an executor branch
-    and every executor branch has a COMMANDS entry (/help renders from the
-    same table, so the three surfaces stay one surface)."""
+def test_web_executors_and_the_registry_web_slice_cannot_drift() -> None:
+    """The drift guard (v25-F3, Phase 10 10.3): app.js keeps no command table
+    — /help, completion and refusals read the registry's web slice over
+    GET /api/commands — so its executor branches and that slice must be one
+    set, both ways. A web row with no executor would answer "unknown command";
+    an executor with no web row is dead code, refused before it can run."""
     import re
 
     from skep.supervisor.serve.app import STATIC_DIR
 
     source = (STATIC_DIR / "app.js").read_text()
-    start = source.index("const COMMANDS = {")
-    table = source[start : source.index("};", start)]
-    declared = set(re.findall(r"^  (\w+): \{", table, flags=re.MULTILINE))
     executor_start = source.index("const runSlashCommand")
     executor = source[executor_start : source.index("const runStream", executor_start)]
     handled = set(re.findall(r'name === "(\w+)"', executor))
-    assert declared == handled
+    web = {row.name for row in commands_for(WEB)}
+    assert handled - web == set(), "app.js executors with no web row in serve/commands.py"
+    assert web - handled == set(), "web rows in serve/commands.py with no app.js executor"
 
 
 def test_composer_autocomplete_offers_the_deck() -> None:
@@ -470,8 +475,8 @@ def test_composer_autocomplete_offers_the_deck() -> None:
     assert 'class: "command-suggest"' in source
     assert "const updateSuggest" in source
     assert 'input.addEventListener("input", updateSuggest)' in source
-    # Suggestions come from the same COMMANDS table as the parser and /help.
-    assert "Object.entries(COMMANDS).filter(([name]) => name.startsWith(needle))" in source
+    # Suggestions come from the same registry slice as the parser and /help.
+    assert "deck.commands.filter(command => command.name.startsWith(needle))" in source
     assert ".command-suggest" in styles
     assert ".command-suggest-item" in styles
 

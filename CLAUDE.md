@@ -117,12 +117,17 @@ gitignored on the public tree: plans stay local, only the fix commits push
   binary. Re-verify primes uv deps from the baseline before applying the patch
   so the default `uv run pytest` pin confirms offline (v94-F7).
 - The command deck (v25): chat messages starting with `/` are parsed client-side
-  (`COMMANDS` in app.js) and mapped onto existing verbs — the model never sees
-  them. Mutations become `chat_actions` rows with `source='operator'`, resolved
-  on `/api/chats/{id}/commands/{action_id}/confirm|deny` under actor
-  `operator-command`. `/workon <path>` is the local-dir on-ramp (confirmed git
-  baseline, then project setup). Keep `COMMANDS`, the executor, and `/help` in
-  lockstep — a test pins the table against the parser branches.
+  and mapped onto existing verbs — the model never sees them. Every command is
+  declared once in `serve/commands.py` (Phase 10) with the surfaces that carry
+  it; app.js reads the web slice from `GET /api/commands` for `/help`,
+  completion and refusals, and keeps only the executors. Mutations become
+  `chat_actions` rows with `source='operator'`, resolved on
+  `/api/chats/{id}/commands/{action_id}/confirm|deny` under actor
+  `operator-command` — which refuses a card whose command the confirming
+  surface does not carry (`?surface=cli` for `skep chat`). `/workon <path>` is
+  the local-dir on-ramp (confirmed git baseline, then project setup). A new
+  web command needs a registry row AND an executor branch — a test pins the
+  two to one set.
 
 ## Required design context before acting
 

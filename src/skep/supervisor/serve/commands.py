@@ -4,9 +4,15 @@ Every ``/`` command any surface answers is declared here once — name, usage,
 help, and the surfaces that may run it. The decks are views of this table:
 ``skep chat`` (``cli_chat.COMMANDS``), the messengers
 (``channels/commands.COMMANDS``, their menus and ``/help``) and the web deck
-(app.js, pinned against it by test). A deck dispatches by asking ``resolve``
+(app.js reads ``web_deck`` over ``GET /api/commands``; its executors are
+pinned against the web slice by test). A deck dispatches by asking ``resolve``
 first; a name its surface does not carry is refused there, before any handler
 or model runs.
+
+A row that proposes a confirm card names the card's ``verb``. The desk's
+confirm path asks ``check_card`` before it claims a card, so a card whose
+command the confirming surface does not carry is refused again there
+(defence in depth, 10.3). Both checks only ever refuse.
 
 Who runs a command: on ``web`` and ``cli`` the operator (serve token / the
 local terminal); on a messenger an allow-listed member — admission happens
@@ -23,6 +29,7 @@ Scope only narrows: a messenger keeps exactly its v130 deck, so /role,
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 WEB = "web"
 CLI = "cli"
@@ -39,14 +46,17 @@ class SlashCommand:
     usage: str
     help: str
     surfaces: frozenset[str]
+    verb: str | None = None  # the mutation its confirm card proposes, if any
 
 
 class CommandRefused(Exception):
     """The surface does not carry this command; ``str()`` says why and where."""
 
 
-def _row(name: str, usage: str, help: str, *surfaces: frozenset[str]) -> SlashCommand:
-    return SlashCommand(name, usage, help, frozenset().union(*surfaces))
+def _row(
+    name: str, usage: str, help: str, *surfaces: frozenset[str], verb: str | None = None
+) -> SlashCommand:
+    return SlashCommand(name, usage, help, frozenset().union(*surfaces), verb)
 
 
 # Order is the /help order on every surface.
@@ -63,31 +73,42 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "/setup <repo> [--pack X] [--phase Y]",
         "bind a repo to a trusted project (confirm card)",
         _DESK,
+        verb="setup_project",
     ),
     _row(
         "phase",
         "/phase <project-id> <bootstrap|build|maintain>",
         "move a project's trust phase (confirm card)",
         _DESK,
+        verb="set_project_phase",
     ),
     _row(
         "unregister",
         "/unregister <project-id>",
         "unregister a project: skep forgets it, its folder stays (confirm card)",
         _DESK,
+        verb="remove_project",
     ),
-    _row("land", "/land <task-id> [branch]", "land a completed run's patch (confirm card)", _DESK),
+    _row(
+        "land",
+        "/land <task-id> [branch]",
+        "land a completed run's patch (confirm card)",
+        _DESK,
+        verb="land_run",
+    ),
     _row(
         "approve",
         "/approve <review-id|card-id> [branch]",
         "approve a pending review (confirm card), or a pending card by its id",
         _DESK,
+        verb="approve_review",
     ),
     _row(
         "deny",
         "/deny <review-id|card-id>",
         "deny a pending review (confirm card), or a pending card by its id",
         _DESK,
+        verb="deny_review",
     ),
     _row(
         "workon",
@@ -95,12 +116,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "make a local directory a first-class workspace — "
         "git baseline + trusted project (confirm card)",
         _DESK,
+        verb="workon",
     ),
     _row(
         "schedule",
         "/schedule <name> <repo> <every> <instructions…>",
         "create a recurring schedule the ticker dispatches — every takes 30m/6h/1d (confirm card)",
         _DESK,
+        verb="propose_schedule",
     ),
     _row(
         "persona",
@@ -108,6 +131,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "set the profile-level identity every chat starts with — "
         "identity only, never policy (confirm card)",
         _DESK,
+        verb="set_persona",
     ),
     _row(
         "role",
@@ -115,12 +139,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "switch this chat's role — prompt, voice and policy layer together; "
         "a role only tightens the baseline (confirm card)",
         _DESK,
+        verb="set_role",
     ),
     _row(
         "personality",
         "/personality <concise|technical|friendly|custom:text|default>",
         "set this chat's reply style — style only, never policy (confirm card)",
         _DESK,
+        verb="set_personality",
     ),
     _row(
         "btw",
@@ -147,12 +173,14 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "/resume <task-id>",
         "continue a crashed/timed-out run from its checkpoint — model-free (confirm card)",
         _DESK,
+        verb="resume_run",
     ),
     _row(
         "browser",
         "/browser",
         "register the built-in Playwright browser under the browse scope (confirm card)",
         _DESK,
+        verb="setup_browser",
     ),
     _row("status", "/status", "what is running and what waits on you", _CLI, CHANNELS),
     _row(
@@ -160,6 +188,7 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "/model [name] [--scope chat|default]",
         "show effective model for this chat; with name: propose set_assistant_model",
         _CLI,
+        verb="set_assistant_model",
     ),
     _row(
         "stop",
@@ -214,5 +243,35 @@ def resolve(surface: str, name: str) -> SlashCommand:
             return row
     if not rows:
         raise CommandRefused(f"unknown command: /{name}")
+    raise _elsewhere(surface, name, rows)
+
+
+def check_card(surface: str, verb: str) -> None:
+    """The confirm path's second look: ``CommandRefused`` when only commands
+    ``surface`` does not carry propose ``verb``. A verb no command proposes (a
+    button's, a server-raised card's) is not the registry's to judge."""
+    rows = [row for row in REGISTRY if row.verb == verb]
+    if rows and not any(surface in row.surfaces for row in rows):
+        raise _elsewhere(surface, rows[0].name, rows)
+
+
+def web_deck() -> dict[str, Any]:
+    """What ``GET /api/commands`` serves the browser: the web rows, and the
+    refusal every other surface's command gets on the web (read-only)."""
+    refusals: dict[str, str] = {}
+    for row in REGISTRY:
+        try:
+            resolve(WEB, row.name)
+        except CommandRefused as exc:
+            refusals[row.name] = str(exc)
+    rows = commands_for(WEB)
+    return {
+        "surface": WEB,
+        "commands": [{"name": row.name, "usage": row.usage, "help": row.help} for row in rows],
+        "refusals": refusals,
+    }
+
+
+def _elsewhere(surface: str, name: str, rows: list[SlashCommand]) -> CommandRefused:
     where = sorted(set().union(*(row.surfaces for row in rows)))
-    raise CommandRefused(f"/{name} is not available on {surface}; it runs on {', '.join(where)}")
+    return CommandRefused(f"/{name} is not available on {surface}; it runs on {', '.join(where)}")

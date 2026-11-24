@@ -1901,9 +1901,7 @@ function renderResearchReport(report) {
 
 // ---------- The command deck (v25-F1) ----------
 // Deterministic /commands: parsed HERE, executed against the same HTTP API the
-// buttons use. The Queen's model never sees or executes these. Keep COMMANDS
-// beside the executor in runSlashCommand — /help renders from this table, so
-// the list and the parser cannot drift.
+// buttons use. The Queen's model never sees or executes these.
 
 const LAST_REPO_KEY = "skep-last-repo";
 // v96-F2: the active chat's bound project repo (server truth from
@@ -1911,70 +1909,21 @@ const LAST_REPO_KEY = "skep-last-repo";
 // localStorage last-repo guess.
 let chatBoundRepo = null;
 
-const COMMANDS = {
-  help: { usage: "/help", desc: "list the command deck" },
-  policy: { usage: "/policy [repo]", desc: "effective policy for a repo (default: last used)" },
-  repos: { usage: "/repos", desc: "registered repos" },
-  skills: { usage: "/skills", desc: "learned-skill candidates and admitted skills" },
-  runs: { usage: "/runs [n]", desc: "recent runs" },
-  approvals: { usage: "/approvals", desc: "the pending approval queue" },
-  state: { usage: "/state <repo>", desc: "a repo's git state: branches, HEAD, recent commits" },
-  setup: {
-    usage: "/setup <repo> [--pack X] [--phase Y]",
-    desc: "bind a repo to a trusted project (confirm card)",
-  },
-  phase: {
-    usage: "/phase <project-id> <bootstrap|build|maintain>",
-    desc: "move a project's trust phase (confirm card)",
-  },
-  unregister: {
-    usage: "/unregister <project-id>",
-    desc: "unregister a project: skep forgets it, its folder stays (confirm card)",
-  },
-  land: { usage: "/land <task-id> [branch]", desc: "land a completed run's patch (confirm card)" },
-  approve: { usage: "/approve <review-id|card-id> [branch]", desc: "approve a pending review (confirm card), or a pending card by its id" },
-  deny: { usage: "/deny <review-id|card-id>", desc: "deny a pending review (confirm card), or a pending card by its id" },
-  workon: {
-    usage: "/workon <path> [--pack X] [--phase Y]",
-    desc: "make a local directory a first-class workspace — git baseline + trusted project (confirm card)",
-  },
-  schedule: {
-    usage: "/schedule <name> <repo> <every> <instructions…>",
-    desc: "create a recurring schedule the ticker dispatches — every takes 30m/6h/1d (confirm card)",
-  },
-  role: {
-    usage: "/role <builder|operator|assistant|custom-role>",
-    desc: "switch this chat's role — prompt, voice and policy layer together; a role only tightens the baseline (confirm card)",
-  },
-  personality: {
-    usage: "/personality <concise|technical|friendly|custom:text|default>",
-    desc: "set this chat's reply style — style only, never policy (confirm card)",
-  },
-  persona: {
-    usage: "/persona <text…|default>",
-    desc: "set the profile-level identity every chat starts with — identity only, never policy (confirm card)",
-  },
-  btw: {
-    usage: "/btw <question…>",
-    desc: "ask a side question WITHOUT touching running work — read-only turn: no cards, no mutations, runs beside a pending card",
-  },
-  steer: {
-    usage: "/steer <task-id> <text…>",
-    desc: "send a steering note into a RUNNING react run — input, never authority: resolves no card, approval, or gate",
-  },
-  resume: {
-    usage: "/resume <task-id>",
-    desc: "continue a crashed/timed-out run from its checkpoint — model-free (confirm card)",
-  },
-  browser: {
-    usage: "/browser",
-    desc: "register the built-in Playwright browser under the browse scope (confirm card)",
-  },
-  trust: {
-    usage: "/trust [private|untrusted]",
-    desc: "trust this chat again: clear its taint (both bits by default) — yours only, never the model's; outside content read later sets it again",
-  },
-};
+// Phase 10 10.3: the deck is a view of the one registry (serve/commands.py).
+// GET /api/commands serves the web surface's rows (name, usage, help) and the
+// refusal each other surface's command gets here; /help, completion and the
+// unknown-command path read it, runSlashCommand keeps the executors (a test
+// pins the two to one set). A name the web does not carry is refused HERE,
+// before anything runs — and the confirm endpoint refuses its card again.
+let commandDeck = null;
+function loadCommandDeck() {
+  commandDeck ||= api("GET", "/api/commands").catch((e) => { commandDeck = null; throw e; });
+  return commandDeck;
+}
+
+function deckRefusal(deck, name) {
+  return deck.refusals[name] || `unknown command: /${name}`;
+}
 
 function parseSlashCommand(text) {
   const tokens = text.trim().split(/\s+/);
@@ -2456,22 +2405,26 @@ async function viewChat(main, chatId) {
     input.value = content;
     deliver();
   };
-  const updateSuggest = () => {
+  // Phase 10 10.3: completion, /help and refusals read the registry's web slice.
+  let deck = { commands: [], refusals: {} };
+  const updateSuggest = async () => {
     const value = input.value;
     if (!value.startsWith("/") || /[\s]/.test(value.slice(1))) {
       suggest.hidden = true;
       return;
     }
+    try { deck = await loadCommandDeck(); } catch { suggest.hidden = true; return; }
+    if (input.value !== value) return; // a newer keystroke draws its own list
     const needle = value.slice(1).toLowerCase();
-    const matches = Object.entries(COMMANDS).filter(([name]) => name.startsWith(needle));
-    suggest.replaceChildren(...matches.map(([name, command]) =>
+    const matches = deck.commands.filter(command => command.name.startsWith(needle));
+    suggest.replaceChildren(...matches.map(command =>
       el("button", {
         type: "button",
         class: "command-suggest-item",
-        onclick: () => { input.value = `/${name} `; suggest.hidden = true; input.focus(); },
+        onclick: () => { input.value = `/${command.name} `; suggest.hidden = true; input.focus(); },
       },
         el("span", { class: "mono" }, command.usage),
-        el("span", { class: "command-suggest-desc" }, command.desc))));
+        el("span", { class: "command-suggest-desc" }, command.help))));
     suggest.hidden = matches.length === 0;
   };
 
@@ -2769,8 +2722,8 @@ async function viewChat(main, chatId) {
     log.append(el("div", { class: "command-help" },
       intro ? el("p", { class: "note" }, intro) : null,
       el("ul", { class: "command-help-list" },
-        Object.values(COMMANDS).map(command => el("li", {},
-          el("span", { class: "mono" }, command.usage), ` — ${command.desc}`)))));
+        deck.commands.map(command => el("li", {},
+          el("span", { class: "mono" }, command.usage), ` — ${command.help}`)))));
     scrollBottom();
   };
 
@@ -2920,9 +2873,10 @@ async function viewChat(main, chatId) {
   const runSlashCommand = async (content) => {
     renderChatMessage(log, "user", content, { label: "You", scroll: scrollBottom });
     const { name, args, flags } = parseSlashCommand(content);
-    const spec = COMMANDS[name];
     try {
-      if (!spec) { commandHelp(`unknown command: /${name}`); return; }
+      deck = await loadCommandDeck();
+      const spec = deck.commands.find(command => command.name === name);
+      if (!spec) { commandHelp(deckRefusal(deck, name)); return; }
       if (name === "help") { commandHelp(); return; }
       if (name === "repos") { commandResult("/repos", await api("GET", "/api/repos")); return; }
       if (name === "skills") { commandResult("/skills", await api("GET", "/api/skills")); return; }

@@ -10,15 +10,22 @@ messenger keeps exactly its pre-registry deck, and a desk verb such as /role or
 
 from __future__ import annotations
 
+import inspect
+import json
+import os
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from skep.supervisor import SupervisorConfig
-from skep.supervisor.serve import commands
+from skep.supervisor.serve import commands, create_app
+from skep.supervisor.serve.app import STATIC_DIR
 from skep.supervisor.serve.commands import CHANNELS, CLI, SURFACES, WEB, CommandRefused, resolve
+from skep.supervisor.serve.tools import COMMAND_TOOL_NAMES
 
+from .conftest import serve_client
 from .test_channels_live import _enable_telegram, _telegram_update, _TelegramHarness
 from .test_cli_chat import client, ollama, script_input  # noqa: F401 - fixtures
 
@@ -71,9 +78,8 @@ def test_a_shared_command_is_one_row_on_every_surface_it_names() -> None:
     assert resolve(CLI, "resume") is not resolve("telegram", "resume")
 
 
-def test_the_three_decks_are_views_of_the_registry() -> None:
+def test_the_three_decks_are_views_of_the_registry(config: SupervisorConfig) -> None:
     from skep import cli_chat
-    from skep.supervisor.serve.app import STATIC_DIR
     from skep.supervisor.serve.channels.commands import COMMANDS as CHANNEL_DECK
 
     assert {name: (spec["usage"], spec["desc"]) for name, spec in cli_chat.COMMANDS.items()} == {
@@ -82,11 +88,117 @@ def test_the_three_decks_are_views_of_the_registry() -> None:
     assert {name: summary for name, (summary, _) in CHANNEL_DECK.items()} == {
         row.name: row.help for row in commands.commands_for("telegram")
     }
+    # Phase 10 10.3: the web deck keeps no table of its own — app.js reads its
+    # slice over HTTP (test_command_deck pins its executors against that slice).
+    assert serve_client(config).get("/api/commands").json()["commands"] == [
+        {"name": row.name, "usage": row.usage, "help": row.help}
+        for row in commands.commands_for(WEB)
+    ]
+    assert "const COMMANDS" not in (STATIC_DIR / "app.js").read_text()
+
+
+# ---------- Phase 10 10.3: the web deck reads the registry ----------
+
+WEB_DECK_FIXTURE = Path(__file__).parents[1] / "web" / "fixtures" / "commands-web.json"
+
+
+def test_the_web_deck_endpoint_is_read_only_and_token_gated(config: SupervisorConfig) -> None:
+    desk = serve_client(config)
+    served = desk.get("/api/commands")
+    assert served.status_code == 200
+    deck = served.json()
+    assert deck["surface"] == WEB
+    carried = {row["name"] for row in deck["commands"]}
+    # Every command the web surface does not carry comes with the refusal
+    # resolve() gives — the words skep chat and the messengers print for the
+    # same name (Test 10.5), so the browser teaches where it does run (I9).
+    for row in commands.REGISTRY:
+        if row.name in carried:
+            assert row.name not in deck["refusals"], row.name
+            continue
+        with pytest.raises(CommandRefused) as refused:
+            resolve(WEB, row.name)
+        assert deck["refusals"][row.name] == str(refused.value)
+    assert deck["refusals"]["status"] == (
+        "/status is not available on web; it runs on cli, discord, slack, telegram"
+    )
+    assert desk.post("/api/commands", json={}).status_code == 405  # no mutation path
+    assert TestClient(create_app(config)).get("/api/commands").status_code == 401
+
+
+def test_the_web_deck_fixture_is_the_served_deck(config: SupervisorConfig) -> None:
+    """tests/web drives the chat composer with this file: the registry's real
+    answer, never a hand-made row. Regenerate with ``SKEP_REGEN_FIXTURES=1``."""
+    served = serve_client(config).get("/api/commands").json()
+    if os.environ.get("SKEP_REGEN_FIXTURES"):
+        WEB_DECK_FIXTURE.write_text(json.dumps(served, indent=2, ensure_ascii=False) + "\n")
+    assert json.loads(WEB_DECK_FIXTURE.read_text()) == served
+
+
+def test_a_rows_card_verb_is_the_verb_its_deck_proposes() -> None:
+    """The confirm-path check maps a card's verb back to its command, so the
+    registry must name the verb each deck really proposes — per web branch,
+    and as a set for skep chat."""
+    from skep import cli_chat
+
+    for row in commands.REGISTRY:
+        if row.verb is not None:
+            assert row.verb in COMMAND_TOOL_NAMES, row.name
     source = (STATIC_DIR / "app.js").read_text()
-    start = source.index("const COMMANDS = {")
-    table = source[start : source.index("};", start)]
-    web = set(re.findall(r"^  (\w+): \{", table, flags=re.MULTILINE))
-    assert web == {row.name for row in commands.commands_for(WEB)}
+    start = source.index("const runSlashCommand")
+    executor = source[start : source.index("const runStream", start)]
+    web = {}
+    for branch in executor.split('if (name === "')[1:]:
+        condition = branch.split(") {", 1)[0]  # policy" || name === "state"
+        verbs = re.findall(r'proposeCommand\("(\w+)"', branch)
+        assert len(verbs) <= 1, branch[:40]
+        for name in [branch.split('"', 1)[0], *re.findall(r'name === "(\w+)"', condition)]:
+            web[name] = verbs[0] if verbs else None
+    assert web == {row.name: row.verb for row in commands.commands_for(WEB)}
+    cli = set(
+        re.findall(
+            r'_propose_command\(\s*"(\w+)"', inspect.getsource(cli_chat.ChatRepl.run_command)
+        )
+    )
+    assert cli == {row.verb for row in commands.commands_for(CLI) if row.verb is not None}
+
+
+def test_a_card_verb_is_refused_only_where_no_command_proposing_it_runs() -> None:
+    commands.check_card(WEB, "set_role")  # /role runs on the web
+    commands.check_card(CLI, "set_assistant_model")  # /model runs in skep chat
+    # A button's verb or a server-raised card: no command proposes it, so it
+    # is not the deck's to judge (the endpoint's own allowlist still binds).
+    commands.check_card(WEB, "push_branch")
+    commands.check_card(WEB, "approve_policy_baseline")
+    with pytest.raises(CommandRefused, match=r"^/model is not available on web; it runs on cli$"):
+        commands.check_card(WEB, "set_assistant_model")
+
+
+def test_confirm_refuses_a_card_whose_command_the_surface_does_not_carry(
+    config: SupervisorConfig,
+) -> None:
+    """Defence in depth (I5/I6): the browser never proposes /model's card, but
+    a card skep chat left pending shows in the same chat — the web confirm
+    path refuses it before the claim, so nothing runs and it stays pending."""
+    desk = serve_client(config)
+    chat_id = desk.post("/api/chats", json={}).json()["chat_id"]
+    action_id = desk.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "set_assistant_model", "args": {"model": "m2"}},
+    ).json()["action_id"]
+    for verb in ("confirm", "deny"):
+        refused = desk.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
+        assert refused.status_code == 403, verb
+        assert refused.json()["detail"] == "/model is not available on web; it runs on cli"
+    (card,) = desk.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert card["status"] == "proposed"
+    # The confirm path is a desk path: a messenger's name is not a surface here.
+    assert (
+        desk.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm?surface=telegram")
+    ).status_code == 422
+    denied = desk.post(f"/api/chats/{chat_id}/commands/{action_id}/deny?surface=cli")
+    assert denied.status_code == 200
+    assert denied.json()["denied"] is True
 
 
 def _say(harness: _TelegramHarness, text: str, update_id: int) -> str:

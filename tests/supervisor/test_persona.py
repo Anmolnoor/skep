@@ -106,8 +106,10 @@ def test_set_persona_is_carded_and_confirm_writes_the_file(
 def test_persona_command_is_in_both_decks() -> None:
     from skep.cli_chat import COMMANDS
     from skep.supervisor.serve.app import STATIC_DIR
+    from skep.supervisor.serve.commands import WEB, resolve
 
     assert "persona" in COMMANDS
+    assert resolve(WEB, "persona").name == "persona"  # the web deck's row
     source = (STATIC_DIR / "app.js").read_text()
-    assert "persona:" in source
+    assert 'name === "persona"' in source
     assert 'proposeCommand("set_persona"' in source

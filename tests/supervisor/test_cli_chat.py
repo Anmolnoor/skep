@@ -373,14 +373,13 @@ def test_python_deck_and_executor_cannot_drift() -> None:
 def test_python_deck_matches_the_web_deck() -> None:
     """Web↔CLI parity: neither deck may quietly grow a command the other lacks.
     CLI_ONLY commands exist only in the terminal (web has equivalent surfaces:
-    /status -> status page + health dot, /model -> composer select, /exit -> close tab)."""
+    /status -> status page + health dot, /model -> composer select, /exit -> close tab).
+    Phase 10 10.3: the web deck is the registry's web slice (app.js reads it
+    over GET /api/commands; test_command_deck pins its executors to it)."""
     from skep import cli_chat
-    from skep.supervisor.serve.app import STATIC_DIR
+    from skep.supervisor.serve.commands import WEB, commands_for
 
-    source = (STATIC_DIR / "app.js").read_text()
-    start = source.index("const COMMANDS = {")
-    table = source[start : source.index("};", start)]
-    web = set(re.findall(r"^  (\w+): \{", table, flags=re.MULTILINE))
+    web = {row.name for row in commands_for(WEB)}
     # CLI_ONLY commands are terminal-only; the rest must match exactly.
     assert {"status", "model", "exit", "replay", "stop"} == cli_chat.CLI_ONLY
     assert set(cli_chat.COMMANDS) - cli_chat.CLI_ONLY == web

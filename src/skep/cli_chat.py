@@ -643,7 +643,11 @@ class ChatRepl:
         if action.get("source") in ("operator", "gate"):
             # Deck commands resolve on the commands endpoints — JSON, no stream.
             # ES-F5 (B98): so do gate mirrors — their Deny denies the review.
-            result = self.client.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
+            # Phase 10 10.3: the cli surface — the server refuses a card whose
+            # command skep chat does not carry, as the browser's is refused.
+            result = self.client.post(
+                f"/api/chats/{chat_id}/commands/{action_id}/{verb}?surface=cli"
+            )
             _print_command_result(result)
             if result.get("ok"):
                 self._maybe_tail(result.get("result"))

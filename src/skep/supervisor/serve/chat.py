@@ -64,6 +64,7 @@ from .cards import (
     recorded_card,
     unreadable_under_deny,
 )
+from .commands import CommandRefused, check_card, web_deck
 from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
@@ -4243,6 +4244,12 @@ def add_chat_routes(
     # in this loop — no transcript writes, no continuation stream. The card +
     # the chat_actions row keep the same audit shape as a Queen proposal.
 
+    @app.get("/api/commands")
+    def command_deck() -> dict[str, Any]:
+        """Phase 10 10.3: the web deck is a view of the one registry — its
+        rows, and what every other surface's command gets here. Read-only."""
+        return web_deck()
+
     @app.post("/api/chats/{chat_id}/stop")
     def stop_turn(chat_id: str, body: StopRequest | None = None) -> dict[str, Any]:
         """v130-F10: /stop — the running turn ends at its next step. Never
@@ -4324,7 +4331,9 @@ def add_chat_routes(
             ),
         }
 
-    def _resolve_command(chat_id: str, action_id: str, *, confirm: bool) -> dict[str, Any]:
+    def _resolve_command(
+        chat_id: str, action_id: str, *, confirm: bool, surface: str
+    ) -> dict[str, Any]:
         _require_chat(chat_id)
         action = run_store.get_chat_action(action_id)
         if action is None or action.chat_id != chat_id:
@@ -4335,6 +4344,13 @@ def add_chat_routes(
                 detail="this is an assistant proposal; resolve it via "
                 f"/api/chats/{chat_id}/actions/{action_id}/confirm or /deny",
             )
+        # Phase 10 10.3 (I5/I6): defence in depth behind the deck's own
+        # refusal — a card whose command this surface does not carry is
+        # refused before the claim, so nothing runs and it stays pending.
+        try:
+            check_card(surface, action.tool)
+        except CommandRefused as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
@@ -4415,13 +4431,18 @@ def add_chat_routes(
             record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
+    # The desk's two surfaces share this path; skep chat says it is the cli.
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")
-    def confirm_command(chat_id: str, action_id: str) -> dict[str, Any]:
-        return _resolve_command(chat_id, action_id, confirm=True)
+    def confirm_command(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] = "web"
+    ) -> dict[str, Any]:
+        return _resolve_command(chat_id, action_id, confirm=True, surface=surface)
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/deny")
-    def deny_command(chat_id: str, action_id: str) -> dict[str, Any]:
-        return _resolve_command(chat_id, action_id, confirm=False)
+    def deny_command(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] = "web"
+    ) -> dict[str, Any]:
+        return _resolve_command(chat_id, action_id, confirm=False, surface=surface)
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/confirm")
     def confirm_action(

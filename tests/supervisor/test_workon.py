@@ -185,9 +185,11 @@ def test_workon_is_a_confirm_carded_tool_on_both_faces(config: SupervisorConfig)
     assert "workon" in COMMAND_TOOL_NAMES
 
     from skep.supervisor.serve.app import STATIC_DIR
+    from skep.supervisor.serve.commands import WEB, resolve
 
     source = (STATIC_DIR / "app.js").read_text()
-    assert "workon:" in source
+    assert resolve(WEB, "workon").verb == "workon"  # the web deck's row, carded
+    assert 'name === "workon"' in source
     assert '"/api/workon/preview"' in source
     assert 'await proposeCommand("workon", body, notes)' in source
     # The card states what will happen before anything runs.
