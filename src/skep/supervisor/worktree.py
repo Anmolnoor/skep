@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Iterable, Iterator, MutableMapping
+from collections.abc import Iterable, MutableMapping
 from pathlib import Path
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
@@ -288,46 +286,8 @@ def remove_worktree(repo: Path, path: Path) -> None:
         _git(repo, "worktree", "prune")
 
 
-@contextlib.contextmanager
-def tree_claim(root: Path, name: str, *, wait: bool = True) -> Iterator[bool]:
-    """Phase 09 R4 (S3): a cross-process owner claim on worktree ``name``
-    under ``root`` — an flock on ``<root>/<name>.claim`` (a file, so no
-    sweep walks it). Yields whether it was taken (``wait=False`` never
-    blocks). The kernel drops it when the holder dies, so a dead owner's
-    tree is sweepable and a live one's is not, whichever process sweeps.
-    The holder unlinks the file on release; a taker re-checks it locked the
-    file still at that path."""
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{name}.claim"
-    while True:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError:
-            os.close(fd)
-            yield False
-            return
-        try:
-            current = os.stat(path).st_ino == os.fstat(fd).st_ino
-        except FileNotFoundError:
-            current = False
-        if current:
-            break
-        os.close(fd)  # its last holder unlinked it: claim the new file
-    try:
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())  # who, for a human; the lock is the claim
-        yield True
-    finally:
-        path.unlink(missing_ok=True)
-        os.close(fd)
-
-
 def cleanup_orphans(repo: Path, root: Path, keep: Iterable[str] = ()) -> list[Path]:
-    """Remove stale per-task worktrees (runs at startup and after every terminal, Q3).
-
-    R4 (S3): a tree whose ``tree_claim`` another holder has — a live G10 in
-    any process — is skipped; the sweep holds the claim while it removes."""
+    """Remove stale per-task worktrees (runs at startup and after every terminal, Q3)."""
     if not root.is_dir():
         return []
     keep_names = set(keep)
@@ -335,9 +295,6 @@ def cleanup_orphans(repo: Path, root: Path, keep: Iterable[str] = ()) -> list[Pa
     for child in sorted(root.iterdir()):
         if not child.is_dir() or child.name in keep_names:
             continue
-        with tree_claim(root, child.name, wait=False) as unowned:
-            if not unowned:
-                continue
-            remove_worktree(repo, child)
+        remove_worktree(repo, child)
         removed.append(child)
     return removed

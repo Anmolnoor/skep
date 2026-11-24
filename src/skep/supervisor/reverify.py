@@ -53,7 +53,6 @@ from .worktree import (
     git_metadata_readable_roots,
     git_metadata_writable_roots,
     remove_worktree,
-    tree_claim,
 )
 
 # pytest/usage exit codes: 0 pass, 1..4 real failure, 5 no-tests; 127 = command
@@ -819,20 +818,13 @@ def reverify(
     # name in _ACTIVE long before this runs, so the window here is narrow — but
     # the recovery path re-verifies without that shield, and a creator that
     # skips the lock is the shape of the bug, not a special case.
-    # R4 (S3): and a durable owner claim, taken before the tree exists and
-    # held until it is gone, that every process's orphan sweep honours —
-    # every G10 path (live, re-adopted, recovery, --reverify) comes here.
-    tree = f"reverify-{name or patch_path.stem}"
-    stack = contextlib.ExitStack()
-    stack.enter_context(tree_claim(config.worktrees_root, tree))
-    try:
-        with TREE_LOCK:
-            worktree = create_worktree(repo, config.worktrees_root, tree, ref)
-    except BaseException:
-        stack.close()
-        raise
+    with TREE_LOCK:
+        worktree = create_worktree(
+            repo, config.worktrees_root, f"reverify-{name or patch_path.stem}", ref
+        )
     # Council round 3 (N4): one stack holds every cleanup — proxies, bridge
     # socket dirs, the worktree — and runs each even when another raises.
+    stack = contextlib.ExitStack()
     stack.callback(remove_worktree, repo, worktree)
     try:
         env = dict(env)
