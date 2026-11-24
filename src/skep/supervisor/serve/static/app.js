@@ -1,26 +1,20 @@
-/* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
+/* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource.
+   Phase 10 10.1: the shared helpers live in js/ (dom, api, sse, store, diff);
+   pages move to js/pages/ one at a time — this file still holds the rest. */
 import { renderContextPanel } from "./room.js";
 import { viewSettings } from "./settings.js";
-import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
+import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
+import { el, iconButton, notFound } from "./js/dom.js";
+import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
+import { liveSource, streamSse } from "./js/sse.js";
+import { renderDiff } from "./js/diff.js";
+import { viewInbox } from "./js/pages/inbox.js";
+import { forensicsSection, viewReview } from "./js/pages/run-detail.js";
+import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
+import { viewSchedules } from "./js/pages/schedules.js";
 
-const TOKEN_KEY = "skep-token";
-
-// ---------- tiny DOM + API helpers ----------
-
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") node.className = v;
-    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
-  }
-  for (const child of children.flat()) {
-    if (child === null || child === undefined) continue;
-    node.append(child.nodeType ? child : document.createTextNode(String(child)));
-  }
-  return node;
-}
+// ---------- tiny view helpers ----------
 
 // v130-F10: the working line's Stop. A direct POST — typed text queues behind
 // the turn (v103-F1), so a typed /stop would arrive only after it ended.
@@ -33,73 +27,6 @@ function stopButton(chatId) {
       catch (err) { flash("bad", err.message); }
     },
   }, "Stop");
-}
-
-function iconButton(label, icon, attrs = {}) {
-  return el("button", {
-    type: "button",
-    title: label,
-    "aria-label": label,
-    ...attrs,
-  }, el("span", { class: "button-icon", "aria-hidden": "true" }, icon));
-}
-
-function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
-
-function setToken(value) {
-  localStorage.setItem(TOKEN_KEY, value);
-  // The cookie is what authenticates EventSource — it cannot set headers.
-  document.cookie = `skep_token=${value}; path=/; SameSite=Strict`;
-}
-
-async function api(method, path, body) {
-  const options = { method, headers: { "X-Skep-Token": token() } };
-  if (body !== undefined) {
-    options.headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(body);
-  }
-  const response = await fetch(path, options);
-  if (response.status === 401) { showLogin(); throw new Error("not authenticated"); }
-  const text = await response.text();
-  let data = text;
-  try { data = JSON.parse(text); } catch { /* plain text (diff) stays text */ }
-  if (!response.ok) throw new Error((data && data.detail) || `${response.status}`);
-  return data;
-}
-
-// POST + read the response as an SSE stream (fetch sets headers, so no cookie
-// dance here — EventSource stays only where the server pushes unprompted).
-async function streamSse(path, body, handlers) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "X-Skep-Token": token(), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (response.status === 401) { showLogin(); throw new Error("not authenticated"); }
-  if (!response.ok) {
-    let detail = `${response.status}`;
-    try { detail = (await response.json()).detail || detail; } catch { /* keep the status */ }
-    throw new Error(detail);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let cut;
-    while ((cut = buffer.indexOf("\n\n")) >= 0) {
-      const block = buffer.slice(0, cut);
-      buffer = buffer.slice(cut + 2);
-      let event = "message"; let data = null;
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event: ")) event = line.slice(7);
-        else if (line.startsWith("data: ")) data = JSON.parse(line.slice(6));
-      }
-      if (data !== null && handlers[event]) handlers[event](data);
-    }
-  }
 }
 
 function fmtTs(ts) { return ts ? ts.replace("T", " ").replace("Z", "") : "-"; }
@@ -742,6 +669,7 @@ function setShellActiveRoute(hash) {
     if (ws === "chat") {
       active = nav === "new-chat" && hash === "#/chat";
     }
+    if (ws === "inbox") active = /^#\/(inbox|review)\b/.test(hash); // a review is an Inbox item
     // Graphite round A: Projects and Setup are Settings tabs (settings.js).
     if (ws === "settings") active = /^#\/(settings|projects|setup)\b/.test(hash);
     // graphite-nav: a surface item for one tab is lit by its own hash; a
@@ -1007,14 +935,10 @@ function flash(kind, message) {
 
 // ---------- login ----------
 
-function showLogin() {
-  document.getElementById("shell").classList.add("hidden");
-  document.getElementById("login").classList.remove("hidden");
-}
-
 async function tryConnect() {
   const response = await fetch("/api/status", { headers: { "X-Skep-Token": token() } });
-  if (!response.ok) { showLogin(); return false; }
+  // A stored token the server now rejects is the re-auth state; no token yet is first contact.
+  if (!response.ok) { showLogin(token() && response.status === 401 ? REAUTH : ""); return false; }
   document.getElementById("login").classList.add("hidden");
   document.getElementById("shell").classList.remove("hidden");
   setToken(token()); // refresh the SSE cookie
@@ -1035,7 +959,9 @@ const routes = [
   [/^#\/home$/, viewHome],
   [/^#\/chat$/, viewChat],
   [/^#\/chat\/([^/]+)$/, viewChat],
-  [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (sidebar.js)
+  [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (js/pages/inbox.js)
+  // Phase 10 10.1: one pending approval, reviewed — diff, forensics, verdict.
+  [/^#\/review\/([^/]+)$/, viewReview],
   [/^#\/notes$/, viewNotesTasks],
   [/^#\/memory$/, viewMemory],
   // v75-F7 (C9): tolerate a query suffix — template cards link to
@@ -1098,7 +1024,11 @@ async function route() {
   for (const [pattern, view] of routes) {
     const match = hash.match(pattern);
     if (match) {
-      await view(main, ...match.slice(1)).catch(e => flash("bad", e.message));
+      // Phase 10 10.1: a 404 is a page state ("not found"), not a toast.
+      await view(main, ...match.slice(1)).catch(e => {
+        if (e.status === 404) { header(main, "Not found"); main.replaceChildren(notFound(e.message)); }
+        else flash("bad", e.message);
+      });
       // H1-G2: the list filter shows only on a view that has a list to filter.
       const filter = document.getElementById("app-search")?.closest(".topbar-search");
       if (filter) filter.hidden = !main.querySelector(".searchable");
@@ -1949,342 +1879,6 @@ async function viewHome(main) {
 
 // Graphite round A: Setup is the last tab of Settings — the first-run
 // checklist and the older setup flag live in settings.js.
-
-// ---------- Notes & Tasks (v76-F7: markdown notes + due-grouped tasks) ----------
-
-// v76-F7: the EXPLICIT run:<task-id> token links to the run page.
-// Deliberately not bare-hex autolinking — prose full of hex-looking words
-// would false-positive, and a link to a non-run is a lie (I8).
-function linkifyRunTokens(text) {
-  const nodes = [];
-  let last = 0;
-  for (const match of String(text || "").matchAll(/run:([0-9a-f]{6,})/gi)) {
-    if (match.index > last) nodes.push(document.createTextNode(text.slice(last, match.index)));
-    nodes.push(el("a", { class: "mono run-token", href: `#/runs/${match[1]}` }, match[0]));
-    last = match.index + match[0].length;
-  }
-  if (last < String(text || "").length) nodes.push(document.createTextNode(text.slice(last)));
-  return nodes;
-}
-
-function linkifyRunTokensInPlace(root) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const textNodes = [];
-  while (walker.nextNode()) textNodes.push(walker.currentNode);
-  for (const node of textNodes) {
-    if (!/run:[0-9a-f]{6,}/i.test(node.textContent)) continue;
-    node.replaceWith(el("span", {}, linkifyRunTokens(node.textContent)));
-  }
-}
-
-function noteTags(content) {
-  return [...new Set([...(content || "").matchAll(/\B#([\w-]+)/g)].map(m => m[1]))];
-}
-
-async function viewNotesTasks(main) {
-  header(main, "Notes & Tasks", "Capture local context and keep lightweight todos.");
-  const [{ notes }, { tasks }] = await Promise.all([
-    api("GET", "/api/notes"),
-    api("GET", "/api/tasks"),
-  ]);
-
-  const noteText = el("textarea", { placeholder: "New note" });
-  const addNote = el("button", { class: "primary" }, "Add note");
-  addNote.addEventListener("click", async () => {
-    if (!noteText.value.trim()) return;
-    addNote.disabled = true;
-    try { await api("POST", "/api/notes", { content: noteText.value.trim() }); route(); }
-    catch (e) { flash("bad", e.message); addNote.disabled = false; }
-  });
-
-  // v76-F7: notes read as markdown (renderMarkdown — rung-2 reuse); edit
-  // swaps to the raw textarea with the same PATCH/DELETE verbs.
-  const notesList = el("div", { class: "stack" });
-  const noteFilter = el("input", {
-    type: "search", placeholder: "Filter notes by text or #tag",
-  });
-  noteFilter.addEventListener("input", () => {
-    const q = noteFilter.value.trim().toLowerCase();
-    for (const item of notesList.children) {
-      item.classList.toggle("search-hidden",
-        Boolean(q) && !item.textContent.toLowerCase().includes(q));
-    }
-  });
-  for (const note of notes) {
-    const body = el("div", { class: "note-md" }, renderMarkdown(note.content));
-    linkifyRunTokensInPlace(body);
-    const tags = noteTags(note.content);
-    const content = el("textarea", { class: "hidden" }, note.content);
-    const save = el("button", { class: "ghost hidden" }, "Save");
-    const remove = el("button", { class: "danger hidden" }, "Delete");
-    const edit = el("button", { class: "ghost" }, "Edit");
-    edit.addEventListener("click", () => {
-      body.classList.add("hidden");
-      edit.classList.add("hidden");
-      for (const node of [content, save, remove]) node.classList.remove("hidden");
-    });
-    save.addEventListener("click", async () => {
-      try { await api("PATCH", `/api/notes/${note.note_id}`, { content: content.value.trim() }); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    remove.addEventListener("click", async () => {
-      try { await api("DELETE", `/api/notes/${note.note_id}`); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    // v126-F10: the existing propose verb, one click from the note; the
-    // server picks the class and the proposal waits on the Memory page.
-    const propose = el("button", { class: "ghost" }, "Propose to memory");
-    propose.addEventListener("click", async () => {
-      propose.disabled = true;
-      try {
-        const p = await api("POST", `/api/notes/${note.note_id}/propose`, {});
-        flash("ok", `proposed as ${p.memory_class} — approve it on the Memory page`);
-      } catch (e) { flash("bad", e.message); propose.disabled = false; }
-    });
-    notesList.append(el("div", { class: "item-card searchable" },
-      body,
-      content,
-      tags.length
-        ? el("div", { class: "note-tags" },
-          tags.map(tag => el("span", { class: "note-tag" }, `#${tag}`)))
-        : null,
-      el("div", { class: "row" },
-        el("span", { class: "note grow" }, fmtTs(note.updated_at)),
-        propose, edit, save, remove)));
-  }
-  if (!notes.length) notesList.append(el("p", { class: "empty-state" }, "No notes yet."));
-
-  const taskTitle = el("input", { placeholder: "New task" });
-  const taskDue = el("input", { type: "datetime-local" });
-  const addTask = el("button", { class: "primary" }, "Add task");
-  addTask.addEventListener("click", async () => {
-    if (!taskTitle.value.trim()) return;
-    addTask.disabled = true;
-    const due = taskDue.value ? `${taskDue.value}:00Z` : null;
-    try { await api("POST", "/api/tasks", { title: taskTitle.value.trim(), due_at: due }); route(); }
-    catch (e) { flash("bad", e.message); addTask.disabled = false; }
-  });
-
-  // v76-F7: tasks group by urgency; the checkbox is the daily verb (the
-  // same PATCH the old Complete button used), the full editor stays one
-  // toggle away — the raw record remains editable (I8).
-  const dueTone = (task) => {
-    if (!task.due_at) return null;
-    const ms = new Date(task.due_at).getTime() - Date.now();
-    if (ms < 0) return "overdue";
-    if (ms < 24 * 60 * 60 * 1000) return "today";
-    return "upcoming";
-  };
-  // v101-F8: the tone lives beside the vocabulary that produces it, not spelled
-  // out longhand per variant in the stylesheet.
-  const DUE_TONE = { overdue: "tone-bad", today: "tone-warn", upcoming: "tone-muted" };
-  const TASK_GROUPS = [
-    { label: "Overdue", test: t => t.status !== "done" && dueTone(t) === "overdue" },
-    { label: "Due today", test: t => t.status !== "done" && dueTone(t) === "today" },
-    { label: "Upcoming", test: t => t.status !== "done" && dueTone(t) === "upcoming" },
-    { label: "No due date", test: t => t.status !== "done" && !t.due_at },
-    { label: "Done", test: t => t.status === "done", collapsed: true },
-  ];
-  const taskRow = (task) => {
-    const checkbox = el("input", { type: "checkbox", "aria-label": "toggle done" });
-    checkbox.checked = task.status === "done";
-    checkbox.addEventListener("change", async () => {
-      try {
-        await api("PATCH", `/api/tasks/${task.task_id}`,
-          { status: checkbox.checked ? "done" : "todo" });
-        route();
-      } catch (e) { flash("bad", e.message); }
-    });
-    const tone = dueTone(task);
-    const duePill = task.due_at
-      ? el("span", { class: `chip ${DUE_TONE[tone] || "tone-muted"}`, title: fmtTs(task.due_at) },
-        tone === "overdue" ? "overdue" : relativeTime(task.due_at))
-      : null;
-    const title = el("input", { value: task.title });
-    const due = el("input", { value: task.due_at || "", placeholder: "YYYY-MM-DDTHH:MM:SSZ" });
-    const status = el("select", {},
-      el("option", { value: "todo" }, "todo"),
-      el("option", { value: "done" }, "done"));
-    status.value = task.status;
-    const save = el("button", { class: "ghost" }, "Save");
-    const remove = el("button", { class: "danger" }, "Delete");
-    save.addEventListener("click", async () => {
-      try {
-        await api("PATCH", `/api/tasks/${task.task_id}`, {
-          title: title.value.trim(),
-          status: status.value,
-          due_at: due.value.trim() || null,
-        });
-        route();
-      } catch (e) { flash("bad", e.message); }
-    });
-    remove.addEventListener("click", async () => {
-      try { await api("DELETE", `/api/tasks/${task.task_id}`); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    const editor = el("div", { class: "task-editor hidden" },
-      el("div", { class: "row" },
-        el("div", { class: "field grow" }, el("label", {}, "task"), title),
-        el("div", { class: "field" }, el("label", {}, "status"), status)),
-      el("div", { class: "row" },
-        el("div", { class: "field grow" }, el("label", {}, "due"), due),
-        save, remove));
-    return el("div", { class: "item-card searchable" },
-      el("div", { class: "task-row" },
-        checkbox,
-        el("span", { class: `task-title${task.status === "done" ? " done" : ""}` },
-          linkifyRunTokens(task.title)),
-        duePill,
-        iconButton("edit task", "✎", {
-          class: "ghost icon-button",
-          onclick: () => editor.classList.toggle("hidden"),
-        })),
-      editor);
-  };
-  const tasksList = el("div", { class: "stack" });
-  for (const group of TASK_GROUPS) {
-    const items = tasks.filter(group.test);
-    if (!items.length) continue;
-    tasksList.append(group.collapsed
-      ? el("details", { class: "task-group" },
-        el("summary", {}, `${group.label} (${items.length})`),
-        items.map(taskRow))
-      : el("section", { class: "task-group" },
-        el("h4", {}, `${group.label} (${items.length})`),
-        items.map(taskRow)));
-  }
-  if (!tasks.length) tasksList.append(el("p", { class: "empty-state" }, "No tasks yet."));
-
-  main.append(el("div", { class: "nt-grid" },
-    el("section", {}, el("h3", {}, "Notes"),
-      el("p", { class: "note" },
-        "Markdown renders; #tags become pills; run:<task-id> links the run."),
-      el("div", { class: "composer inline" }, noteText, addNote),
-      noteFilter,
-      notesList),
-    el("section", {}, el("h3", {}, "Tasks"),
-      el("div", { class: "composer stacky" },
-        el("div", { class: "row" },
-          el("div", { class: "field grow" }, el("label", {}, "task"), taskTitle),
-          el("div", { class: "field" }, el("label", {}, "due"), taskDue),
-          addTask)),
-      tasksList)));
-}
-
-// ---------- Curated memory (v13; v76-F8 class chips + counts) ----------
-
-// v76-F8: the 7 REAL memory classes (MEMORY_CLASSES, memory.py) — a class
-// added server-side must be added here consciously (a lockstep test compares
-// this map to the store's set); unknown falls back muted. The build spec's
-// user/environment/convention list had no data source and is not used (I8).
-const MEMORY_CLASS_COLORS = {
-  durable_preference: "var(--accent)",
-  project_fact: "var(--info)",
-  todo: "var(--warn)",
-  not_to_do: "var(--bad)",
-  reminder: "var(--accent-2)",
-  policy_hint: "var(--ok)",
-  observation: "var(--muted)",
-};
-
-function memoryClassChip(cls) {
-  const color = MEMORY_CLASS_COLORS[cls] || "var(--muted)";
-  return el("span", {
-    // v101-F8: the shared .chip primitive; the tone is this chip's own colour
-    // rather than one of the named tones, so it still sets --chip-color itself.
-    class: "chip upper",
-    style: `--chip-color: ${color}`,
-  }, cls);
-}
-
-async function viewMemory(main) {
-  header(main, "Memory", "Curated durable memory — a proposal becomes durable only when approved; `skep memory add` is the operator's direct write.");
-  const [{ proposals }, { items }] = await Promise.all([
-    api("GET", "/api/memory/proposals?state=pending_review"),
-    api("GET", "/api/memory"),
-  ]);
-
-  const propList = el("div", { class: "stack" });
-  for (const p of proposals) {
-    const approve = el("button", { class: "primary" }, "Approve");
-    const reject = el("button", { class: "danger" }, "Reject");
-    const clarify = el("button", { class: "ghost" }, "Needs info");
-    approve.addEventListener("click", async () => {
-      try { await api("POST", `/api/memory/proposals/${p.proposal_id}/approve`); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    reject.addEventListener("click", async () => {
-      const reason = window.prompt("Why reject this proposal?");
-      if (!reason) return;
-      try { await api("POST", `/api/memory/proposals/${p.proposal_id}/reject`, { reason }); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    clarify.addEventListener("click", async () => {
-      const reason = window.prompt("What needs clarification?");
-      if (!reason) return;
-      try { await api("POST", `/api/memory/proposals/${p.proposal_id}/clarify`, { reason }); route(); }
-      catch (e) { flash("bad", e.message); }
-    });
-    const sources = (p.sources || []).map(s => `${s.kind}:${s.source_id}`).join(", ");
-    propList.append(el("div", { class: "item-card" },
-      el("div", { class: "row" },
-        memoryClassChip(p.memory_class),
-        el("span", { class: "note grow" }, sources ? `from ${sources}` : "manual"),
-        // v76-F8: an old proposal means the operator is the bottleneck.
-        el("span", { class: "note", title: fmtTs(p.created_at) },
-          `proposed ${relativeTime(p.created_at)}`)),
-      el("p", {}, p.content),
-      // v126-F6 (review): the approver sees what the filing chat had read.
-      Array.isArray(p.taint) && p.taint.length
-        ? el("p", { class: "note" }, `filed from a chat that read: ${p.taint.slice().sort()
-          .map(bit => ({ private: "private data", untrusted: "outside content" })[bit] || bit).join(", ")}`)
-        : null,
-      el("div", { class: "row" }, approve, clarify, reject)));
-  }
-  if (!proposals.length) propList.append(el("p", { class: "empty-state" }, "No proposals to review."));
-
-  const memList = el("div", { class: "stack" });
-  function renderItems(list) {
-    memList.replaceChildren();
-    for (const item of list) {
-      const forget = el("button", { class: "danger" }, "Forget");
-      forget.addEventListener("click", async () => {
-        try { await api("DELETE", `/api/memory/${item.memory_id}`); route(); }
-        catch (e) { flash("bad", e.message); }
-      });
-      memList.append(el("div", { class: "item-card" },
-        el("div", { class: "row" },
-          memoryClassChip(item.memory_class),
-          el("span", { class: "note grow" }, item.project_id || "global",
-            item.provenance ? ` · written by ${item.provenance}` : ""),
-          forget),
-        el("p", {}, item.content)));
-    }
-    if (!list.length) memList.append(el("p", { class: "empty-state" }, "No durable memory yet."));
-  }
-  renderItems(items);
-
-  const search = el("input", { placeholder: "Search durable memory" });
-  search.addEventListener("input", async () => {
-    const q = search.value.trim();
-    if (!q) { renderItems(items); return; }
-    try {
-      const res = await api("GET", `/api/memory/search?q=${encodeURIComponent(q)}`);
-      renderItems(res.items);
-    } catch (e) { flash("bad", e.message); }
-  });
-
-  // v76-F8: how much the Queen knows — count + summed content size.
-  const memKb = (items.reduce((n, item) => n + (item.content || "").length, 0) / 1024)
-    .toFixed(1);
-  main.append(el("div", { class: "nt-grid" },
-    el("section", {}, el("h3", {}, "Proposals"), propList),
-    el("section", {},
-      el("h3", {}, "Durable memory"),
-      el("p", { class: "note" }, `${items.length} items · ${memKb} KB`),
-      el("div", { class: "composer inline" }, search),
-      memList)));
-}
 
 // ---------- Deep research report rendering (v17) ----------
 
@@ -4239,6 +3833,10 @@ async function viewRunDetail(main, taskId) {
   // v19-F1: one approval can carry a batch of shell commands.
   const batchCommands = Array.isArray(pending[0]?.commands) ? pending[0].commands : null;
   const isBatch = batchCommands && batchCommands.length > 1;
+  // Phase 10 10.1: a pending gate opens in the review flow (diff → forensics → verdict).
+  if (pending.length) {
+    actions.append(el("a", { class: "home-link", href: `#/review/${pending[0].review_id}` }, "Review →"));
+  }
   if (run.state === "pending_approval" || run.state === "completed") {
     actions.append(
       act(isBatch ? `Approve all ${batchCommands.length} commands` : "Approve", "primary", async () => {
@@ -4266,8 +3864,8 @@ async function viewRunDetail(main, taskId) {
           result.opened ? `PR: ${result.url}` : `PR not opened: ${result.detail}`);
       }));
     }
-    main.append(actions);
   }
+  if (actions.children.length) main.append(actions);
   for (const approval of detail.approvals) {
     main.append(el("p", { class: "note" },
       `approval ${approval.review_id.slice(0, 8)}: `, stateChip(approval.status),
@@ -4316,10 +3914,11 @@ async function viewRunDetail(main, taskId) {
     const { events } = await api("GET", `/api/runs/${taskId}/events`);
     events.forEach(append);
   } else {
-    const source = new EventSource(`/api/runs/${taskId}/events?stream=1`);
-    source.onmessage = (message) => append(JSON.parse(message.data));
-    source.addEventListener("done", () => { source.close(); route(); });
-    cleanup = () => source.close();
+    const live = liveSource(`/api/runs/${taskId}/events?stream=1`, {
+      message: (message) => append(JSON.parse(message.data)),
+      done: () => { live.close(); route(); },
+    });
+    cleanup = () => live.close();
   }
 
   if (detail.commands.length) {
@@ -4370,16 +3969,13 @@ async function viewRunDetail(main, taskId) {
 
   // The final diff, syntax-lit by line. v106-F9: fetched only when the run
   // recorded a patch artifact — a no-patch run has nothing to 404 about.
+  // Phase 10 10.1: drawn file by file (js/diff.js).
   if ((detail.artifacts || []).some((a) => a.kind === "patch")) try {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
-    const pre = el("pre", { class: "diff" });
-    for (const line of String(diff).split("\n")) {
-      const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
-        : line.startsWith("@@") ? "hunk" : "";
-      pre.append(el("div", { class: cls }, line || " "));
-    }
-    main.append(el("h2", {}, "diff"), pre);
+    main.append(el("h2", {}, "diff"), renderDiff(diff).node);
   } catch { /* no patch artifact — nothing to show */ }
+  // Phase 10 10.1: the forensics report (G10, V1, ledger, blame), on demand.
+  main.append(forensicsSection(taskId));
 }
 
 // ---------- Approvals ----------
@@ -4463,7 +4059,9 @@ async function viewApprovals(main) {
     const card = el("div", { class: "card" },
       el("p", {}, el("a", { href: `#/runs/${approval.task_id}` },
         el("span", { class: "mono" }, approval.task_id.slice(0, 12))),
-        " ", stateChip(run.state || "?"), ` — ${approval.action}: ${approval.reason}`),
+        " ", stateChip(run.state || "?"), ` — ${approval.action}: ${approval.reason} `,
+        // Phase 10 10.1: the same gate, with its diff and forensics in view.
+        el("a", { class: "home-link", href: `#/review/${approval.review_id}` }, "Review →")),
       el("p", { class: "note" }, (run.instructions || "").slice(0, 140)));
     // v76-F5 (C5): the age reads requested_at — the field the record carries.
     // The clock is visibility, not authority: timeouts still DENY (I6).
@@ -4556,227 +4154,7 @@ async function viewApprovals(main) {
   renderList("all");
 }
 
-// ---------- Templates & Skills (v75-F7: two tabs — authored vs learned) ----------
-
-let activeTemplatesTab = "templates";
-
-async function viewTemplates(main) {
-  header(main, "Templates & Skills",
-    "Saved recipes — hand-authored, or learned from confirmed runs and human-approved.");
-  const tabs = buildTabBar([
-    { key: "templates", label: "Templates", render: renderTemplatesTab },
-    { key: "skills", label: "Skills", render: renderSkillsTab },
-  ], { initial: activeTemplatesTab, onActivate: (key) => { activeTemplatesTab = key; } });
-  main.append(tabs.bar, tabs.content);
-}
-
-async function renderTemplatesTab(panel) {
-  const [{ templates }, repos, roster] = await Promise.all([
-    api("GET", "/api/templates"),
-    repoOptions(),
-    api("GET", "/api/workers"),
-  ]);
-
-  if (templates.length) {
-    panel.append(el("div", { class: "template-cards" }, templates.map(t => {
-      const remove = el("button", { class: "danger ghost" }, "remove");
-      remove.addEventListener("click", async () => {
-        try { await api("DELETE", `/api/templates/${t.name}`); route(); }
-        catch (e) { flash("bad", e.message); }
-      });
-      return el("div", { class: "template-card searchable" },
-        el("div", { class: "template-card-header" },
-          el("span", { class: "mono" }, t.name),
-          stateChip(t.worker_kind),
-          stateChip(t.provenance)),
-        el("div", { class: "template-card-params note" },
-          (t.params || []).length
-            ? `params: ${(t.params || []).map(p => p.name).join(", ")}`
-            : "no params"),
-        el("div", { class: "actions" },
-          // v75-F7 (C9): Use navigates to Assign; the ?template= prefill
-          // parsing ships in v76-F4 — until then this is a plain navigation.
-          el("a", {
-            class: "template-card-use",
-            href: `#/assign?template=${encodeURIComponent(t.name)}`,
-            title: "opens Assign",
-          }, "Use →"),
-          remove));
-    })));
-  } else panel.append(el("p", { class: "empty-state" }, "No templates yet."));
-
-  const name = el("input", { placeholder: "name" });
-  const caste = casteSelect(roster.castes);
-  const params = el("input", { placeholder: "target, level=high" });
-  const instructions = el("textarea", { placeholder: "Audit {{target}} dependencies…" });
-  const add = el("button", { class: "primary" }, "Save template");
-  add.addEventListener("click", async () => {
-    try {
-      await api("POST", "/api/templates", {
-        name: name.value.trim(), instructions: instructions.value, worker_kind: caste.value,
-        params: params.value.split(",").map(s => s.trim()).filter(Boolean).map(spec => {
-          const [n, d] = spec.split("=");
-          return d === undefined ? { name: n } : { name: n, default: d };
-        }),
-      });
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  panel.append(el("h3", {}, "new template"),
-    el("div", { class: "composer stacky" },
-      el("div", { class: "row" },
-        el("div", { class: "field" }, el("label", {}, "name"), name),
-        el("div", { class: "field" }, el("label", {}, "caste"), caste),
-        el("div", { class: "field grow" }, el("label", {}, "params (name or name=default)"), params)),
-      el("div", { class: "field" }, el("label", {}, "instructions ({{param}} placeholders)"), instructions),
-      add));
-
-  const suggestionName = el("input", { placeholder: "web-feature" });
-  const suggestionRepo = el("input", { list: "suggestion-repo-list", placeholder: "repo slug or host path" });
-  const suggestionInstructions = el("textarea", { placeholder: "Task that should reuse remembered approvals" });
-  const suggestionCaste = casteSelect(roster.castes);
-  const suggestionPreview = el("div", { class: "suggestion-preview" });
-  const preview = el("button", { class: "ghost" }, "Preview suggestion");
-  const confirm = el("button", { class: "primary", disabled: true }, "Confirm suggestion");
-  let currentSuggestion = null;
-  const resetSuggestion = () => {
-    currentSuggestion = null;
-    confirm.disabled = true;
-    suggestionPreview.replaceChildren();
-  };
-  for (const input of [suggestionName, suggestionRepo, suggestionInstructions, suggestionCaste]) {
-    input.addEventListener("input", resetSuggestion);
-    input.addEventListener("change", resetSuggestion);
-  }
-  const suggestionInput = () => {
-    const payload = {
-      name: suggestionName.value.trim(),
-      repo: suggestionRepo.value.trim(),
-      instructions: suggestionInstructions.value.trim(),
-      caste: suggestionCaste.value,
-    };
-    if (!payload.name) throw new Error("suggestion name is required");
-    if (!payload.repo) throw new Error("repo is required");
-    if (!payload.instructions) throw new Error("instructions are required");
-    return payload;
-  };
-  preview.addEventListener("click", async () => {
-    preview.disabled = true;
-    resetSuggestion();
-    try {
-      const payload = suggestionInput();
-      const { suggestions } = await previewTemplateSuggestion(payload);
-      if (!suggestions.length) {
-        suggestionPreview.append(el("p", { class: "empty-state" }, "No matching remembered approvals."));
-        return;
-      }
-      currentSuggestion = suggestions[0];
-      confirm.disabled = false;
-      suggestionPreview.append(el("div", { class: "suggestion-result" },
-        el("p", {}, el("span", { class: "mono" }, currentSuggestion.template.name),
-          ` ${currentSuggestion.template.worker_kind}`),
-        el("p", { class: "note" }, currentSuggestion.template.instructions),
-        renderSuggestionGrant(currentSuggestion)));
-    } catch (e) { flash("bad", e.message); } finally { preview.disabled = false; }
-  });
-  confirm.addEventListener("click", async () => {
-    confirm.disabled = true;
-    try {
-      const payload = suggestionInput();
-      await confirmTemplateSuggestion(payload.name, {
-        repo: payload.repo,
-        instructions: payload.instructions,
-        caste: payload.caste,
-      });
-      flash("ok", `saved template ${payload.name}`);
-      route();
-    } catch (e) { flash("bad", e.message); confirm.disabled = currentSuggestion === null; }
-  });
-  panel.append(el("h3", {}, "suggest from approvals"),
-    el("div", { class: "composer stacky" },
-      el("div", { class: "row" },
-        el("div", { class: "field" }, el("label", {}, "name"), suggestionName),
-        el("div", { class: "field grow" }, el("label", {}, "repo"), suggestionRepo,
-          el("datalist", { id: "suggestion-repo-list" }, repos.map(r => el("option", { value: r })))),
-        el("div", { class: "field" }, el("label", {}, "caste"), suggestionCaste)),
-      el("div", { class: "field" }, el("label", {}, "instructions"), suggestionInstructions),
-      el("div", { class: "actions" }, preview, confirm),
-      suggestionPreview));
-}
-
-// v75-F7: the lifecycle stepper renders the states that EXIST in skills.py
-// (draft → tested → approved; rejected is the terminal failure branch) — the
-// spec's six-step pipeline invented states with no data source (I8).
-const SKILL_STEPS = ["draft", "tested", "approved"];
-
-function buildSkillStepper(status) {
-  const currentIdx = SKILL_STEPS.indexOf(status);
-  return el("div", { class: "skill-stepper" },
-    SKILL_STEPS.map((step, i) => el("div", {
-      class: `skill-step${i <= currentIdx ? " reached" : ""}${i === currentIdx ? " current" : ""}`,
-    },
-      el("div", { class: "skill-step-dot", "aria-hidden": "true" }),
-      el("div", { class: "skill-step-label" }, step))),
-    status === "rejected" ? el("span", { class: "state rejected" }, "rejected") : null);
-}
-
-async function renderSkillsTab(panel) {
-  const { skills } = await api("GET", "/api/skills");
-  const propose = el("button", { class: "ghost" }, "Propose from confirmed runs");
-  propose.addEventListener("click", async () => {
-    try {
-      const { proposed } = await api("POST", "/api/skills/propose");
-      flash("ok", `${proposed.length} new draft(s)`); route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  panel.append(el("div", { class: "actions" }, propose));
-  if (!skills.length) {
-    panel.append(el("p", { class: "empty-state" },
-      "No candidates — propose after a few confirmed runs."));
-    return;
-  }
-  for (const skill of skills) {
-    const actions = el("div", { class: "actions" });
-    const decide = (label, cls, path, body) => {
-      const button = el("button", { class: cls }, label);
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try { await api("POST", `/api/skills/${skill.name}/${path}`, body); route(); }
-        catch (e) { flash("bad", e.message); button.disabled = false; }
-      });
-      return button;
-    };
-    if (skill.status === "draft") {
-      const repo = el("input", { placeholder: "test repo (slug or path)", style: "width:160px" });
-      const go = el("button", { class: "ghost" }, "Test");
-      go.addEventListener("click", async () => {
-        go.disabled = true;
-        try {
-          const result = await api("POST", `/api/skills/${skill.name}/test`,
-            { repo: repo.value.trim(), params: {} });
-          flash(result.passed ? "ok" : "bad",
-            result.passed ? "passed the G10 test gate" : "failed the test gate");
-          route();
-        } catch (e) { flash("bad", e.message); go.disabled = false; }
-      });
-      actions.append(repo, go);
-    }
-    if (skill.status === "tested") actions.append(decide("Approve", "primary", "approve", { actor: "operator" }));
-    if (skill.status === "draft" || skill.status === "tested") {
-      actions.append(decide("Reject", "danger", "reject", { actor: "operator" }));
-    }
-    panel.append(el("div", { class: "item-card searchable" },
-      el("div", { class: "row" },
-        el("span", { class: "mono" }, skill.name),
-        skill.registry_name ? el("span", { class: "note" }, `→ ${skill.registry_name}`) : null),
-      buildSkillStepper(skill.status),
-      el("div", { class: "note" }, skill.template.instructions.slice(0, 90)),
-      el("div", { class: "note" }, `${skill.occurrences} runs; test: ${skill.test_outcome || "-"}`),
-      actions));
-  }
-}
-
-// ---------- Schedules ----------
+// ---------- Projects (Settings → Projects; the Schedules page is js/pages/schedules.js) ----------
 
 // Graphite round A: the project cards and setup form, drawn into Settings →
 // Projects (settings.js) — no page header of their own any more.
@@ -5027,150 +4405,6 @@ async function viewProjectDetail(main, projectId) {
     main.append(el("div", { class: "run-cards" },
       projectRuns.slice(0, 20).map(buildRunCard)));
   } else main.append(el("p", { class: "empty-state" }, "No runs for this project yet."));
-}
-
-async function viewSchedules(main) {
-  header(main, "Schedules", "Recurring work the in-process ticker dispatches — no cron, no terminal.");
-  // v76-F6: one fetch — the health facts render ABOVE the table as banners,
-  // so a failing schedule is visible (and actionable) without scrolling.
-  const [
-    { schedules }, { templates },
-    { health: schedHealth }, { health: provHealth }, { nodes },
-  ] = await Promise.all([
-    api("GET", "/api/schedules"),
-    api("GET", "/api/templates"),
-    api("GET", "/api/schedules/health"),
-    api("GET", "/api/providers/health"),
-    api("GET", "/api/nodes"),
-  ]);
-
-  // Banners fire only for actual failures (I8/v65) — a clean page shows none.
-  const failing = schedHealth.filter(h => h.consecutive_failures >= 3);
-  if (failing.length) {
-    main.append(el("div", { class: "health-banner warn" },
-      el("span", {}, `${failing.length} schedule(s) failing:`),
-      failing.map(h => {
-        const entry = el("span", { class: "health-banner-item" },
-          el("span", { class: "mono" }, h.name),
-          ` ${h.consecutive_failures} consecutive failures`);
-        // The disable goes through the EXISTING toggle (no new mutation
-        // path, I5); the ticker itself auto-disables at 5 — the button is
-        // early action, not the only guard (I8).
-        if (h.consecutive_failures >= 5 && h.enabled) {
-          entry.append(el("button", {
-            class: "ghost",
-            onclick: async () => {
-              try { await api("PATCH", `/api/schedules/${h.name}`, { enabled: false }); route(); }
-              catch (e) { flash("bad", e.message); }
-            },
-          }, "disable"));
-        }
-        return entry;
-      }),
-      el("span", { class: "note" },
-        "the ticker auto-disables a schedule after 5 consecutive failures")));
-  }
-  const unreachable = provHealth.filter(h => !h.reachable);
-  if (unreachable.length) {
-    main.append(el("div", { class: "health-banner bad" },
-      el("span", {}, `${unreachable.length} provider(s) unreachable:`),
-      unreachable.map(h => el("span", { class: "health-banner-item mono" }, h.provider_id))));
-  }
-
-  if (schedules.length) {
-    main.append(el("table", {},
-      el("thead", {}, el("tr", {},
-        ["name", "caste", "project", "every", "on", "next run", "last run", "last outcome", "source", ""].map(h => el("th", {}, h)))),
-      el("tbody", {}, schedules.map(s => {
-        const toggle = el("button", { class: "ghost" }, s.enabled ? "disable" : "enable");
-        toggle.addEventListener("click", async () => {
-          await api("PATCH", `/api/schedules/${s.name}`, { enabled: !s.enabled }); route();
-        });
-        const remove = el("button", { class: "danger" }, "remove");
-        remove.addEventListener("click", async () => {
-          await api("DELETE", `/api/schedules/${s.name}`); route();
-        });
-        const project = s.project_context
-          ? `${s.project_context.project_id} (${s.project_context.phase})`
-          : "-";
-        // v76-F6: next-run is a countdown ("in 4h 12m"; a past stamp reads
-        // "overdue"), the absolute time one hover away (I8). Last-run stays
-        // absolute — it is a record, not a countdown.
-        const nextRun = s.next_run_at && new Date(s.next_run_at).getTime() < Date.now()
-          ? "overdue" : relativeTime(s.next_run_at);
-        return el("tr", {},
-          el("td", { class: "mono" }, s.name),
-          el("td", {}, s.worker_kind),
-          el("td", {}, project),
-          el("td", {}, `${s.interval_seconds}s`),
-          el("td", {}, s.enabled ? "yes" : "no"),
-          el("td", { title: fmtTs(s.next_run_at) }, nextRun),
-          el("td", {}, fmtTs(s.last_run_at)),
-          el("td", {}, s.last_state || "-"),
-          el("td", {}, s.template_name ? `template ${s.template_name}` : "inline"),
-          el("td", { class: "actions" }, toggle, remove));
-      }))));
-  } else main.append(el("p", { class: "empty-state" }, "No schedules yet."));
-
-  // v14: schedule + provider health. v15: ops nodes. (Fetched up top since
-  // v76-F6 — the banners summarize; this table stays the record.)
-  if (schedHealth.length || provHealth.length || nodes.length) {
-    const rows = [];
-    for (const n of nodes) {
-      rows.push(el("tr", {},
-        el("td", {}, `node: ${n.node_id}`),
-        el("td", {}, n.trust_tier),
-        el("td", {}, `${n.allowed_capabilities.length} ops capabilities`)));
-    }
-    for (const h of schedHealth) {
-      const rate = h.success_rate == null ? "-" : `${Math.round(h.success_rate * 100)}%`;
-      rows.push(el("tr", {},
-        el("td", {}, `schedule: ${h.name}`),
-        el("td", {}, h.enabled ? "enabled" : "disabled"),
-        el("td", {}, `success ${rate}, consecutive fails ${h.consecutive_failures}`)));
-    }
-    for (const h of provHealth) {
-      rows.push(el("tr", {},
-        el("td", {}, `provider: ${h.provider_id}`),
-        el("td", {}, h.reachable ? "reachable" : "unreachable"),
-        el("td", {}, h.model_found ? "model ok" : (h.error || "model missing"))));
-    }
-    main.append(el("section", {}, el("h3", {}, "Health"),
-      el("table", {}, el("tbody", {}, rows))));
-  }
-
-  const name = el("input", { placeholder: "nightly-audit" });
-  const repo = el("input", { placeholder: "repo slug or path" });
-  const every = el("input", { placeholder: "30s / 5m / 2h / 1d", value: "1d" });
-  const templateSel = el("select", {}, el("option", { value: "" }, "(inline instructions)"),
-    templates.map(t => el("option", { value: t.name }, t.name)));
-  const params = el("input", { placeholder: "key=value, key=value" });
-  const instructions = el("input", { placeholder: "instructions (inline schedules)" });
-  const add = el("button", { class: "primary" }, "Add schedule");
-  add.addEventListener("click", async () => {
-    try {
-      const body = {
-        name: name.value.trim(), repo: repo.value.trim(), every: every.value.trim(),
-      };
-      if (templateSel.value) {
-        body.template = templateSel.value;
-        body.params = Object.fromEntries(params.value.split(",")
-          .map(s => s.trim()).filter(Boolean).map(pair => pair.split("=").map(x => x.trim())));
-      } else body.instructions = instructions.value;
-      await api("POST", "/api/schedules", body);
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  main.append(el("div", { class: "composer stacky" },
-    el("div", { class: "row" },
-      el("div", { class: "field" }, el("label", {}, "name"), name),
-      el("div", { class: "field grow" }, el("label", {}, "repo"), repo),
-      el("div", { class: "field" }, el("label", {}, "every"), every)),
-    el("div", { class: "row" },
-      el("div", { class: "field" }, el("label", {}, "template"), templateSel),
-      el("div", { class: "field grow" }, el("label", {}, "params"), params),
-      el("div", { class: "field grow" }, el("label", {}, "instructions"), instructions),
-      add)));
 }
 
 // ---------- Policies (graphite round A: the page lives in policies.js) ----------
@@ -5790,4 +5024,6 @@ schedulePoll(POLL_MIN_MS);
 
 // H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
 // only declare at top level). After the boot marker, so tests/web never sees it.
-export { api, buildFilterBar, buildTabBar, chatTitle, el, flash, fmtTs, header, iconButton, relativeTime, renderAssistantTab, renderChannelsTab, renderProjectList, renderReposTab, renderWebhooksTab, renderWorkerModel, renderWorkersTab, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };
+// Phase 10 10.1: api/el/iconButton now come from js/; re-exported so the
+// modules that import them from here keep working unchanged.
+export { api, buildFilterBar, buildTabBar, casteSelect, chatTitle, confirmTemplateSuggestion, copyText, el, flash, fmtTs, header, iconButton, offersRemember, previewTemplateSuggestion, relativeTime, renderAssistantTab, renderChannelsTab, renderMarkdown, renderProjectList, renderReposTab, renderSuggestionGrant, renderWebhooksTab, renderWorkerModel, renderWorkersTab, repoOptions, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };
