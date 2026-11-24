@@ -246,7 +246,7 @@ your phone. See
 
 ## Status
 
-As of 1.6.1:
+As of 2.0.0:
 
 | Works today | Being wired up | Opinions pending code |
 |---|---|---|
