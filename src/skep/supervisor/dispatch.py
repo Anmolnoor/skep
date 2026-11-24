@@ -820,6 +820,14 @@ def run_task(
                         f"pr={pr_match[1]} first, then dispatch the review"
                     )
                 pr_pin.pop("fetched_at")
+                if (
+                    resume_workspace is not None
+                    and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]
+                ):
+                    # R3 (N5): an unpinned run's warm tree is at whatever head
+                    # it had — never paired with this newly resolved pin.
+                    resume_workspace = None
+                    effective_worker_state = strip_resume_cursor(effective_worker_state)
         # v89-F1: shield registration and the sweep share one lock, and the
         # keep-set snapshot sits INSIDE it with the sweep it feeds — a snapshot
         # taken outside would reopen the very window the lock exists to close.

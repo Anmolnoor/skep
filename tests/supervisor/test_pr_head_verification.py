@@ -489,6 +489,47 @@ def test_a_resumed_review_keeps_its_pin_or_starts_fresh_never_mixed(
         assert retry.base_commit == newer
 
 
+def test_an_unpinned_pr_run_resumed_never_pairs_its_old_tree_with_a_new_pin(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (N5): a retry of a PR run that recorded NO pin (one dispatched
+    before pins) takes the latest fetch as its pin — and its warm worktree,
+    still at the old head, is discarded, never paired with the new pin."""
+    from skep.supervisor.dispatch import run_task
+
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        fetch: dict[str, Any] = {
+            "pr_repo": ORIGIN, "number": 7, "base_branch": "main", "base_commit": base,
+        }  # fmt: skip
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=head)
+        first = run_task(repo, "Review. MODE:badresult", config=config, ref=PR_REF).record
+        assert first.state == "failed" and first.workspace
+        store._conn.execute("UPDATE runs SET pr_json = NULL WHERE task_id = ?", (first.task_id,))
+        store._conn.commit()
+        git(repo, "checkout", "-q", "dependabot/bump")
+        (repo / "existing.py").write_text("value = 0  # pushed again\n", encoding="utf-8")
+        git(repo, "commit", "-qam", "push")
+        newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "-q", "main")
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
+    finally:
+        store.close()
+
+    retry = run_task(
+        repo, "Review. MODE:happy", config=config, ref=PR_REF, resume_of=first.task_id
+    ).record
+
+    store = RunStore(config.db_path)
+    try:
+        pinned = store.run_pr(retry.task_id)
+    finally:
+        store.close()
+    assert pinned == _pair(base, newer) and retry.workspace != first.workspace
+    assert retry.base_commit == newer
+
+
 # --- 2. G10 + V1 across base...head when the review run changed nothing --------
 
 
