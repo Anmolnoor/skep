@@ -2406,7 +2406,7 @@ def cmd_provider_remove(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         try:
-            result = remove_provider(store, provider_id=args.provider_id)
+            result = remove_provider(store, config.home, provider_id=args.provider_id)
         except ProviderError as exc:
             return _err(str(exc))
     finally:

@@ -1526,16 +1526,20 @@ def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str)
     }
 
 
-def remove_provider(store: RunStore, *, provider_id: str) -> dict[str, Any]:
-    """Delete a profile. Removing the ACTIVE profile does not touch the saved
-    assistant llm_* settings — the Queen keeps speaking its current config
-    until another profile is activated."""
+def remove_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, Any]:
+    """Delete a profile and its key file (v108-F4: no orphaned credential; a
+    re-add of the id never inherits it — every face, ADR 0050). Removing the
+    ACTIVE profile does not touch the saved assistant llm_* settings — the
+    Queen keeps speaking its current config until another profile is
+    activated. ``home`` is the supervisor home."""
     from ..providers import ProviderError
+    from .llm import store_provider_api_key
 
     profile = store.get_provider_profile(provider_id)
     if profile is None:
         raise ProviderError(f"unknown provider {provider_id!r}")
     store.delete_provider_profile(provider_id)
+    store_provider_api_key(home, provider_id, "")
     return {"removed": provider_id, "was_active": profile.active}
 
 
