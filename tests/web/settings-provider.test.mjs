@@ -90,7 +90,7 @@ test("Save writes exactly the values that passed, then re-renders", async () => 
   await button("Save connection").click();
   await flush();
   assert.deepEqual(calls.filter(([m]) => m === "PUT"), [
-    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", api_key: "sk-new" }],
+    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", api_key: "sk-new", default_model: "qwen3:14b" }],
   ]);
   assert.equal(routed(), 1);
   assert.match(app.flashes.at(-1)[1], /saved — the Queen now uses http:\/\/new:11434/);
@@ -197,4 +197,17 @@ test("a probed model is the one Save will activate", async () => {
   await button("Test connection").click();
   await flush();
   assert.match(panel.querySelector(".probe-result").textContent, /qwen3:14b answered the 1-token probe \(the model Save activates\)/);
+});
+
+test("R3 J11: on a fresh profile Save persists the model the probe named — the one it says Save activates", async () => {
+  const fresh = { configured: false, protocol: "ollama", base_url: null, api_key_set: false, num_ctx: 8192, num_ctx_source: "default", default_model: null };
+  const { button, baseUrl, calls } = await models({ "GET /api/llm/config": fresh, "GET /api/providers": { providers: [] }, "GET /api/providers/health": { health: [] } });
+  await edit(baseUrl, "http://new:11434");
+  await button("Test connection").click();
+  await flush();
+  await button("Save connection").click();
+  await flush();
+  assert.deepEqual(calls.filter(([m]) => m === "PUT"), [
+    ["PUT", "/api/llm/config", { base_url: "http://new:11434", protocol: "ollama", default_model: "qwen3:14b" }],
+  ]);
 });

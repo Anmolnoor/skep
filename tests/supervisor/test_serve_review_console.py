@@ -705,3 +705,21 @@ def test_an_approval_row_carries_its_own_stored_argv_quoted(
         store.close()
     (row,) = serve_client(config).get("/api/approvals").json()["approvals"]
     assert row["command_lines"] == ["npm install", "npm run build:it 'a b'"]
+
+
+def test_a_fresh_profile_saves_the_model_its_probe_named(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R3 J11: Settings' Save sends the probed model with the staged
+    connection; on a fresh profile that model becomes the default."""
+    client = serve_client(config)
+    assert not client.get("/api/llm/config").json().get("default_model")
+    probed = client.post(
+        "/api/llm/probe", json={"base_url": ollama.base_url, "api_key": "sk-fake"}
+    ).json()
+    saved = client.put(
+        "/api/llm/config",
+        json={"base_url": ollama.base_url, "api_key": "sk-fake", "default_model": probed["model"]},
+    )
+    assert saved.status_code == 200, saved.text
+    assert client.get("/api/llm/config").json()["default_model"] == probed["model"] == "llama3.2"

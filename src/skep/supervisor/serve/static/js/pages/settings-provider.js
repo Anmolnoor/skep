@@ -34,6 +34,7 @@ export function stagedConnection(fields) {
     "Test the connection first: nothing is saved until you press Save.");
   save.disabled = true;
   let passed = null; // the JSON of the values that last passed, or null
+  let answered = null; // R3 J11: the model that answered that probe — Save persists it
   const show = (tone, ...text) => {
     result.className = `probe-result note tone-${tone}`;
     result.replaceChildren(...text);
@@ -73,6 +74,7 @@ export function stagedConnection(fields) {
       }
       const ctx = verdict.context_window || {};
       passed = JSON.stringify(body);
+      answered = verdict.model;
       save.disabled = false;
       show("ok",
         `✓ ${reach}; ${verdict.model} answered the 1-token probe (the model Save activates); `
@@ -88,7 +90,9 @@ export function stagedConnection(fields) {
     if (passed === null || JSON.stringify(body) !== passed) return; // only what passed
     save.disabled = true;
     try {
-      await api("PUT", "/api/llm/config", body);
+      // R3 J11: the model the probe said Save activates, saved with it — a
+      // fresh profile has no default model of its own to fall back on.
+      await api("PUT", "/api/llm/config", { ...body, default_model: answered });
       flash("ok", `saved — the Queen now uses ${body.base_url}`);
       route();
     } catch (e) { flash("bad", e.message); save.disabled = false; }
