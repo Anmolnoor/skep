@@ -10,7 +10,7 @@ import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
 import { viewInbox } from "./js/pages/inbox.js";
-import { forensicsSection, routeLive, viewReview } from "./js/pages/run-detail.js";
+import { forensicsSection, g10Provenance, routeLive, viewReview } from "./js/pages/run-detail.js";
 import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
 import { viewSchedules } from "./js/pages/schedules.js";
 import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js";
@@ -1064,6 +1064,8 @@ function header(main, title, subtitle) {
 // graphite-nav: "Settings / <page>"; a one-tab page adds its tab's label
 // ("Settings / Policies / Now"); a repeat ("Settings / Settings") is dropped.
 function surfaceCrumb(title) {
+  // Phase 10 R2 I10: a run's page sits under the list it opens from.
+  if (/^#\/runs\/[^/?]+/.test(location.hash)) return `Runs / ${title}`;
   const item = [...document.querySelectorAll(".sidebar-pages a[data-tab]")]
     .find(link => link.getAttribute("href") === location.hash);
   const parts = ["Settings", title, item?.textContent.trim()];
@@ -3807,6 +3809,9 @@ async function viewRunDetail(main, taskId) {
     } else if ((rv.commands || []).length) {
       kv("re-verify recorded (not run)", el("span", { class: "mono" }, rv.commands.join(" && ")));
     }
+    // Phase 10 R2 I10 (I2, I8): whose command it was and the counts, as the
+    // review page says them.
+    if (rv.outcome !== "not_applicable") for (const [k, v] of g10Provenance(rv)) kv(k, v);
   } else if (detail.reverification_missing) {
     // ES-F291 follow-up (I8): a patch with no G10 record is "not re-verified",
     // never a blank row — landing refuses it until the record exists.

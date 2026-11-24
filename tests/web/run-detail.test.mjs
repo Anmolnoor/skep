@@ -256,3 +256,27 @@ test("an approve that lands with a warning shows the warning", async () => {
   const alerts = main.querySelectorAll(".banner").filter(b => b.getAttribute("role") === "alert").map(b => b.textContent);
   assert.ok(alerts.includes("⚠ G10 could not re-verify this patch"), alerts);
 });
+
+// Phase 10 R2 I10: the run page names G10's command source and the counts,
+// as the review page does.
+test("run detail's G10 rows name the command source and the test counts", async () => {
+  const app = loadApp();
+  const body = {
+    run: { task_id: "t1", instructions: "land me", state: "completed", repo: "/r" },
+    transitions: [], artifacts: [], commands: [], approvals: [], policy_blocks: [],
+    reverification: g10(), // commands_source "project", counts 4 → 5
+  };
+  app.api = async (method, path) => (path === "/api/runs/t1" ? body : { events: [] });
+  const main = app.document.createElement("main");
+  main.dataset.route = "1";
+  await app.viewRunDetail(main, "t1");
+  const dts = main.querySelectorAll("dt").map(n => n.textContent);
+  const dds = main.querySelectorAll("dd").map(n => n.textContent);
+  const rows = Object.fromEntries(dts.map((k, i) => [k, dds[i]]));
+  assert.match(rows["command from"], /^project pin/);
+  assert.match(rows.tests, /baseline 4 executed .* → patched 5 executed/);
+  body.reverification = g10({ commands_source: "worker", test_counts: null });
+  main.replaceChildren();
+  await app.viewRunDetail(main, "t1");
+  assert.match(main.textContent, /worker fallback/);
+});
