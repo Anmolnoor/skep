@@ -25,7 +25,9 @@ Every approval row (`skep review`, `GET /api/approvals`) carries one status:
 
 - `pending`: waiting on a human answer.
 - `applying`: claimed by the verdict now running (a landing or a resume).
-- `approved`: a human approved it.
+- `approved`: by a human, or by skep under a policy the operator turned on
+  (a verified patch auto-applied, an unlocked project's gate). The recorded
+  actor (`resolved_by`) says which: an `auto:…` actor is skep's answer.
 - `denied`: a human denied it, or its apply failed or was interrupted (the
   note says which).
 - `superseded`: minted for a `skep review` verdict that was then refused as
