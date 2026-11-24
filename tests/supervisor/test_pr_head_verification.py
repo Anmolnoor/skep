@@ -637,6 +637,46 @@ def test_a_patch_with_trailing_whitespace_is_still_read_by_v1(repo: Path) -> Non
     assert "skip_marker_added:tests/test_app.py" in static_tamper_flags(repo, patch, seed)
 
 
+def test_a_hook_the_pr_ships_never_runs_on_a_supervisor_checkout(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (D7, S4): with a worktree-relative core.hooksPath, a PR that adds
+    .githooks/post-checkout would run its own code when skep materialises
+    the head — in G10's checkout and in dispatch's worktree add. Neither
+    runs a hook, even without the process-wide GIT_CONFIG hardening (ES-F3):
+    the two call sites carry the flags themselves."""
+    from skep.supervisor.worktree import create_worktree
+
+    _seed(repo)
+    git(repo, "config", "core.hooksPath", ".githooks")
+    canary = tmp_path / "canary"
+    hook = repo / ".githooks" / "post-checkout"
+    git(repo, "checkout", "-qb", "hooked")
+    hook.parent.mkdir()
+    hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(canary))}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "hook")
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    canary.unlink(missing_ok=True)  # the operator's own checkout above ran it
+    git(repo, "update-ref", PR_REF, head)
+    git(repo, "update-ref", "refs/skep/pr/7/base", git(repo, "rev-parse", "main").stdout.strip())
+
+    for name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        monkeypatch.delenv(name, raising=False)
+    outcome, _record, _task_id = _g10(repo, config, head, pin="true")
+    assert outcome.exit_codes, outcome.detail
+    assert not canary.exists(), "G10's checkout ran the PR's hook"
+    wt = create_worktree(repo, tmp_path / "wts", "dispatch-like", "main")
+    git(wt, "-c", "core.hooksPath=.githooks", "checkout", "-q", "--detach", head)
+    assert canary.exists()  # the hook is live: a plain checkout runs it
+    canary.unlink()
+    create_worktree(wt, tmp_path / "wts", "dispatch-like-2", head)  # run from a hooked tree
+
+    assert not canary.exists(), "dispatch's worktree add ran the PR's hook"
+
+
 def test_a_breaking_pr_fails_g10(repo: Path, config: SupervisorConfig) -> None:
     _seed(repo)
     _base, head = _pr(repo, {"app.py": "def value():\n    return 2\n"})

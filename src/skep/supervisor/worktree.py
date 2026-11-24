@@ -253,11 +253,17 @@ def _resolve_ref(repo: Path, ref: str) -> str:
     return ref
 
 
+# Phase 09 R2 (D7): the ES-F3 pairs, as flags on each git that materialises
+# PR content — held even where a caller's env lost GIT_CONFIG_COUNT.
+NO_HOOKS = tuple(arg for key, value in _GIT_HARDENING for arg in ("-c", f"{key}={value}"))
+
+
 def create_worktree(repo: Path, root: Path, task_id: str, ref: str | None = None) -> Path:
-    """Create a detached worktree for one task under ``root``."""
+    """Create a detached worktree for one task under ``root`` — no hook or
+    fsmonitor the checked-out tree ships ever runs (``NO_HOOKS``)."""
     root.mkdir(parents=True, exist_ok=True)
     path = root / task_id
-    args = ["worktree", "add", "--detach", str(path)]
+    args = [*NO_HOOKS, "worktree", "add", "--detach", str(path)]
     if ref:
         args.append(_resolve_ref(repo, ref))
     with TREE_LOCK:

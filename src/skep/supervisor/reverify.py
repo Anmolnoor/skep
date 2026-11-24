@@ -46,6 +46,7 @@ from .policy import test_config_changes
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
+    NO_HOOKS,
     TREE_LOCK,
     _resolve_ref,
     create_worktree,
@@ -1027,7 +1028,7 @@ def reverify(
             # to another base (a tree nobody pushed; `git apply` drops a
             # submodule pointer).
             checked_out = subprocess.run(
-                ["git", "-C", str(worktree), "checkout", "-q", "--detach",
+                ["git", "-C", str(worktree), *NO_HOOKS, "checkout", "-q", "--detach",
                  "--no-recurse-submodules", head],
                 capture_output=True,
                 text=True,
