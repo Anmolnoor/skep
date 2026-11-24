@@ -102,6 +102,40 @@ def test_list_approvals_reads_store_rows_only(
     assert result["recently_resolved"] == []
 
 
+def test_list_runs_carries_a_review_runs_pr_and_clamps_its_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 (N6): the pinned PR rides the row like the attended view's (a
+    store lookup), and the limit is clamped to 1..50."""
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        done, _gated = _seed(store, tmp_path)
+        review = mint_task(workspace=tmp_path / "ws-r", instructions="r", budget=DEFAULT_BUDGET)
+        store.create_run(
+            review, repo=tmp_path, ref=None, execution_mode="sandbox",
+            pr={"repo": "octo/demo", "number": 7},
+        )  # fmt: skip
+        seen: list[int] = []
+        real = store.recent_runs
+
+        def spy(limit: int) -> Any:
+            seen.append(limit)
+            return real(limit)
+
+        monkeypatch.setattr(store, "recent_runs", spy)
+        _no_disk_no_git(monkeypatch)
+        result = scheduled_read("list_runs", {"limit": 5}, store=store)
+        for asked in (-3, 0, 500):
+            scheduled_read("list_runs", {"limit": asked}, store=store)
+    finally:
+        monkeypatch.undo()
+        store.close()
+    rows = {row["task_id"]: row for row in result["runs"]}
+    assert rows[review.task_id]["pr"] == "octo/demo#7"
+    assert "pr" not in rows[done]
+    assert seen == [5, 1, 10, 50]  # 0 is "unset": the default 10
+
+
 @pytest.fixture()
 def ollama() -> Iterator[FakeOllama]:
     server = FakeOllama(api_key=None).start()

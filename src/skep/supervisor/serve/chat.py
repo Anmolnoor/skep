@@ -1598,7 +1598,7 @@ _PROJECTION_NOTE = (
 def _stored_run_row(store: Any, record: Any) -> dict[str, Any]:
     """A run as its store row says — what ``_run_view`` shows minus every
     disk probe."""
-    return {
+    row = {
         "task_id": record.task_id,
         "state": record.state,
         "repo": record.repo,
@@ -1611,6 +1611,9 @@ def _stored_run_row(store: Any, record: Any) -> dict[str, Any]:
         "reverification": actions.reverification_summary(store.reverification_for(record.task_id)),
         "applied_branch": actions.applied_branch_for(store, record.task_id),
     }
+    if (pr := store.run_pr(record.task_id)) is not None:  # R4 (N6): a store lookup
+        row["pr"] = f"{pr['repo']}#{pr['number']}"
+    return row
 
 
 def scheduled_read(name: str, args: dict[str, Any], *, store: Any) -> dict[str, Any]:
@@ -1618,7 +1621,7 @@ def scheduled_read(name: str, args: dict[str, Any], *, store: Any) -> dict[str, 
     (SCHEDULED_PROJECTIONS) from store rows alone — the attended tools open
     worker event logs, probe patch files and may run git."""
     if name == "list_runs":
-        limit = min(int(args.get("limit") or 10), 50)
+        limit = max(1, min(int(args.get("limit") or 10), 50))
         runs = [_stored_run_row(store, record) for record in store.recent_runs(limit)]
         return {"runs": runs, "note": _PROJECTION_NOTE}
     approvals = []
