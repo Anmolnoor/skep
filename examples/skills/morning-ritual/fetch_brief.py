@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import sys
 import urllib.request
 
@@ -38,10 +39,22 @@ WEATHER_URL = (
 )
 
 
+# skep.mcp_servers.calendar's own fetch cap: a host cannot flood the brief.
+WEATHER_CAP_BYTES = 512 * 1024
+
+
 def weather(where: str) -> str:
-    lat, lon = (float(part) for part in where.split(","))
+    try:
+        lat, lon = (float(part) for part in where.split(","))
+    except ValueError:
+        lat = lon = math.nan
+    if not (math.isfinite(lat) and math.isfinite(lon) and abs(lat) <= 90 and abs(lon) <= 180):
+        raise ValueError(f"--weather wants LAT,LON in degrees (-90..90,-180..180), got {where!r}")
     with urllib.request.urlopen(WEATHER_URL.format(lat=lat, lon=lon), timeout=10) as response:
-        daily = json.load(response)["daily"]
+        body = response.read(WEATHER_CAP_BYTES + 1)
+    if len(body) > WEATHER_CAP_BYTES:
+        raise ValueError(f"the weather answer passed {WEATHER_CAP_BYTES // 1024} KiB")
+    daily = json.loads(body)["daily"]
     return (
         f"high {daily['temperature_2m_max'][0]}°C, low {daily['temperature_2m_min'][0]}°C, "
         f"rain chance {daily['precipitation_probability_max'][0]}%"

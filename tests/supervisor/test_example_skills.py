@@ -148,6 +148,36 @@ def test_fetch_brief_prints_labeled_sections_mail_last(
     assert urls and urls[0].startswith("https://api.open-meteo.com/") and "49.28" in urls[0]
 
 
+@pytest.mark.parametrize("where", ["nan,0", "inf,0", "91,0", "0,-180.5", "1", "1,2,3", "a,b"])
+def test_fetch_brief_refuses_a_coordinate_outside_the_globe(
+    where: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N11: a non-finite or out-of-range LAT,LON never reaches the URL."""
+    module = _fetch_brief()
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *a, **k: pytest.fail("fetched"))
+    with pytest.raises(ValueError, match="LAT,LON"):
+        module.weather(where)
+
+
+def test_fetch_brief_caps_the_weather_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N11: the answer is read at most 512 KiB + 1 (calendar.py's cap)."""
+    from skep.mcp_servers import calendar
+
+    module = _fetch_brief()
+    asked: list[object] = []
+
+    class Huge(_Response):
+        def read(self, *args: object) -> bytes:
+            asked.extend(args)
+            return b" " * (int(str(args[0])) if args else 10**7)
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *a, **k: Huge())
+    with pytest.raises(ValueError, match="512 KiB"):
+        module.weather("49.28,-123.12")
+    assert module.WEATHER_CAP_BYTES == calendar._FETCH_CAP_BYTES
+    assert asked == [module.WEATHER_CAP_BYTES + 1]
+
+
 def test_fetch_brief_says_which_source_failed_and_exits_1(
     brief_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
