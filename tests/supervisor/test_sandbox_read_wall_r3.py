@@ -345,3 +345,41 @@ def test_the_interpreter_s_whole_link_chain_is_inside_the_wall(
         cwd=work, capture_output=True, text=True, check=False, timeout=60,
     )  # fmt: skip
     assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr
+
+
+@needs_bwrap
+def test_an_interpreter_reached_through_a_linked_dir_runs_in_the_wall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI (Ubuntu): uv's overlay python points at
+    ``~/.local/share/uv/python/cpython-3.12-…/bin/python3.12``, where
+    ``cpython-3.12-…`` is uv's minor-version LINK to the patch dir. With HOME
+    faked (tests do) that toolchain dir is not bound, so only the resolved
+    dir was — the link itself was missing and bwrap's execvp hit ENOENT."""
+    real = Path(os.path.realpath(sys.executable))
+    pythons = tmp_path / "pythons"
+    (pythons / "cpython-3.12.99" / "bin").mkdir(parents=True)
+    (pythons / "cpython-3.12.99" / "bin" / "python3.12").symlink_to(real)
+    (pythons / "cpython-3.12").symlink_to(pythons / "cpython-3.12.99")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    overlay_python = overlay / "bin" / "python"
+    overlay_python.symlink_to(pythons / "cpython-3.12" / "bin" / "python3.12")
+    site = overlay / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    site.mkdir(parents=True)
+    import skep
+
+    (site / "skep.pth").write_text(str(Path(skep.__file__).resolve().parents[1]) + "\n")
+    monkeypatch.setattr(sys, "executable", str(overlay_python))
+    work = tmp_path / "work"
+    work.mkdir()
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile", workspace=work, skep_home=tmp_path / "skep", read_allowlist=()
+    )
+    probe = f"{overlay_python} -S -c 'print(1+1)'"
+    proc = subprocess.run(
+        sandbox.wrap_command(["/bin/sh", "-c", probe], profile),
+        cwd=work, capture_output=True, text=True, check=False, timeout=60,
+    )  # fmt: skip
+    assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr

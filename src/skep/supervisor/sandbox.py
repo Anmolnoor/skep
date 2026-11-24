@@ -268,12 +268,16 @@ def _in_place(path: Path, skep_home: Path) -> bool:
 
 
 def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
-    """The env (or bin dir) of each hop in ``executable``'s symlink chain."""
+    """The env (or bin dir) of each hop in ``executable``'s symlink chain,
+    plus any linked dir a hop is reached through — uv's ``cpython-3.12-…``
+    minor-version link to its patch dir: binding only the resolved dir left
+    that link missing in the wall (``_alias_links`` recreates it)."""
     hops: list[Path] = []
     current = executable
     for _ in range(limit):
         env = current.parent.parent
-        hops.append(env if (env / "pyvenv.cfg").is_file() else current.parent)
+        hop = env if (env / "pyvenv.cfg").is_file() else current.parent
+        hops += [hop, *(parent for parent in hop.parents if parent.is_symlink())]
         if not current.is_symlink():
             break
         target = Path(os.readlink(current))
