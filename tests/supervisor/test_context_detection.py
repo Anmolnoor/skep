@@ -171,10 +171,129 @@ def test_loopback_ollama_shows_the_real_max_but_keeps_ram_capped(
     assert llm.resolved_num_ctx(store) == (DEFAULT_NUM_CTX, "provider-api")
 
 
-def test_anthropic_protocol_floor_is_a_catalog_answer(store: RunStore, tmp_path: Path) -> None:
+def test_an_unknown_anthropic_wire_model_is_the_honest_default(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """F4: the anthropic wire carries third-party presets too — a model the
+    catalog does not name exactly is the default, never a 200k guess (I8)."""
     _profile(store, "anthropic", "http://127.0.0.1:9", "claude-fable-5", protocol="anthropic")
     refresh_model_ctx(store, tmp_path, "claude-fable-5")
-    assert resolve_context_window(store) == ContextWindow(200_000, AUTO_NUM_CTX_CAP, "catalog")
+    assert resolve_context_window(store) == ContextWindow(
+        DEFAULT_NUM_CTX, DEFAULT_NUM_CTX, "default"
+    )
+    assert resolve_context_window(store, model="claude-sonnet-4-5") == ContextWindow(
+        200_000, AUTO_NUM_CTX_CAP, "catalog"
+    )
+
+
+def _lmstudio(model: dict[str, object]) -> dict[str, object]:
+    return {"models": [{"type": "llm", "max_context_length": 262144, **model}]}
+
+
+def test_lm_studio_native_listing_sets_the_window(
+    store: RunStore, tmp_path: Path, openai: FakeOpenAI
+) -> None:
+    """F5: LM Studio's /v1/models carries no window; its native
+    GET /api/v1/models does — the loaded instance's context_length is what
+    a request may use, else the model's max_context_length."""
+    openai.api_key = None
+    openai.native_models = _lmstudio(
+        {
+            "key": "m1",
+            "loaded_instances": [{"id": "m1", "config": {"context_length": 32768}}],
+        }
+    )
+    _profile(store, "lmstudio", openai.base_url, "m1")
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert resolve_context_window(store) == ContextWindow(32768, 32768, "provider-api")
+    openai.native_models = _lmstudio({"key": "m1", "loaded_instances": []})
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert resolve_context_window(store).model_window == 262144
+
+
+def test_lm_studio_matches_a_named_loaded_instance(
+    store: RunStore, tmp_path: Path, openai: FakeOpenAI
+) -> None:
+    openai.api_key = None
+    openai.models = ["m1:2"]
+    openai.native_models = _lmstudio(
+        {
+            "key": "m1",
+            "loaded_instances": [
+                {"id": "m1", "config": {"context_length": 4096}},
+                {"id": "m1:2", "config": {"context_length": 16384 * 2}},
+            ],
+        }
+    )
+    _profile(store, "lmstudio", openai.base_url, "m1:2")
+    refresh_model_ctx(store, tmp_path, "m1:2")
+    assert resolve_context_window(store).model_window == 32768
+
+
+@pytest.mark.parametrize(
+    "listing", [{"data": 7}, {"data": "m1"}, [1, 2], {"data": [{"id": "m1", "max_model_len": "x"}]}]
+)
+def test_a_malformed_listing_is_a_miss_never_a_crash(
+    store: RunStore, tmp_path: Path, openai: FakeOpenAI, listing: object
+) -> None:
+    """F9: whatever shape the endpoint returns, detection is a miss."""
+    openai.api_key = None
+    openai.listing_body = listing
+    openai.native_models = {"models": {"m1": 1}}
+    openai.props = {"default_generation_settings": [1]}
+    _profile(store, "odd", openai.base_url, "m1")
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert resolve_context_window(store).source == "default"
+
+
+def test_a_credential_error_is_a_miss_never_a_crash(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9: the Copilot token exchange raises OllamaError; a refresh runs
+    after the save committed, so it must not turn the save into a 500."""
+    profile = _profile(store, "copilot", "http://127.0.0.1:9", "m1")
+    key = context_cache_key(profile.provider_id, profile.base_url, "m1")
+    store.set_setting(key, {"window": 32768, "max_output": None})
+
+    def refuse(*_: object, **__: object) -> str:
+        raise llm.OllamaError("copilot token exchange failed")
+
+    monkeypatch.setattr(llm, "resolve_active_api_key", refuse)
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert store.get_setting(key) is None
+
+
+def test_one_deadline_covers_every_probe_and_a_dead_host_stops_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F10: the probes share one wall-clock budget, and a transport failure
+    ends the probe — no second wait on a host that just timed out."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    clock = [100.0]
+    asked: list[tuple[str, float]] = []
+
+    def slow_404(url: str, **kwargs: object) -> httpx.Response:
+        asked.append((url, float(kwargs["timeout"])))  # type: ignore[arg-type]
+        clock[0] += 1.0
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(llm, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(httpx, "get", slow_404)
+    assert llm.detect_model_ctx("http://h", None, model="m1", protocol="openai-compat") is None
+    assert [timeout for _, timeout in asked] == [3.0, 2.0, 1.0]  # one 3 s budget, shrinking
+
+    asked.clear()
+
+    def dead(url: str, **kwargs: object) -> httpx.Response:
+        asked.append((url, float(kwargs["timeout"])))  # type: ignore[arg-type]
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "get", dead)
+    assert llm.detect_model_ctx("http://h", None, model="m1", protocol="openai-compat") is None
+    assert [url for url, _ in asked] == ["http://h/v1/models"]
 
 
 def test_doctor_names_the_window_and_its_source(tmp_path: Path) -> None:

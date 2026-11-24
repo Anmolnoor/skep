@@ -75,7 +75,6 @@ from .llm import (
     llm_config_view,
     resolve_active_api_key,
     resolve_context_window,
-    resolved_num_ctx,
     tool_delivery,
 )
 from .settings import ConfigHolder
@@ -1288,6 +1287,7 @@ def skill_index_block(store: RunStore) -> str:
 # the operator's own skills are already described in the index above.
 SKILL_HINT_MAX = 5
 SKILL_HINT_CHARS = 40
+_SKILL_HINT_TAIL = re.compile(r"\n\n\[Relevant skills: [^\n]*\]\Z")  # R1 (F7)
 _SKILL_HINT_STOPWORDS = frozenset({"a", "an", "the", "and", "of", "to", "for", "with", "on"})
 
 
@@ -1320,27 +1320,49 @@ def skill_hint(store: RunStore, content: str) -> str:
 # index with zero prompt edits.
 _REACH_HEADER = "You can reach:"
 _MCP_INDEX_HEADER = (
-    "Registered MCP servers, with their tools as last listed ('*'=not a read: "
-    "it asks unless policy allows it). Call a tool with call_mcp_tool; "
-    "list_mcp_tools with a server_id re-lists that server's tools with "
-    "descriptions and what policy decides for each (a server shown without "
-    "tools has not been listed yet):"
+    "Registered MCP servers, with their tools as last listed ('*'=not a read). "
+    "Call a tool with call_mcp_tool; list_mcp_tools with a server_id re-lists "
+    "its tools with descriptions and what policy decides for each (a server "
+    "shown without tools has not been listed yet):"
 )
+# Phase 06 R1 (F1): tool names come from the MCP server itself, so only a
+# plain identifier enters the system prompt, and only so many — the rest are
+# counted and pointed at list_mcp_tools. Bounds the prompt (I9) and keeps a
+# hostile name from speaking as instructions (I8).
+MCP_INDEX_PER_SERVER = 16
+MCP_INDEX_TOTAL = 48
+_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def mcp_index_block(store: RunStore) -> str:
     """Phase 06 (6.2): each server's tool names from the discovery cache —
     never a tools/list here, so a turn spawns no server process."""
-    from ..mcp_client import index_tool_names, load_mcp_servers
+    from ..mcp_client import cached_tools, index_tool_names, load_mcp_servers
 
     servers = load_mcp_servers(store)
     if not servers:
         return ""
     lines = []
+    room = MCP_INDEX_TOTAL
     for server_id, config in servers.items():
-        names = index_tool_names(store, config)
-        tools = f": {', '.join(names)}" if names else ""
-        lines.append(f"- {server_id} ({config.transport}){tools}")
+        tools = cached_tools(store, config)
+        if tools is None:
+            lines.append(f"- {server_id} ({config.transport})")
+            continue
+        rows = index_tool_names(config, tools)
+        safe = [
+            name + ("" if read else "*") for name, read in rows if _MCP_TOOL_NAME.fullmatch(name)
+        ]
+        shown = safe[: min(MCP_INDEX_PER_SERVER, room)]
+        room -= len(shown)
+        notes = []
+        if len(safe) > len(shown):
+            notes.append(f"+{len(safe) - len(shown)} more")
+        if len(rows) > len(safe):
+            notes.append(f"{len(rows) - len(safe)} unsafe names hidden")
+        tail = f"({'; '.join(notes)} — list_mcp_tools {server_id})" if notes else ""
+        body = " ".join(part for part in (", ".join(shown), tail) if part) or "(no tools)"
+        lines.append(f"- {server_id} ({config.transport}): {body}")
     return "\n".join([_MCP_INDEX_HEADER, *lines])
 
 
@@ -1560,6 +1582,10 @@ def shown_message(message: Any) -> dict[str, Any]:
     calls carry their args masked (``stream_args``), as the card does; the
     stored row keeps them raw for the transcript the model replays."""
     row: dict[str, Any] = asdict(message)
+    if row["role"] == "user" and row["content"]:
+        # R1 (F7): the skill hint is for the model's replay; the user's bubble
+        # (and Resend, which copies it) shows what they typed.
+        row["content"] = _SKILL_HINT_TAIL.sub("", row["content"])
     row["tool_calls"] = row["tool_calls"] and [
         {**call, "function": {**(call.get("function") or {}),
                               "arguments": stream_args(_call_args(call))}}
@@ -2060,14 +2086,16 @@ class ChatEngine:
         # is full" when it meant "the floor is fixed and the window small";
         # the meter now names its parts (I8). Same functions, same numbers.
         tool_surface_chars = len(json.dumps(self._advertised_tools(chat)))
-        model = getattr(chat, "model", None)
-        window_tokens, num_ctx_source = resolved_num_ctx(self.store, model)
+        # R1 (F6): the replay cap the budget uses AND the model's own window —
+        # a 262k model replaying 16k is two numbers, never one (I8).
+        window = resolve_context_window(self.store, model=getattr(chat, "model", None))
         floor_chars = len(system) + len(summary) + tool_surface_chars
-        window_chars = window_tokens * 4
+        window_chars = window.replay_cap * 4
         compacted = dropped > 0 or bool(chat and (chat.compacted_through or 0))
         return {
-            "window_tokens": window_tokens,
-            "num_ctx_source": num_ctx_source,
+            "window_tokens": window.replay_cap,
+            "model_window": window.model_window,
+            "num_ctx_source": window.source,
             "tool_surface_chars": tool_surface_chars,
             "system_prompt_chars": len(system),
             "digest_chars": len(summary),

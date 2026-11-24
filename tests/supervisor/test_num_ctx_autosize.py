@@ -141,7 +141,7 @@ def test_a_chat_pinned_to_a_bigger_model_budgets_like_one(
     assert context["window_tokens"] == 24576
 
 
-def test_anthropic_gets_the_static_floor_without_network(
+def test_an_anthropic_catalog_id_gets_its_window_without_network(
     config: SupervisorConfig,
 ) -> None:
     client = _client(config)
@@ -150,12 +150,12 @@ def test_anthropic_gets_the_static_floor_without_network(
         json={
             "base_url": "http://127.0.0.1:9",  # dead — must never be contacted
             "protocol": "anthropic",
-            "default_model": "claude-fable-5",
+            "default_model": "claude-sonnet-4-5",
         },
     )
     view = client.get("/api/llm/config").json()
-    assert view["num_ctx_source"] == "catalog"  # Phase 06: a protocol fact, not a probe
-    assert view["num_ctx"] == AUTO_NUM_CTX_CAP  # 200k floor, auto-capped
+    assert view["num_ctx_source"] == "catalog"  # R1 (F4): the exact id, not the protocol
+    assert view["num_ctx"] == AUTO_NUM_CTX_CAP  # 200k, auto-capped
 
 
 def test_loopback_ollama_is_never_auto_matched(
@@ -184,3 +184,90 @@ def test_is_loopback_recognizes_local_hosts() -> None:
     assert not llm._is_loopback("https://ollama.com")
     assert not llm._is_loopback(None)
     assert not llm._is_loopback("")
+
+
+@pytest.fixture()
+def refreshes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every refresh_model_ctx call, by model — run for real underneath."""
+    calls: list[str] = []
+    real = llm.refresh_model_ctx
+
+    def spy(store: RunStore, home: object, model: str) -> None:
+        calls.append(model)
+        real(store, home, model)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(llm, "refresh_model_ctx", spy)
+    return calls
+
+
+@pytest.mark.parametrize("change", [{"api_key": "sk-fake"}, {"protocol": "ollama"}])
+def test_a_key_or_protocol_save_refreshes_the_window(
+    config: SupervisorConfig, ollama: FakeOllama, refreshes: list[str], change: dict[str, str]
+) -> None:
+    """R1 (F8): a new key can unlock a listing the old one could not read —
+    every provider change re-probes, not only a base_url/model change."""
+    client = configured_client(config, ollama)
+    refreshes.clear()
+    assert client.put("/api/llm/config", json=change).status_code == 200
+    assert refreshes == ["qwen3"]
+    assert client.put("/api/llm/config", json={"vision": True}).status_code == 200
+    assert refreshes == ["qwen3"]  # not a provider change
+
+
+def test_a_new_key_on_the_active_profile_refreshes_its_window(
+    config: SupervisorConfig, ollama: FakeOllama, refreshes: list[str], remote: None
+) -> None:
+    from skep.supervisor.serve.actions import set_provider_key
+
+    ollama.show_context_lengths["qwen3"] = 32768
+    configured_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        active = store.active_provider_profile()
+        assert active is not None
+        store.set_setting(_window_key(store, "qwen3"), None)
+        refreshes.clear()
+        set_provider_key(store, config.home, provider_id=active.provider_id, key="sk-fake")
+        assert refreshes == ["qwen3"]
+        assert llm.resolve_context_window(store).model_window == 32768
+    finally:
+        store.close()
+
+
+def test_startup_probes_the_active_window_once_when_it_was_never_detected(
+    config: SupervisorConfig, ollama: FakeOllama, refreshes: list[str], remote: None
+) -> None:
+    """R1 (F8): an upgraded home has only the pre-6.1 bare-name rows."""
+    import time
+
+    ollama.show_context_lengths["qwen3"] = 32768
+    configured_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(_window_key(store, "qwen3"), None)
+    finally:
+        store.close()
+    refreshes.clear()
+    with _client(config, start_ticker=False) as client:
+        deadline = time.monotonic() + 10
+        while client.get("/api/llm/config").json()["model_window"] != 32768:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+    assert refreshes == ["qwen3"]
+    refreshes.clear()
+    with _client(config, start_ticker=False):
+        pass  # detected now: startup leaves it alone
+    assert refreshes == []
+
+
+def test_the_chat_meter_names_the_model_window_apart_from_the_replay_cap(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R1 (F6): a 262k model on a loopback ollama replays 16k — the meter
+    says both, never "16,384 (provider-api)" as if that were the model."""
+    ollama.show_context_lengths["qwen3"] = 262144
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    context = client.get(f"/api/chats/{chat_id}").json()["context"]
+    assert (context["window_tokens"], context["model_window"]) == (DEFAULT_NUM_CTX, 262144)
+    assert context["num_ctx_source"] == "provider-api"

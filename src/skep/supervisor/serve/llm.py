@@ -73,9 +73,6 @@ _MIN_NUM_CTX = 1024
 MODEL_WINDOW_PREFIX = "llm_model_window:"
 AUTO_NUM_CTX_CAP = 65536
 ContextSource = Literal["override", "provider-api", "catalog", "default"]
-# Current Claude models all carry >= 200k; the Messages API has no
-# per-model context endpoint, so a static floor is the honest answer.
-_ANTHROPIC_CTX_FLOOR = 200_000
 # v74-F3: how the chat advertises tools. 'indexed' (default) sends the
 # categorized index in the prompt plus full schemas for the core set and
 # any described-active tools; 'full' restores the whole registry every
@@ -494,9 +491,9 @@ def resolve_context_window(
         window, source = int(cached["window"]), "provider-api"
         max_output = cached.get("max_output") if _valid_ctx(cached.get("max_output")) else None
     elif name in MODEL_CONTEXT_WINDOWS:
+        # R1 (F4): exact ids only — the anthropic wire carries third-party
+        # presets too, so no protocol-wide 200k guess (I8)
         window, source = MODEL_CONTEXT_WINDOWS[name], "catalog"
-    elif protocol == "anthropic":
-        window, source = _ANTHROPIC_CTX_FLOOR, "catalog"
     loopback = protocol == "ollama" and _is_loopback(base_url)
     cap = DEFAULT_NUM_CTX if loopback else AUTO_NUM_CTX_CAP
     return ContextWindow(window, min(window, cap), source, max_output)
@@ -524,33 +521,79 @@ def chat_num_ctx(store: RunStore, model: str | None = None) -> int:
 
 
 _WINDOW_FIELDS = ("context_length", "max_model_len", "max_context_length")
+_UNREACHABLE = object()
 
 
-def _get_json(url: str, api_key: str | None, timeout: float) -> Any:
+def _get_json(url: str, api_key: str | None, deadline: float) -> Any:
+    """The body, None on an HTTP or JSON error, or _UNREACHABLE when the host
+    did not answer within what is left of ``deadline`` (R1 F10: one budget
+    for every probe, and a host that timed out is not asked again)."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _UNREACHABLE
     try:
-        response = httpx.get(url, headers=_headers(api_key), timeout=timeout)
-        response.raise_for_status()
-        return response.json()
-    except (httpx.HTTPError, json.JSONDecodeError):
+        response = httpx.get(url, headers=_headers(api_key), timeout=remaining)
+    except httpx.TransportError:
+        return _UNREACHABLE
+    if response.is_error:
         return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _rows(body: Any, key: str) -> list[dict[str, Any]]:
+    """R1 (F9): the dict rows under ``key`` — any other shape is no rows."""
+    rows = body.get(key) if isinstance(body, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _lmstudio_window(body: Any, model: str) -> int | None:
+    """R1 (F5): LM Studio's native GET /api/v1/models — a loaded instance's
+    config.context_length (what a request may use) when ``model`` names the
+    instance or its model, else the model's max_context_length."""
+    for row in _rows(body, "models"):
+        instances = _rows(row, "loaded_instances")
+        named = [i for i in instances if i.get("id") == model]
+        if not named and row.get("key") != model:
+            continue
+        for instance in named or instances:
+            config = instance.get("config")
+            n_ctx = config.get("context_length") if isinstance(config, dict) else None
+            if _valid_ctx(n_ctx):
+                return int(n_ctx)
+        top = row.get("max_context_length")
+        return int(top) if _valid_ctx(top) else None
+    return None
 
 
 def _openai_style_window(
     base_url: str, api_key: str | None, model: str, timeout: float
 ) -> tuple[int, int | None] | None:
     """The model's row in GET <prefix>/models — OpenRouter's context_length
-    (+ top_provider.max_completion_tokens), vLLM's max_model_len, LM
-    Studio's max_context_length — else llama.cpp's GET /props n_ctx."""
+    (+ top_provider.max_completion_tokens), vLLM's max_model_len — else LM
+    Studio's native GET /api/v1/models, else llama.cpp's GET /props n_ctx.
+    All of them inside one ``timeout``."""
+    deadline = time.monotonic() + timeout
     prefix = openai_style_prefix(base_url)
-    listing = _get_json(f"{prefix}/models", api_key, timeout)
-    rows = listing.get("data") if isinstance(listing, dict) else None
-    entry = next((r for r in rows or () if isinstance(r, dict) and r.get("id") == model), {})
+    root = prefix.removesuffix("/v1")
+    listing = _get_json(f"{prefix}/models", api_key, deadline)
+    if listing is _UNREACHABLE:
+        return None
+    entry = next((r for r in _rows(listing, "data") if r.get("id") == model), {})
     top = entry.get("top_provider")
     out = top.get("max_completion_tokens") if isinstance(top, dict) else None
     for field in _WINDOW_FIELDS:
         if _valid_ctx(entry.get(field)):
             return int(entry[field]), (int(out) if _valid_ctx(out) else None)
-    props = _get_json(f"{prefix.removesuffix('/v1')}/props", api_key, timeout)
+    native = _get_json(f"{root}/api/v1/models", api_key, deadline)
+    if native is _UNREACHABLE:
+        return None
+    lmstudio = _lmstudio_window(native, model)
+    if lmstudio is not None:
+        return lmstudio, None
+    props = _get_json(f"{root}/props", api_key, deadline)
     settings = props.get("default_generation_settings") if isinstance(props, dict) else None
     n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
     return (int(n_ctx), None) if _valid_ctx(n_ctx) else None
@@ -565,7 +608,7 @@ def detect_model_ctx(
     timeout: float = 3.0,
 ) -> tuple[int, int | None] | None:
     """(window, max output) from the endpoint's own API, or None — detection
-    never breaks a save; each request is bounded by ``timeout``.
+    never breaks a save; the whole probe is bounded by ``timeout``.
 
     ollama reports it via POST /api/show under an architecture-prefixed
     ``model_info`` key (``llama.context_length``, ``qwen3.context_length``, …);
@@ -606,18 +649,30 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
 
     if uses_codex_login(base_url):
         return  # v118-F1: no context endpoint, and llm-secret never goes there
-    detected = detect_model_ctx(
-        base_url,
+    try:
         # Phase 05 R1: the key saved for this endpoint, or none (P2)
-        resolve_active_api_key(store, home, base_url=base_url),
-        model=model,
-        protocol=protocol,
-    )
+        api_key = resolve_active_api_key(store, home, base_url=base_url)
+    except OllamaError:  # R1 (F9): a refused credential (Copilot exchange) is a miss
+        detected = None
+    else:
+        detected = detect_model_ctx(base_url, api_key, model=model, protocol=protocol)
     key = context_cache_key(provider_id, base_url, model)
     if detected is None:
         store.set_setting(key, None)
     else:
         store.set_setting(key, {"window": detected[0], "max_output": detected[1]})
+
+
+def refresh_missing_model_ctx(store: RunStore, home: Path) -> None:
+    """R1 (F8): serve startup probes the active window once when it has no
+    provider-keyed row (an upgraded home has only v74 bare-name rows)."""
+    provider_id, base_url, model, _protocol = _context_identity(store, None)
+    if (
+        base_url
+        and model
+        and store.get_setting(context_cache_key(provider_id, base_url, model)) is None
+    ):
+        refresh_model_ctx(store, home, model)
 
 
 def _headers(api_key: str | None) -> dict[str, str]:
@@ -1840,9 +1895,10 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             raise HTTPException(
                 status_code=500, detail=f"the save failed ({exc}) — {_UNCHANGED}"
             ) from exc
-        if base_url or model:
-            # v74-F2: detection runs where the model changes; failure is silent
-            # here (never breaks a save) and visible in num_ctx_source (I8).
+        if provider:
+            # v74-F2: detection runs where the provider changes — R1 (F8): a
+            # key or protocol too; failure is silent here (never breaks a
+            # save) and visible in num_ctx_source (I8).
             current = assistant_llm(run_store)[1]
             if current:
                 refresh_model_ctx(run_store, home, current)

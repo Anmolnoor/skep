@@ -118,3 +118,30 @@ def test_the_system_prompt_is_byte_identical_and_the_hint_rides_its_turn(
     finally:
         store.close()
     assert stored == users
+
+
+def test_the_users_bubble_shows_what_they_typed_and_the_model_replays_the_hint(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R1 (F7): the stored row keeps the hint (replay bytes stay put), but the
+    chat fetch shows the user their own words — Resend copies those, so the
+    hint never stacks."""
+    client, chat_id = chat_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        load_seed_skills(store)
+    finally:
+        store.close()
+    for _ in range(2):  # the second send is what Resend would post
+        ollama.script_reply("ok")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "merge these pdfs"})
+    shown = [
+        m["content"]
+        for m in client.get(f"/api/chats/{chat_id}").json()["messages"]
+        if m["role"] == "user"
+    ]
+    assert shown == ["merge these pdfs", "merge these pdfs"]
+    replayed = [m["content"] for m in ollama.chat_bodies()[-1]["messages"] if m["role"] == "user"]
+    assert replayed[0] == replayed[1]
+    assert replayed[0].startswith("merge these pdfs\n\n[Relevant skills: pdf — ")
+    assert replayed[0].count("[Relevant skills:") == 1

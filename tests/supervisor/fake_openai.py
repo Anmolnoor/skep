@@ -34,6 +34,10 @@ class FakeOpenAI:
         # GET /props body; None = 404, like every server that is not llama.cpp.
         self.model_fields: dict[str, dict[str, Any]] = {}
         self.props: dict[str, Any] | None = None
+        # Phase 06 R1: LM Studio's native GET /api/v1/models body (None = 404),
+        # and a raw /v1/models body that replaces the listing (malformed shapes).
+        self.native_models: dict[str, Any] | None = None
+        self.listing_body: Any = None
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -153,6 +157,10 @@ class FakeOpenAI:
                 )
                 if not (self._authorized() or fake.public_listing):
                     self._refuse()
+                elif self.path == "/v1/models" and fake.listing_body is not None:
+                    self._send(200, json.dumps(fake.listing_body).encode())
+                elif self.path == "/api/v1/models" and fake.native_models is not None:
+                    self._send(200, json.dumps(fake.native_models).encode())
                 elif self.path == "/v1/models":
                     models = [{"id": m, **fake.model_fields.get(m, {})} for m in fake.models]
                     self._send(200, json.dumps({"data": models}).encode())

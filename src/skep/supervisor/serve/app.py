@@ -410,18 +410,29 @@ def create_app(
 
         threading.Thread(target=startup_reverify, name="skep-startup-reverify", daemon=True).start()
 
+        # Phase 06 R1 (F8): an active window never detected (an upgraded home)
+        # is probed once, in the background — never on a chat turn.
+        def startup_context() -> None:
+            from .llm import refresh_missing_model_ctx
+
+            try:
+                refresh_missing_model_ctx(run_store, config.home)
+            except Exception:
+                logging.getLogger("skep.serve").exception("startup context probe failed")
+
+        threading.Thread(target=startup_context, name="skep-context-probe", daemon=True).start()
+
         # Phase 06 (6.2): list each MCP server's tools once, so turn 1's index
         # names them (the prompt reads only this cache). Forged servers are
         # skipped — cache-only until their runtime egress closes (Phase 07.1).
-        def warm_mcp() -> None:
-            from ..mcp_client import warm_listed_tools
+        # R1 (F3): serve accepts no turn until the warm is done or its cap
+        # (MCP_WARM_TIMEOUT_SECONDS) passes; a slow server finishes behind it.
+        from ..mcp_client import warm_listed_tools
 
-            try:
-                warm_listed_tools(run_store)
-            except Exception:
-                logging.getLogger("skep.serve").exception("MCP tool warm-up failed")
-
-        threading.Thread(target=warm_mcp, name="skep-mcp-warm", daemon=True).start()
+        try:
+            warm_listed_tools(run_store)
+        except Exception:
+            logging.getLogger("skep.serve").exception("MCP tool warm-up failed")
         try:
             # ES-F1/F4: a card or landing claimed by a process that died
             # mid-execute ends honestly — never re-run, never reopened (either

@@ -161,8 +161,8 @@ def test_home_activity_feed_strip_and_banner() -> None:
 
 def test_topbar_queen_status_claims_only_sourced_fields() -> None:
     """v76-F2 (C10): the Queen tile shows model + live dot; the hover title
-    composes ONLY fields the API returns (num_ctx, num_ctx_source,
-    tool_delivery, last_5h.requests). Liveness rides the existing poll — no
+    composes ONLY fields the API returns (num_ctx, model_window,
+    num_ctx_source, tool_delivery, last_5h.requests). Liveness rides the existing poll — no
     new timer; per-chat context stays in the chat meter."""
     app_js = (STATIC_DIR / "app.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
@@ -175,7 +175,10 @@ def test_topbar_queen_status_claims_only_sourced_fields() -> None:
     # exactly the sourced ones.
     dock = app_js[app_js.index("async function refreshDockModel") :]
     dock = dock[: dock.index("function updateShellChrome")]
-    assert ("window ${llm.num_ctx} (${llm.num_ctx_source}) · tools ${llm.tool_delivery}") in dock
+    assert (
+        "${windowNote(llm.num_ctx, llm.model_window, llm.num_ctx_source)} · tools "
+        "${llm.tool_delivery}"
+    ) in dock
     # No invented fields anywhere near the tile (C10/I8).
     status_region = dock + app_js[app_js.index("async function poll()") :]
     assert "last response" not in status_region

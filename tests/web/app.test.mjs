@@ -511,3 +511,24 @@ test("stopButton asks the chat's running turn to stop and says what happened", a
   await button.click();
   assert.deepEqual([...app.flashes[1]], ["bad", "down"]);
 });
+
+test("windowNote: the model window and the replay cap are two numbers once they differ (Phase 06 R1 F6)", () => {
+  const app = loadApp();
+  // A 262k model on a loopback ollama replays 16k: never "16,384 (provider-api)".
+  assert.equal(app.windowNote(16384, 262144, "provider-api"),
+    "replay cap 16,384 of a 262,144-token window (provider-api)");
+  assert.equal(app.windowNote(16384, 16384, "default"), "window 16,384 (default)");
+  assert.equal(app.windowNote(8192, undefined, "default"), "window 8,192 (default)");
+});
+
+test("Resend fills exactly the text the user's bubble shows (Phase 06 R1 F7)", () => {
+  const app = loadApp();
+  const log = app.el("div");
+  const filled = [];
+  // The chat fetch strips the stored skill hint (shown_message); Resend must
+  // hand back that shown text, never a stored row's extra line.
+  app.renderChatMessage(log, "user", "merge these pdfs", { onResend: text => filled.push(text) });
+  log.querySelectorAll(".chat-message-action")
+    .find(b => b.getAttribute("aria-label") === "resend message").click();
+  assert.deepEqual(filled, ["merge these pdfs"]);
+});
