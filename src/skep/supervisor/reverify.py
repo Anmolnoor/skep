@@ -40,6 +40,7 @@ from skep.worker_contract import Event, EventType
 from . import sandbox
 from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
+from .github import pr_ref
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import test_config_changes
 from .spawner import proxy_env
@@ -58,6 +59,9 @@ from .worktree import (
 _COMMAND_NOT_FOUND = 127
 _REVERIFY_TIMEOUT_SECONDS = 300.0
 
+
+# Phase 09 (9.0): a review run on a fetched PR head (github.fetch_pr_head).
+_PR_HEAD_REF = re.compile(r"refs/skep/pr/(\d+)/head")
 
 # V1 (phase-01 1.3): what the guard can and cannot see, said on every verdict.
 V1_SCOPE = (
@@ -1157,6 +1161,7 @@ def reverify_run(
     # said what verification means outranks it.
     commands = [pinned] if pinned else verification_commands_from_events(store.events_for(task_id))
     commands_source = "project" if pinned else "worker"
+    pr_head: str | None = None  # Phase 09 (9.0): set once this is a PR-head verdict
 
     def unavailable(detail: str) -> ReverifyOutcome:
         outcome = ReverifyOutcome(
@@ -1170,6 +1175,7 @@ def reverify_run(
             commands=outcome.commands,
             exit_codes=outcome.exit_codes,
             detail=outcome.detail,
+            head_commit=pr_head,
         )
         return outcome
 
@@ -1226,6 +1232,39 @@ def reverify_run(
     # and the landing must build on exactly the tree that was confirmed.
     base_commit = resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
 
+    pr = _PR_HEAD_REF.fullmatch(ref or "")
+    if pr and not changed_files and (patch_path is None or not patch_path.is_file()):
+        # Phase 09 (9.0, I2): a review run that changed nothing on a fetched
+        # PR head — the PR's own changes are the patch. G10 applies them
+        # (merge-base...head) to the fetched base and V1 reads that diff, so a
+        # PR that deletes or skips tests is caught, not "not_applicable". The
+        # head is the one the worker reviewed (its dispatch baseline).
+        run = store.get_run(task_id)
+        pr_head = (run.base_commit if run else None) or base_commit
+        base_commit = resolve_commit(repo, f"{pr_ref(pr.group(1), 'base')}^{{commit}}")
+        if not pinned:
+            # v88-F4: a PR is never confirmed by a command the worker chose.
+            return unavailable(
+                f"PR #{pr.group(1)}: a PR head is re-verified only with the project's pinned "
+                "verify_command, and this project pins none — set one (`skep project setup "
+                f"{repo} --verify-command ...`) and re-run the review"
+            )
+        diff = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--binary", "--no-color", "--no-ext-diff",
+             "--no-textconv", f"{base_commit}...{pr_head}"],
+            capture_output=True,
+            check=False,
+        )  # fmt: skip
+        if base_commit is None or diff.returncode:
+            return unavailable(
+                f"PR #{pr.group(1)}: its fetched base and head ({pr_ref(pr.group(1), 'base')}, "
+                f"{pr_head}) cannot be diffed — refresh_repo pr={pr.group(1)} and re-run the review"
+            )
+        if diff.stdout.strip():  # an empty PR stays patch-less: not_applicable
+            patch_path = config.audit_dir / task_id / f"{task_id}.pr-head.diff"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_bytes(diff.stdout)
+
     # V1: count the project's own pytest pin; cached per (repo, base, pin).
     count_pytest = bool(pinned) and _is_pytest_pin(pinned)
     cached = (
@@ -1274,6 +1313,11 @@ def reverify_run(
     else:
         outcome = replace(outcome, commands_source=commands_source)
     outcome = _v1_verdict(outcome, repo, patch_path, base_commit or ref or "HEAD")
+    if pr and pr_head:
+        outcome = replace(
+            outcome,
+            detail=f"PR #{pr.group(1)}: head {pr_head} on base {base_commit}: {outcome.detail}",
+        )
     confirmed = worker_outcome == "passed" and outcome.outcome == "passed"
     store.record_reverification(
         task_id,
@@ -1286,6 +1330,7 @@ def reverify_run(
         base_commit=base_commit if outcome.exit_codes else None,
         tamper_flags=outcome.tamper_flags,
         test_counts=outcome.test_counts,
+        head_commit=pr_head,
     )
     return outcome
 

@@ -1568,7 +1568,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE merging an open GitHub PR (requires user confirmation in the web "
         "UI; messenger channels can never confirm it). The ONLY way a base branch "
         "like main advances — runs gh on the operator's own credentials. `pr` is "
-        "a PR number or URL.",
+        "a PR number or URL. Pinned to the head G10 last verified for it, if any: "
+        "a later push makes GitHub refuse it.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "pr": {"type": "string"},
@@ -1723,7 +1724,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the default branch to origin. THE way to bring a registered repo up to "
         "date — workers can never fetch. Use when a branch or commit pushed to "
         "the remote after registration is not visible in repo_state.",
-        {"repo": {"type": "string", "description": "registered repo slug or host path"}},
+        {
+            "repo": {"type": "string", "description": "registered repo slug or host path"},
+            "pr": {
+                "type": "string",
+                "description": "PR number: fetch only its head + base, for a review run "
+                "(dispatch_run ref=refs/skep/pr/<N>/head)",
+            },
+        },
         ["repo"],
     ),
     _tool(
@@ -5817,14 +5825,22 @@ def _execute_mutation(
         # v47-F5: the only base-branch advance, strictly behind the confirm the
         # operator just gave. gh failure degrades to an honest tool result.
         from .. import github
+        from .cards import merge_pin
 
+        # Phase 09 (9.0, I1, I8): the head the card showed, never re-looked-up
+        pin = (card or {}).get("merge")
+        pin = merge_pin(store, args) if pin is None else pin
+        if "error" in pin:
+            raise ValueError(f"merge cannot be pinned to a verified head: {pin['error']}")
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
         merge = github.merge_pull_request(
             repo=repo_path,
             pr=str(args["pr"]),
             strategy=str(args.get("strategy") or "merge"),
+            expected_head_sha=pin.get("expected_head_sha"),
         )
-        return {"merged": merge.merged, "detail": merge.detail}
+        merged = {"merged": merge.merged, "detail": merge.detail}
+        return {**merged, "expected_head_sha": pin["expected_head_sha"]} if pin else merged
     if name == "close_pr":
         # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
         # reopens) — but NOT with delete_branch: deleting the head ref cascade-
@@ -5870,7 +5886,8 @@ def _execute_mutation(
             store=store,
         )
     if name == "refresh_repo":
-        return actions.refresh_repo(holder, str(args["repo"]), store=store)
+        pr = None if args.get("pr") is None else str(args["pr"])
+        return actions.refresh_repo(holder, str(args["repo"]), store=store, pr=pr)
     if name == "create_branch":
         return actions.create_branch(
             holder,

@@ -247,7 +247,7 @@ skep tick [--worker-cmd COMMAND]
 
 ```sh
 skep repo list
-skep repo refresh REPO
+skep repo refresh REPO [--pr NUMBER]
 skep repo push-baseline REPO [--base BRANCH]
 
 skep branch list   REPO
@@ -265,6 +265,13 @@ skep pr close REPO NUMBER [--delete-branch]
 These are the operator's half of the git surface (ADR 0050). They run
 supervisor-side on your own credentials; workers can never reach a remote or
 move a branch, and neither can the Queen's shell.
+
+`skep repo refresh REPO --pr N` fetches only PR #N's head and base into
+`refs/skep/pr/N/`; a review run dispatched on `refs/skep/pr/N/head` that
+changes nothing is re-verified base...head with the project's pinned
+`verify_command` (G10 and the V1 test-tamper check). `skep pr merge` (and the
+`merge_pr` card) then merges only that verified head: a push after it makes
+GitHub refuse the merge.
 
 - `repo list` shows every repo skep can reach: clones and workon directories.
 - `repo refresh` fetches origin and fast-forwards the default branch. Run it
