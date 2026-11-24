@@ -302,17 +302,18 @@ def test_the_documented_command_runs_as_a_script_schedule_and_the_alarm_parses_i
 ) -> None:
     """The setup doc's line, through ``run_schedule_script`` itself (the
     scrubbed env, the wall): config inline, the password from the file the
-    command names. The fake imaplib's dir is let in beside the declared
-    inputs (a dir is never one), so the wall stays the real one."""
-    from skep.supervisor import scheduler
+    command names. The fake imaplib's dir is let in as a read root of the
+    wall (a dir is never a declared input), so the wall stays the real one."""
+    import functools
+
+    from skep.supervisor import scheduler, wall
 
     fake = tmp_path / "fake"
     fake.mkdir()
     (fake / "imaplib.py").write_text(textwrap.dedent(_FAKE_IMAPLIB), encoding="utf-8")
     password = tmp_path / "mail-password"
     password.write_text("pw-from-home\n")
-    declared = scheduler.script_inputs
-    monkeypatch.setattr(scheduler, "script_inputs", lambda c: (*declared(c), fake))
+    monkeypatch.setattr(wall, "walled", functools.partial(wall.walled, read_allowlist=(fake,)))
     monkeypatch.setenv("SKEP_MAIL_PASSWORD", "never-inherited")  # scrubbed away
     command = (
         documented_mail_command()

@@ -24,11 +24,13 @@ def walled(
     workspace: Path,
     writable: tuple[Path, ...] = (),
     read_allowlist: tuple[Path, ...] = (),
+    read_files: tuple[Path, ...] = (),
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """``argv`` wrapped in the wall, and the env it runs with, for the life
     of the block. Reads: the ADR 0068 strict allowlist (system dirs, detected
     toolchains incl. ``<skep home>/tools/.venvs``, the workspace,
-    ``read_allowlist``), never the operator's other files; the secret masks
+    ``read_allowlist``) and ``read_files`` as single files (R2, S7), never
+    the operator's other files; the secret masks
     land last. Writes: ``workspace`` (+ ``writable``). Env: PATH and LANG,
     HOME and TMPDIR in the workspace. Egress: deny-all when ``hosts`` is
     empty, else pinned to them through a FilteringProxy (D1) — never
@@ -73,6 +75,7 @@ def walled(
                 unix_socket_path=None if proxy is None else proxy.unix_socket_path,
                 skep_home=skep_home,
                 read_allowlist=read_allowlist,
+                read_files=read_files,
             )
             wrapped = sandbox.wrap_command(argv, profile)
         except sandbox.SandboxAllowlistUnsupported as exc:

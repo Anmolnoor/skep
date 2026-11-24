@@ -175,8 +175,9 @@ def run_schedule_script(
     an operator-vetted command, never a new command.
 
     Phase 09 R1 (S7): inside the strict wall (``wall.walled``, the forged
-    tools' own). Reads: ADR 0068's allowlist plus ``script_inputs`` (the
-    secret masks still land last, and an input in the skep home refuses).
+    tools' own). Reads: ADR 0068's allowlist plus ``script_inputs``, bound
+    as single files (R2: ``read_files``; the secret masks still land last,
+    and an input in the skep home, or one reached through a link, refuses).
     Writes: a throwaway workspace, which is also its HOME and TMPDIR.
     Egress: ``hosts`` (the schedule's ``network``) through a FilteringProxy,
     none when empty. No backend refuses the run (I12). Creation stays
@@ -196,7 +197,7 @@ def run_schedule_script(
             skep_home=skep_home,
             hosts=tuple(hosts),
             workspace=workspace,
-            read_allowlist=inputs,
+            read_files=inputs,  # R2 (S7): bound as files, never as roots
         ) as (argv, wall_env):
             env = {**script_env(workspace), **wall_env}
             return _run_script_process(argv, env, workspace, timeout_seconds, stdin)
