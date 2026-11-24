@@ -205,7 +205,12 @@ def run_terminal_text(
     unlanded_patch = patch is not None and not landed
     # v128-F7: the newest landing verdict a human denied (not a failed
     # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
-    landings = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
+    # R4 K4: a superseded review was never answered — it does not count.
+    landings = [
+        a
+        for a in store.approvals_for(task_id)
+        if a.action == "apply_patch" and a.status != "superseded"
+    ]
     last = landings[-1] if landings else None
     human_denied = (
         last is not None

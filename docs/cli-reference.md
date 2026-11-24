@@ -175,7 +175,10 @@ skep review [task_id] [--approve | --deny | --allow-command | --reverify]
 ```
 
 - Plain `review` shows the run evidence, patch, approval state, and
-  re-verification result.
+  re-verification result. An approval's status is `pending`, `applying`,
+  `approved`, `denied` or `superseded` ([approvals](approvals.md));
+  `superseded`: minted for a `skep review` verdict that was then refused as
+  stale; never a human answer.
 - `skep review` with no task id walks every run waiting on you (a gate, an
   unlanded patch, a G10 disagreement): its card, G10/V1, the exact diff, then
   one key — `a` approve, `d` deny, `f` forensics, `p` receipt, `s` skip, `q`

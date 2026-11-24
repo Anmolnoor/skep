@@ -1491,6 +1491,28 @@ def test_v128_f7_denying_a_land_card_records_a_denied_landing(
     assert line is not None and "landing denied" in line[0], line
 
 
+def test_a_withdrawn_retry_after_a_denial_leaves_the_run_denied(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R4 K4: a review minted for a verdict and then withdrawn (superseded)
+    is no human answer — the denial before it stays the run's landing
+    verdict, and the superseded row stays in the history."""
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    task_id = run_task(repo, "Fix the bug. MODE:happy", config=config).record.task_id
+    store = RunStore(config.db_path)
+    try:
+        denied = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+        store.resolve_approval(denied, approved=False, actor="anmol", note="no")
+        retry = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+        assert store.supersede_approval(retry, actor="skep review", note="refused as stale")
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied", "superseded"]
+        line = run_terminal_text(store, task_id)
+    finally:
+        store.close()
+    assert line is not None and "landing denied by anmol" in line[0], line
+
+
 def _deny_land_command(client: TestClient, chat_id: str, task_id: str) -> None:
     card = client.post(
         f"/api/chats/{chat_id}/commands",

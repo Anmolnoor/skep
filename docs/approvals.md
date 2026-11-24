@@ -21,6 +21,16 @@ approval needed: shell.run
 - `d` denies the request.
 - `s` leaves the approval pending so you can inspect it later with `skep review`.
 
+Every approval row (`skep review`, `GET /api/approvals`) carries one status:
+
+- `pending`: waiting on a human answer.
+- `applying`: claimed by the verdict now running (a landing or a resume).
+- `approved`: a human approved it.
+- `denied`: a human denied it, or its apply failed or was interrupted (the
+  note says which).
+- `superseded`: minted for a `skep review` verdict that was then refused as
+  stale; never a human answer.
+
 If the resumed run hits another gate, `skep run` prompts again in the same
 terminal instead of forcing a handoff to `skep review`.
 
