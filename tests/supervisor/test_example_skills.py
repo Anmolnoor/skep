@@ -297,12 +297,110 @@ def test_seed_refuses_a_directory_it_did_not_make(tmp_path: Path, fakes: dict[st
     assert sorted(p.name for p in target.iterdir()) == ["notes.txt"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["me/real-app", "-R/fixture", "me/my fixture", "me/x;fixture", "me/fixture/x", "/fixture"],
+)
 def test_seed_refuses_a_github_repo_not_named_fixture(
-    tmp_path: Path, fakes: dict[str, str]
+    tmp_path: Path, fakes: dict[str, str], name: str
 ) -> None:
-    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/real-app")
+    """S9: OWNER/NAME by a strict pattern — never an option-shaped `-R/...`."""
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", name)
     assert done.returncode == 2 and "'fixture' in NAME" in done.stderr
     assert not (tmp_path / "fx").exists()
+
+
+def _remote_with(fakes: dict[str, str], tmp_path: Path, *, branch: str, tag: bool = False) -> str:
+    """A bare 'GitHub' remote holding someone's real work on ``branch``."""
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", "-b", branch, str(other)], check=True)
+    (other / "app.py").write_text("print('real')\n")
+    subprocess.run(["git", "-C", str(other), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(other), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "real"],
+        check=True,
+        env=fakes,
+    )  # fmt: skip
+    remote = fakes["FAKE_GH_REMOTE"]
+    subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+    ref = "refs/tags/v1" if tag else f"refs/heads/{branch}"
+    subprocess.run(["git", "-C", str(other), "push", "-q", remote, f"HEAD:{ref}"], check=True)
+    return _git(Path(remote), "rev-parse", ref)
+
+
+@pytest.mark.parametrize(("branch", "tag"), [("trunk", False), ("main", True)])
+def test_github_mode_refuses_a_non_empty_remote_with_no_fixture_main(
+    tmp_path: Path, fakes: dict[str, str], branch: str, tag: bool
+) -> None:
+    """S9: another default branch, or tags alone, is someone's repo — refused
+    whole, even though no `main` exists to be overwritten."""
+    before = _remote_with(fakes, tmp_path, branch=branch, tag=tag)
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/dependabot-fixture")
+    assert done.returncode == 2 and "not this fixture's" in done.stderr, done.stderr
+    remote = Path(fakes["FAKE_GH_REMOTE"])
+    refs = _git(remote, "for-each-ref", "--format=%(refname) %(objectname)")
+    assert refs == f"{'refs/tags/v1' if tag else 'refs/heads/' + branch} {before}"
+    assert not Path(fakes["FAKE_GH_LOG"]).exists()
+
+
+def test_github_mode_refuses_when_the_remote_cannot_be_probed(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """S9: a failed ls-remote is not an empty remote."""
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/dependabot-fixture")
+    assert done.returncode == 2 and "cannot list" in done.stderr, done.stderr
+    assert not Path(fakes["FAKE_GH_REMOTE"]).exists()
+
+
+def test_every_push_is_leased_to_what_the_probe_saw(tmp_path: Path, fakes: dict[str, str]) -> None:
+    """S9: a fixture branch that moves between the probe and the push is not
+    overwritten (--force-with-lease=<ref>:<seen>, atomic): the run fails."""
+    import shutil
+
+    subprocess.run(["git", "init", "-q", "--bare", fakes["FAKE_GH_REMOTE"]], check=True)
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target), "--github", "me/dependabot-fixture").returncode == 0
+    remote = Path(fakes["FAKE_GH_REMOTE"])
+    main = _git(remote, "rev-parse", "main")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" push "*) "$REAL_GIT" --git-dir="$FAKE_GH_REMOTE" '
+        'update-ref "refs/heads/$RACE_BRANCH" "$RACE_SHA" ;; esac\n'
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    raced = {
+        **fakes,
+        "PATH": f"{shim}{os.pathsep}{fakes['PATH']}",
+        "REAL_GIT": str(shutil.which("git")),
+        "RACE_BRANCH": SHAPES["a"],
+        "RACE_SHA": main,
+    }
+    done = _seed(raced, str(target), "--github", "me/dependabot-fixture")
+    assert done.returncode != 0
+    assert "stale info" in done.stderr or "rejected" in done.stderr, done.stderr
+    assert _git(remote, "rev-parse", SHAPES["a"]) == main  # the racer's value stands
+
+
+def test_move_head_pushes_only_to_the_fixtures_own_remote(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """S9/N9: --move-head checks the checkout's origin is exactly the
+    disposable remote this run names, and that remote's main is the fixture's."""
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target)).returncode == 0
+    elsewhere = tmp_path / "elsewhere.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(target / "origin.git"), str(elsewhere)],
+                   check=True)  # fmt: skip
+    before = _git(elsewhere, "rev-parse", SHAPES["d"])
+    _git(target / "repo", "remote", "set-url", "origin", str(elsewhere))
+
+    done = _seed(fakes, str(target), "--move-head")
+    assert done.returncode == 2 and "not the fixture's remote" in done.stderr, done.stderr
+    assert _git(elsewhere, "rev-parse", SHAPES["d"]) == before
 
 
 def test_seed_builds_the_four_shapes_idempotently(tmp_path: Path, fakes: dict[str, str]) -> None:

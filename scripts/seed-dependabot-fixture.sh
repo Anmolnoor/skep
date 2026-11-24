@@ -15,14 +15,18 @@
 # .skep-dependabot-fixture); a re-run rebuilds only DIR/repo and DIR/origin.git.
 # Nothing is pushed anywhere but DIR/origin.git without --github, and --github
 # needs a repo you created yourself (gh repo create OWNER/NAME --private) whose
-# name contains "fixture" and whose main is empty or this fixture's. Commits are
-# dated and authored fixedly, so a re-run gives the same SHAs (given one uv).
+# NAME contains "fixture" and that is empty or this fixture's: any branch or tag
+# there means its main must carry the marker, or nothing is pushed. A failed
+# probe refuses. Every push is leased to the SHA the probe saw (atomic), and
+# --move-head pushes only to the remote this run names (DIR/origin.git, or the
+# --github URL), checked against the checkout's origin. Commits are dated and
+# authored fixedly, so a re-run gives the same SHAs (given one uv).
 set -euo pipefail
 
 MARKER=.skep-dependabot-fixture
 SHAPES=(
   "a|dependabot/pip/fakelib-1.0.1|Bump fakelib from 1.0.0 to 1.0.1|verified: G10 confirms base...head, merge_pr pins the head"
-  "b|dependabot/pip/fakelib-2.0.0|Bump fakelib from 1.0.0 to 2.0.0|fails: G10 failed, nothing merges"
+  "b|dependabot/pip/fakelib-2.0.0|Bump fakelib from 1.0.0 to 2.0.0|fails: the run ends failed with no G10 verdict (reverification null), nothing merges"
   "c|dependabot/pip/fakelib-2.0.0-tests|Bump fakelib from 1.0.0 to 2.0.0 and skip the failing test|tampered: V1 flags the skip across base...head"
   "d|dependabot/pip/fakelib-1.0.2|Bump fakelib from 1.0.0 to 1.0.2|verify it, propose merge_pr, run --move-head, confirm: GitHub refuses"
 )
@@ -45,8 +49,9 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$DIR" ] || usage
 
-if [ -n "$GITHUB" ]; then
-  case "$GITHUB" in */*fixture*) ;; *) refuse "--github $GITHUB: give OWNER/NAME with 'fixture' in NAME (a throwaway repo only)" ;; esac
+NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]*fixture[A-Za-z0-9._-]*$'
+if [ -n "$GITHUB" ] && ! [[ "$GITHUB" =~ $NAME_RE ]]; then
+  refuse "--github $GITHUB: give OWNER/NAME with 'fixture' in NAME (a throwaway repo only)"
 fi
 if [ -e "$DIR" ]; then
   [ -d "$DIR" ] || refuse "$DIR is not a directory"
@@ -86,8 +91,35 @@ remote_url() {
   fi
 }
 
+HEADS=""
+sha_of() {  # sha_of BRANCH — its SHA on the probed remote, or empty
+  printf '%s\n' "$HEADS" | awk -v ref="refs/heads/$1" '$2 == ref { print $1 }'
+}
+probe() {  # probe URL — refuse unless it is empty or this fixture's; HEADS = its branches
+  local url="$1" tags dir
+  HEADS="$(git ls-remote --heads "$url")" || refuse "cannot list $url's branches (git ls-remote failed)"
+  tags="$(git ls-remote --tags "$url")" || refuse "cannot list $url's tags (git ls-remote failed)"
+  [ -n "$HEADS$tags" ] || return 0
+  [ -n "$(sha_of main)" ] || refuse "$url holds branches or tags but no main: not this fixture's"
+  dir="$(mktemp -d)"
+  if ! git -C "$dir" init -q || ! git -C "$dir" fetch -q "$url" refs/heads/main \
+    || [ "$(git -C "$dir" rev-parse FETCH_HEAD)" != "$(sha_of main)" ] \
+    || ! git -C "$dir" cat-file -e "FETCH_HEAD:$MARKER" 2>/dev/null; then
+    rm -rf "$dir"
+    refuse "$url has a main that is not this fixture's (no $MARKER)"
+  fi
+  rm -rf "$dir"
+}
+lease() {  # lease BRANCH — push it only if the remote still holds what the probe saw
+  echo "--force-with-lease=refs/heads/$1:$(sha_of "$1")"
+}
+
 if [ "$MOVE" -eq 1 ]; then
   [ -f "$DIR/$MARKER" ] && [ -d "$REPO/.git" ] || refuse "$DIR holds no seeded fixture; seed it first"
+  URL="$(remote_url)"
+  origin="$(g remote get-url origin)"
+  [ "$origin" = "$URL" ] || refuse "the checkout's origin is $origin, not the fixture's remote $URL"
+  probe "$URL"
   branch="$(echo "${SHAPES[3]}" | cut -d'|' -f2)"
   g checkout -q "$branch"
   if [ "$(g log -1 --format=%s)" = "$MOVE_MSG" ]; then
@@ -96,21 +128,14 @@ if [ "$MOVE" -eq 1 ]; then
   fi
   fakelib 1.0.3 "a + b"
   commit "2026-01-02T00:00:00Z" "$MOVE_MSG"
-  g push -q origin "$branch"
+  g push -q "$(lease "$branch")" "$URL" "refs/heads/$branch:refs/heads/$branch"
   echo "moved shape (d): $branch is now $(g rev-parse HEAD) — confirm its merge_pr card: GitHub must refuse it"
   exit 0
 fi
 
 command -v uv >/dev/null || refuse "uv is not on PATH (the fixture commits a uv.lock)"
 URL="$(remote_url)"
-if [ -n "$GITHUB" ] && [ -n "$(git ls-remote "$URL" refs/heads/main)" ]; then
-  probe="$(mktemp -d)"
-  git -C "$probe" init -q
-  git -C "$probe" fetch -q "$URL" main
-  git -C "$probe" cat-file -e "FETCH_HEAD:$MARKER" 2>/dev/null \
-    || { rm -rf "$probe"; refuse "$GITHUB has a main that is not this fixture's (no $MARKER)"; }
-  rm -rf "$probe"
-fi
+[ -z "$GITHUB" ] || probe "$URL"
 
 rm -rf "$REPO" "$DIR/origin.git"
 touch "$DIR/$MARKER"
@@ -193,11 +218,14 @@ EOF
 done
 g checkout -q main
 
-[ -n "$GITHUB" ] || git init -q --bare "$DIR/origin.git"
+[ -n "$GITHUB" ] || { git init -q --bare "$DIR/origin.git"; probe "$URL"; }
 g remote add origin "$URL"
-branches=()
-for shape in "${SHAPES[@]}"; do branches+=("$(echo "$shape" | cut -d'|' -f2)"); done
-g push -q --force origin main "${branches[@]}"
+branches=() leases=("$(lease main)")
+for shape in "${SHAPES[@]}"; do
+  branch="$(echo "$shape" | cut -d'|' -f2)"
+  branches+=("$branch") leases+=("$(lease "$branch")")
+done
+g push -q --atomic "${leases[@]}" origin main "${branches[@]}"
 
 echo "fixture: $REPO (origin $URL)"
 for shape in "${SHAPES[@]}"; do
