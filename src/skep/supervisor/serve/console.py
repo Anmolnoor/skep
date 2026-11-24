@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shlex
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException
@@ -87,6 +88,20 @@ def canonical_task_id(store: RunStore, task_id: str) -> str:
         return task_id
 
 
+def _branch_repo(store: RunStore, args: dict[str, Any]) -> Path | None:
+    """The repo a branch-mode open_pr pushes, resolved as its execution does
+    (resolve_repo_arg over the daemon's clone root, cards.merge_pin's way)."""
+    from .registry import resolve_repo_arg
+
+    if not args.get("repo"):
+        return None
+    try:
+        root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
+        return resolve_repo_arg(str(args["repo"]), root, store)
+    except HTTPException:
+        return None
+
+
 def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     """R3 J1: the runs whose patch a card's execution lands or publishes —
     read from what the tool does (tools.py), not its boundary label: land_run
@@ -97,8 +112,17 @@ def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     if tool == "land_run":
         ids = [args.get("task_id")]
     elif tool == "open_pr" and args.get("branch"):
-        # R4 K1 (O2): branch mode publishes the runs whose approved landing named it
-        ids = store.runs_landed_on(str(args["branch"]))
+        # R4 K1 (O2): branch mode publishes the runs whose approved landing
+        # named it — R5-1: in the repo open_pr resolves (skep/maintain is the
+        # same name in every maintain-phase repo)
+        repo = _branch_repo(store, args)
+        ids = [
+            task_id
+            for task_id in store.runs_landed_on(str(args["branch"]))
+            if repo is not None
+            and (record := store.get_run(task_id)) is not None
+            and Path(record.repo).resolve() == repo
+        ]
     elif tool == "open_pr":
         ids = args.get("task_ids") or [args.get("task_id")]
     elif tool == "approve_review":

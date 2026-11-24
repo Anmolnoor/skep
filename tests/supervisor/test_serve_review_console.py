@@ -1092,3 +1092,37 @@ def test_save_binds_to_the_endpoint_its_test_resolved(
         ) == other.base_url.rstrip("/")
     finally:
         other.stop()
+
+
+def test_a_branch_mode_card_lists_only_its_own_repos_landings_on_that_branch(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R5-1: skep/maintain is the same name in every maintain-phase repo — a
+    branch-mode open_pr card for repo A resolves A as open_pr does and lists
+    only A's run landed there, never repo B's (nor B's G10 / V1)."""
+    from skep.supervisor import RunStore, mint_task
+
+    store = RunStore(config.db_path)
+    try:
+        landed = {}
+        for name in ("a", "b"):
+            repo = tmp_path / name
+            (repo / ".git").mkdir(parents=True)
+            task = mint_task(workspace=tmp_path / f"w{name}", instructions=name)
+            store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+            store.transition(task.task_id, "completed")
+            _landed_on(store, task.task_id, "skep/maintain")
+            landed[name] = task.task_id
+        chat = store.create_chat(title="pr", model=None)
+        card = store.add_chat_action(
+            chat.chat_id,
+            tool="open_pr",
+            args={"branch": "skep/maintain", "repo": str(tmp_path / "a")},
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    (action,) = client.get(f"/api/chats/{chat.chat_id}").json()["actions"]
+    assert [r["task_id"] for r in action["card"]["runs"]] == [landed["a"]]
+    (row,) = [i for i in client.get("/api/review-queue").json()["items"] if i["id"] == card]
+    assert row["task_ids"] == [landed["a"]]
