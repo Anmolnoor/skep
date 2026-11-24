@@ -2079,16 +2079,14 @@ def _moved_since_shown(store: RunStore, record: RunRecord, shown: _Shown) -> str
     task_id = record.task_id
     if record.state != shown.state:
         return f"task {task_id} moved from {shown.state} to {record.state} since you read it"
-    if shown.patch_sha256 is not None:
-        from .serve.actions import patch_path
+    from .serve.actions import patch_path
 
-        path = patch_path(store, task_id)
-        now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
-        if now != shown.patch_sha256:
-            return (
-                f"the patch changed since you read it "
-                f"(sha256 {shown.patch_sha256[:12]} → {now[:12]})"
-            )
+    # R3 J3: absence is evidence too — a card that showed no patch refuses one now.
+    path = patch_path(store, task_id)
+    now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
+    was = shown.patch_sha256 or "none"
+    if now != was:
+        return f"the patch changed since you read it (sha256 {was[:12]} → {now[:12]})"
     return None
 
 

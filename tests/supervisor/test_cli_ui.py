@@ -915,3 +915,31 @@ def test_the_line_fallback_skips_on_timeout_and_eof(
     assert cli_cmds._read_approval_choice() == "s"  # nothing typed: skip
     os.close(master)  # the terminal hung up: EOF
     assert cli_cmds._read_approval_choice() == "s"
+
+
+def test_interactive_verdict_refuses_a_patch_that_appeared_after_a_card_showed_none(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 J3 (I7, I13): absence is evidence too — a G10-disagreement card that
+    displayed NO patch refuses a verdict once a patch exists, and nothing lands
+    or is recorded."""
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:liar", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    capsys.readouterr()
+    task_id = _only_task_id(home)
+    patch = _patch_of(home, task_id)
+    hidden = patch.with_suffix(".away")
+    patch.rename(hidden)  # the card is read with no patch on disk
+    for key in ("a", "d"):
+        _press(monkeypatch, key, lambda: hidden.exists() and hidden.rename(patch))
+        assert _run_cli(home, "review") == 2
+        err = capsys.readouterr().err
+        assert "the patch changed since you read it" in err and "nothing done" in err
+        patch.rename(hidden)
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert store.approvals_for(task_id) == []
+    finally:
+        store.close()
