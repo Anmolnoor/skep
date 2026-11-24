@@ -196,3 +196,19 @@ def test_doctor_names_the_window_and_its_source(tmp_path: Path) -> None:
     }
     report = format_doctor_report({"overall": "ready", "queen_context": check})
     assert f"- queen context: window 400000 (catalog), replay cap {AUTO_NUM_CTX_CAP}" in report
+
+
+def test_the_chat_replay_budget_follows_the_detected_window(store: RunStore) -> None:
+    """Phase 06 wiring: chat.py's _history_budget budgets with the resolver's
+    replay_cap — a 200k provider-api window widens the replay past the 16k
+    default, capped at AUTO_NUM_CTX_CAP."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.chat import RESPONSE_RESERVE_CHARS, ChatEngine
+
+    profile = _profile(store, "or", "https://or.example/api/v1", "big-model")
+    engine = SimpleNamespace(store=store, _advertised_tools=lambda _chat: [])
+    floor = 1000 + len("[]") + RESPONSE_RESERVE_CHARS
+    assert ChatEngine._history_budget(engine, 1000) == DEFAULT_NUM_CTX * 4 - floor  # type: ignore[arg-type]
+    store.set_setting(context_cache_key("or", profile.base_url, "big-model"), {"window": 200_000})
+    assert ChatEngine._history_budget(engine, 1000) == AUTO_NUM_CTX_CAP * 4 - floor  # type: ignore[arg-type]

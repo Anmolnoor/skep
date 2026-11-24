@@ -74,6 +74,7 @@ from .llm import (
     chat_stream,
     llm_config_view,
     resolve_active_api_key,
+    resolve_context_window,
     resolved_num_ctx,
     tool_delivery,
 )
@@ -1871,8 +1872,11 @@ class ChatEngine:
 
         v73-F1: a recorded provider ceiling is a second, lower wall the
         num_ctx budget never sees — replay AND compaction stay under it."""
-        # v74-F2: a chat pinned to a bigger model budgets like one.
-        window_chars = chat_num_ctx(self.store, getattr(chat, "model", None)) * 4
+        # v74-F2: a chat pinned to a bigger model budgets like one. Phase 06:
+        # the provider-keyed window's replay cap (override > provider-api >
+        # catalog > default), never the 16k fallback for a 200k model
+        model = getattr(chat, "model", None)
+        window_chars = resolve_context_window(self.store, model=model).replay_cap * 4
         tools_chars = len(json.dumps(self._advertised_tools(chat)))
         floor = system_chars + tools_chars + RESPONSE_RESERVE_CHARS
         budget = max(MIN_HISTORY_BUDGET_CHARS, window_chars - floor)
