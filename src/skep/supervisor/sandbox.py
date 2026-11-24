@@ -467,45 +467,6 @@ def _validated_extra(extra: Iterable[Path], skep_home: Path) -> list[Path]:
 # Phase 09 R4 (N1): kernel pseudo filesystems hold live process and device
 # state (/proc/<pid>/environ is the supervisor's env), never an operator file.
 _PSEUDO_ROOTS = ("proc", "sys", "dev")
-# statfs f_type of the Linux pseudo filesystems: proc, sysfs, devpts, debugfs,
-# tracefs, securityfs, cgroup, cgroup2, bpf, efivarfs, configfs, pstore.
-_PSEUDO_FS_MAGIC = frozenset(
-    {
-        0x9FA0,
-        0x62656572,
-        0x1CD1,
-        0x64626720,
-        0x74726163,
-        0x73636673,
-        0x27E0EB,
-        0x63677270,
-        0xCAFE4A11,
-        0xDE5E81E4,
-        0x62656570,
-        0x6165676C,
-    }
-)
-
-
-def _pseudo_devices() -> set[int]:
-    """The st_dev of /proc, /sys and /dev, where they exist."""
-    devices = set()
-    for root in _PSEUDO_ROOTS:
-        with contextlib.suppress(OSError):
-            devices.add(os.stat(f"/{root}").st_dev)
-    return devices
-
-
-def _fs_magic(fd: int) -> int | None:
-    """fstatfs's f_type on Linux (the first field, a C long), else None."""
-    if sys.platform != "linux":
-        return None
-    import ctypes
-
-    buf = ctypes.create_string_buffer(256)  # struct statfs is 120 bytes on 64-bit
-    if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
-        return None
-    return ctypes.c_long.from_buffer(buf).value
 
 
 def _pseudo_problem(path: Path) -> str:
@@ -517,18 +478,15 @@ def _pseudo_problem(path: Path) -> str:
     )
 
 
-def open_read_file(path: Path, *, denied: Iterable[Path] = ()) -> int:
+def open_read_file(path: Path) -> int:
     """Phase 09 R2 (S7): ``path`` opened read-only as the regular file it
     names — every component walked without following a link, so a path
     reached through one refuses, as does a directory, FIFO or device. The
-    caller owns the returned fd; what it binds is this object, not a name
-    a later swap could retarget.
+    caller owns the returned fd. Nothing here reads its bytes, and the wall
+    binds the path, not this fd (R4, SD-1: ADR 0068's "Not defended").
 
-    R4: an ordinary file only. A relative path or a ``..`` component
-    refuses before anything normalizes it (N4); a path under /proc, /sys or
-    /dev, or an opened file on a kernel pseudo filesystem (st_dev, statfs
-    magic), refuses (N1); a file with more than one hard link refuses, and
-    the opened file is compared with each ``denied`` file's identity (S1)."""
+    R4: a relative path or a ``..`` component refuses before anything
+    normalizes it (N4); a path under /proc, /sys or /dev refuses (N1)."""
     if not os.path.isabs(path) or ".." in Path(path).parts:
         raise SandboxUnavailableError(
             f"input {path} must be an absolute path with no '..' component; name the "
@@ -553,42 +511,10 @@ def open_read_file(path: Path, *, denied: Iterable[Path] = ()) -> int:
         raise SandboxUnavailableError(f"input {path} cannot be opened: {exc.strerror}") from exc
     finally:
         os.close(parent)
-    try:
-        info = os.fstat(fd)
-        if info.st_dev in _pseudo_devices() or _fs_magic(fd) in _PSEUDO_FS_MAGIC:
-            raise SandboxUnavailableError(_pseudo_problem(path))
-        if not stat.S_ISREG(info.st_mode):
-            raise SandboxUnavailableError(f"input {path} is not a regular file; name files only")
-        if info.st_nlink > 1:
-            raise SandboxUnavailableError(
-                f"input {path} has {info.st_nlink} hard links: another name for the same file "
-                "could be a masked secret. Copy the file instead (cp makes a new one) and name "
-                "the copy"
-            )
-        for mask in denied:
-            try:
-                other = os.stat(mask)
-            except OSError:
-                continue  # a mask that is not there now has no identity to share
-            same = (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino)
-            if stat.S_ISREG(other.st_mode) and same:
-                raise SandboxUnavailableError(
-                    f"input {path} is the masked file {mask} under another name; an "
-                    "input never reopens a mask. Name a file outside it"
-                )
-    except BaseException:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise
+        raise SandboxUnavailableError(f"input {path} is not a regular file; name files only")
     return fd
-
-
-# Phase 09 R3 (S2): bubblewrap stages a snapshot of each input; bounded.
-READ_FILE_MAX_BYTES = 16 * 1024 * 1024
-READ_FILES_TOTAL_MAX_BYTES = 64 * 1024 * 1024
-
-
-def _cap(limit: int) -> str:
-    return f"{limit // 2**20} MiB" if limit % 2**20 == 0 else f"{limit} bytes"
 
 
 def masked_input_problem(
@@ -606,55 +532,6 @@ def masked_input_problem(
                 "an input never reopens it. Name a file outside it"
             )
     return None
-
-
-def _staged_read_files(
-    files: list[Path], stage: Path, *, denied: Iterable[Path] = ()
-) -> list[tuple[Path, Path]]:
-    """bwrap's half of S7: each input copied from its pinned fd into the
-    private ``stage`` (R3: outside the workspace; the caller removes it),
-    paired with the path it is bound at. The copy is what the wall binds, so
-    a swap after this point changes nothing inside. Each copy is 0600 plus
-    the source's owner-execute bit (S9), never setuid/setgid/sticky, and the
-    byte caps hold from fstat and again while copying."""
-    pairs: list[tuple[Path, Path]] = []
-    total = 0
-    for index, path in enumerate(files):
-        with os.fdopen(open_read_file(path, denied=denied), "rb") as src:
-            info = os.fstat(src.fileno())
-            if info.st_size > READ_FILE_MAX_BYTES:
-                raise SandboxUnavailableError(
-                    f"input {path} is {info.st_size} bytes, over the cap of "
-                    f"{_cap(READ_FILE_MAX_BYTES)} per file a run's snapshot holds"
-                )
-            if total + info.st_size > READ_FILES_TOTAL_MAX_BYTES:
-                raise SandboxUnavailableError(
-                    f"input {path} brings the inputs to {total + info.st_size} bytes, over "
-                    f"the cap of {_cap(READ_FILES_TOTAL_MAX_BYTES)} in all"
-                )
-            limit = min(READ_FILE_MAX_BYTES, READ_FILES_TOTAL_MAX_BYTES - total)
-            mode = 0o600 | (info.st_mode & stat.S_IXUSR)
-            copy = stage / f"{index}-{path.name}"
-            try:
-                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-                with os.fdopen(fd, "wb") as dst:
-                    os.fchmod(dst.fileno(), mode)  # the umask may have cut the x bit
-                    copied = 0
-                    while chunk := src.read(1 << 16):
-                        copied += len(chunk)
-                        if copied > limit:
-                            raise SandboxUnavailableError(
-                                f"input {path} grew past the cap of {_cap(limit)} while it "
-                                "was copied"
-                            )
-                        dst.write(chunk)
-            except OSError as exc:
-                raise SandboxUnavailableError(
-                    f"input {path} could not be staged: {exc.strerror}"
-                ) from exc
-        total += copied
-        pairs.append((copy, path))
-    return pairs
 
 
 def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
@@ -1272,7 +1149,7 @@ def _bubblewrap_args(
     unmasked: Iterable[Path] = (),
     strict: bool = False,
     aliases: Iterable[Path] = (),
-    read_files: Iterable[tuple[Path, Path]] = (),
+    read_files: Iterable[Path] = (),
 ) -> list[str]:
     # ADR 0068: ``strict`` starts from bwrap's empty root instead of the
     # host's: the system dirs, then ``readable_roots`` (which the caller has
@@ -1301,7 +1178,7 @@ def _bubblewrap_args(
     readable_roots = list(readable_roots)
     read_files = list(read_files)
     tmp_mountpoints: dict[str, None] = {}
-    for _copy, dest in read_files:
+    for dest in read_files:
         for mountpoint in _tmp_mountpoints_for_bind(dest.parent):
             tmp_mountpoints.setdefault(mountpoint, None)
     for root in [*readable_roots, *writable_roots]:
@@ -1321,8 +1198,8 @@ def _bubblewrap_args(
     for root in writable_roots:
         path = str(Path(root))
         args.extend(["--bind", path, path])
-    for copy, dest in read_files:  # S7: the pinned copy, at the path the command names
-        args.extend(["--ro-bind", str(copy), str(dest)])
+    for dest in read_files:  # S7, R4 SD-1: the live file, read-only, in place
+        args.extend(["--ro-bind", str(dest), str(dest)])
     for pinned in write_denied:
         # W31: read-only over its writable root (the run's git pin).
         args.extend(["--ro-bind", str(pinned), str(pinned)])
@@ -1335,7 +1212,7 @@ def _bubblewrap_args(
         if (
             denied.parts[1:2] in (("tmp",), ("run",))
             and not any(denied.is_relative_to(root) for root in [*readable_roots, *writable_roots])
-            and not any(dest.is_relative_to(denied) for _copy, dest in read_files)
+            and not any(dest.is_relative_to(denied) for dest in read_files)
         ):
             continue
         args.extend(
@@ -1621,7 +1498,6 @@ def write_profile(
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
     read_files: Iterable[Path] = (),
-    read_files_stage: Path | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1659,24 +1535,14 @@ def write_profile(
     ``read_files`` (Phase 09 R2, S7): single files a strict run may read,
     never as roots. Each must be a regular file named by its real path
     (``open_read_file``) and pass ``extra_read_path_problem`` and
-    ``masked_input_problem``. bubblewrap binds a copy taken from the pinned
-    fd into ``read_files_stage`` — a private dir outside the run's writable
-    roots that the caller makes and removes (``wall.walled``; R3) — so a run
-    sees a snapshot taken at launch, capped at ``READ_FILE_MAX_BYTES`` per
-    file and ``READ_FILES_TOTAL_MAX_BYTES`` in all. Seatbelt grants its
-    ``(literal …)`` path. The masks still land last.
+    ``masked_input_problem``. Both backends grant the live file, read-only,
+    at its own path (R4, SD-1): bubblewrap ``--ro-bind``s it in place,
+    Seatbelt grants its ``(literal …)`` path. The masks still land last.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
     read_allowlist = None if read_allowlist is None else tuple(read_allowlist)
-    read_files = list(read_files)
-    for path in read_files:  # R4 (N4): judged as named, before abspath normalizes it
-        if not os.path.isabs(path) or ".." in Path(path).parts:
-            raise SandboxUnavailableError(
-                f"input {path} must be an absolute path with no '..' component; name the "
-                "file by its real absolute path"
-            )
-    read_files = [Path(os.path.abspath(path)) for path in read_files]
+    read_files = [Path(path) for path in read_files]  # R4 (N4): judged as named, no abspath
     probe = require_usable(backend)
     if read_files and (read_allowlist is None or probe.backend not in STRICT_READ_BACKENDS):
         raise SandboxUnavailableError(
@@ -1684,9 +1550,9 @@ def write_profile(
             f"only; the {probe.backend} backend cannot, so this run is refused"
         )
     for path in read_files:
+        os.close(open_read_file(path))  # refuses '..', /proc, a link, dir or special file now
         if problem := extra_read_path_problem(path, skep_home):
             raise SandboxUnavailableError(f"input {problem}")
-        os.close(open_read_file(path))  # refuses a link, dir or special file now
     if read_allowlist is not None and probe.backend not in STRICT_READ_BACKENDS:
         raise SandboxUnavailableError(
             f"strict read confinement (ADR 0068) is enforced on bubblewrap and Seatbelt "
@@ -1719,12 +1585,10 @@ def write_profile(
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
-    input_masks = [*read_denied, *git_masked]
-    for path in read_files:  # R3 (N2): before anything is copied or granted
-        masked = masked_input_problem(path, skep_home=skep_home, denied=input_masks)
+    for path in read_files:  # R3 (N2): before anything is granted
+        masked = masked_input_problem(path, skep_home=skep_home, denied=[*read_denied, *git_masked])
         if masked:
             raise SandboxUnavailableError(f"input {masked}")
-        os.close(open_read_file(path, denied=input_masks))  # R4 (S1): no second name
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
         # linked message file refuses the wall rather than going unmasked (R5, Sol)
@@ -1764,21 +1628,6 @@ def write_profile(
         return _write_argv_profile(profile_path, args, header=_PODMAN_HEADER)
     if probe.backend == "bubblewrap":
         writable_roots = [workspace, *extra_writable]
-        staged: list[tuple[Path, Path]] = []
-        if read_files:
-            if read_files_stage is None:
-                raise SandboxUnavailableError(
-                    "input files on bubblewrap are copied into a private stage dir outside "
-                    "the workspace (wall.walled makes one); none was given, so this run is "
-                    "refused"
-                )
-            stage = Path(read_files_stage).resolve()
-            if any(stage.is_relative_to(Path(root).resolve()) for root in writable_roots):
-                raise SandboxUnavailableError(
-                    f"the input stage {stage} must lie outside the run's writable roots, or "
-                    "the run could rewrite its own inputs; this run is refused"
-                )
-            staged = _staged_read_files(read_files, stage, denied=input_masks)
         args = _bubblewrap_args(
             writable_roots=writable_roots,
             network=network,
@@ -1791,7 +1640,7 @@ def write_profile(
             unmasked=unmasked,
             strict=read_allowlist is not None,
             aliases=aliases,
-            read_files=staged,
+            read_files=read_files,
         )
         # After the netshim when there is one (it alone needs the proxy
         # bridge); wrap_command's "--" then ends the step's options.

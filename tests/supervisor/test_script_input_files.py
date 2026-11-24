@@ -5,9 +5,9 @@ as roots.
 it by path as a read root — which accepts a directory. A directory (or a
 link to one) swapped in between the check and the bind was granted whole.
 The wall now takes inputs as ``read_files``: a path reached through a link,
-or anything but a regular file, refuses; bubblewrap binds a copy of the
-object opened without following links, so a later swap changes nothing;
-Seatbelt grants the ``(literal …)`` path, never a ``(subpath …)``."""
+or anything but a regular file, refuses; bubblewrap ``--ro-bind``s the
+file in place (R4, SD-1: no copy) and Seatbelt grants the ``(literal …)``
+path, never a ``(subpath …)``."""
 
 from __future__ import annotations
 
@@ -41,10 +41,9 @@ def _usable(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
 def _profile(tmp_path: Path, home: Path, files: tuple[Path, ...]) -> Path:
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
-    (stage := tmp_path / "stage").mkdir(exist_ok=True)  # R3: outside the workspace
     return sandbox.write_profile(
         workspace / "p.profile", workspace=workspace, skep_home=home,
-        read_allowlist=(), read_files=files, read_files_stage=stage,
+        read_allowlist=(), read_files=files,
     )  # fmt: skip
 
 
@@ -80,23 +79,31 @@ def test_anything_but_a_regular_file_by_its_real_path_refuses(tmp_path: Path, ki
         sandbox.open_read_file(target)
 
 
-def test_bubblewrap_binds_a_copy_not_the_path(
+def test_bubblewrap_binds_each_input_in_place_before_every_mask(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R4 (SD-1): ``--ro-bind P P`` — the live file, read-only, at its own
+    path, never a copy — and every secret mask lands after it."""
     _usable(monkeypatch, "bubblewrap")
-    target = tmp_path / "data" / "in.txt"
-    target.parent.mkdir()
-    target.write_text("INPUT")
-    args: list[str] = json.loads(_profile(tmp_path, home, (target,)).read_text().partition("\n")[2])
-    binds = [(args[i + 1], args[i + 2]) for i, a in enumerate(args) if a == "--ro-bind"]
-    (staged,) = [src for src, dest in binds if dest == str(target)]
-    assert staged != str(target) and Path(staged).read_text() == "INPUT"
-    assert str(target.parent) not in {dest for _src, dest in binds}
-    # a swap after the wall is built moves nothing: the bind names the copy
-    target.unlink()
-    target.mkdir()
-    (target / "secret.txt").write_text("SECRET")
-    assert Path(staged).is_file() and Path(staged).read_text() == "INPUT"
+    targets = []
+    for name in ("in.txt", "two.txt"):
+        target = tmp_path / "data" / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("INPUT")
+        targets.append(target)
+    args: list[str] = json.loads(
+        _profile(tmp_path, home, tuple(targets)).read_text().partition("\n")[2]
+    )
+    binds = [(i, args[i + 1], args[i + 2]) for i, a in enumerate(args) if a == "--ro-bind"]
+    at = {}
+    for target in targets:
+        ((index, src, _dest),) = [b for b in binds if b[2] == str(target)]
+        assert src == str(target)
+        at[target] = index
+    assert str(targets[0].parent) not in {dest for _i, _src, dest in binds}
+    masks = [str(p) for p in sandbox.secret_paths(home)]
+    mask_at = [i for i, a in enumerate(args) if a in masks and i > 0 and args[i - 1] != "--dir"]
+    assert mask_at and min(mask_at) > max(at.values())
 
 
 def test_seatbelt_grants_the_literal_path_only(
@@ -142,12 +149,16 @@ def test_podman_refuses_read_files(
         _profile(tmp_path, home, (target,))
 
 
-@needs_wall
+@pytest.mark.skipif(
+    sandbox.availability().backend != "seatbelt",
+    reason="Seatbelt's (literal …) grant; bubblewrap binds by path (ADR 0068, Not defended)",
+)
 def test_a_dir_swapped_in_after_validation_is_not_readable(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The input passes every check, then becomes a directory before the
-    script runs: its files stay out of reach."""
+    script runs: Seatbelt's literal grant keeps its files out of reach. On
+    bubblewrap this swap is ADR 0068's "Not defended" (b) (R4, SD-1)."""
     target = home.parent / "in.txt"
     target.write_text("INPUT")
     real_wrap = sandbox.wrap_command
@@ -196,3 +207,20 @@ def test_a_declared_input_is_still_readable(home: Path) -> None:
         f"{sys.executable} -c 'print(1)'; cat {target}", skep_home=home
     )
     assert ok and "INPUT-OK" in output, output
+
+
+@needs_wall
+def test_an_input_is_live_and_read_only_and_its_siblings_unseen(home: Path) -> None:
+    """R4 (SD-1): the script reads the live file, cannot write it, and a
+    file next to it that the command does not name is not there."""
+    target = home.parent / "in.txt"
+    target.write_text("LIVE-INPUT")
+    sibling = home.parent / "sibling.txt"
+    sibling.write_text("SIBLING-UNSEEN")
+    output, _ok = run_schedule_script(
+        # a glob, so the command does not name (declare) the sibling itself
+        f"cat {target}; echo changed >> {target}; cat {home.parent}/sibling.tx?",
+        skep_home=home,
+    )
+    assert "LIVE-INPUT" in output and "SIBLING-UNSEEN" not in output, output
+    assert target.read_text() == "LIVE-INPUT" and sibling.read_text() == "SIBLING-UNSEEN"

@@ -32,9 +32,8 @@ def walled(
     detected toolchains incl. ``<skep home>/tools/.venvs``, the workspace,
     ``read_allowlist``) and ``read_files`` as single files (R2, S7), never
     the operator's other files; the secret masks land last, and an input
-    under one refuses (R3). On bubblewrap each input is a snapshot copied at
-    launch into a private temp dir this block removes, capped per file and
-    in all (``sandbox.READ_FILE_MAX_BYTES``). Writes: ``workspace`` (+
+    under one refuses (R3). Each input is the live file, read-only, on
+    both backends (R4, SD-1). Writes: ``workspace`` (+
     ``writable``). Env: PATH and LANG, HOME and TMPDIR in the workspace.
     Egress: deny-all when ``hosts`` is empty, else pinned to them through a
     FilteringProxy (D1) — never allow-all: an entry that is not a concrete
@@ -76,10 +75,6 @@ def walled(
                 denied_loopback_ports=control_plane_ports(skep_home / "supervisor"),
             ).start()
             stack.callback(proxy.stop)
-        stage = None
-        if read_files and probe.backend == "bubblewrap":  # R3 (S2): private, outside, removed
-            stage = Path(tempfile.mkdtemp(prefix="skep-inputs-"))
-            stack.callback(shutil.rmtree, stage, ignore_errors=True)
         try:
             profile = sandbox.write_profile(
                 workspace / "sandbox.profile",
@@ -93,7 +88,6 @@ def walled(
                 skep_home=skep_home,
                 read_allowlist=read_allowlist,
                 read_files=read_files,
-                read_files_stage=stage,
             )
             wrapped = sandbox.wrap_command(argv, profile)
         except sandbox.SandboxAllowlistUnsupported as exc:
