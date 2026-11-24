@@ -209,25 +209,47 @@ def _preset_for(provider: str, endpoint: str | None, model: str, api_key_env: st
     )
 
 
-def _unregistered_key_fix(candidate: Any, key_env: str | None) -> str | None:
-    """What works when the key of a provider that is not registered yet is
-    refused; None where no stored key would (the ChatGPT login, Bedrock)."""
-    from .codex_login import uses_codex_login
+def _key_fix(
+    candidate: Any, *, key_env: str | None, registered: bool, home: Path | None
+) -> str | None:
+    """The 401/403 fix that is true for this candidate (I9). None keeps the
+    default text: a registered profile that takes a stored key, where
+    `skep provider set-key` works. ``home`` is the skep home when it is not
+    the default one — the commands then carry it."""
+    from urllib.parse import urlsplit
 
-    if key_env:
-        return (
-            f"set {key_env} to a working key (it is unset or holds a refused one) "
-            "and run skep onboard again"
-        )
-    if uses_codex_login(candidate.base_url) or candidate.protocol == "bedrock":
-        return None
+    from .codex_login import NO_KEY_REFUSAL, uses_codex_login
+
+    again = "then run the same skep onboard command again"
     pid = candidate.provider_id
+    if uses_codex_login(candidate.base_url):
+        return f"{pid!r} {NO_KEY_REFUSAL}, {again}"
+    if candidate.protocol == "bedrock":
+        return (
+            "Bedrock takes no key: it signs with the AWS credentials in this environment "
+            "(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN if you use "
+            f"one) — set working ones, {again}"
+        )
+    if registered:
+        return None
+    if key_env:
+        return f"set {key_env} to a working key (it is unset or holds a refused one), {again}"
+    skep = shlex.join(["skep", *(["--home", str(home)] if home else [])])
+    # a password in the endpoint is never printed back; the rest is quoted so
+    # the line is one a shell and argparse take (an IPv6 host, a spaced model)
+    base_url = (
+        "--base-url=<the endpoint URL you gave>"
+        if "@" in urlsplit(candidate.base_url).netloc
+        else shlex.quote(f"--base-url={candidate.base_url}")
+    )
+    add = (
+        f"{skep} provider add {shlex.quote(pid)} --protocol {candidate.protocol} "
+        f"{base_url} {shlex.quote(f'--model={candidate.model}')}"
+    )
     return (
-        f"{pid!r} is not registered yet, so there is no stored key to replace: run "
-        f"skep provider add {pid} --protocol {candidate.protocol} "
-        f"--base-url {candidate.base_url} --model {candidate.model}, then skep provider "
-        f"set-key {pid}, then skep onboard again (or pass --api-key-env NAME for a "
-        "variable that holds the key)"
+        f"{pid!r} is not registered yet, so there is no stored key to replace: run {add}, "
+        f"then {skep} provider set-key {shlex.quote(pid)}, {again} "
+        "(or pass --api-key-env NAME for a variable that holds the key)"
     )
 
 
@@ -305,11 +327,16 @@ def onboard_model(
         )
     )
     # I9: an unregistered candidate has no stored key for set-key to replace
-    registered = store.get_provider_profile(pid) is not None
+    default_home = Path(os.environ.get("SKEP_HOME", Path.home() / ".skep"))
     health = check_provider_health(
         candidate,
         now=_now(),
-        key_fix=None if registered else _unregistered_key_fix(candidate, key_env),
+        key_fix=_key_fix(
+            candidate,
+            key_env=key_env,
+            registered=store.get_provider_profile(pid) is not None,
+            home=None if home.resolve() == default_home.resolve() else home,
+        ),
         **live_probes(holder.current.home, store, timeout=15.0),
     )
     if not health.ok:

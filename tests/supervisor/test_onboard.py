@@ -147,20 +147,27 @@ def test_the_model_step_makes_a_test_call_and_says_where_prompts_go(tmp_path: Pa
         fake.stop()
 
 
+def _taught(message: str, verb: str) -> list[str]:
+    """The argv of the `skep … provider <verb> …` command a refusal prints."""
+    import re
+    import shlex
+
+    found = re.search(rf"(skep (?:--home (?:'[^']*'|\S+) )?provider {verb}[^,(]*)", message)
+    assert found is not None, message
+    return shlex.split(found.group(1))[1:]
+
+
 def test_a_refused_key_on_an_unregistered_provider_teaches_steps_that_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """I9: the live 2.0.0 smoke taught `skep provider set-key ollama` for a
     candidate onboarding never registered (I8) — set-key answered 'unknown
-    provider'. The refusal now names the sequence, and that sequence works."""
+    provider'. The refusal now names the sequence, and that sequence works:
+    this test runs the commands as printed, --home included."""
     import io
 
     fake = FakeOllama(api_key="ka1", public_listing=True, models=["llama3.2"]).start()
     home = tmp_path / "home"
-    add = [
-        "provider", "add", "ollama", "--protocol", "ollama",
-        "--base-url", fake.base_url, "--model", "llama3.2",
-    ]  # fmt: skip
     try:
         with _holder(home) as (holder, store), pytest.raises(ValueError) as refused:
             onboard_model(
@@ -169,11 +176,13 @@ def test_a_refused_key_on_an_unregistered_provider_teaches_steps_that_work(
         message = str(refused.value)
         assert "or the env var it names" not in message
         assert "'ollama' is not registered yet" in message
-        taught = message.index("skep " + " ".join(add))
-        assert taught < message.index("skep provider set-key ollama")
+        assert message.index("provider add ollama") < message.index("provider set-key ollama")
         assert message.endswith("nothing changed: no provider was active before and none is now")
+        add, set_key = _taught(message, "add"), _taught(message, "set-key")
+        assert add[:2] == ["--home", str(home)] and set_key[:2] == ["--home", str(home)]
+        assert f"--base-url={fake.base_url}" in add and "--model=llama3.2" in add
         # do what it says, through the CLI faces it names
-        assert main(["--home", str(home), *add]) == 0
+        assert main(add) == 0
         with _holder(home) as (holder, store), pytest.raises(ValueError) as refused:
             onboard_model(
                 holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
@@ -181,7 +190,7 @@ def test_a_refused_key_on_an_unregistered_provider_teaches_steps_that_work(
         # registered now: set-key works for it, so today's hint stands
         assert "(skep provider set-key ollama, or the env var it names)" in str(refused.value)
         monkeypatch.setattr("sys.stdin", io.StringIO("ka1\n"))
-        assert main(["--home", str(home), "provider", "set-key", "ollama"]) == 0
+        assert main(set_key) == 0
         with _holder(home) as (holder, store):
             record = onboard_model(
                 holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
@@ -219,19 +228,59 @@ def test_a_refused_key_from_a_named_env_var_says_to_fix_that_variable(
         fake.stop()
 
 
-def test_a_provider_that_takes_no_stored_key_is_not_taught_set_key() -> None:
-    """The ChatGPT login and Bedrock take no stored key (`skep provider
-    set-key` refuses the first; the second signs with AWS credentials), so the
-    add-then-set-key sequence is never printed for them."""
-    from skep.supervisor.onboard import _unregistered_key_fix
+def _fix(protocol: str, base_url: str, model: str = "m", **kwargs: Any) -> str:
+    from skep.supervisor.onboard import _key_fix
     from skep.supervisor.providers import ProviderProfile
 
-    def fix(protocol: str, base_url: str) -> str | None:
-        return _unregistered_key_fix(ProviderProfile("p", protocol, base_url, "m"), None)
+    kwargs = {"key_env": None, "registered": False, "home": None, **kwargs}
+    return _key_fix(ProviderProfile("p", protocol, base_url, model), **kwargs) or ""
 
-    assert fix("openai_responses", "https://chatgpt.com/backend-api/codex") is None
-    assert fix("bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com") is None
-    assert "skep provider set-key p" in (fix("ollama", "https://ollama.com") or "")
+
+def test_a_provider_that_takes_no_stored_key_is_told_its_own_fix() -> None:
+    """The ChatGPT login and Bedrock take no stored key, registered or not,
+    and ignore a named key variable (Sol R1-4): neither is taught set-key or
+    that variable."""
+    codex = _fix("openai_responses", "https://chatgpt.com/backend-api/codex", key_env="UNUSED")
+    assert "codex login" in codex and "set-key" not in codex and "UNUSED" not in codex
+    bedrock = _fix(
+        "bedrock",
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        key_env="UNUSED",
+        registered=True,
+    )
+    assert "AWS_ACCESS_KEY_ID" in bedrock and "set-key" not in bedrock and "UNUSED" not in bedrock
+    # a registered profile that takes a stored key keeps the default text
+    assert _fix("ollama", "https://ollama.com", registered=True) == ""
+
+
+def test_the_taught_command_never_prints_a_password_in_the_endpoint() -> None:
+    """Sol R1-1: the probe error masks URL userinfo; the command beside it
+    must not print it back."""
+    text = _fix("ollama", "https://someone:hunter2pw@example.invalid")
+    assert "hunter2pw" not in text and "someone" not in text
+    assert "--base-url=<" in text and "provider set-key p" in text
+
+
+def test_the_taught_command_is_one_a_shell_and_argparse_accept() -> None:
+    """Sol R1-2: an IPv6 endpoint and a model with a space or a leading dash
+    survive the shell and the parser as the values onboarding used."""
+    from skep.cli import _parser
+
+    for model in ("Local Model", "-odd"):
+        argv = _taught(_fix("ollama", "http://[::1]:11434", model), "add")
+        args = _parser().parse_args(argv)
+        assert (args.base_url, args.model) == ("http://[::1]:11434", model)
+        assert (args.provider_id, args.protocol) == ("p", "ollama")
+
+
+def test_the_taught_commands_carry_a_home_that_is_not_the_default(tmp_path: Path) -> None:
+    """Sol R1-3: `skep --home X onboard` is told `skep --home X provider …`;
+    the default home is told plain `skep provider …`."""
+    custom = tmp_path / "my home"
+    text = _fix("ollama", "https://ollama.com", home=custom)
+    assert _taught(text, "add")[:2] == ["--home", str(custom)]
+    assert _taught(text, "set-key")[:2] == ["--home", str(custom)]
+    assert "skep provider add p" in _fix("ollama", "https://ollama.com")
 
 
 def _answers(monkeypatch: pytest.MonkeyPatch, *replies: str | type[BaseException]) -> list[str]:
