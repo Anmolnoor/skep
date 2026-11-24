@@ -1633,16 +1633,33 @@ def use_provider(
 
 
 def refresh_repo(
-    holder: ConfigHolder, repo: str, *, store: RunStore | None = None
+    holder: ConfigHolder, repo: str, *, store: RunStore | None = None, pr: str | None = None
 ) -> dict[str, Any]:
     """Supervisor-side fetch + fast-forward for a registered repo (v55-F1).
 
     Workers are hard-denied remote git (v19-F3) — this verb is the supervisor
     manning that station: remote-tracking refs refresh and the default branch
-    mirrors origin, so dispatch baselines and repo_state reflect reality."""
+    mirrors origin, so dispatch baselines and repo_state reflect reality.
+    ``pr`` (Phase 09, 9.0): fetch only that PR's head and base, for a review
+    run (``github.fetch_pr_head``)."""
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     if not (resolved / ".git").exists():
         raise HTTPException(status_code=404, detail=f"{repo!r} is not a git repository")
+    if pr is not None:
+        from .. import github
+
+        head = github.fetch_pr_head(repo=resolved, pr=pr)
+        if not head.ok:
+            raise HTTPException(status_code=502, detail=head.detail)
+        return {
+            "repo": str(resolved),
+            "ref": head.ref,
+            "base_sha": head.base_sha,
+            "head_sha": head.head_sha,
+            "detail": head.detail,
+            "next_step": f"dispatch_run ref={head.ref} to review it; G10 then verifies "
+            "base...head with the pinned verify_command, and merge_pr pins that head",
+        }
     try:
         return refresh_clone(resolved)
     except RefreshError as exc:

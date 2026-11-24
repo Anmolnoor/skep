@@ -671,6 +671,9 @@ class ReverifyRecord:
     # "baseline"/"patched": pytest counts, "baseline_source": "run"|"cache"};
     # None when no command ran or the row predates V1.
     test_counts: dict[str, Any] | None = None
+    # Phase 09 (9.0): the PR head G10 verified base...head (a review run on
+    # refs/skep/pr/<N>/head that changed nothing) — what a merge_pr card pins.
+    head_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1160,6 +1163,8 @@ class RunStore:
             )
         if "test_counts_json" not in reverify_columns:
             self._conn.execute("ALTER TABLE reverifications ADD COLUMN test_counts_json TEXT")
+        if "head_commit" not in reverify_columns:
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN head_commit TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1685,12 +1690,13 @@ class RunStore:
         base_commit: str | None = None,
         tamper_flags: tuple[str, ...] = (),
         test_counts: dict[str, Any] | None = None,
+        head_commit: str | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
             " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit,"
-            " tamper_flags_json, test_counts_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tamper_flags_json, test_counts_json, head_commit)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1703,6 +1709,7 @@ class RunStore:
                 base_commit,
                 json.dumps(list(tamper_flags)),
                 None if test_counts is None else json.dumps(test_counts),
+                head_commit,
             ),
         )
         self._conn.commit()
@@ -1752,7 +1759,7 @@ class RunStore:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
             " exit_codes_json, detail, created_at, base_commit, tamper_flags_json,"
-            " test_counts_json FROM reverifications WHERE task_id = ?",
+            " test_counts_json, head_commit FROM reverifications WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1769,7 +1776,20 @@ class RunStore:
             base_commit=row[8],
             tamper_flags=tuple(json.loads(row[9])),
             test_counts=None if row[10] is None else json.loads(row[10]),
+            head_commit=row[11],
         )
+
+    @_locked
+    def pr_head_verdict(self, repo: str, ref: str) -> ReverifyRecord | None:
+        """Phase 09 (9.0): the newest G10 verdict on a PR head — a review run
+        of ``repo`` on ``ref`` (refs/skep/pr/<N>/head) that recorded one."""
+        row = self._conn.execute(
+            "SELECT r.task_id FROM reverifications r JOIN runs u ON u.task_id = r.task_id"
+            " WHERE u.repo = ? AND u.ref = ? AND r.head_commit IS NOT NULL"
+            " ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
+            (repo, ref),
+        ).fetchone()
+        return None if row is None else self.reverification_for(row[0])
 
     # -- usage accounting (G8: cost is answerable) ----------------------------
 

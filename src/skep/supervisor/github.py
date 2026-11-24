@@ -44,6 +44,22 @@ class CloseResult:
 
 
 @dataclass(frozen=True)
+class PrHead:
+    ok: bool
+    detail: str
+    ref: str = ""
+    base_sha: str = ""
+    head_sha: str = ""
+
+
+def pr_ref(number: int | str, side: str = "head") -> str:
+    """Phase 09 (9.0): where ``fetch_pr_head`` keeps PR ``number``'s head and
+    base — skep's own namespace, never a branch (I1); workers read refs but
+    cannot write them (``git_metadata_writable_roots``)."""
+    return f"refs/skep/pr/{number}/{side}"
+
+
+@dataclass(frozen=True)
 class PullRequestList:
     ok: bool
     prs: list[dict[str, Any]]
@@ -84,6 +100,46 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     where = None if cwd is None else str(cwd)
     return runner(args, cwd=where, capture_output=True, text=True, check=False)
+
+
+def fetch_pr_head(*, repo: Path, pr: str, runner: Runner = subprocess.run) -> PrHead:
+    """Phase 09 (9.0, I4): fetch PR ``pr``'s head and its base branch from
+    origin into ``pr_ref(N)`` — supervisor-side, on the operator's own
+    credentials, which never enter a sandbox. Workers still never fetch
+    (v19-F3/F5); a review run starts from the fetched head (dispatch_run
+    ref=…), and G10 verifies base...head. Honest failure, never raises."""
+    view = _run(
+        runner, ["gh", "pr", "view", pr, "--json", "number,baseRefName,headRefOid"], cwd=repo
+    )
+    if view.returncode != 0:
+        return PrHead(False, f"gh pr view failed: {(view.stderr or view.stdout).strip()}")
+    try:
+        info = json.loads(view.stdout)
+        number, base, expected = int(info["number"]), str(info["baseRefName"]), info["headRefOid"]
+    except (ValueError, KeyError, TypeError):
+        return PrHead(False, "gh pr view returned unparseable output")
+    head_ref, base_ref = pr_ref(number), pr_ref(number, "base")
+    fetched = _run(
+        runner,
+        ["git", "-C", str(repo), "fetch", "--no-tags", "origin",
+         f"+refs/pull/{number}/head:{head_ref}", f"+refs/heads/{base}:{base_ref}"],
+    )  # fmt: skip
+    if fetched.returncode != 0:
+        return PrHead(False, f"git fetch failed: {(fetched.stderr or fetched.stdout).strip()}")
+    shas = _run(runner, ["git", "-C", str(repo), "rev-parse", head_ref, base_ref]).stdout.split()
+    if len(shas) != 2 or shas[0] != expected:
+        return PrHead(
+            False,
+            f"PR #{number} moved while it was fetched (GitHub says head {expected}, origin "
+            f"gave {shas[0] if shas else 'nothing'}); refresh_repo pr={number} again",
+        )
+    return PrHead(
+        True,
+        f"fetched PR #{number}: head {shas[0]} on {base} {shas[1]}",
+        head_ref,
+        shas[1],
+        shas[0],
+    )
 
 
 def open_pull_request(
@@ -138,17 +194,46 @@ def merge_pull_request(
     repo: Path,
     pr: str,
     strategy: str = "merge",
+    expected_head_sha: str | None = None,
     runner: Runner = subprocess.run,
 ) -> MergeResult:
     """v47-F5: merge an open PR via gh. Honest failure, never raises.
 
     The ONLY path that advances a base branch, and it runs solely behind an
     explicit operator confirm on the operator's own gh credentials — workers
-    cannot merge, and nothing merges automatically."""
+    cannot merge, and nothing merges automatically.
+
+    Phase 09 (9.0, I1, I9): ``expected_head_sha`` (the head G10 verified, as
+    the card showed it) pins the merge — a moved head is refused here with
+    both SHAs, and GitHub refuses a push that races this check
+    (``--match-head-commit``, the API's expected head)."""
     flag = _MERGE_FLAGS.get(strategy)
     if flag is None:
         return MergeResult(False, f"unknown merge strategy {strategy!r}")
-    merged = _run(runner, ["gh", "pr", "merge", pr, flag], cwd=repo)
+    args = ["gh", "pr", "merge", pr, flag]
+    if expected_head_sha:
+        view = _run(
+            runner,
+            ["gh", "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid"],
+            cwd=repo,
+        )
+        head = view.stdout.strip()
+        if view.returncode != 0:
+            why = (view.stderr or view.stdout).strip()
+            return MergeResult(
+                False,
+                f"gh pr view failed: {why} — PR {pr}'s head could not be checked against "
+                f"the verified {expected_head_sha}; nothing merged",
+            )
+        if head != expected_head_sha:
+            return MergeResult(
+                False,
+                f"refused: PR {pr}'s head is now {head}, not {expected_head_sha}, the head "
+                f"G10 verified — it was pushed to after verification; nothing merged. "
+                f"refresh_repo pr={pr}, review the new head, then propose merge_pr again",
+            )
+        args += ["--match-head-commit", expected_head_sha]
+    merged = _run(runner, args, cwd=repo)
     if merged.returncode != 0:
         why = (merged.stderr or merged.stdout).strip()
         return MergeResult(False, f"gh pr merge failed: {why}")

@@ -3117,11 +3117,24 @@ def _pr_repo(args: argparse.Namespace) -> Path | int:
 
 def cmd_pr_merge(args: argparse.Namespace) -> int:
     from . import github
+    from .serve.cards import merge_line, merge_pin
 
     repo = _pr_repo(args)
     if isinstance(repo, int):
         return repo
-    result = github.merge_pull_request(repo=repo, pr=args.number, strategy=args.method)
+    # Phase 09 (9.0, I1): pinned to the head G10 verified, as on the chat card.
+    store = RunStore(build_config(args.home, None).db_path)
+    try:
+        pin = merge_pin(store, {"repo": str(repo), "pr": args.number})
+    finally:
+        store.close()
+    print(f"  pin: {merge_line(pin)}")
+    result = github.merge_pull_request(
+        repo=repo,
+        pr=args.number,
+        strategy=args.method,
+        expected_head_sha=pin.get("expected_head_sha"),
+    )
     # gh failures come back as ok=False with the reason rather than raising, so
     # the exit code has to be derived — a merge that did not happen must not
     # report success (I8).
@@ -3223,7 +3236,7 @@ def cmd_repo_refresh(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
-        result = refresh_repo(ConfigHolder(config, store), args.repo, store=store)
+        result = refresh_repo(ConfigHolder(config, store), args.repo, store=store, pr=args.pr)
     except HTTPException as exc:
         return _err(_http_error_detail(exc))
     finally:
@@ -4556,6 +4569,9 @@ def register_supervisor_commands(
         "refresh", help="fetch origin and fast-forward the default branch"
     )
     repo_refresh.add_argument("repo", help="registered repo slug or host path")
+    repo_refresh.add_argument(
+        "--pr", help="fetch only this PR's head + base into refs/skep/pr/<N>/ (a review run's ref)"
+    )
     repo_refresh.set_defaults(func=cmd_repo_refresh)
 
     repo_baseline = repo_sub.add_parser(

@@ -709,7 +709,57 @@ def recorded_card(
         record["forge"] = promotion_card(store, args)
     if tool == "capture_skill":
         record["capture"] = capture_card(store, args)
+    if tool == "merge_pr":
+        record["merge"] = merge_pin(store, args)
     return record or None
+
+
+def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
+    """Phase 09 (9.0, I1, I8): the PR head a merge_pr card pins — the head
+    of G10's newest verdict on this PR (a review run on refs/skep/pr/<N>/head),
+    recorded when the card is proposed; the confirm passes exactly it to
+    GitHub. ``{}``: no verdict covers the PR, so the merge is not pinned."""
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from ..github import pr_ref
+    from .registry import resolve_repo_arg
+
+    number = re.search(r"(\d+)/*$", str(args.get("pr") or "").strip())
+    try:
+        root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
+        repo = resolve_repo_arg(str(args.get("repo") or ""), root, store)
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}
+    verdict = store.pr_head_verdict(str(repo), pr_ref(number.group(1))) if number else None
+    if verdict is None:
+        return {}
+    return {
+        "expected_head_sha": verdict.head_commit,
+        "base_sha": verdict.base_commit,
+        "task_id": verdict.task_id,
+        "outcome": verdict.outcome,
+        "confirmed": verdict.confirmed,
+    }
+
+
+def merge_line(pin: dict[str, Any]) -> str:
+    if "error" in pin:
+        return f"it cannot be pinned to a verified head: {pin['error']}"
+    if not pin:
+        return (
+            "NOT pinned: no G10 verdict covers this PR's head (refresh_repo pr=<N>, then a "
+            "review run on refs/skep/pr/<N>/head) — it merges whatever head the PR has"
+        )
+    verdict = (
+        "G10 confirmed it" if pin["confirmed"] else f"G10 did NOT confirm it ({pin['outcome']})"
+    )
+    return (
+        f"merges only head {pin['expected_head_sha'][:12]} — {verdict} on base "
+        f"{str(pin['base_sha'] or 'unknown')[:12]} (run {pin['task_id'][:8]}); "
+        "a push to the PR after this card makes GitHub refuse the merge"
+    )
 
 
 def capture_card(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
@@ -910,6 +960,12 @@ def card_summary(
         summary["forge"] = forged
         line = _promotion_line(forged)
         danger = line if danger is None else f"{danger} — {line}"
+    pinned = (recorded or {}).get("merge")
+    if tool == "merge_pr" and pinned is None and store is not None and live_tier:
+        pinned = merge_pin(store, safe_args)  # a card proposed without the record
+    if tool == "merge_pr" and isinstance(pinned, dict):
+        summary["merge"] = pinned
+        danger = f"{merge_line(pinned)} — {danger}"
     captured = (recorded or {}).get("capture")
     if tool == "capture_skill" and isinstance(captured, dict):
         name = safe_args.get("name")

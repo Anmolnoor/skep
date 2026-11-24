@@ -1111,6 +1111,7 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         # V1 (phase-01 1.3): no tampering, and a grep pin's counts are unknown.
         "tamper_flags": (),
         "test_counts": {"status": "unknown", "runner": None},
+        "head_commit": None,  # Phase 09 (9.0): set only on a PR-head verdict
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {
