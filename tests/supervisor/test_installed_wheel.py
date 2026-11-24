@@ -68,7 +68,8 @@ def _build_wheel(uv: str, dist: Path, root: Path) -> None:
     fetches the backend, once, and every later step stays offline."""
     build = (uv, "build", "--wheel", "--out-dir", dist, root)
     done = _step(*build)
-    if done.returncode != 0 and "network was disabled" in done.stderr:
+    # uv's own hint for a package its cache lacks — nothing else retries
+    if done.returncode != 0 and "unavailable because the network was disabled" in done.stderr:
         done = _step(*build, offline=False)
     assert done.returncode == 0, done.stderr
 
