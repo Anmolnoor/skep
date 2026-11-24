@@ -313,6 +313,47 @@ def test_forged_tools_route_shows_each_binding_and_rechecks_copy_and_seal(
     assert client.get("/api/forge/tools").json()["tools"][1]["seal"] == "broken"
 
 
+def test_forged_tools_report_a_malformed_landed_lock_on_its_row_and_list_the_rest(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 H8: one tool's unparseable landed lock is that row's note — the
+    shelf still lists every other tool."""
+    from skep.supervisor import RunStore, forge
+    from skep.supervisor.forge import ForgedPlugin, save_plugin
+
+    pinned = f"requests==2.32.3 --hash=sha256:{'0' * 64}\n"
+    bound = {"bad-lock": "cd" * 32, "good": "", "pinned": forge.sha256_text(pinned)}
+    store = RunStore(config.db_path)
+    try:
+        for name in bound:
+            save_plugin(
+                store,
+                ForgedPlugin(
+                    plugin_id=name, name=name, purpose="p", state="active",
+                    rel_path=f"tools/{name}.py", server_id=f"forge-{name}",
+                    source_sha256="ab" * 32, lock_sha256=bound[name],
+                    repo=str(config.home.parent / "forge"), task_id="t",
+                ),
+            )  # fmt: skip
+    finally:
+        store.close()
+    locks = {
+        "bad-lock": "--index-url https://evil.example/simple\n",
+        "good": None,
+        "pinned": pinned,
+    }
+    monkeypatch.setattr(forge, "read_candidate", lambda record, branch: ("", locks[record.name]))
+    response = serve_client(config).get("/api/forge/tools")
+    assert response.status_code == 200
+    found = {t["plugin_id"]: t for t in response.json()["tools"]}
+    assert set(found) == set(bound)
+    assert found["bad-lock"]["locked"] == []
+    assert found["bad-lock"]["lock_note"].startswith("the landed lock is invalid: lock line")
+    assert found["good"]["lock_note"] == "no lock landed beside the tool: stdlib only"
+    assert found["pinned"]["lock_note"] == "the landed lock is the approved one"
+    assert found["pinned"]["locked"] and found["pinned"]["locked"][0].startswith("requests==2.32.3")
+
+
 # ---------- E4: the staged provider probe — test first, save separately ----------
 
 

@@ -281,12 +281,16 @@ def forged_tools(store: RunStore, holder: ConfigHolder) -> list[dict[str, Any]]:
             if lock is None:
                 note = "no lock landed beside the tool: stdlib only"
             else:
-                locked = list(forge.parse_lock(lock))
-                note = (
-                    "the landed lock is the approved one"
-                    if forge.sha256_text(lock) == record.lock_sha256
-                    else "the landed lock is NOT the approved one: promote_tool asks again"
-                )
+                try:
+                    locked = list(forge.parse_lock(lock))
+                except ValueError as exc:  # H8: this row says so; the shelf stands
+                    note = f"the landed lock is invalid: {exc}"
+                else:
+                    note = (
+                        "the landed lock is the approved one"
+                        if forge.sha256_text(lock) == record.lock_sha256
+                        else "the landed lock is NOT the approved one: promote_tool asks again"
+                    )
         tools.append(
             {
                 "plugin_id": record.plugin_id,
