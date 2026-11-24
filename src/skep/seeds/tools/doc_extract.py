@@ -631,28 +631,37 @@ class _Text:
             elif abs(e - self.last[0]) > 0.2 * self.size * (abs(a) or 1.0):
                 pieces.append(" ")
         advance = 0.0
+        # R3/R4: the cap holds piece by piece on a running count (linear, and
+        # a crossing piece is cut forwards — never a wrapped negative slice)
+        buffered = sum(map(len, pieces))
+
+        def take(text: str) -> None:
+            nonlocal buffered
+            room = self.max_chars - self.chars - buffered
+            if len(text) > room:
+                pieces.append(text[: max(0, room + 1)])
+                self.out.extend(pieces)
+                self.chars = self.max_chars + 1
+                raise _Full
+            pieces.append(text)
+            buffered += len(text)
+
         for item in items:
             if isinstance(item, bytes):
                 for code in self.font.codes(item):
                     self.glyphs += 1
                     text = self.font.text(code)
                     self.unmapped += not text
-                    pieces.append(text)
+                    take(text)
                     advance += self.font.widths.get(code, self.font.default) / 1000 * self.size
-                    room = self.max_chars - self.chars - sum(map(len, pieces))
-                    if room < 0:  # R3: the cap holds glyph by glyph, never after
-                        pieces[-1] = text[: len(text) + room + 1]
-                        self.out.extend(pieces)
-                        self.chars = self.max_chars + 1
-                        raise _Full
             elif (shift := _number(item)) is not None:
                 if -shift / 1000 > 0.2:
-                    pieces.append(" ")
+                    take(" ")
                 advance -= shift / 1000 * self.size
         self.tm = (a, b, c, d, e + advance * a, f + advance * b)
         self.last = (self.tm[4], self.tm[5])
         self.out.extend(pieces)
-        self.chars += sum(map(len, pieces))
+        self.chars += buffered
         if self.chars > self.max_chars:  # K2: the extracted text is bounded too
             raise _Full
 

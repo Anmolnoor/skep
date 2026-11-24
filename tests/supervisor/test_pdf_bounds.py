@@ -398,3 +398,51 @@ def test_every_page_ref_ticks_the_work_budget(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(ValueError):  # no text layer — but every ref was counted
         pdf_to_text(pdf)
     assert 37 in ticks
+
+
+def test_a_long_shown_string_extracts_in_linear_time() -> None:
+    """R4 (Sol/Terra/Neon R4-1): the per-glyph cap re-summed every buffered
+    piece — 40K glyphs took 5 s. A running count keeps it linear."""
+
+    class _One:
+        default = 500.0
+
+        def __init__(self) -> None:
+            self.widths: dict[int, float] = {}
+
+        def codes(self, data: bytes) -> list[int]:
+            return list(data)
+
+        def text(self, _code: int) -> str:
+            return "a"
+
+    state = doc_extract._Text(max_chars=10_000_000)
+    state.font = _One()  # type: ignore[assignment]
+    began = time.monotonic()
+    state.show([b"\x01" * 80_000])
+    assert time.monotonic() - began < 1.0 and state.chars == 80_000
+
+
+def test_the_cap_never_slices_from_the_end() -> None:
+    """R4 (Neon R4-2): with the cap already reached, a TJ space shift made
+    `room` so negative that the slice index wrapped and kept nearly the whole
+    string. The cap counts shifts too and never slices backwards."""
+
+    class _Big:
+        default = 500.0
+
+        def __init__(self) -> None:
+            self.widths: dict[int, float] = {}
+
+        def codes(self, data: bytes) -> list[int]:
+            return list(data)
+
+        def text(self, _code: int) -> str:
+            return "x" * 200_000
+
+    state = doc_extract._Text(max_chars=100)
+    state.font = _Big()  # type: ignore[assignment]
+    state.chars = 100
+    with pytest.raises(doc_extract._Full):
+        state.show([-1000, -1000, b"\x02"])
+    assert sum(map(len, state.out)) <= 101

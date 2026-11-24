@@ -1120,3 +1120,27 @@ def test_a_failed_read_only_step_keeps_the_previous_venv(
         forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
     monkeypatch.setattr(forge, "_writable", real)
     assert forge.seal_venv(home) == old_seal  # the previous venv is back
+
+
+def test_a_rollback_that_cannot_chmod_still_restores_the_previous_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 (Sol S2): a chmod that keeps failing aborted the rollback before the
+    old venv came back, and cleanup then deleted the backup. The failed tree
+    is moved aside (same-dir rename, no chmod), the backup restored first."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    old_seal = _tree(home, "#!old")
+    staging = home.parent / ".staging-x"
+    seal = _tree(staging, "#!new")
+    real = forge._writable
+
+    def chmod_broken_on_the_new_tree(root: Path, writable: bool) -> None:
+        if root == home and (home / "bin" / "python").read_text().startswith("#!new"):
+            raise OSError("chmod refused")
+        real(root, writable)
+
+    monkeypatch.setattr(forge, "_writable", chmod_broken_on_the_new_tree)
+    with pytest.raises(OSError, match="chmod refused"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    monkeypatch.setattr(forge, "_writable", real)
+    assert forge.seal_venv(home) == old_seal

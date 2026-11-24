@@ -901,18 +901,28 @@ def commit_locked_venv(
             _require_seal(home, seal)
             _writable(home, False)  # R3: inside the rollback — a failure restores the old
         except BaseException:
+            # R4 (Sol S2): no chmod stands between a failure and the old venv —
+            # the failed tree moves aside by a same-dir rename, the backup comes
+            # back first, and only then is anything deleted
+            failed = None
             if moved:
-                _writable(home, True)
-                shutil.rmtree(home, ignore_errors=True)
+                failed = home.parent / f".failed-{os.getpid()}-{id(home)}"
+                home.rename(failed)
             if previous is not None:
                 previous.rename(home)
+                shutil.rmtree(previous.parent, ignore_errors=True)  # its empty temp dir
+                previous = None  # restored: nothing left to clean up there
                 with contextlib.suppress(OSError):  # the old tree is back either way
                     _writable(home, False)
+            if failed is not None:
+                with contextlib.suppress(OSError):
+                    _writable(failed, True)
+                shutil.rmtree(failed, ignore_errors=True)
             raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        if previous is not None:
-            if previous.exists():
+        if previous is not None and previous.exists():  # committed: the backup goes
+            with contextlib.suppress(OSError):
                 _writable(previous, True)
             shutil.rmtree(previous.parent, ignore_errors=True)
     return str(final)
