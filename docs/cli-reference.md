@@ -267,9 +267,13 @@ supervisor-side on your own credentials; workers can never reach a remote or
 move a branch, and neither can the Queen's shell.
 
 `skep repo refresh REPO --pr N` fetches only PR #N's head and base into
-`refs/skep/pr/N/`; a review run dispatched on `refs/skep/pr/N/head` that
-changes nothing is re-verified base...head with the project's pinned
-`verify_command` (G10 and the V1 test-tamper check). `skep pr merge` (and the
+`refs/skep/pr/N/` (no branch or remote-tracking ref moves) and records that
+pair. `N` is the PR number (`7`, `#7`) or its URL on the repo's origin;
+anything else is refused before gh runs. A review run dispatched on
+`refs/skep/pr/N/head` is pinned to the recorded pair; when it changes
+nothing, G10 runs the project's pinned `verify_command` on the exact head
+commit, and the V1 test-tamper check reads the PR's own diff
+(merge-base..head). `skep pr merge` (and the
 `merge_pr` card) then merges only that verified head: a push after it makes
 GitHub refuse the merge.
 

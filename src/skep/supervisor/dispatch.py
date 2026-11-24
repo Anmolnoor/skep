@@ -69,6 +69,7 @@ from .contracts_io import (
     read_result,
     write_task_file,
 )
+from .github import PR_HEAD_REF
 from .ingest import IngestOutcome, ingest_run
 from .monitor import (
     AdoptedWorker,
@@ -103,6 +104,7 @@ from .worker_state import (
 )
 from .worktree import (
     TREE_LOCK,
+    WorktreeError,
     cleanup_orphans,
     create_worktree,
     is_linked_worktree,
@@ -844,6 +846,20 @@ def run_task(
             approval_verdict=approval_verdict,
             worker_state=effective_worker_state,
         )
+        # Phase 09 R1 (D2, S6): a review run on a fetched PR head is pinned
+        # ONCE, here, to the (base, head) pair its fetch recorded: the worker
+        # starts from that head, and G10, V1 and the verdict use the same pair —
+        # refs/skep/pr/<N>/* is never read again for this run.
+        pr_pin: dict[str, Any] | None = None
+        if ref is not None and (pr_match := PR_HEAD_REF.fullmatch(ref)):
+            pr_pin = run_store.pr_fetch(str(repo.resolve()), int(pr_match[1]))
+            if pr_pin is None:
+                raise WorktreeError(
+                    f"{ref}: skep has no fetch of PR #{pr_match[1]} recorded for {repo}, so "
+                    f"there is no head to pin the review to — refresh_repo pr={pr_match[1]} "
+                    "first, then dispatch the review"
+                )
+            pr_pin.pop("fetched_at")
         # Protect this task's worktree and its later re-verify worktree from any
         # concurrent sibling's orphan sweep. (The reused dir keeps the chain's
         # first task's name and was already shielded above.)
@@ -855,7 +871,12 @@ def run_task(
             workspace = (
                 resume_workspace
                 if resume_workspace is not None
-                else create_worktree(repo, worktrees_root, provisional.task_id, ref)
+                else create_worktree(
+                    repo,
+                    worktrees_root,
+                    provisional.task_id,
+                    pr_pin["head_commit"] if pr_pin else ref,
+                )
             )
         task = provisional.model_copy(update={"workspace": str(workspace)})
 
@@ -880,7 +901,8 @@ def run_task(
             execution_mode=execution_mode,
             # v81-F3: pin the base the patch is generated against, so a land
             # can say "the branch has advanced" instead of shrugging.
-            base_commit=resolve_commit(repo, ref),
+            base_commit=pr_pin["head_commit"] if pr_pin else resolve_commit(repo, ref),
+            pr=pr_pin,
             # v101-F4: which agent edited the repo — the RESOLVED name, not the
             # raw argument, or every builtin run would record NULL and the
             # record would be silent about the commonest case. Only the coding

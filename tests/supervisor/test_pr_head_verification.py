@@ -75,20 +75,38 @@ def _pr(repo: Path, edit: dict[str, str | None]) -> tuple[str, str]:
     return base, head
 
 
-def _review_run(store: RunStore, repo: Path, head: str) -> str:
-    """A completed PR-review run on the PR head that changed nothing."""
+def _pair(base: str, head: str) -> dict[str, Any]:
+    """The (base, head) pair dispatch pins a review run to (R1, D2)."""
+    return {
+        "repo": ORIGIN, "number": 7, "base_branch": "main",
+        "base_commit": base, "head_commit": head,
+    }  # fmt: skip
+
+
+def _review_run(store: RunStore, repo: Path, head: str, base: str | None = None) -> str:
+    """A completed PR-review run on the PR head that changed nothing —
+    pinned at dispatch to ``(base, head)`` when ``base`` is given."""
     task = mint_task(workspace=repo.parent / "ws-review", instructions="review PR 7")
     store.create_run(
-        task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace", base_commit=head
+        task,
+        repo=repo.resolve(),
+        ref=PR_REF,
+        execution_mode="workspace",
+        base_commit=head,
+        pr=None if base is None else _pair(base, head),
     )
     store.transition(task.task_id, "completed", None)
     return task.task_id
 
 
+def _fetched_base(repo: Path) -> str:
+    return git(repo, "rev-parse", "refs/skep/pr/7/base").stdout.strip()
+
+
 def _g10(repo: Path, config: SupervisorConfig, head: str, pin: str = PIN) -> tuple[Any, Any, str]:
     store = RunStore(config.db_path)
     try:
-        task_id = _review_run(store, repo, head)
+        task_id = _review_run(store, repo, head, _fetched_base(repo))
         outcome = reverify_run(
             store=store,
             task_id=task_id,
@@ -343,15 +361,43 @@ def test_a_review_run_dispatches_from_the_fetched_pr_head(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """The worker gets the PR head as its baseline — fetched by the
-    supervisor before dispatch, never by the worker."""
+    supervisor before dispatch, never by the worker — and the run keeps
+    the (base, head) pair the fetch recorded (R1, D2)."""
     from skep.supervisor.dispatch import run_task
 
-    _base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        store.record_pr_fetch(
+            str(repo.resolve()), pr_repo=ORIGIN, number=7, base_branch="main",
+            base_commit=base, head_commit=head,
+        )  # fmt: skip
+    finally:
+        store.close()
 
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config, ref=PR_REF)
 
     assert outcome.record.state == "completed"
     assert outcome.record.base_commit == head
+    store = RunStore(config.db_path)
+    try:
+        assert store.run_pr(outcome.record.task_id) == _pair(base, head)
+    finally:
+        store.close()
+
+
+def test_a_review_run_with_no_recorded_fetch_is_refused(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (D2): a PR ref with no pair to pin is never dispatched from refs
+    whose origin skep cannot vouch for."""
+    from skep.supervisor import WorktreeError
+    from skep.supervisor.dispatch import run_task
+
+    _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+
+    with pytest.raises(WorktreeError, match="refresh_repo pr=7"):
+        run_task(repo, "Review it. MODE:happy", config=config, ref=PR_REF)
 
 
 # --- 2. G10 + V1 across base...head when the review run changed nothing --------
@@ -368,10 +414,11 @@ def test_a_clean_pr_is_verified_base_to_head_with_the_pinned_command(
     assert outcome.outcome == "passed", outcome.detail
     assert record.confirmed is True
     assert (record.base_commit, record.head_commit) == (base, head)
+    assert record.pr == {**_pair(base, head), "merge_base": base}  # R1 (D2, S14)
     assert outcome.commands == [PIN] and outcome.commands_source == "project"
     assert record.test_counts["status"] == "ok"
     assert record.test_counts["patched"]["passed"] == 2
-    assert f"PR #7: head {head} on base {base}" in record.detail
+    assert f"PR #7: head {head} on base {base} (merge-base {base})" in record.detail
 
 
 @pytest.mark.parametrize(
@@ -410,10 +457,10 @@ def test_a_breaking_pr_fails_g10(repo: Path, config: SupervisorConfig) -> None:
 def test_base_moving_after_the_pr_branched_is_not_tampering(
     repo: Path, config: SupervisorConfig
 ) -> None:
-    """The PR's own changes (merge-base...head) are what G10 applies to the
-    fetched base — a test main gained since is not one the PR deleted."""
+    """V1 reads the PR's own changes (merge-base..head) — a test main gained
+    since is not one the PR deleted; G10 counts the head's own tests."""
     _seed(repo)
-    _old_base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    old_base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
     (repo / "tests" / "test_new.py").write_text("def test_new():\n    pass\n", encoding="utf-8")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "main moves on")
@@ -423,7 +470,106 @@ def test_base_moving_after_the_pr_branched_is_not_tampering(
     outcome, record, _task_id = _g10(repo, config, head)
 
     assert outcome.outcome == "passed", outcome.detail
-    assert record.base_commit == base and record.test_counts["patched"]["passed"] == 3
+    assert record.base_commit == base and record.pr["merge_base"] == old_base
+    assert record.test_counts["baseline"]["passed"] == 2
+    assert record.test_counts["patched"]["passed"] == 2
+
+
+def test_g10_verifies_the_exact_pr_head_tree(repo: Path, config: SupervisorConfig) -> None:
+    """R1 (S5, D2): the pinned command runs on the head commit itself —
+    never the PR's diff re-applied to a base that moved (a tree nobody
+    pushed), and a submodule pointer the head moves is in it."""
+    _seed(repo)
+    base = git(repo, "rev-parse", "main").stdout.strip()
+    git(repo, "checkout", "-qb", "feature")
+    (repo / "head_marker.txt").write_text("head\n", encoding="utf-8")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib")
+    git(repo, "add", "head_marker.txt")
+    git(repo, "commit", "-qm", "feature")
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    (repo / "base_only.txt").write_text("base moved on\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "main moves on")
+    git(repo, "update-ref", PR_REF, head)
+    git(repo, "update-ref", "refs/skep/pr/7/base", git(repo, "rev-parse", "main").stdout.strip())
+    exact = "test -e head_marker.txt && test -d vendor/lib && test ! -e base_only.txt"
+
+    outcome, record, _task_id = _g10(repo, config, head, pin=exact)
+
+    assert outcome.outcome == "passed", outcome.detail
+    assert record.confirmed is True and record.head_commit == head
+
+
+def test_refs_moved_after_dispatch_never_change_the_verdict(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (S6, D2): G10 uses the pair dispatch pinned, not refs/skep/pr/7/*
+    as they read later."""
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task_id = _review_run(store, repo, head, base)
+        git(repo, "update-ref", PR_REF, base)
+        git(repo, "update-ref", "refs/skep/pr/7/base", head)
+        outcome = reverify_run(
+            store=store, task_id=task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=config, changed_files=(), verify_command=PIN,
+        )  # fmt: skip
+        record = store.reverification_for(task_id)
+    finally:
+        store.close()
+
+    assert outcome.outcome == "passed", outcome.detail
+    assert record is not None
+    assert (record.base_commit, record.head_commit) == (base, head)
+
+
+def test_the_pr_g10_worktree_is_the_one_dispatch_shields(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 (S11): dispatch shields ``reverify-<task_id>`` from a sibling's
+    orphan sweep; the PR-head G10 worktree is exactly that name."""
+    from skep.supervisor.worktree import create_worktree
+
+    reverify_module = sys.modules[reverify_run.__module__]  # the package re-exports a function
+    _seed(repo)
+    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    names: list[str] = []
+
+    def spy(repo_: Path, root: Path, name: str, ref: str | None = None) -> Path:
+        names.append(name)
+        return create_worktree(repo_, root, name, ref)
+
+    monkeypatch.setattr(reverify_module, "create_worktree", spy)
+
+    _outcome, _record, task_id = _g10(repo, config, head)
+
+    assert names == [f"reverify-{task_id}"]
+
+
+def test_diff_config_cannot_hide_a_test_the_pr_removes(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (N5): the operator's diff.noprefix / mnemonicPrefix / renames
+    settings never reshape a diff the supervisor parses or applies."""
+    _seed(repo)
+    for key, value in (("noprefix", "true"), ("mnemonicPrefix", "true"), ("renames", "copies")):
+        git(repo, "config", f"diff.{key}", value)
+    base = git(repo, "rev-parse", "main").stdout.strip()
+    git(repo, "checkout", "-qb", "rename")
+    git(repo, "mv", "tests/test_app.py", "tests/helpers_app.txt")
+    git(repo, "commit", "-qm", "move the tests aside")
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    git(repo, "update-ref", PR_REF, head)
+    git(repo, "update-ref", "refs/skep/pr/7/base", base)
+
+    outcome, record, _task_id = _g10(repo, config, head)
+
+    assert outcome.outcome == "tampered", outcome.detail
+    assert "test_file_deleted:tests/test_app.py" in record.tamper_flags
 
 
 def test_a_pr_head_is_never_verified_with_a_worker_nominated_command(
@@ -441,17 +587,26 @@ def test_a_pr_head_is_never_verified_with_a_worker_nominated_command(
     assert record.confirmed is False and record.head_commit == head
 
 
-def test_a_pr_head_without_its_fetched_base_confirms_nothing(
+def test_a_pr_review_run_without_a_pinned_pair_confirms_nothing(
     repo: Path, config: SupervisorConfig
 ) -> None:
+    """R1 (D2): G10 never re-reads refs/skep/pr/7/* to find what to verify."""
     _seed(repo)
     _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
-    git(repo, "update-ref", "-d", "refs/skep/pr/7/base")
-
-    outcome, record, _task_id = _g10(repo, config, head)
+    store = RunStore(config.db_path)
+    try:
+        task_id = _review_run(store, repo, head)  # no pair recorded
+        outcome = reverify_run(
+            store=store, task_id=task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=config, changed_files=(), verify_command=PIN,
+        )  # fmt: skip
+        record = store.reverification_for(task_id)
+    finally:
+        store.close()
 
     assert outcome.outcome == "unavailable" and not outcome.exit_codes
-    assert "refresh_repo pr=7" in outcome.detail and record.confirmed is False
+    assert record is not None and record.confirmed is False
+    assert "refresh_repo pr=7" in outcome.detail
 
 
 def test_a_pr_that_changes_nothing_is_not_applicable(repo: Path, config: SupervisorConfig) -> None:

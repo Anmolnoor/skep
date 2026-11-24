@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS runs (
     worker_kind TEXT,
     coding_engine TEXT,
     supervisor_owner TEXT,
+    -- Phase 09 R1 (D2): the pair a PR review run is pinned to: JSON repo/number/
+    -- base_branch/base_commit/head_commit
+    pr_json TEXT,
     -- ES-F242 (D18): the run-finish follow-up turn still owed to its chat:
     -- 'queued' and then 'seeded' once its rows are written; cleared when
     -- the turn ends (a restart resumes it). No commas in this comment:
@@ -684,9 +687,12 @@ class ReverifyRecord:
     # "baseline"/"patched": pytest counts, "baseline_source": "run"|"cache"};
     # None when no command ran or the row predates V1.
     test_counts: dict[str, Any] | None = None
-    # Phase 09 (9.0): the PR head G10 verified base...head (a review run on
+    # Phase 09 (9.0): the PR head G10 verified (a review run on
     # refs/skep/pr/<N>/head that changed nothing) — what a merge_pr card pins.
     head_commit: str | None = None
+    # R1 (D2): that verdict's PR: {repo (owner/name), number, base_branch,
+    # base_commit, head_commit, merge_base}; None for every other verdict.
+    pr: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1178,6 +1184,8 @@ class RunStore:
             self._conn.execute("ALTER TABLE reverifications ADD COLUMN test_counts_json TEXT")
         if "head_commit" not in reverify_columns:
             self._conn.execute("ALTER TABLE reverifications ADD COLUMN head_commit TEXT")
+        if "pr_json" not in reverify_columns:
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN pr_json TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1291,6 +1299,9 @@ class RunStore:
         if "follow_up" not in run_columns:
             # ES-F242 (D18): a run-finish follow-up survives a serve restart.
             self._conn.execute("ALTER TABLE runs ADD COLUMN follow_up TEXT")
+        if "pr_json" not in run_columns:
+            # Phase 09 R1 (D2): the PR pair a review run was pinned to.
+            self._conn.execute("ALTER TABLE runs ADD COLUMN pr_json TEXT")
         chat_message_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(chat_messages)")
         }
@@ -1459,13 +1470,14 @@ class RunStore:
         execution_mode: str,
         base_commit: str | None = None,
         coding_engine: str | None = None,
+        pr: dict[str, Any] | None = None,
     ) -> None:
         now = _now()
         self._conn.execute(
             "INSERT INTO runs (task_id, trace_id, repo, ref, workspace, execution_mode,"
             " instructions, state, resume_of, created_at, updated_at, base_commit,"
-            " worker_kind, coding_engine)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " worker_kind, coding_engine, pr_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task.task_id,
                 task.trace_id,
@@ -1481,6 +1493,7 @@ class RunStore:
                 base_commit,
                 task.worker_kind,
                 coding_engine or None,
+                None if pr is None else json.dumps(pr),
             ),
         )
         self._record_transition(task.task_id, "created", _created_transition_detail(task))
@@ -1575,6 +1588,15 @@ class RunStore:
             (task_id,),
         ).fetchone()
         return RunRecord(*row) if row is not None else None
+
+    @_locked
+    def run_pr(self, task_id: str) -> dict[str, Any] | None:
+        """Phase 09 R1 (D2): the PR pair a review run was pinned to at
+        dispatch (``pr_fetch``'s row as it stood), or None."""
+        row = self._conn.execute(
+            "SELECT pr_json FROM runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return None if row is None or row[0] is None else dict(json.loads(row[0]))
 
     @_locked
     def runs_with_states(self, states: Sequence[str]) -> list[RunRecord]:
@@ -1713,12 +1735,13 @@ class RunStore:
         tamper_flags: tuple[str, ...] = (),
         test_counts: dict[str, Any] | None = None,
         head_commit: str | None = None,
+        pr: dict[str, Any] | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
             " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit,"
-            " tamper_flags_json, test_counts_json, head_commit)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tamper_flags_json, test_counts_json, head_commit, pr_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1732,6 +1755,7 @@ class RunStore:
                 json.dumps(list(tamper_flags)),
                 None if test_counts is None else json.dumps(test_counts),
                 head_commit,
+                None if pr is None else json.dumps(pr),
             ),
         )
         self._conn.commit()
@@ -1812,7 +1836,7 @@ class RunStore:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
             " exit_codes_json, detail, created_at, base_commit, tamper_flags_json,"
-            " test_counts_json, head_commit FROM reverifications WHERE task_id = ?",
+            " test_counts_json, head_commit, pr_json FROM reverifications WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1830,6 +1854,7 @@ class RunStore:
             tamper_flags=tuple(json.loads(row[9])),
             test_counts=None if row[10] is None else json.loads(row[10]),
             head_commit=row[11],
+            pr=None if row[12] is None else json.loads(row[12]),
         )
 
     @_locked

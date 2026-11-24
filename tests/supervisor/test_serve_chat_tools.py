@@ -1112,6 +1112,7 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         "tamper_flags": (),
         "test_counts": {"status": "unknown", "runner": None},
         "head_commit": None,  # Phase 09 (9.0): set only on a PR-head verdict
+        "pr": None,  # Phase 09 R1: and the PR tuple with it
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {

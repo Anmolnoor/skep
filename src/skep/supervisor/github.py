@@ -79,6 +79,10 @@ def pr_ref(number: int | str, side: str = "head") -> str:
     return f"refs/skep/pr/{number}/{side}"
 
 
+# The ref a PR review run is dispatched on (dispatch_run ref=…, R1 D2).
+PR_HEAD_REF = re.compile(r"refs/skep/pr/([1-9][0-9]*)/head")
+
+
 @dataclass(frozen=True)
 class PullRequestList:
     ok: bool

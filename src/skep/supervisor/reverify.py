@@ -40,7 +40,7 @@ from skep.worker_contract import Event, EventType
 from . import sandbox
 from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
-from .github import pr_ref
+from .github import PR_HEAD_REF
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import test_config_changes
 from .spawner import proxy_env
@@ -59,9 +59,6 @@ from .worktree import (
 _COMMAND_NOT_FOUND = 127
 _REVERIFY_TIMEOUT_SECONDS = 300.0
 
-
-# Phase 09 (9.0): a review run on a fetched PR head (github.fetch_pr_head).
-_PR_HEAD_REF = re.compile(r"refs/skep/pr/(\d+)/head")
 
 # V1 (phase-01 1.3): what the guard can and cannot see, said on every verdict.
 V1_SCOPE = (
@@ -680,6 +677,8 @@ def reverify(
     count_pytest: bool = False,
     baseline_counts: dict[str, int] | None = None,
     read_allowlist: tuple[Path, ...] | None = None,
+    head: str | None = None,
+    name: str | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -709,6 +708,13 @@ def reverify(
     ``read_allowlist`` (ADR 0068): the run's read wall, the same one its
     worker had (``sandbox.read_allowlist_for``) — every prime and the verify
     run inside it; None keeps reads denylist-only.
+
+    ``head`` (Phase 09 R1, D2): verify that commit itself — checked out
+    where the patch would be applied (after the baseline count on ``ref``),
+    so a PR is confirmed as exactly the tree it is; ``patch_path`` is then
+    its diff from ``ref``, read for what it touches. ``name`` names the
+    worktree ``reverify-<name>`` (default: the patch's stem) — the name
+    dispatch shields from orphan sweeps.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -742,7 +748,9 @@ def reverify(
     # the recovery path re-verifies without that shield, and a creator that
     # skips the lock is the shape of the bug, not a special case.
     with TREE_LOCK:
-        worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
+        worktree = create_worktree(
+            repo, config.worktrees_root, f"reverify-{name or patch_path.stem}", ref
+        )
     # Council round 3 (N4): one stack holds every cleanup — proxies, bridge
     # socket dirs, the worktree — and runs each even when another raises.
     stack = contextlib.ExitStack()
@@ -950,20 +958,40 @@ def reverify(
                     "the baseline test run left files git could not clean up, so the "
                     "patched run would not start from a clean tree; not re-verified",
                 )
-        applied = subprocess.run(
-            ["git", "-C", str(worktree), "apply", str(patch_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if applied.returncode != 0:
-            return ReverifyOutcome(
-                "failed",
-                commands,
-                [],
-                f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
-                f"{applied.stderr.strip()}",
+        if head is not None:
+            # R1 (D2, S5): the head commit itself — never its diff re-applied
+            # to another base (a tree nobody pushed; `git apply` drops a
+            # submodule pointer).
+            checked_out = subprocess.run(
+                ["git", "-C", str(worktree), "checkout", "-q", "--detach",
+                 "--no-recurse-submodules", head],
+                capture_output=True,
+                text=True,
+                check=False,
+            )  # fmt: skip
+            if checked_out.returncode != 0:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    f"could not check out {head} in a clean worktree: "
+                    f"{checked_out.stderr.strip()}; the verification command was not run",
+                )
+        else:
+            applied = subprocess.run(
+                ["git", "-C", str(worktree), "apply", str(patch_path)],
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            if applied.returncode != 0:
+                return ReverifyOutcome(
+                    "failed",
+                    commands,
+                    [],
+                    f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
+                    f"{applied.stderr.strip()}",
+                )
         touched = set(patch_paths(worktree, patch_path)) if uv_prime or node_pin else set()
         if uv_prime and touched & _UV_PRIME_INPUTS:
             # v115-F13 (I2): the baseline prime installed the OLD dependencies;
@@ -1161,7 +1189,11 @@ def reverify_run(
     # said what verification means outranks it.
     commands = [pinned] if pinned else verification_commands_from_events(store.events_for(task_id))
     commands_source = "project" if pinned else "worker"
-    pr_head: str | None = None  # Phase 09 (9.0): set once this is a PR-head verdict
+    # Phase 09 R1 (D2): a PR review run's (base, head) pair, pinned at
+    # dispatch — never re-read from refs/skep/pr/<N>/*.
+    pr_pin = store.run_pr(task_id)
+    pr_head: str | None = None  # set once this is a PR-head verdict
+    verdict_pr: dict[str, Any] | None = None
 
     def unavailable(detail: str) -> ReverifyOutcome:
         outcome = ReverifyOutcome(
@@ -1175,7 +1207,9 @@ def reverify_run(
             commands=outcome.commands,
             exit_codes=outcome.exit_codes,
             detail=outcome.detail,
+            base_commit=None if verdict_pr is None else verdict_pr["base_commit"],
             head_commit=pr_head,
+            pr=verdict_pr,
         )
         return outcome
 
@@ -1230,38 +1264,60 @@ def reverify_run(
     # ES-F3 (B131, I2): pin the commit BEFORE re-verifying, and verify on that
     # commit — a name like `main` can move between this run and the landing,
     # and the landing must build on exactly the tree that was confirmed.
-    base_commit = resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
+    base_commit = (
+        pr_pin["head_commit"]  # R1 (D2): the head the worker started from
+        if pr_pin is not None
+        else resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
+    )
 
-    pr = _PR_HEAD_REF.fullmatch(ref or "")
+    pr = PR_HEAD_REF.fullmatch(ref or "")
+    checkout: str | None = None
     if pr and not changed_files and (patch_path is None or not patch_path.is_file()):
         # Phase 09 (9.0, I2): a review run that changed nothing on a fetched
-        # PR head — the PR's own changes are the patch. G10 applies them
-        # (merge-base...head) to the fetched base and V1 reads that diff, so a
-        # PR that deletes or skips tests is caught, not "not_applicable". The
-        # head is the one the worker reviewed (its dispatch baseline).
-        run = store.get_run(task_id)
-        pr_head = (run.base_commit if run else None) or base_commit
-        base_commit = resolve_commit(repo, f"{pr_ref(pr.group(1), 'base')}^{{commit}}")
+        # PR head — the PR itself is what G10 verifies. R1 (D2): the pinned
+        # command runs on the exact head commit; V1 reads the PR's own diff,
+        # merge-base(base, head)..head, so a PR that deletes or skips tests
+        # is caught, not "not_applicable".
+        if pr_pin is None:
+            return unavailable(
+                f"PR #{pr[1]}: this review run has no (base, head) pair pinned at dispatch, "
+                f"so there is nothing G10 may verify — refresh_repo pr={pr[1]} and dispatch "
+                "the review again"
+            )
+        pr_head, verdict_pr = pr_pin["head_commit"], dict(pr_pin)
         if not pinned:
             # v88-F4: a PR is never confirmed by a command the worker chose.
             return unavailable(
-                f"PR #{pr.group(1)}: a PR head is re-verified only with the project's pinned "
+                f"PR #{pr[1]}: a PR head is re-verified only with the project's pinned "
                 "verify_command, and this project pins none — set one (`skep project setup "
                 f"{repo} --verify-command ...`) and re-run the review"
             )
+        found = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", pr_pin["base_commit"], pr_head],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        merge_base = found.stdout.strip()
+        # R1 (N5): no diff.* setting (noprefix, mnemonicPrefix, renames,
+        # ignoreSubmodules) reshapes a diff the supervisor applies or reads.
         diff = subprocess.run(
             ["git", "-C", str(repo), "diff", "--binary", "--no-color", "--no-ext-diff",
-             "--no-textconv", f"{base_commit}...{pr_head}"],
+             "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
+             "--ignore-submodules=none", merge_base, pr_head],
             capture_output=True,
             check=False,
         )  # fmt: skip
-        if base_commit is None or diff.returncode:
+        if found.returncode or diff.returncode:
             return unavailable(
-                f"PR #{pr.group(1)}: its fetched base and head ({pr_ref(pr.group(1), 'base')}, "
-                f"{pr_head}) cannot be diffed — refresh_repo pr={pr.group(1)} and re-run the review"
+                f"PR #{pr[1]}: its pinned base {pr_pin['base_commit']} and head {pr_head} "
+                f"have no merge-base here or cannot be diffed — refresh_repo pr={pr[1]} and "
+                "dispatch the review again"
             )
+        verdict_pr["merge_base"] = merge_base
+        base_commit, checkout = merge_base, pr_head
         if diff.stdout.strip():  # an empty PR stays patch-less: not_applicable
-            patch_path = config.audit_dir / task_id / f"{task_id}.pr-head.diff"
+            patch_path = config.audit_dir / task_id / f"{task_id}.pr.diff"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(diff.stdout)
 
@@ -1289,6 +1345,8 @@ def reverify_run(
         count_pytest=count_pytest,
         baseline_counts=cached,
         read_allowlist=read_allowlist,
+        head=checkout,
+        name=task_id,
     )
     counts = outcome.test_counts
     if counts is not None and counts["baseline_source"] == "run" and base_commit:
@@ -1313,10 +1371,11 @@ def reverify_run(
     else:
         outcome = replace(outcome, commands_source=commands_source)
     outcome = _v1_verdict(outcome, repo, patch_path, base_commit or ref or "HEAD")
-    if pr and pr_head:
+    if verdict_pr is not None:
         outcome = replace(
             outcome,
-            detail=f"PR #{pr.group(1)}: head {pr_head} on base {base_commit}: {outcome.detail}",
+            detail=f"PR #{verdict_pr['number']}: head {pr_head} on base "
+            f"{verdict_pr['base_commit']} (merge-base {base_commit}): {outcome.detail}",
         )
     confirmed = worker_outcome == "passed" and outcome.outcome == "passed"
     store.record_reverification(
@@ -1327,10 +1386,15 @@ def reverify_run(
         commands=outcome.commands,
         exit_codes=outcome.exit_codes,
         detail=outcome.detail,
-        base_commit=base_commit if outcome.exit_codes else None,
+        base_commit=verdict_pr["base_commit"]
+        if verdict_pr is not None
+        else base_commit
+        if outcome.exit_codes
+        else None,
         tamper_flags=outcome.tamper_flags,
         test_counts=outcome.test_counts,
         head_commit=pr_head,
+        pr=verdict_pr,
     )
     return outcome
 
