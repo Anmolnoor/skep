@@ -478,12 +478,8 @@ def test_review_r1_a_turn_from_before_trust_keeps_its_taint(
     assert candidate.taint == ()
 
 
-def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
-    tmp_path: Path,
-) -> None:
-    """Review R1 (Q10): drafts the old observer made (it drafted from
-    untrusted chats too) carry no taint record; the upgrade marks them
-    unknown — both bits — so approving one names it."""
+def _legacy_drafts(tmp_path: Path) -> Path:
+    """A store from before skill_candidates.taint, with one open draft of each provenance."""
     db = tmp_path / "supervisor.sqlite3"
     store = RunStore(db)
     for name, provenance in (("conv-x", "conversation"), ("learned-x", "learned")):
@@ -500,6 +496,10 @@ def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
     with closing(sqlite3.connect(db)) as conn:
         conn.execute("ALTER TABLE skill_candidates DROP COLUMN taint")
         conn.commit()
+    return db
+
+
+def _drafts_need_acknowledgment(db: Path) -> None:
     store = RunStore(db)
     try:
         assert store.get_candidate("conv-x").taint == ("private", "untrusted")  # type: ignore[union-attr]
@@ -509,6 +509,41 @@ def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
         approve(store, "conv-x", actor="op", accept_taint=True)
     finally:
         store.close()
+
+
+def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
+    tmp_path: Path,
+) -> None:
+    """Review R1 (Q10): drafts the old observer made (it drafted from
+    untrusted chats too) carry no taint record; the upgrade marks them
+    unknown — both bits — so approving one names it."""
+    _drafts_need_acknowledgment(_legacy_drafts(tmp_path))
+
+
+class _KilledAfterTheAlter(sqlite3.Connection):
+    """The process dies once the taint column is added, before its backfill."""
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        if sql.startswith("UPDATE skill_candidates SET taint"):
+            raise RuntimeError("killed between the ALTER and the backfill")
+        return super().execute(sql, parameters)
+
+
+def test_review_r2_an_upgrade_cut_after_the_taint_column_still_marks_old_drafts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F4): the column and its backfill commit together — an
+    upgrade killed between them leaves neither, so the reopen marks the
+    conversation draft with both bits and approving it still names them."""
+    db = _legacy_drafts(tmp_path)
+    connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: connect(*a, factory=_KilledAfterTheAlter, **kw)
+    )
+    with pytest.raises(RuntimeError, match="killed"):
+        RunStore(db)
+    monkeypatch.undo()
+    _drafts_need_acknowledgment(db)
 
 
 def test_review_r1_a_channel_chat_turn_is_outside_content(store: RunStore, tmp_path: Path) -> None:
