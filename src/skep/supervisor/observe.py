@@ -232,19 +232,22 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
     except TemplateError:
         return None
     signature = candidate_signature(template)
-    if store.get_candidate(name) is not None or store.get_template(name) is not None:
-        return None
     if any(c.signature == signature for c in store.list_candidates()):
         return None
-    store.add_candidate(
-        SkillCandidate(
-            name=name,
-            signature=signature,
-            status=DRAFT,
-            template=template,
-            source_task_ids=(f"chat:{chat_id}",),
-            occurrences=1,
-            taint=tuple(sorted(taint)),
-        )
+    candidate = SkillCandidate(
+        name=name,
+        signature=signature,
+        status=DRAFT,
+        template=template,
+        source_task_ids=(f"chat:{chat_id}",),
+        occurrences=1,
+        taint=tuple(sorted(taint)),
     )
+    # Review R2 (F7): reserve the name atomically, as capture does — a name a
+    # capture (or any candidate or template) holds by now is skipped, never replaced
+    detail = {"source": f"chat:{chat_id}", "taint": list(candidate.taint)}
+    if not store.add_new_candidate(
+        candidate, action="observed", actor="chat-observer", detail=detail
+    ):
+        return None
     return name

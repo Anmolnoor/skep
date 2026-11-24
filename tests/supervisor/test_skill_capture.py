@@ -718,3 +718,28 @@ def test_review_r2_a_trust_after_the_observer_read_the_turn_never_drafts_it_clea
     _turn(store, chat, "run it again")
     assert _draft_from_last_turn(store, chat) == "conv-run-it-again"
     assert store.get_candidate("conv-run-it-again").taint == ()  # type: ignore[union-attr]
+
+
+def test_review_r2_the_observer_never_replaces_a_draft_captured_under_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F7): a capture reserves the name after the observer's
+    checks — the observer's write refuses a held name and skips quietly; the
+    captured draft (and its audit row) is what approval targets."""
+    observer, operator = RunStore(tmp_path / "s.sqlite3"), RunStore(tmp_path / "s.sqlite3")
+    try:
+        chat = _chat(observer)
+        scan = observer.list_candidates
+
+        def capture_lands(*args: Any) -> Any:
+            monkeypatch.setattr(observer, "list_candidates", scan)
+            capture_skill(operator, tmp_path, chat, name="conv-run-the-release-check", actor="op")
+            return scan(*args)
+
+        monkeypatch.setattr(observer, "list_candidates", capture_lands)
+        assert _draft_from_last_turn(observer, chat) is None
+        (kept,) = operator.list_candidates()
+        assert (kept.name, kept.template.provenance) == ("conv-run-the-release-check", CAPTURED)
+    finally:
+        observer.close()
+        operator.close()
