@@ -70,6 +70,7 @@ skep status [--personal] [--json]
 ```sh
 skep run [repo] [instructions] [options]
 skep run forensics TASK_ID [--md|--json]
+skep forensics TASK_ID [--md|--json]   # the same report, shorter to type
 ```
 
 Common examples:
@@ -168,13 +169,18 @@ detection patterns are data from herdr (Apache-2.0; see `NOTICE`).
 ## Review and Approval
 
 ```sh
-skep review <task_id> [--approve | --deny | --allow-command | --reverify]
+skep review [task_id] [--approve | --deny | --allow-command | --reverify]
                       [--branch NAME] [--pr] [--pr-base BRANCH] [--note TEXT]
                       [--actor NAME] [--worker-cmd COMMAND]
 ```
 
 - Plain `review` shows the run evidence, patch, approval state, and
   re-verification result.
+- `skep review` with no task id walks every run waiting on you (a gate, an
+  unlanded patch, a G10 disagreement): its card, G10/V1, the exact diff, then
+  one key — `a` approve, `d` deny, `f` forensics, `p` receipt, `s` skip, `q`
+  quit. A key is the same `--approve`/`--deny` above; EOF skips. Off a
+  terminal it only lists them and never prompts.
 - `--approve` applies a completed patch to a `skep/<task_id>` branch, or resumes
   a pending approval. A run with no re-verification record is refused.
 - `--branch NAME` names the landing branch for `--approve` on a completed run;

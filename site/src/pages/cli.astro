@@ -132,6 +132,7 @@ const groups: Group[] = [
     title: 'Read the evidence, then decide',
     lead: 'Approving a completed run applies its patch on a branch. The branch, pull-request and repository commands are your half of git: they run on your own credentials.',
     rows: [
+      ['skep review', 'With no id, on a terminal: walk every run waiting on you, each as its card, G10 and V1, and the exact diff, then one key: a approve, d deny, f forensics, p receipt, s skip, q quit. Off a terminal it only lists them.'],
       ['skep review <task_id>', 'The run\'s evidence, re-verification result, approval state and diff. A unique prefix of the id is enough.'],
       ['skep review <task_id> --approve [--branch NAME] [--pr] [--pr-base BRANCH] [--note TEXT] [--actor NAME]', 'On a completed run, apply the patch on <code>skep/&lt;task_id&gt;</code> or the branch you name; the default branch is refused. On a run waiting at a gate, resume it. <code>--pr</code> then pushes that branch and opens a pull request with the GitHub CLI.'],
       ['skep review <task_id> --deny', 'Reject the pending approval.'],
@@ -177,6 +178,7 @@ const groups: Group[] = [
       ['skep policy revoke RULE_ID', 'Remove one learned grant. What it allowed asks again.'],
       ['skep policy decisions [--actor GLOB] [--since TIME] [--limit N] [--team ID]', 'The decision log, newest first, with counts per verdict.'],
       ['skep ledger verify [--path FILE] [--json]', 'Check every hash-chained row of the decision log, across rotations. Exits 1 naming the first break by file and line.'],
+      ['skep forensics TASK_ID [--md|--json]', 'One run\'s evidence in one read, the same report as <code>skep run forensics</code>.'],
       ['skep proof export TASK_ID [--format md|json]', 'One run\'s local receipt for a PR: posture, G10 and V1, decision count, ledger head hash. A local chain catches an edited row, not a rewrite by someone who can write your skep home: the published receipt is the outside anchor.'],
       ['skep role list', 'Every role; <code>*</code> marks the one new chats open in.'],
       ['skep role show NAME', 'One role\'s record and its policy layer as a table.'],

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -764,8 +764,12 @@ def cmd_run_forensics(args: argparse.Namespace) -> int:
         return _err(str(exc.detail), next_command="skep status --personal  # list recent task ids")
     finally:
         store.close()
+    from .. import cli_ui
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
+    elif not args.md and cli_ui.rich_enabled():
+        cli_ui.print_report(render_forensics(report, markdown=False))
     else:
         print(render_forensics(report, markdown=args.md))
     return 0
@@ -1435,6 +1439,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             evidence=str(config.db_path),
             next_command='skep run <repo> "<instructions>"',
         )
+    if args.task_id is None:
+        return _review_inbox(args, config)
     store = RunStore(config.db_path)
     try:
         record = _find_run(store, args.task_id)
@@ -1891,6 +1897,139 @@ def _prompt_inline_approval(
     finally:
         if owns_store:
             run_store.close()
+
+
+@dataclass(frozen=True)
+class _ReviewCard:
+    task_id: str
+    label: str  # CONFIRMED / NOT CONFIRMED / TAMPER / ASK
+    style: str
+    waiting: str
+    lines: list[str]
+    patch: str | None
+
+
+def _review_interactive() -> bool:
+    """Prompts need a terminal on both ends: `skep review | less` never asks."""
+    return _stdin_is_interactive() and sys.stdout.isatty()
+
+
+def _review_cards(store: RunStore) -> list[_ReviewCard]:
+    """What waits on the operator — the same "action needed" every face pushes
+    (``run_terminal_text``): a gated run, an unlanded patch, a G10 disagreement.
+    # ponytail: the newest 200 runs; an older waiting run still lists in
+    # `skep status --personal` and reviews by id.
+    """
+    from .serve.actions import patch_path, tamper_note
+    from .serve.run_status import run_terminal_text
+
+    cards = []
+    for record in store.recent_runs(200):
+        if record.state not in ("pending_approval", "completed"):
+            continue
+        notice = run_terminal_text(store, record.task_id, completion_opt_in=False)
+        if notice is None or notice[1] != "action_needed":
+            continue
+        reverify = store.reverification_for(record.task_id)
+        if record.state == "pending_approval":
+            label, style = "ASK", "yellow"
+        elif reverify is not None and reverify.outcome == "tampered":
+            label, style = "TAMPER", "red"
+        elif reverify is not None and reverify.confirmed:
+            label, style = "CONFIRMED", "green"
+        else:
+            label, style = "NOT CONFIRMED", "red"
+        lines = [
+            f"state:    {record.state}",
+            f"summary:  {record.summary or '-'}",
+            f"waiting:  {notice[0]}",
+        ]
+        for gate in store.approvals_for(record.task_id):
+            if gate.status == "pending":
+                lines.append(f"card:     review {gate.review_id} — {gate.action}: {gate.reason}")
+        if reverify is not None:
+            lines.append(
+                f"G10:      {reverify.outcome} confirmed={reverify.confirmed} "
+                f"re-ran {reverify.commands} → exit {reverify.exit_codes}"
+            )
+        note = tamper_note(reverify)
+        if note:
+            lines.append(f"V1:       {note}")
+        patch = patch_path(store, record.task_id)
+        cards.append(
+            _ReviewCard(
+                record.task_id,
+                label,
+                style,
+                notice[0],
+                lines,
+                patch.read_text() if patch is not None else None,
+            )
+        )
+    return cards
+
+
+def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
+    """Phase 10 10.2: ``skep review`` with no id walks every waiting run — card
+    (named id, G10/V1), the exact diff, then ONE explicit key per run. Every
+    verdict is the existing ``skep review <id> --approve/--deny`` (I5); EOF and
+    any other key skip (I7). Off a terminal it lists and never prompts."""
+    if args.approve or args.deny or args.allow_command or args.reverify:
+        return _err("a verdict needs a task id.", next_command="skep review <task_id> --approve")
+    from .. import cli_ui
+
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        cards = _review_cards(store)
+    finally:
+        store.close()
+    if not cards:
+        print("nothing waits on you: no run is gated or holding an unlanded patch")
+        return 0
+    if not _review_interactive():
+        for card in cards:
+            print(f"{card.task_id}  {card.label}  {card.waiting}")
+        print("next: skep review <task_id>  # one run's evidence; --approve or --deny decides it")
+        return 0
+    rich = cli_ui.rich_enabled()
+    code = 0
+    for card in cards:
+        title = f"{card.label} · task {card.task_id}"
+        if rich:
+            cli_ui.print_panel("\n".join(card.lines), title=title, style=card.style)
+            if card.patch:
+                cli_ui.print_diff(card.patch)
+        else:
+            print(title)
+            print("\n".join(f"  {line}" for line in card.lines))
+            if card.patch:
+                print(card.patch)
+        act = "resume" if card.label == "ASK" else "land"
+        keys = f"  [a] approve & {act}  [d] deny  [f] forensics  [p] receipt  [s] skip  [q] quit"
+        while True:
+            print(keys)
+            choice = _read_approval_choice()
+            if choice == "f":
+                cmd_run_forensics(
+                    argparse.Namespace(
+                        home=args.home, instructions=card.task_id, md=False, json=False
+                    )
+                )
+                continue
+            if choice == "p":
+                cmd_proof_export(
+                    argparse.Namespace(home=args.home, task_id=card.task_id, format="md")
+                )
+                continue
+            if choice == "q":
+                return code
+            if choice in ("a", "d"):
+                verdict = {"task_id": card.task_id, "approve": choice == "a", "deny": choice == "d"}
+                code = max(code, cmd_review(argparse.Namespace(**{**vars(args), **verdict})))
+            else:
+                print(f"skipped: task {card.task_id} still waits")
+            break
+    return code
 
 
 def _approval_can_be_remembered(action: str, reason: str) -> bool:
@@ -3399,7 +3538,12 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
         )
     except ValueError as exc:
         return _err(str(exc))
-    print(json.dumps(view, indent=2, sort_keys=True))
+    from .. import cli_ui
+
+    if args.json or not cli_ui.rich_enabled():
+        print(json.dumps(view, indent=2, sort_keys=True))
+    else:
+        cli_ui.print_decisions(view)
     return 0
 
 
@@ -3910,7 +4054,13 @@ def register_supervisor_commands(
             "(pending), --allow-command persists a pending shell command and resumes"
         ),
     )
-    review.add_argument("task_id")
+    review.add_argument(
+        "task_id",
+        nargs="?",
+        default=None,
+        help="omit to walk every run waiting on you (diff, G10/V1, then a verdict key); "
+        "off a terminal it only lists them",
+    )
     review.add_argument("--approve", action="store_true")
     review.add_argument("--deny", action="store_true")
     review.add_argument("--allow-command", action="store_true")
@@ -4542,6 +4692,9 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
     policy_decisions.add_argument("--task", help="one run's rows (rows that name no task skip)")
     policy_decisions.add_argument("--engine", help="one coding engine's rows, e.g. claude_code")
+    policy_decisions.add_argument(
+        "--json", action="store_true", help="JSON on a terminal too (off one it always is)"
+    )
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     trust = subcommands.add_parser(
@@ -4595,6 +4748,19 @@ def register_supervisor_commands(
     )
     ledger_verify.add_argument("--json", action="store_true", help="the result as JSON")
     ledger_verify.set_defaults(func=cmd_ledger_verify)
+    forensics = subcommands.add_parser(
+        "forensics", help="one run's evidence in one read (= skep run forensics)"
+    )
+    forensics.add_argument("instructions", metavar="task_id")
+    forensics_format = forensics.add_mutually_exclusive_group()
+    forensics_format.add_argument(
+        "--md", action="store_true", help="a paste-ready Markdown bug report"
+    )
+    forensics_format.add_argument(
+        "--json", action="store_true", help="the report as JSON (= the REST body)"
+    )
+    forensics.set_defaults(func=cmd_run_forensics)
+
     proof = subcommands.add_parser("proof", help="verifiable local receipts")
     proof.set_defaults(func=_group_usage(proof))
     proof_sub = proof.add_subparsers(dest="proof_command")
