@@ -3227,3 +3227,120 @@ Everything merged since 1.6.0 (#121–#122):
   block reason. A worker artifact with a reserved supervisor
   audit filename is refused, and a Telegram photo captioned `/update` no
   longer triggers an update.
+
+## v2.0.0 — unattended runs you can check: quiet sandboxed coding, a tamper guard, receipts, PR review and a new console (2026-11-24)
+
+Everything merged since 1.6.1 (#124–#133), the ten phases of the master
+plan. Several defaults changed; read "Behaviour changes" at the end before
+you upgrade a home that is in use.
+
+- **Phase 01 (#124): quiet sandboxed coding and the V1 test-tamper guard.**
+  On a project set up with `--execution-mode sandbox --unlocked`, `skep serve`
+  and `skep run` can answer eligible in-sandbox shell gates themselves. Each
+  command skep evaluates gets a decision-log row under `auto:unlocked`, and
+  the CLI answers up to ten gates in a row. Floor denials are refused
+  outright; opaque shell commands, host and network gates and `--minimal`
+  runs still need a human when they ask. V1 flags deleted or emptied test
+  files, added skip or xfail markers and test-runner configuration edits.
+  When a pinned pytest check passes and both counts are readable, V1 compares
+  the run's counts with a fresh or cached baseline; unreadable counts block
+  automatic landing. A `tampered` G10 verdict leaves the patch unconfirmed
+  and blocks automatic landing.
+- **Phase 02 (#125): decisions name their run, and one command tells the
+  story.** Run decision rows record the task id and caste when known, plus
+  the engine for coding runs when known.
+  `skep run forensics <task_id> [--md|--json]` and
+  `GET /api/runs/<id>/forensics` build one redacted, read-only report from the
+  store, the task envelope, the event stream, the worker log and the decision
+  log. `skep policy decisions --task <id>` filters the log.
+- **Phase 03 (#126): the key relay by default, and strict reads.** The
+  provider key relay is on by default (ADR 0062). Eligible built-in workers
+  reach the model through the supervisor, and sandboxed relayed workers
+  cannot read the provider key file. External engines keep their own
+  authentication. A project with strict reads gets a true read allowlist on
+  Linux (bubblewrap from a minimal root) and macOS (Seatbelt deny-all, then
+  the same set reopened), and G10 re-verifies inside the same wall (ADR 0068).
+- **Phase 04 (#127): a sandboxed ACP engine and five gates for unattended
+  external runs.** `coding_engine: acp:<adapter>` runs an ACP agent inside
+  the sandbox with skep's governor outside it (ADR 0058). Scheduled external
+  coding runs require a usable sandbox with confined egress, strict reads, a
+  non-vacuous pinned verify command and usable engine authentication; if
+  automatic landing is configured, its branch must be under `skep/`. A failed
+  gate pauses the schedule and names the reason.
+- **Phase 05 (#128): one setup truth and one provider shelf.** The CLI
+  (`skep provider add --activate / use / set-key / remove`), REST, Web
+  Settings and the Queen share the same provider actions. Activation and a
+  non-empty key replacement validate the candidate before anything is saved;
+  ChatGPT-login activation checks for a usable login. Saved credentials are
+  scoped to their configured endpoints. `skep doctor` is grouped (health,
+  security posture, projects needing an upgrade) and `--offline` dials
+  nothing.
+- **Phase 06 (#129): the real context window, and a prompt that stays
+  cacheable.** The Queen resolves its saved context window through one
+  resolver: an operator override, then the cached provider result, then the
+  model catalog, then a 16,384-token default. Settings Test reports the
+  staged endpoint's window before saving. Turn 1 lists MCP tool names from
+  the discovery cache, and a seed-skill hint is stored on the user turn so
+  replayed bytes stay identical.
+- **Phase 07 (#130): forged tools confined at run time.** Every forged-tool
+  exchange runs through one wall: strict reads, a throwaway workspace, a
+  scrubbed environment and no network unless the card approved hosts. PEP 723
+  dependencies are opt-in, pinned with hashes, installed wheels-only inside
+  the wall and sealed read-only. `read_url` strips page chrome, reads PDFs
+  under a budget and refuses compressed bodies.
+- **Phase 08 (#131): a verifiable ledger and proof receipts.** New decision
+  rows are hash-chained and `skep ledger verify [--path FILE]` names the
+  first break. `skep proof export TASK_ID` builds a local, redacted receipt
+  for a run. Memory proposals created from notes or tasks inherit their
+  source's taint, and `skep skill capture` drafts a zero-grant SKILL.md that
+  carries the chat's taint.
+- **Phase 09 (#132): the supervisor reviews a PR at an exact head.**
+  `refresh_repo pr=N` makes the supervisor (never a worker) fetch and pin a
+  PR's head and base. For a review run that leaves the PR head unchanged, G10
+  runs the project's pinned verify command on that exact head, and V1 checks
+  the PR diff from its merge base. `merge_pr` and `skep pr merge` merge
+  through GitHub's REST endpoint with `sha=<head>` and need a clean confirmed
+  verdict for the pinned tuple. Script schedules now run inside the sandbox
+  wall. Two example skills build on this: `dependabot-maintainer` and
+  `morning-ritual`.
+- **Phase 10 (#133): a new web console, one command registry, a CLI that
+  pipes cleanly.** The web UI is a zero-build console: an Inbox with one
+  review queue, Run Detail with the diff, G10, V1, forensics and a copyable
+  receipt, Policies and Ledger, a Settings provider shelf with a staged
+  one-token Test, and a Library, in light and dark at phone width. Slash
+  commands come from one registry shared by the web, the CLI and the
+  messengers. `skep review` is interactive. The new CLI styling is off when
+  piped, under `NO_COLOR`, and in `--json` or `--md` output; terminal chat
+  can still emit clickable links under `NO_COLOR`.
+
+**Behaviour changes**
+
+- Script schedules get a temporary `HOME`. To give the script read-only
+  access to an additional host file, name its absolute path in the command.
+  Only eligible regular files are allowed; files reached through symlinks or
+  under protected paths are ineligible. List concrete hosts in the schedule
+  for any network access (#132).
+- Prompt schedules now read only stored data. Move GitHub, checkout, MCP
+  discovery and live run evidence checks to an attended turn (#132).
+- Before merging a PR through skep, refresh and review its current head and
+  base. If either moves, refresh and review again (#132).
+- Mail tools now verify TLS certificates and hostnames. Install the right CA
+  or correct the configured hostname if your mail server fails verification
+  (#132).
+- Forged tools activated before #130 stop running until promoted again.
+  Forged-tool calls ask by default, and `allow_mcp_tool` can grant standing
+  permission subject to policy. Pass document content to `extract_document`
+  and URLs to `read_url` (#130).
+- New sandboxed projects default to strict reads where the backend supports
+  them; existing projects keep their saved settings. Run
+  `skep project setup <repo> --project-id <id> --strict-reads` to turn strict
+  reads on for an existing project before it runs scheduled external coding
+  jobs (#126, #127).
+- A legacy home marked complete without an approved baseline or role now
+  reads as setup incomplete. Re-registering a provider id at a new URL is
+  refused. Activation requires a successful check, including working
+  credentials when the endpoint requires them (#128).
+- The provider key relay is on by default (#126).
+- The Inbox approves inline only where the row is the whole evidence: a
+  worker gate that is not a patch landing, or a memory proposal. A patch
+  landing always opens the review page (#133).
