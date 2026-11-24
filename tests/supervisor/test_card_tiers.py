@@ -706,3 +706,34 @@ def test_an_unknown_tilde_user_does_not_crash_the_floor() -> None:
 
     assert shell_secret_floor_reason("cat ~nosuchuser0/x; cd ~nosuchuser0", cwd="/tmp") is None
     assert high_tier("run_shell", {"command": "ls ~nosuchuser0", "cwd": "/tmp"}) is None
+
+
+def test_no_channel_press_confirms_a_tool_binding_it_could_not_show(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (K6, I6): even the channel's admin — who may confirm HIGH
+    cards — cannot confirm a promote_tool card whose binding (digest, lock,
+    hosts, diff) a messenger could not show whole; one that fits, they can."""
+    from skep.supervisor.serve import channels
+
+    ran: list[str] = []
+    monkeypatch.setattr(chat_module, "execute_mutation", lambda name, *_, **__: ran.append(name))
+    monkeypatch.setattr(channels, "channel_admin_actor", lambda *_: True)
+    chat_id = rig.store.create_chat(title="t", model=None).chat_id
+    forged = {"source_sha256": "a" * 64, "lock_sha256": "", "approved_hosts": [], "locked": []}
+    high = {"tier": "high", "high": "it installs a forged tool"}
+    long_card = {**high, "forge": {**forged, "diff": "+x = 1\n" * 600}}
+    action_id = rig.store.add_chat_action(
+        chat_id, tool="promote_tool", args={"plugin_id": "p"}, card=long_card
+    )
+    with pytest.raises(HTTPException) as refused:
+        _confirm(rig, chat_id, action_id, actor="channel:telegram:1:admin:1")
+    assert refused.value.status_code == 403 and "web UI or the CLI" in str(refused.value.detail)
+    assert ran == []
+    short_card = {**high, "forge": {**forged, "diff": "+x = 1\n"}}
+    fits = rig.store.add_chat_action(
+        chat_id, tool="promote_tool", args={"plugin_id": "p"}, card=short_card
+    )
+    rig.ollama.script_reply("done")
+    _confirm(rig, chat_id, fits, actor="channel:telegram:1:admin:1")
+    assert ran == ["promote_tool"]

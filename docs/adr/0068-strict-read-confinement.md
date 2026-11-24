@@ -532,6 +532,20 @@ What did not move, and why:
   run on the host, unsandboxed, as the operator. Putting them in a wall is
   a product decision (Playwright needs its browser, a mail server its
   credentials), not a profile flag.
-- **The run_code half of the trial** (the dispatched script run that keeps
-  the Queen's role chain, R3-F2) follows the forge project's own strict
-  setting, like any run. The trial's runtime-wall stages are always strict.
+- **The dispatched half of the trial** keeps the Queen's role chain (R3-F2)
+  and nothing else: since the Phase 07 review (R1) it runs a one-line gate
+  script, never the candidate. Every execution of a forged tool — its two
+  trial stages, its install lane, discovery and every call — runs behind
+  `forged_lane`, so "forged tools always strict" (the doctor line) holds
+  with no exception.
+
+The same review closed the gaps around that lane: a `forge-*` server id is
+reserved before any transport is chosen (an `http` config with that prefix
+runs the bound record through the lane, never a host-side request, and
+`register_mcp_server` refuses the prefix); a locked tool's venv is sealed
+(`forge.seal_venv`: every path, file digest and link target, with only
+`bin/python*` allowed to link out of the tree) when its hashed install
+finishes, the seal is recorded with the approval (`venv_sha256`) and
+checked before every reuse and every launch; and the promotion publishes
+its binding atomically — conditional on the plugin record it read before
+the trial, with the previous tool's bytes restored if the publish fails.

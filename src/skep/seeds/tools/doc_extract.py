@@ -1,10 +1,13 @@
-"""doc_extract — read a PDF or HTML document from a URL as plain text.
+"""doc_extract — the plain text of a PDF or HTML document you already hold.
 
 Phase 07 / 7.3: a shipped seed tool in the forge's single-file stdio MCP
-format (stdlib only, JSON-RPC over stdio, self_test offline). Read-only;
-it reads public addresses only and its sandbox decides which hosts it may
-reach. The PDF reader here is also the one skep's read_url and researcher
-use (``pdf_to_text``), so there is one PDF path, not three.
+format (stdlib only, JSON-RPC over stdio, self_test offline). Review R1
+(K4): it has NO network — a forged tool's wall is deny-all unless its card
+approves hosts, and this one approves none — so it extracts from content it
+is given (base64 bytes or text); reading a URL is read_url's job, which
+reads PDFs with this same reader (``pdf_to_text``): one PDF path, not
+three. A seed runs from its own bytes inside the wall (it cannot import
+skep), so the reader lives here and read_url and the researcher import it.
 
 The PDF reader handles what text PDFs are made of: objects found by
 scanning (no xref needed, so a damaged table still reads), Flate/ASCIIHex/
@@ -12,38 +15,48 @@ ASCII85 streams, PDF 1.5 object streams, simple fonts (WinAnsi/MacRoman,
 /Differences) and composite fonts through their ToUnicode CMap, Form
 XObjects, and word/line breaks placed by where each string lands. It does
 NOT decrypt (an encrypted PDF needs a cipher stdlib lacks), OCR a scan, or
-map CJK fonts that ship no ToUnicode — each of those says so.
+map CJK fonts that ship no ToUnicode — each of those says so. One budget
+per document (K2) bounds what a hostile file may cost.
 """
 
 import base64
-import ipaddress
+import binascii
+import bisect
 import json
 import re
-import socket
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 import zlib
 from html.parser import HTMLParser
 from typing import Any, NamedTuple
 
 MAX_BYTES = 8 * 1024 * 1024
-TIMEOUT_SECONDS = 20
+# Review R1 (K2): one budget per document — read_url parses inside the serve
+# process, so a tiny hostile file must cost neither gigabytes nor minutes.
+MAX_DECODED_BYTES = 32 * 1024 * 1024  # every stream's filter output, summed
+MAX_READ_BYTES = 4 * MAX_BYTES  # raw stream bytes handed to a decoder, summed
+MAX_FILTERS = 4  # filters on one stream
+MAX_OBJECTS = 200_000  # objects found by scanning plus unpacked from object streams
+MAX_WORK = 2_000_000  # parser tokens plus font/CMap map entries
+MAX_FORM_DEPTH = 8
+MAX_FORM_CALLS = 2_000  # Form XObjects drawn, in total
+MAX_TEXT_CHARS = 1_000_000
+REPLY_CHARS = 100_000  # what one extract_document reply carries
 
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "extract_document",
-        "description": "Read a PDF or HTML document from a URL as plain text. "
-        "Arguments: {url: string} — a public http(s) address. Example: "
-        "{name: extract_document, arguments: {url: https://example.com/report.pdf}}. "
-        "Read-only. Encrypted or scanned (image-only) PDFs are refused with "
-        "a reason; it does not OCR.",
+        "description": "The plain text of a document you already hold — NO network. "
+        "Arguments: {content_base64: string} (a PDF or HTML file's bytes, base64) or "
+        "{content: string} (HTML or plain text). Read-only. Encrypted or scanned "
+        "(image-only) PDFs are refused with a reason; it does not OCR. To read a URL, "
+        "use read_url (it reads PDFs too).",
         "annotations": {"readOnlyHint": True},
         "inputSchema": {
             "type": "object",
-            "properties": {"url": {"type": "string"}},
-            "required": ["url"],
+            "properties": {
+                "content_base64": {"type": "string"},
+                "content": {"type": "string"},
+            },
         },
     },
     {
@@ -53,34 +66,6 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
-
-
-# --- fetch errors that say what to do next --------------------------------------------
-
-
-def http_error_message(status: int, reason: str, retry_after: str | None = None) -> str:
-    """One line naming the HTTP failure and the next step (I9)."""
-    head = f"HTTP {status} {reason}".rstrip()
-    wait = (retry_after or "").strip()
-    hint = f"wait {wait}s" if wait.isdigit() else f"wait until {wait} (Retry-After)" if wait else ""
-    if status == 429:
-        return (
-            f"{head} — the site is rate-limiting this reader; "
-            f"{hint or 'wait a minute'} before trying again"
-        )
-    if status in (404, 410):
-        return (
-            f"{head} — nothing at this URL; check it for typos or find the page's current address"
-        )
-    if status in (401, 403):
-        return (
-            f"{head} — the site refuses this reader (login wall or bot block); use another source"
-        )
-    if status >= 500:
-        return f"{head} — the site is failing on its side; try again later" + (
-            f" ({hint})" if hint else ""
-        )
-    return f"{head} — the site rejected the request; check the URL or use another source"
 
 
 # --- PDF -------------------------------------------------------------------------------
@@ -125,12 +110,59 @@ class _Ref(NamedTuple):
     gen: int
 
 
+class _Budget:
+    """Review R1 (K2): what one document may cost. Past any cap: ValueError."""
+
+    def __init__(self) -> None:
+        self.decoded = self.read = self.objects = self.work = self.forms = 0
+
+    def raw(self, size: int) -> None:
+        self.read += size  # stream extents may overlap in a hostile file
+        if self.read > MAX_READ_BYTES:
+            raise self.refuse(f"more than {MAX_READ_BYTES >> 20} MiB of stream bytes read")
+
+    @staticmethod
+    def refuse(what: str) -> ValueError:
+        return ValueError(
+            f"this PDF is too complex for skep's built-in reader ({what}) — it may be "
+            "hostile or simply huge; open it in a PDF viewer"
+        )
+
+    def decode(self, size: int) -> None:
+        self.decoded += size
+        if self.decoded > MAX_DECODED_BYTES:
+            raise self.refuse(f"more than {MAX_DECODED_BYTES >> 20} MiB of decoded streams")
+
+    def room(self) -> int:
+        return MAX_DECODED_BYTES - self.decoded
+
+    def object(self) -> None:
+        self.objects += 1
+        if self.objects > MAX_OBJECTS:
+            raise self.refuse(f"more than {MAX_OBJECTS} objects")
+
+    def tick(self, amount: int = 1) -> None:
+        self.work += amount
+        if self.work > MAX_WORK:
+            raise self.refuse(f"more than {MAX_WORK} parser steps")
+
+    def form(self) -> None:
+        self.forms += 1
+        if self.forms > MAX_FORM_CALLS:
+            raise self.refuse(f"more than {MAX_FORM_CALLS} form drawings")
+
+
+class _Full(Exception):
+    """The extracted text reached its cap: stop reading, keep what we have."""
+
+
 class _Parser:
     """Tokenizer for PDF objects and content streams: composites come back
     built (dict, list), ``n g R`` as a _Ref, anything else bare as an _Op."""
 
-    def __init__(self, data: bytes, pos: int = 0) -> None:
+    def __init__(self, data: bytes, budget: _Budget, pos: int = 0) -> None:
         self.data = data
+        self.budget = budget
         self.pos = pos
 
     def skip(self) -> None:
@@ -150,6 +182,7 @@ class _Parser:
         return pos
 
     def token(self) -> Any:
+        self.budget.tick()
         self.skip()
         data = self.data
         if self.pos >= len(data):
@@ -244,18 +277,25 @@ class _Parser:
         return bytes(out)
 
 
-def _decode(meta: Any, raw: bytes) -> bytes | None:
+def _decode(meta: Any, raw: bytes, budget: _Budget) -> bytes | None:
     """A stream's bytes through its filters; None for codecs that hold no
-    text (images, LZW) or a broken stream."""
+    text (images, LZW) or a broken stream. Every filter's output is charged
+    to ``budget`` (K2): Flate never inflates past what is left of it."""
     meta = meta if isinstance(meta, dict) else {}
     filters = meta.get("Filter")
+    chain = filters if isinstance(filters, list) else [filters] if filters else []
+    if len(chain) > MAX_FILTERS:
+        raise budget.refuse(f"a stream with more than {MAX_FILTERS} filters")
     data = raw
-    for name in filters if isinstance(filters, list) else [filters] if filters else []:
+    for name in chain:
         if name in ("FlateDecode", "Fl"):
+            room = budget.room()
             try:
-                data = zlib.decompressobj().decompress(data)
+                data = zlib.decompressobj().decompress(data, room + 1)
             except zlib.error:
                 return None
+            if len(data) > room:
+                raise budget.refuse(f"more than {MAX_DECODED_BYTES >> 20} MiB of decoded streams")
         elif name in ("ASCIIHexDecode", "AHx"):
             digits = re.sub(rb"[^0-9A-Fa-f]", b"", data.split(b">")[0])
             data = bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
@@ -267,15 +307,24 @@ def _decode(meta: Any, raw: bytes) -> bytes | None:
                 return None
         else:
             return None
+        budget.decode(len(data))
     return data
 
 
 class _Pdf:
     def __init__(self, data: bytes) -> None:
+        self.budget = _Budget()
         self.objects: dict[int, Any] = {}
-        self.streams: dict[int, bytes] = {}
+        self.streams: dict[int, memoryview] = {}  # extents only: nothing copied
+        self._decoded: dict[int, bytes | None] = {}
+        self._fonts: dict[int, _Font] = {}
+        # every endstream once, so a stream with a bad /Length finds its end
+        # by bisection — never a rescan of the file per object (K2)
+        ends = [m.start() for m in re.finditer(rb"endstream", data)]
+        view = memoryview(data)
         for match in _OBJ.finditer(data):
-            parser = _Parser(data, match.end())
+            self.budget.object()
+            parser = _Parser(data, self.budget, match.end())
             value = parser.token()
             num = int(match.group(1))
             self.objects[num] = value  # a later revision of an object wins
@@ -286,11 +335,11 @@ class _Pdf:
                     2 if data.startswith(b"\r\n", start) else data[start : start + 1] in b"\r\n"
                 )
                 length = value.get("Length")
-                end = start + length if isinstance(length, int) else -1
+                end = start + length if isinstance(length, int) and length >= 0 else -1
                 if end < 0 or not data[end : end + 12].lstrip().startswith(b"endstream"):
-                    found = data.find(b"endstream", start)
-                    end = len(data) if found < 0 else found
-                self.streams[num] = data[start:end]
+                    found = bisect.bisect_left(ends, start)
+                    end = ends[found] if found < len(ends) else len(data)
+                self.streams[num] = view[start:end]
         for num, value in list(self.objects.items()):
             if isinstance(value, dict) and value.get("Type") == "ObjStm":
                 self._unpack(value, num)
@@ -298,20 +347,32 @@ class _Pdf:
             value for value in self.objects.values() if isinstance(value, dict) and "Root" in value
         ]
         for match in re.finditer(rb"trailer\s*<<", data):
-            trailer = _Parser(data, match.end() - 2).token()
+            trailer = _Parser(data, self.budget, match.end() - 2).token()
             if isinstance(trailer, dict):
                 self.trailers.append(trailer)
 
     def _unpack(self, meta: dict[str, Any], num: int) -> None:
-        body = _decode(meta, self.streams.get(num, b""))
+        body = self._decode(num)
         first, count = meta.get("First"), meta.get("N")
-        if body is None or not isinstance(first, int) or not isinstance(count, int):
+        if body is None or not isinstance(first, int) or not isinstance(count, int) or first < 0:
             return
-        header = _Parser(body)
-        pairs = [(header.token(), header.token()) for _ in range(count)]
-        for packed, offset in pairs:
-            if isinstance(packed, int) and isinstance(offset, int):
-                self.objects.setdefault(packed, _Parser(body, first + offset).token())
+        # K2: /N is a claim; each (number, offset) pair takes at least 3 bytes
+        header = _Parser(body, self.budget)
+        for _ in range(min(count, len(body) // 3)):
+            packed, offset = header.token(), header.token()
+            if packed is None or offset is None:
+                break
+            if isinstance(packed, int) and isinstance(offset, int) and offset >= 0:
+                self.budget.object()
+                parser = _Parser(body, self.budget, first + offset)
+                self.objects.setdefault(packed, parser.token())
+
+    def _decode(self, num: int) -> bytes | None:
+        if num not in self._decoded:  # each stream decodes (and is charged) once
+            raw = self.streams[num]
+            self.budget.raw(len(raw))
+            self._decoded[num] = _decode(self.objects.get(num), bytes(raw), self.budget)
+        return self._decoded[num]
 
     def get(self, value: Any) -> Any:
         for _ in range(32):  # a reference chain, never a cycle
@@ -323,7 +384,14 @@ class _Pdf:
     def stream(self, ref: Any) -> bytes | None:
         if not isinstance(ref, _Ref) or ref.num not in self.streams:
             return None
-        return _decode(self.objects.get(ref.num), self.streams[ref.num])
+        return self._decode(ref.num)
+
+    def font(self, ref: Any) -> "_Font":
+        if not isinstance(ref, _Ref):
+            return _Font(self, ref)
+        if ref.num not in self._fonts:  # a font's maps are built once per document
+            self._fonts[ref.num] = _Font(self, ref)
+        return self._fonts[ref.num]
 
     def pages(self) -> list[dict[str, Any]]:
         roots = [self.get(t.get("Root")) for t in self.trailers]
@@ -356,7 +424,7 @@ class _Pdf:
         return found
 
 
-def _cmap(data: bytes) -> tuple[dict[int, str], int]:
+def _cmap(data: bytes, budget: _Budget) -> tuple[dict[int, str], int]:
     """A ToUnicode CMap: code -> text, and the code width in bytes."""
     mapping: dict[int, str] = {}
     space = re.search(rb"begincodespacerange\s*<([0-9A-Fa-f]+)>", data)
@@ -373,6 +441,7 @@ def _cmap(data: bytes) -> tuple[dict[int, str], int]:
             rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])", block
         ):
             first, last = int(low, 16), int(high, 16)
+            budget.tick(min(max(last - first, 0), 65535) + 1)
             if target.startswith(b"["):
                 for offset, item in enumerate(re.findall(rb"<([0-9A-Fa-f]*)>", target)):
                     mapping[first + offset] = utf16(item)
@@ -408,7 +477,7 @@ class _Font:
         self.default = 500.0
         cmap = pdf.stream(font.get("ToUnicode"))
         if cmap is not None:
-            self.map, width = _cmap(cmap)
+            self.map, width = _cmap(cmap, pdf.budget)
             self.width = width if composite else 1
         encoding = pdf.get(font.get("Encoding"))
         base = encoding.get("BaseEncoding") if isinstance(encoding, dict) else encoding
@@ -438,6 +507,7 @@ class _Font:
                 elif (
                     i + 2 < len(spec) and isinstance(spec[i], int) and isinstance(spec[i + 1], int)
                 ):
+                    pdf.budget.tick(min(max(spec[i + 1] - spec[i], 0), 65535) + 1)
                     for code in range(spec[i], min(spec[i + 1], spec[i] + 65535) + 1):
                         self._set(code, spec[i + 2])
                     i += 3
@@ -471,8 +541,10 @@ class _Text:
     """The text state: each string is placed, and where it lands (not which
     operator moved it) decides the space or line break before it."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_chars: int = MAX_TEXT_CHARS) -> None:
         self.out: list[str] = []
+        self.chars = 0
+        self.max_chars = max_chars
         self.glyphs = 0
         self.unmapped = 0  # composite-font glyphs with no Unicode mapping
         self.font: _Font | None = None
@@ -489,11 +561,12 @@ class _Text:
         if self.font is None:
             return
         a, b, c, d, e, f = self.tm
+        pieces: list[str] = []
         if self.last is not None:
             if abs(f - self.last[1]) > 0.5 * self.size * (abs(d) or 1.0):
-                self.out.append("\n")
+                pieces.append("\n")
             elif abs(e - self.last[0]) > 0.2 * self.size * (abs(a) or 1.0):
-                self.out.append(" ")
+                pieces.append(" ")
         advance = 0.0
         for item in items:
             if isinstance(item, bytes):
@@ -501,14 +574,18 @@ class _Text:
                     self.glyphs += 1
                     text = self.font.text(code)
                     self.unmapped += not text
-                    self.out.append(text)
+                    pieces.append(text)
                     advance += self.font.widths.get(code, self.font.default) / 1000 * self.size
             elif (shift := _number(item)) is not None:
                 if -shift / 1000 > 0.2:
-                    self.out.append(" ")
+                    pieces.append(" ")
                 advance -= shift / 1000 * self.size
         self.tm = (a, b, c, d, e + advance * a, f + advance * b)
         self.last = (self.tm[4], self.tm[5])
+        self.out.extend(pieces)
+        self.chars += sum(map(len, pieces))
+        if self.chars > self.max_chars:  # K2: the extracted text is bounded too
+            raise _Full
 
 
 def _numbers(operands: list[Any], count: int) -> list[float] | None:
@@ -517,15 +594,23 @@ def _numbers(operands: list[Any], count: int) -> list[float] | None:
     return floats if len(floats) == count else None
 
 
-def _run(pdf: _Pdf, content: bytes, resources: Any, state: _Text, depth: int = 0) -> None:
+def _run(
+    pdf: _Pdf,
+    content: bytes,
+    resources: Any,
+    state: _Text,
+    depth: int = 0,
+    drawing: frozenset[int] = frozenset(),
+) -> None:
+    """Run one content stream. ``drawing``: the forms on the stack, so a
+    form that draws itself (directly or through others) is drawn once (K2)."""
     resources = pdf.get(resources)
     resources = resources if isinstance(resources, dict) else {}
     fonts = pdf.get(resources.get("Font"))
     fonts = fonts if isinstance(fonts, dict) else {}
     xobjects = pdf.get(resources.get("XObject"))
     xobjects = xobjects if isinstance(xobjects, dict) else {}
-    cache: dict[str, _Font] = {}
-    parser = _Parser(content)
+    parser = _Parser(content, pdf.budget)
     operands: list[Any] = []
     while (token := parser.token()) is not None:
         if not isinstance(token, _Op):
@@ -535,10 +620,7 @@ def _run(pdf: _Pdf, content: bytes, resources: Any, state: _Text, depth: int = 0
         if token == "BT":
             state.tm = state.tlm = _IDENTITY
         elif token == "Tf" and len(operands) >= 2:
-            key = str(operands[-2])
-            if key not in cache:
-                cache[key] = _Font(pdf, fonts.get(key))
-            state.font = cache[key]
+            state.font = pdf.font(fonts.get(str(operands[-2])))
             state.size = abs(_number(last) or 1.0)
         elif token == "TL" and (nums := _numbers(operands, 1)):
             state.leading = nums[0]
@@ -559,22 +641,33 @@ def _run(pdf: _Pdf, content: bytes, resources: Any, state: _Text, depth: int = 0
         elif token == "ID":  # inline image: skip its raw bytes to EI
             end = re.compile(rb"\sEI(?=\s|$)").search(parser.data, parser.pos)
             parser.pos = len(parser.data) if end is None else end.end()
-        elif token == "Do" and depth < 8:
+        elif token == "Do" and depth < MAX_FORM_DEPTH:
             ref = xobjects.get(str(last))
             form = pdf.get(ref)
-            body = pdf.stream(ref)
-            if isinstance(form, dict) and form.get("Subtype") == "Form" and body is not None:
-                saved = state.tm, state.tlm
-                _run(pdf, body, form.get("Resources") or resources, state, depth + 1)
-                state.tm, state.tlm = saved
+            if (
+                isinstance(ref, _Ref)
+                and ref.num not in drawing
+                and isinstance(form, dict)
+                and form.get("Subtype") == "Form"  # an image is never decoded
+            ):
+                pdf.budget.form()
+                body = pdf.stream(ref)
+                if body is not None:
+                    saved = state.tm, state.tlm
+                    inner = form.get("Resources") or resources
+                    _run(pdf, body, inner, state, depth + 1, drawing | {ref.num})
+                    state.tm, state.tlm = saved
         operands = []
 
 
-def pdf_to_text(data: bytes) -> str:
+def pdf_to_text(data: bytes, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     """The text of a PDF, page by page. Raises ValueError, with what to do
-    next, for anything that is not a readable text PDF."""
+    next, for anything that is not a readable text PDF — or one past the
+    per-document budget (K2). Text past ``max_chars`` is not read; the
+    result then ends saying so."""
     if b"%PDF-" not in data[:1024]:
         raise ValueError("not a PDF — the response does not start with a PDF header")
+    full = False
     try:
         pdf = _Pdf(data)
         if any("Encrypt" in trailer for trailer in pdf.trailers):
@@ -587,16 +680,23 @@ def pdf_to_text(data: bytes) -> str:
             raise ValueError(
                 "found no pages — the PDF is truncated or damaged; try downloading it again"
             )
-        state = _Text()
+        state = _Text(max_chars)
         texts = []
         for page in pages:
             contents = page.get("Contents")
-            refs = pdf.get(contents) if not isinstance(contents, _Ref) else [contents]
-            body = b"\n".join(s for s in map(pdf.stream, refs or []) if s is not None)
+            # K11: a reference may name an ARRAY of streams — read in order
+            target = pdf.get(contents)
+            refs = target if isinstance(target, list) else [contents]
+            body = b"\n".join(s for s in map(pdf.stream, refs) if s is not None)
             state.out, state.last = [], None
-            _run(pdf, body, page.get("Resources"), state)
+            try:
+                _run(pdf, body, page.get("Resources"), state)
+            except _Full:
+                full = True
             lines = (" ".join(line.split()) for line in "".join(state.out).splitlines())
             texts.append("\n".join(line for line in lines if line))
+            if full:
+                break
     except ValueError:
         raise
     except Exception as exc:  # a malformed file is an answer, never a crash
@@ -610,6 +710,8 @@ def pdf_to_text(data: bytes) -> str:
             "this PDF draws text whose fonts carry no Unicode map (common in CJK "
             "PDFs) — skep's reader cannot recover the characters; open it in a PDF viewer"
         )
+    if full:
+        return f"{text[:max_chars]}\n\n[the PDF's text continues past {max_chars} characters]"
     if text:
         return text
     raise ValueError(
@@ -657,78 +759,35 @@ def html_to_text(page: str) -> str:
 # --- the tool --------------------------------------------------------------------------
 
 
-def _refuse_non_public(host: str) -> None:
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError as exc:
-        raise ValueError(f"{host!r} does not resolve ({exc}) — check the address") from exc
-    for info in infos:
-        address = str(info[4][0])
-        if not ipaddress.ip_address(address.split("%")[0]).is_global:
+def extract(arguments: dict[str, Any]) -> str:
+    """The text of the document in ``arguments`` (K4: given, never fetched)."""
+    encoded, given = arguments.get("content_base64"), arguments.get("content")
+    if isinstance(encoded, str) and encoded.strip():
+        if len(encoded) > (MAX_BYTES // 3 + 1) * 4 + 1024:
+            raise ValueError(f"the document is larger than {MAX_BYTES >> 20} MiB — too big here")
+        try:
+            body = base64.b64decode("".join(encoded.split()), validate=True)
+        except (binascii.Error, ValueError) as exc:
             raise ValueError(
-                f"extract_document only reads public internet addresses: {host!r} is "
-                f"{address} — open that document yourself"
-            )
-
-
-class _Redirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> Any:
-        _refuse_non_public(urllib.parse.urlparse(newurl).hostname or "")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _fetch(url: str) -> tuple[str, bytes]:
-    """(content type, body) of a public http(s) URL."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(f"extract_document reads http(s) URLs, got {url!r}")
-    _refuse_non_public(parsed.hostname)
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 skep-doc-extract"})
-    opener = urllib.request.build_opener(_Redirects)
-    try:
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
-            body = response.read(MAX_BYTES + 1)
-            kind = (
-                response.headers.get_content_type() if response.headers.get("Content-Type") else ""
-            )
-    except urllib.error.HTTPError as exc:
+                "content_base64 is not valid base64 — pass the file's bytes base64-encoded, "
+                "or pass HTML or text as content"
+            ) from exc
+    elif isinstance(given, str) and given.strip():
+        body = given.encode("utf-8")
+    else:
         raise ValueError(
-            http_error_message(exc.code, exc.reason, exc.headers.get("Retry-After"))
-        ) from exc
-    except TimeoutError as exc:
-        raise ValueError(
-            f"timed out after {TIMEOUT_SECONDS}s reading {parsed.hostname} — the site is "
-            "slow or unreachable; try again later"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise ValueError(
-            f"could not reach {parsed.hostname} ({exc.reason}) — check the address; if it "
-            "is right, this tool's sandbox may not allow that host"
-        ) from exc
-    if len(body) > MAX_BYTES:
-        raise ValueError(
-            f"the document is larger than {MAX_BYTES // (1024 * 1024)} MiB — "
-            "too big to read here; download it yourself"
+            "extract_document needs content_base64 (a PDF or HTML file's bytes, base64) or "
+            "content (HTML or plain text); it has no network — read a URL with read_url"
         )
-    return kind, body
-
-
-def extract(url: str) -> str:
-    kind, body = _fetch(url)
-    if kind == "application/pdf" or body.startswith(b"%PDF-"):
-        return pdf_to_text(body)
-    text = body.decode("utf-8", errors="replace")
-    if kind in ("text/html", "application/xhtml+xml") or (
-        not kind and text.lstrip().startswith("<")
-    ):
-        return html_to_text(text)
-    if not kind or kind.startswith("text/"):
-        return text.strip()
-    raise ValueError(
-        f"content type {kind} is not a document — extract_document reads PDF, HTML and plain text"
-    )
+    if len(body) > MAX_BYTES:
+        raise ValueError(f"the document is larger than {MAX_BYTES >> 20} MiB — too big here")
+    if b"%PDF-" in body[:1024]:
+        return pdf_to_text(body, max_chars=REPLY_CHARS)
+    page = body.decode("utf-8", errors="replace")
+    text = html_to_text(page) if page.lstrip().startswith("<") else page.strip()
+    if len(text) > REPLY_CHARS:
+        return f"{text[:REPLY_CHARS]}\n\n[the text continues past {REPLY_CHARS} characters]"
+    return text
 
 
 def _fixture_pdf() -> bytes:
@@ -750,14 +809,8 @@ def _error(message: str) -> dict[str, Any]:
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if name == "extract_document":
-        url = str(arguments.get("url") or "").strip()
-        if not url:
-            return _error(
-                "extract_document needs a url argument — pass the http(s) address "
-                "of a PDF or HTML page"
-            )
         try:
-            return {"content": extract(url)}
+            return {"content": extract(arguments)}
         except ValueError as exc:
             return _error(str(exc))
     if name == "self_test":

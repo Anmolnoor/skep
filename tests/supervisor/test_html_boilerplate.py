@@ -6,6 +6,7 @@ like a docs site, a news article and a GitHub issue page."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -139,3 +140,47 @@ def test_nested_same_tag_regions_close_at_the_right_end() -> None:
     text = html_to_markdown(html)
     assert "Lead" in text and "After the aside" in text
     assert "inner" not in text and "outer tail" not in text
+
+
+# --- review R1 (K10): chrome is a region, never the page itself ------------
+
+
+@pytest.mark.parametrize("convert", [html_to_text, html_to_markdown])
+def test_a_cookie_class_on_the_page_wrapper_never_drops_the_page(convert: Any) -> None:
+    for wrapper in (
+        '<html class="cookie-consent-banner-shown"><body><p>Body text</p></body></html>',
+        '<body class="cookie-notice-hidden"><p>Body text</p></body>',
+        '<main class="cookie-banner-offset"><p>Body text</p></main>',
+        '<article id="gdpr-notice-wrapper"><p>Body text</p></article>',
+        '<div id="cookie-consent-wrapper"><main><p>Body text</p></main></div>',
+    ):
+        assert "Body text" in convert(wrapper), wrapper
+
+
+@pytest.mark.parametrize("convert", [html_to_text, html_to_markdown])
+def test_a_void_element_never_opens_a_region(convert: Any) -> None:
+    page = (
+        '<head><link id="cookie-notice-css" rel="stylesheet"></head>'
+        '<body><img class="cookie-banner-icon" src="x.png">'
+        "<nav>Site menu</nav><main><p>Body text</p></main><footer>Legal</footer></body>"
+    )
+    text = convert(page)
+    assert "Body text" in text
+    assert "Site menu" not in text and "Legal" not in text  # chrome after it still strips
+
+
+@pytest.mark.parametrize("convert", [html_to_text, html_to_markdown])
+def test_role_main_is_case_insensitive(convert: Any) -> None:
+    page = '<header>Site banner</header><div role="MAIN"><header>Post title</header>Body</div>'
+    text = convert(page)
+    assert "Post title" in text and "Body" in text and "Site banner" not in text
+
+
+@pytest.mark.parametrize("convert", [html_to_text, html_to_markdown])
+def test_a_landmark_inside_a_comment_or_script_is_not_a_landmark(convert: Any) -> None:
+    """With no real landmark, a header or aside is not proven chrome."""
+    for hidden in ("<!-- <main> -->", "<script>let t = '<main>'</script>",
+                   "<template><main>t</main></template>"):  # fmt: skip
+        page = f"{hidden}<header>Real heading</header><aside>Real note</aside><p>Body</p>"
+        text = convert(page)
+        assert "Real heading" in text and "Real note" in text, hidden

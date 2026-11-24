@@ -6,22 +6,21 @@ streams, xref) so no binary fixture ships."""
 from __future__ import annotations
 
 import contextlib
-import http.server
 import importlib.util
 import json
 import subprocess
 import sys
-import threading
 import zlib
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from skep.seeds.tools.doc_extract import http_error_message, pdf_to_text
-from skep.supervisor.forge import seed_tool_source, seed_tools_root, trial_script, trial_verdict
+from skep.seeds.tools.doc_extract import pdf_to_text
+from skep.supervisor.forge import seed_tool_source, seed_tools_root
+from skep.workers.researcher import http_error_message
 
+from .forge_rig import contract
 from .pdf_builder import HELVETICA, build, simple_pdf, stream
 
 # --- the extractor ------------------------------------------------------------------------
@@ -233,96 +232,66 @@ def _seed_module() -> Any:
     return module
 
 
-def test_doc_extract_passes_the_real_trial_harness(tmp_path: Path) -> None:
-    proc = subprocess.run(
-        [sys.executable, "-c", trial_script(seed_tool_source("doc_extract.py"))],
-        capture_output=True,
-        text=True,
-        cwd=tmp_path,
-        timeout=120,
-    )
-    ok, reason, evidence = trial_verdict(
-        {"state": "completed", "output": proc.stdout, "stderr": proc.stderr}
-    )
+def test_doc_extract_passes_the_trial_contract(tmp_path: Path) -> None:
+    ok, reason, evidence = contract(seed_tool_source("doc_extract.py"), tmp_path)
     assert ok, reason
-    assert evidence["tools"] == ["extract_document", "self_test"]
-    assert "offline" in str(evidence["self_test"])
+    assert evidence["offline"]["tools"] == ["extract_document", "self_test"]
+    assert "offline" in str(evidence["offline"]["result"])
+    assert evidence["egress"] is None  # it names no hosts: one deny-all stage
 
 
-def test_doc_extract_is_stdlib_only() -> None:
-    """A seed runs as one copied file: it may import nothing from skep."""
+def test_doc_extract_is_stdlib_only_and_has_no_network() -> None:
+    """A seed runs as one copied file: it may import nothing from skep. K4:
+    its wall approves no host, so it carries no fetch path that could only
+    fail — and its description says to read URLs with read_url."""
     source = seed_tool_source("doc_extract.py")
     assert "import skep" not in source and "from skep" not in source
+    for module in ("socket", "urllib", "http.client", "ipaddress", "ssl"):
+        assert f"import {module}" not in source, module
+    assert "# skep-hosts:" not in source
+    description = _seed_module().TOOLS[0]["description"]
+    assert "NO network" in description and "read_url" in description
 
 
 _PDF = simple_pdf(b"BT /F1 12 Tf 72 720 Td (Quarterly report) Tj ET")
-_PAGES: dict[str, tuple[int, dict[str, str], bytes]] = {
-    "/report.pdf": (200, {"Content-Type": "application/pdf"}, _PDF),
-    "/mislabelled": (200, {"Content-Type": "application/octet-stream"}, _PDF),
-    "/page": (
-        200,
-        {"Content-Type": "text/html; charset=utf-8"},
-        b"<nav>Menu</nav><main><h1>Title</h1><p>Body &amp; more</p></main>",
-    ),
-    "/missing": (404, {}, b"gone"),
-    "/busy": (429, {"Retry-After": "30"}, b""),
-    "/logo.png": (200, {"Content-Type": "image/png"}, b"\x89PNG\r\n"),
-}
 
 
-@pytest.fixture
-def local_site() -> Iterator[str]:
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            status, headers, body = _PAGES[self.path]
-            self.send_response(status)
-            for key, value in headers.items():
-                self.send_header(key, value)
-            self.end_headers()
-            self.wfile.write(body)
+def test_doc_extract_reads_the_content_it_is_given() -> None:
+    import base64
 
-        def log_message(self, *_args: object) -> None:
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-
-
-def test_doc_extract_reads_pdfs_and_html_and_errors_say_what_next(
-    local_site: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
     module = _seed_module()
-    monkeypatch.setattr(module, "_refuse_non_public", lambda _host: None)  # the fake is loopback
 
-    def call(url: str) -> dict[str, Any]:
-        result: dict[str, Any] = module.call_tool("extract_document", {"url": url})
+    def call(**arguments: str) -> dict[str, Any]:
+        result: dict[str, Any] = module.call_tool("extract_document", arguments)
         return result
 
-    assert call(f"{local_site}/report.pdf") == {"content": "Quarterly report"}
-    assert call(f"{local_site}/mislabelled") == {"content": "Quarterly report"}
-    assert call(f"{local_site}/page") == {"content": "Title\nBody & more"}
-    missing = call(f"{local_site}/missing")
-    assert missing["isError"] and "HTTP 404" in missing["content"]
-    busy = call(f"{local_site}/busy")
-    assert busy["isError"] and "wait 30s" in busy["content"]
-    image = call(f"{local_site}/logo.png")
-    assert image["isError"] and "image/png is not a document" in image["content"]
-    empty = module.call_tool("extract_document", {})
-    assert empty["isError"] and "needs a url" in empty["content"]
-    ftp = module.call_tool("extract_document", {"url": "ftp://example.com/x.pdf"})
-    assert ftp["isError"] and "http(s)" in ftp["content"]
+    pdf = base64.b64encode(_PDF).decode()
+    assert call(content_base64=pdf) == {"content": "Quarterly report"}
+    page = "<nav>Menu</nav><main><h1>Title</h1><p>Body &amp; more</p></main>"
+    assert call(content=page) == {"content": "Title\nBody & more"}
+    assert call(content_base64=base64.b64encode(page.encode()).decode()) == {
+        "content": "Title\nBody & more"
+    }
+    assert call(content="  plain notes \n") == {"content": "plain notes"}
+    bad = call(content_base64="not base64!")
+    assert bad["isError"] and "not valid base64" in bad["content"]
+    empty = call()
+    assert empty["isError"] and "read_url" in empty["content"]
+    scan = call(content_base64=base64.b64encode(simple_pdf(b"q Q")).decode())
+    assert scan["isError"] and "no text layer" in scan["content"]
 
 
-def test_doc_extract_refuses_non_public_addresses_like_read_url() -> None:
+def test_doc_extract_size_caps() -> None:
     module = _seed_module()
-    for url in ("http://127.0.0.1:8765/api", "http://localhost/", "http://169.254.169.254/"):
-        result = module.call_tool("extract_document", {"url": url})
-        assert result["isError"] and "public" in result["content"], url
+    module.MAX_BYTES = 4
+    huge = module.call_tool("extract_document", {"content": "more than four bytes"})
+    assert huge["isError"] and "too big" in huge["content"]
+    long = module.call_tool("extract_document", {"content_base64": "A" * 1200})
+    assert long["isError"] and "too big" in long["content"]
+    module = _seed_module()
+    module.REPLY_CHARS = 10
+    cut = module.call_tool("extract_document", {"content": "x" * 50})["content"]
+    assert cut.startswith("x" * 10) and cut.endswith("[the text continues past 10 characters]")
 
 
 def test_doc_extract_answers_jsonrpc_over_stdio() -> None:
@@ -387,69 +356,6 @@ def test_object_streams_and_page_trees_that_lie_are_survived() -> None:
         stream(b"(no font yet) Tj BT /F1 12 Tf 72 720 Td (AB) Tj ET"),
     ]
     assert pdf_to_text(build(objects)) == "AB"
-
-
-def _call_seed(module: Any, monkeypatch: pytest.MonkeyPatch, failure: Exception) -> str:
-    def boom(*_args: object, **_kw: object) -> None:
-        raise failure
-
-    monkeypatch.setattr(module, "_refuse_non_public", lambda _host: None)
-    monkeypatch.setattr(module.urllib.request.OpenerDirector, "open", boom)
-    result: dict[str, Any] = module.call_tool("extract_document", {"url": "https://x.example/a"})
-    assert result["isError"] is True
-    return str(result["content"])
-
-
-def test_doc_extract_transport_failures_say_what_next(monkeypatch: pytest.MonkeyPatch) -> None:
-    import urllib.error
-
-    module = _seed_module()
-    assert "timed out after 20s" in _call_seed(module, monkeypatch, TimeoutError())
-    unreachable = _call_seed(module, monkeypatch, urllib.error.URLError("refused"))
-    assert "could not reach x.example" in unreachable and "sandbox" in unreachable
-
-
-def test_doc_extract_size_text_and_type_branches(
-    local_site: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    module = _seed_module()
-    monkeypatch.setattr(module, "_refuse_non_public", lambda _host: None)
-    _PAGES["/notes.txt"] = (200, {"Content-Type": "text/plain"}, b"  plain notes \n")
-    _PAGES["/untyped"] = (200, {}, b"<p>untyped page</p>")
-    _PAGES["/zip"] = (200, {"Content-Type": "application/zip"}, b"PK")
-    assert module.call_tool("extract_document", {"url": f"{local_site}/notes.txt"}) == {
-        "content": "plain notes"
-    }
-    assert module.extract(f"{local_site}/untyped") == "untyped page"
-    with pytest.raises(ValueError, match="application/zip is not a document"):
-        module.extract(f"{local_site}/zip")
-    monkeypatch.setattr(module, "MAX_BYTES", 4)
-    with pytest.raises(ValueError, match="too big to read here"):
-        module.extract(f"{local_site}/report.pdf")
-
-
-def test_doc_extract_refuses_a_redirect_into_a_private_address(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import urllib.request
-
-    module = _seed_module()
-    calls: list[str] = []
-
-    def guard(host: str) -> None:
-        calls.append(host)
-        if host == "127.0.0.1":
-            raise ValueError("only reads public internet addresses")
-
-    monkeypatch.setattr(module, "_refuse_non_public", guard)
-    handler = module._Redirects()
-    request = urllib.request.Request("https://public.example/a")
-    with pytest.raises(ValueError, match="public"):
-        handler.redirect_request(request, None, 302, "Found", {}, "http://127.0.0.1/admin")
-    moved = handler.redirect_request(request, None, 302, "Found", {}, "https://public.example/b")
-    assert moved.full_url == "https://public.example/b" and calls == ["127.0.0.1", "public.example"]
-    with pytest.raises(ValueError, match="does not resolve"):
-        _seed_module()._refuse_non_public("no-such-host.invalid")
 
 
 def test_doc_extract_self_test_and_stdio_loop_in_process(

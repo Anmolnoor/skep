@@ -418,6 +418,18 @@ def runner_for_config(
     """
     import json
 
+    if config.server_id.startswith(FORGED_SERVER_PREFIX):
+        # Review R1 (K8): the prefix is reserved BEFORE any transport is
+        # chosen — a forge-* id runs only from its bound record behind
+        # forged_lane, whatever transport or command its config names.
+        def run_forged(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            payload = _stdio_payload(method, params)
+            return _stdio_reply(
+                _run_forged_sandboxed(config, payload, skep_home, store).stdout.splitlines()
+            )
+
+        return run_forged
+
     if config.transport == "http":
         # MCP Streamable HTTP (2025-03-26): JSON-RPC POSTs to one endpoint;
         # the response body is JSON or an SSE stream. The legacy 2024-11-05
@@ -520,21 +532,17 @@ def runner_for_config(
 
     def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
         payload = _stdio_payload(method, params)
-        if not config.server_id.startswith(FORGED_SERVER_PREFIX):
-            cwd = None
-            if config.scope == "browse":
-                # R6 review: Playwright writes a read's optional `filename`
-                # anywhere under its cwd, and a read takes no card — so a
-                # browse server never runs in serve's folder (the repo or the
-                # operator's home), only in one of its own.
-                if skep_home is None:
-                    raise MCPError(f"browse server {config.server_id!r} needs its skep home")
-                cwd = skep_home / "browser"
-                cwd.mkdir(parents=True, exist_ok=True)
-            lines = _stdio_exchange(list(config.command), payload, cwd=cwd)
-        else:
-            lines = _run_forged_sandboxed(config, payload, skep_home, store).stdout.splitlines()
-        return _stdio_reply(lines)
+        cwd = None
+        if config.scope == "browse":
+            # R6 review: Playwright writes a read's optional `filename`
+            # anywhere under its cwd, and a read takes no card — so a
+            # browse server never runs in serve's folder (the repo or the
+            # operator's home), only in one of its own.
+            if skep_home is None:
+                raise MCPError(f"browse server {config.server_id!r} needs its skep home")
+            cwd = skep_home / "browser"
+            cwd.mkdir(parents=True, exist_ok=True)
+        return _stdio_reply(_stdio_exchange(list(config.command), payload, cwd=cwd))
 
     return run
 

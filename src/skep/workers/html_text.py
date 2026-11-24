@@ -52,9 +52,49 @@ _BLOCK = frozenset(
 # The body lives in these; chrome tags inside them (an article's own header,
 # footer, or aside) are content.
 _CONTENT = frozenset({"main", "article"})
-_LANDMARK = re.compile(r"<(?:main|article)\b|role\s*=\s*[\"']?main\b", re.I)
+# Review R1 (K10): never a chrome region — the page itself, its landmarks,
+# and void elements (no end tag: a region they opened would never close).
+_NEVER_CHROME = frozenset({"html", "body", "main", "article"})
+_VOID = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+     "source", "track", "wbr"}
+)  # fmt: skip
 _COOKIE = re.compile(r"cookie|gdpr|onetrust", re.I)
 _BANNER = re.compile(r"banner|bar|notice|popup|modal|dialog|overlay|wall|prompt|consent|sdk", re.I)
+
+
+def _is_landmark(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+    return tag in _CONTENT or (dict(attrs).get("role") or "").strip().lower() == "main"
+
+
+class _LandmarkScan(HTMLParser):
+    """K10: does the page mark its body? Judged from parsed start tags outside
+    ignored regions — a ``<main>`` in a comment, script or template is text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.found = False
+        self._ignored = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _DROP_CONTENT:
+            self._ignored += 1
+        elif not self._ignored and _is_landmark(tag, attrs):
+            self.found = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _DROP_CONTENT and self._ignored:
+            self._ignored -= 1
+
+
+def _has_landmark(html: str) -> bool:
+    scan = _LandmarkScan()
+    try:
+        scan.feed(html)
+        scan.close()
+    except Exception:  # a lenient parser rarely raises; judge what it read
+        pass
+    return scan.found
 
 
 class _ChromeFilter(HTMLParser):
@@ -67,11 +107,14 @@ class _ChromeFilter(HTMLParser):
         self._chunks: list[str] = []
         self._landmark = landmark
         self._content: list[str | int] | None = None  # [tag, depth]
-        self._region: list[str | int] | None = None  # [tag, depth, chunk mark]
+        # [tag, depth, chunk mark, keep]: keep = a content landmark opened inside
+        self._region: list[str | int | bool] | None = None
 
     def _is_chrome(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        if tag in _NEVER_CHROME or tag in _VOID:
+            return False
         found = dict(attrs)
-        role = (found.get("role") or "").lower()
+        role = (found.get("role") or "").strip().lower()
         if tag == "nav" or role == "navigation":
             return True
         if self._content is not None:
@@ -87,12 +130,14 @@ class _ChromeFilter(HTMLParser):
         if self._region is not None:
             if tag == self._region[0]:
                 self._region[1] = int(self._region[1]) + 1
+            if _is_landmark(tag, attrs):  # K10: the body is inside — keep it all
+                self._region[3] = True
         elif self._is_chrome(tag, attrs):
-            self._region = [tag, 1, len(self._chunks)]
+            self._region = [tag, 1, len(self._chunks), False]
         elif self._content is not None:
             if tag == self._content[0]:
                 self._content[1] = int(self._content[1]) + 1
-        elif tag in _CONTENT or ("role", "main") in attrs:
+        elif _is_landmark(tag, attrs):
             self._content = [tag, 1]
         self._start(tag, attrs)
 
@@ -102,7 +147,8 @@ class _ChromeFilter(HTMLParser):
             if tag == self._region[0]:
                 self._region[1] = int(self._region[1]) - 1
                 if self._region[1] == 0:
-                    del self._chunks[int(self._region[2]) :]
+                    if not self._region[3]:
+                        del self._chunks[int(self._region[2]) :]
                     self._region = None
         elif self._content is not None and tag == self._content[0]:
             self._content[1] = int(self._content[1]) - 1
@@ -215,7 +261,7 @@ def html_to_markdown(html: str) -> str:
     markdown; ``pre`` blocks become fences with their whitespace intact.
     Same leniency contract as :func:`html_to_text` — never raises.
     """
-    parser = _MarkdownExtractor(bool(_LANDMARK.search(html)))
+    parser = _MarkdownExtractor(_has_landmark(html))
     try:
         parser.feed(html)
         parser.close()
@@ -254,7 +300,7 @@ def html_to_text(html: str) -> str:
     and never allocates beyond the input. Malformed HTML never raises — the
     stdlib parser is lenient and a parse error just yields whatever it read.
     """
-    parser = _TextExtractor(bool(_LANDMARK.search(html)))
+    parser = _TextExtractor(_has_landmark(html))
     try:
         parser.feed(html)
         parser.close()

@@ -843,3 +843,123 @@ def test_search_web_missing_query_and_rate_limit_say_what_next() -> None:
         search_web("q", run=limited)
     with pytest.raises(WebSearchError, match="try again in a minute"):
         search_web("q", run=lambda query, limit: (_ for _ in ()).throw(RuntimeError("boom")))
+
+
+# --- review R1 (K3): the body is streamed, capped and deadlined ------------
+
+
+class _Endless:
+    """A response body that never ends; counts what was pulled from it."""
+
+    def __init__(self, chunk: bytes = b"x" * 65536, delay: float = 0.0) -> None:
+        self.chunk, self.delay, self.pulled, self.closed = chunk, delay, 0, False
+
+    def __iter__(self) -> Any:
+        import time
+
+        while True:
+            if self.pulled > 64 << 20:  # a buffering reader would hang here
+                raise AssertionError("read far past every cap")
+            if self.delay:
+                time.sleep(self.delay)
+            self.pulled += len(self.chunk)
+            yield self.chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _streamed(monkeypatch: pytest.MonkeyPatch, pages: dict[str, Any]) -> list[bool]:
+    """Pages answer (status, headers, body stream); records each send's stream flag."""
+    import httpx
+
+    flags: list[bool] = []
+
+    class Body(httpx.SyncByteStream):
+        def __init__(self, inner: _Endless) -> None:
+            self.inner = inner
+
+        def __iter__(self) -> Any:
+            return iter(self.inner)
+
+        def close(self) -> None:
+            self.inner.close()
+
+    def send(_client: object, request: httpx.Request, **kw: Any) -> httpx.Response:
+        flags.append(bool(kw.get("stream")))
+        status, headers, body = pages[request.url.raw_path.decode()]
+        return httpx.Response(status, headers=headers, stream=Body(body), request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    return flags
+
+
+def test_a_huge_body_is_read_only_to_its_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.seeds.tools import doc_extract
+    from skep.supervisor.serve.websearch import WebReadError
+
+    page, pdf = _Endless(b"<p>" + b"a" * 65533), _Endless(b"%PDF-1.7\n" + b"0" * 65527)
+    flags = _streamed(
+        monkeypatch,
+        {
+            "/page": (200, {"content-type": "text/html"}, page),
+            "/doc.pdf": (200, {"content-type": "application/pdf"}, pdf),
+        },
+    )
+    read = _read("/page", max_bytes=1000)
+    assert read["truncated"] is True and page.pulled <= 1000 + 65536 and page.closed
+    with pytest.raises(WebReadError, match="too big to read here"):
+        _read("/doc.pdf")
+    assert pdf.pulled <= doc_extract.MAX_BYTES + 2 * 65536 and pdf.closed
+    assert flags and all(flags)  # every send streamed: nothing was buffered first
+
+
+def test_redirect_and_error_bodies_are_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve.websearch import WebReadError
+
+    hop, failing, final = _Endless(), _Endless(), _Endless(b"<p>done</p>")
+    _streamed(
+        monkeypatch,
+        {
+            "/moved": (302, {"location": "/final"}, hop),
+            "/final": (200, {"content-type": "text/html"}, final),
+            "/broken": (500, {}, failing),
+        },
+    )
+    assert _read("/moved", max_bytes=100)["truncated"] is True
+    assert hop.pulled == 0 and hop.closed
+    with pytest.raises(WebReadError, match="HTTP 500"):
+        _read("/broken")
+    assert failing.pulled == 0 and failing.closed
+
+
+def test_a_trickling_body_stops_at_the_read_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    slow = _Endless(b"a", delay=0.05)
+    _streamed(monkeypatch, {"/slow": (200, {"content-type": "text/plain"}, slow)})
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        _read("/slow")
+    assert slow.closed
+
+
+def test_a_text_body_under_a_wrong_type_is_still_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K13 (O S7): javascript, yaml and octet-stream text read before 7.3;
+    the bytes are sniffed before a type is refused."""
+    from skep.supervisor.serve.websearch import WebReadError
+
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/app.js": (200, {"content-type": "application/javascript"}, b"let x = 1;"),
+            "/conf.yaml": (200, {"content-type": "application/yaml"}, b"key: value\n"),
+            "/notes": (200, {"content-type": "application/octet-stream"}, b"plain notes"),
+            "/logo.png": (200, {"content-type": "image/png"}, b"\x89PNG\r\n\x1a\n\x00\x00"),
+        },
+    )
+    assert _read("/app.js")["text"] == "let x = 1;"
+    assert _read("/conf.yaml")["text"] == "key: value"
+    assert _read("/notes")["text"] == "plain notes"
+    with pytest.raises(WebReadError, match="image/png is not a page"):
+        _read("/logo.png")

@@ -184,6 +184,33 @@ def fold_fits_a_messenger(items: Sequence[str]) -> bool:
     )
 
 
+def forge_lines(forged: Mapping[str, Any]) -> list[str]:
+    """Review R1 (K6, I6, I8): everything a promote_tool confirm binds —
+    the full source and lock digests, the approved hosts, every wheel pin
+    and the source diff — as plain lines."""
+    if "error" in forged:
+        return [f"it cannot be installed as shown: {forged['error']}"]
+    lock, hosts = forged.get("lock_sha256"), forged.get("approved_hosts")
+    lines = [
+        f"source sha256: {forged.get('source_sha256')}",
+        f"lock sha256: {lock}" if lock else "lock: none (stdlib only, no venv)",
+        f"network: {_hosts(hosts) if hosts else 'none (deny-all)'}",
+    ]
+    locked = [str(pin) for pin in forged.get("locked") or ()]
+    if locked:
+        lines.append(f"{len(locked)} hash-pinned wheel(s):")
+        lines.extend(f"- {pin}" for pin in locked)
+    diff = str(forged.get("diff") or "")
+    lines.append("source diff:" if diff else "source diff: none (it installs the copy it runs)")
+    lines.extend(diff.splitlines())
+    return lines
+
+
+def forge_fits_a_messenger(forged: Mapping[str, Any]) -> bool:
+    """Can a messenger show a promote_tool card's whole binding?"""
+    return sum(len(line) + 1 for line in forge_lines(forged)) <= MESSENGER_FOLD_CHARS
+
+
 def card_notes(
     card: Mapping[str, Any] | None, *, messenger: bool = True, admin: bool = False
 ) -> tuple[str, ...]:
@@ -191,7 +218,9 @@ def card_notes(
     a HIGH card says it needs the web UI and why, then the taint line; a
     folded card lists every item it would approve — on a messenger only when
     it fits whole (``fold_fits_a_messenger``); the CLI (``messenger`` False)
-    always lists them."""
+    always lists them. Review R1 (K6): the risk line, and a promote_tool
+    card's whole binding (``forge_lines``) — on a messenger only when it
+    fits whole, else a pointer to the web UI or the CLI."""
     if not card:
         return ()
     notes: list[str] = []
@@ -209,6 +238,18 @@ def card_notes(
         notes.append(f"the path is a link: it resolves to {card['resolves_to']}")
     if card.get("taint"):
         notes.append(str(card["taint"]))
+    if card.get("risk"):
+        notes.append(f"risk: {card['risk']}")
+    forged = card.get("forge")
+    if isinstance(forged, Mapping):
+        if messenger and not forge_fits_a_messenger(forged):
+            notes.append(
+                "this tool's source digest, lock, hosts and source diff are too long to show "
+                "here: open the skep web UI or the CLI (skep chat) to read them whole and "
+                "confirm there."
+            )
+        else:
+            notes.extend(forge_lines(forged))
     manifest = card.get("manifest")
     if isinstance(manifest, Mapping):  # P4-2: what the dispatched run gets
         notes.extend(manifest_lines(manifest))
@@ -350,7 +391,10 @@ def render_confirm_card(
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
-    too_long = len(items) > 1 and not fold_fits_a_messenger(items)
+    forged = (card or {}).get("forge")
+    too_long = (len(items) > 1 and not fold_fits_a_messenger(items)) or (
+        isinstance(forged, Mapping) and not forge_fits_a_messenger(forged)
+    )
     web_ui_only = too_long or (
         not admin and (action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high)
     )

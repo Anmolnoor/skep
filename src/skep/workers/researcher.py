@@ -83,6 +83,33 @@ class FetchError(Exception):
     """7.3: a source could not be read; the message names the next step (I9)."""
 
 
+def http_error_message(status: int, reason: str, retry_after: str | None = None) -> str:
+    """One line naming the HTTP failure and the next step (I9) — the
+    researcher's and read_url's (review R1, K4: the doc_extract seed has no
+    network, so its fetch errors moved here)."""
+    head = f"HTTP {status} {reason}".rstrip()
+    wait = (retry_after or "").strip()
+    hint = f"wait {wait}s" if wait.isdigit() else f"wait until {wait} (Retry-After)" if wait else ""
+    if status == 429:
+        return (
+            f"{head} — the site is rate-limiting this reader; "
+            f"{hint or 'wait a minute'} before trying again"
+        )
+    if status in (404, 410):
+        return (
+            f"{head} — nothing at this URL; check it for typos or find the page's current address"
+        )
+    if status in (401, 403):
+        return (
+            f"{head} — the site refuses this reader (login wall or bot block); use another source"
+        )
+    if status >= 500:
+        return f"{head} — the site is failing on its side; try again later" + (
+            f" ({hint})" if hint else ""
+        )
+    return f"{head} — the site rejected the request; check the URL or use another source"
+
+
 BINARY = "(binary: "
 
 
@@ -94,7 +121,7 @@ def is_text_type(content_type: str) -> bool:
     )
 
 
-def _binary_bytes(body: bytes) -> bool:
+def binary_bytes(body: bytes) -> bool:
     """Raw bytes that are not text: any NUL, or more than 10% of the bytes
     undecodable as UTF-8 (compressed data decodes to junk that is not all
     U+FFFD, so this must run before decoding)."""
@@ -341,13 +368,14 @@ def _urllib_fetch(url: str) -> str:
             content_type = (
                 response.headers.get_content_type() if response.headers.get("Content-Type") else ""
             )
-            maybe_pdf = content_type in ("", "application/pdf")
+            # K13: a download labelled octet-stream may be a PDF; its bytes decide
+            maybe_pdf = content_type in ("", "application/pdf", "application/octet-stream")
             if not maybe_pdf and not is_text_type(content_type):
                 raise NotText(content_type)
             body = response.read(doc_extract.MAX_BYTES + 1 if maybe_pdf else _FETCH_MAX_BYTES)
     except urllib.error.HTTPError as exc:
         raise FetchError(
-            doc_extract.http_error_message(exc.code, exc.reason, exc.headers.get("Retry-After"))
+            http_error_message(exc.code, exc.reason, exc.headers.get("Retry-After"))
         ) from exc
     except TimeoutError as exc:
         raise FetchError(timed_out) from exc
@@ -362,11 +390,11 @@ def _urllib_fetch(url: str) -> str:
         if len(body) > doc_extract.MAX_BYTES:
             raise NotText("application/pdf", "larger than 8 MiB, too big to read here")
         try:
-            return doc_extract.pdf_to_text(body)
+            return doc_extract.pdf_to_text(body, max_chars=_FETCH_MAX_BYTES)
         except ValueError as exc:
             raise NotText("application/pdf", str(exc)) from exc
     body = body[:_FETCH_MAX_BYTES]
-    if _binary_bytes(body):
+    if binary_bytes(body):
         raise NotText(content_type or "unknown")
     return html_to_text(body.decode("utf-8", errors="replace"))
 

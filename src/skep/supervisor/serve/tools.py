@@ -171,34 +171,30 @@ def _forge_trial(
     holder: ConfigHolder,
     runner: Dispatcher,
     *,
-    source: str,
     repo: str,
     decision: AutonomyDecision | None,
     delegation_chain: Sequence[str] = (),
-    python: str | None = None,
 ) -> dict[str, Any]:
-    """v71-F1: the forged tool's sandboxed trial — exactly the run_code lane
-    (script caste, sandbox, deny-all egress), so plugin_can_run's
-    sandboxed_no_network shape is literally what runs. Tests monkeypatch this
-    seam instead of standing up the dispatch pipeline.
+    """v71-F1: the dispatched half of a forged tool's trial, through the
+    run_code lane. Tests monkeypatch this seam instead of standing up the
+    dispatch pipeline.
 
     R3-F2: the Queen's chain rides it like run_code's, so a role that may not
     run a script gets no trial through a promote_tool card either (R2 ⊆).
-    Phase 07: ``python`` is a locked tool's staged venv (skep's own
-    interpreter, the harness's default, for a stdlib-only tool)."""
-    import sys
-
+    Review R1 (K1): that role/chain check is ALL it is — it runs
+    ``forge.GATE_SCRIPT``, never the candidate. Every execution of the
+    candidate (and of its third-party wheels) is behind ``forged_lane``
+    (``forge.wall_trial``): strict reads, deny-all unless approved hosts."""
     from skep.workers.script_worker import script_instructions
 
-    from ..forge import trial_script
+    from ..forge import GATE_SCRIPT
 
-    locked = None if python in (None, sys.executable) else python
     task_id = actions.submit_run(
         holder,
         runner,
         store,
         repo=repo,
-        instructions=script_instructions("python", trial_script(source, locked)),
+        instructions=script_instructions("python", GATE_SCRIPT),
         caste="script",
         execution_mode="sandbox",
         network=[],
@@ -1202,8 +1198,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "forge_tool",
         "PROPOSE authoring a NEW MCP tool server for skep itself (requires "
-        "user confirmation). On confirm, a coding worker writes ONE "
-        "stdlib-only Python file in the operator's forge repo; that patch "
+        "user confirmation). On confirm, a coding worker writes ONE Python "
+        "file in the operator's forge repo (stdlib-only, or PEP 723 deps with "
+        "a hash lock; `# skep-hosts:` names any host it needs); that patch "
         "lands only through the normal human approval, and even then the "
         "tool cannot run until promote_tool passes its sandboxed trial and "
         "the user confirms activation. Use when a capability is missing and "
@@ -1224,14 +1221,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE promoting a forged plugin to ACTIVE (requires user "
         "confirmation): a landed forge_tool plugin, OR a shipped seed tool "
         "(list_plugins shows provenance 'seed' — no authoring run or landing "
-        "needed). On confirm: a sandboxed NO-network trial must list "
-        "the server's tools and pass its zero-argument self_test; only then "
-        "is the source installed and registered as a stdio MCP server "
-        "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
-        "suspended plugin reactivates the same way, and an active seed tool "
-        "takes a shipped update the same way. Fails honestly (and stays "
-        "demoted) if a forged plugin's authoring run has not landed or the "
-        "trial fails.",
+        "needed). The card binds the source sha256, the lock sha256 (locked "
+        "wheels installed from hashes) and the `# skep-hosts:` hosts; the "
+        "confirm installs only that. Trial, in the sandbox: offline with no "
+        "network, tools/list plus the zero-argument self_test; then, only if "
+        "hosts are approved, the same with network pinned to them. Only then "
+        "is it registered for call_mcp_tool; every call runs in that sandbox "
+        "with those hosts. A suspended plugin, an active one that is refused "
+        "(tampered or unbound) or whose source, lock or hosts changed take "
+        "the same card and trial. Fails honestly (and stays demoted) if the "
+        "authoring run has not landed or the trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),
@@ -4683,8 +4682,14 @@ def _execute_mutation(
         # W21: a store write an untrusted chat had to ask for, now confirmed
         return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
     if name == "register_mcp_server":
-        from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
+        from ..mcp_client import FORGED_SERVER_PREFIX, MCPError, MCPServerConfig, save_mcp_server
 
+        if str(args["server_id"]).startswith(FORGED_SERVER_PREFIX):
+            raise ValueError(
+                f"server ids starting {FORGED_SERVER_PREFIX!r} are reserved for forged tools, "
+                "which run only from their bound record inside the sandbox — pick another id; "
+                "promote_tool registers a forged tool itself"
+            )
         config = MCPServerConfig(
             server_id=str(args["server_id"]),
             transport=str(args["transport"]),
@@ -5268,7 +5273,14 @@ def _execute_mutation(
         import shutil
 
         from .. import forge
-        from ..mcp_client import MCPError, MCPServerConfig, refresh_listed_tools, save_mcp_server
+        from ..mcp_client import (
+            MCPError,
+            MCPServerConfig,
+            load_mcp_servers,
+            refresh_listed_tools,
+            remove_mcp_server,
+            save_mcp_server,
+        )
         from ..plugin_lifecycle import require_transition
 
         plugin_id = str(args["plugin_id"])
@@ -5277,15 +5289,6 @@ def _execute_mutation(
         if record is None:
             known = ", ".join(sorted(plugins)) or "none yet — forge_tool creates one"
             raise ValueError(f"no forged plugin {plugin_id!r}; known: {known}")
-        # v126-F1: an ACTIVE seed whose installed copy differs from the
-        # shipped source takes the update through the same trial + card;
-        # Phase 07: so does an active tool bound to no digest (it no longer
-        # runs until it is re-promoted).
-        reinstall = record.state == "active" and (
-            not record.source_sha256 or plugin_id in forge.seed_tool_updates(store, holder.current)
-        )
-        if record.state == "active" and not reinstall:
-            return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
         if record.state == "rolled_back":
             raise ValueError(
                 f"plugin {plugin_id!r} was rolled back — that is terminal; forge_tool a replacement"
@@ -5299,6 +5302,24 @@ def _execute_mutation(
         # gate both.
         source, lock = forge.read_candidate(record, branch)
         binding = forge.promotion_binding(source, lock)
+        skep_home = holder.current.home.parent
+        hosts = tuple(binding["approved_hosts"])
+        reinstall = runnable = False
+        if record.state == "active":
+            # v126-F1 / Phase 07 / review R1 (K9): "already active" only when
+            # the runtime would launch it AND the candidate is the triple it
+            # is bound to. An unbound, tampered or unsealed tool (refused at
+            # runtime, naming this verb) or a changed candidate (a seed
+            # update, a new landing) takes a fresh card + trial.
+            try:
+                forge.runtime_launch(store, skep_home, record.server_id)
+                runnable = True
+            except ValueError:
+                runnable = False
+            bound = (record.source_sha256, record.lock_sha256, record.approved_hosts)
+            if runnable and bound == (binding["source_sha256"], binding["lock_sha256"], hosts):
+                return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
+            reinstall = True
         forge.require_card_binding(card, binding)
         if record.provenance == "seed":
             # The trial runs in the forge repo (prepared exactly like
@@ -5312,84 +5333,121 @@ def _execute_mutation(
             require_transition("draft", "sandboxed")
             record = dataclasses.replace(record, state="sandboxed")
             forge.save_plugin(store, record)
-        skep_home = holder.current.home.parent
-        hosts = tuple(binding["approved_hosts"])
+        expected = record  # K7: the record the publish below must still find
         if record.state != "active":
             kept = f"the plugin stays {record.state!r}"
-        elif record.source_sha256:
+        elif runnable:
             kept = "the active copy keeps running unchanged"
-        else:  # unbound: refused at runtime until a promotion passes
+        else:  # unbound, tampered or unsealed: refused at runtime until a promotion passes
             kept = "the old copy stays installed, and refused, until a promotion passes"
-        # Build + trial in staging: until the record flips below, the active
-        # tool (if any) keeps its own source, venv and hosts.
+        # Build + trial in staging: until the publish below, the active tool
+        # (if any) keeps its own source, venv and hosts.
+        same_lock = record.lock_sha256 == binding["lock_sha256"]
         try:
-            python, staging = forge.stage_locked_python(
-                skep_home, plugin_id, lock, binding["lock_sha256"]
-            )
+            python, staging, seal = forge.stage_locked_python(
+                skep_home, plugin_id, lock, binding["lock_sha256"],
+                record.venv_sha256 if same_lock else "",
+            )  # fmt: skip
         except ValueError as exc:
             raise ValueError(f"{exc} — {kept}") from exc
+
+        def discard() -> None:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+
         try:
             # v126-F1: every install is trialed — reactivation and a seed
-            # update write fresh source too. Stage 1 runs twice over: the
-            # run_code lane (the Queen's role chain, R3-F2), then — with
-            # stage 2 when hosts are approved — behind the runtime wall.
-            trial_result = _forge_trial(
+            # update write fresh source too. Review R1 (K1): the dispatch is
+            # the role gate only; the candidate runs behind the wall alone.
+            gate = _forge_trial(
                 store,
                 holder,
                 runner,
-                source=source,
                 repo=trial_repo,
                 decision=decision,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
-                python=python,
             )
-            ok, reason, evidence = forge.trial_verdict(trial_result)
+            ok, reason = forge.gate_verdict(gate)
+            evidence: dict[str, Any] = {"gate": gate.get("task_id"), "tools": []}
             if ok:
                 ok, reason, wall = forge.wall_trial(
                     skep_home, record.server_id, source, python, hosts
                 )
-                evidence = {**evidence, "wall": wall}
+                offline = wall.get("offline") or {}
+                evidence.update(tools=offline.get("tools") or [], wall=wall)
+                if ok:
+                    evidence["self_test"] = offline.get("result")
+            evidence.update(ok=ok, error=None if ok else reason)
         except BaseException:
-            if staging is not None:
-                shutil.rmtree(staging, ignore_errors=True)
+            discard()
             raise
-        record = dataclasses.replace(record, trial=evidence)
-        forge.save_plugin(store, record)
-        if not ok:
-            if staging is not None:
-                shutil.rmtree(staging, ignore_errors=True)
-            raise ValueError(
-                f"the sandboxed trial did not pass: {reason} — {kept}. Fix the tool "
-                "in the forge repo (forge_tool again re-briefs a worker), land the "
-                "fix, then promote_tool again."
+        with forge.PROMOTION_LOCK:
+            # K7: a suspend or rollback confirmed elsewhere while the trial ran
+            # wins — this promotion publishes nothing over it.
+            live = forge.load_plugins(store).get(plugin_id)
+            if live != expected:
+                discard()
+                live_state = "gone" if live is None else live.state
+                raise ValueError(
+                    f"plugin {plugin_id!r} changed while its trial ran (it is now "
+                    f"{live_state}), so nothing was installed — propose promote_tool again "
+                    "if it should run"
+                )
+            record = dataclasses.replace(record, trial=evidence)
+            forge.save_plugin(store, record)
+            if not ok:
+                discard()
+                raise ValueError(
+                    f"the sandboxed trial did not pass: {reason} — {kept}. Fix the tool "
+                    "in the forge repo (forge_tool again re-briefs a worker), land the "
+                    "fix, then promote_tool again."
+                )
+            if record.state == "suspended":
+                # Reactivation: the pause ends on this confirmed card.
+                require_transition("suspended", "active")
+            elif not reinstall:
+                require_transition("sandboxed", "tested", verifier_passed=True)
+                require_transition("tested", "reviewed")
+                # The card the operator just confirmed IS the human action (I6/I7
+                # — asked once, never re-asked).
+                require_transition("reviewed", "approved", human_action=True)
+                require_transition("approved", "active")
+            try:
+                python = forge.commit_locked_venv(
+                    skep_home, plugin_id, binding["lock_sha256"], staging, seal
+                )
+            except ValueError as exc:
+                raise ValueError(f"{exc} — {kept}") from exc
+            published = dataclasses.replace(
+                record,
+                state="active",
+                approved_hosts=hosts,
+                source_sha256=binding["source_sha256"],
+                lock_sha256=binding["lock_sha256"],
+                venv_sha256=seal,
             )
-        if record.state == "suspended":
-            # Reactivation: the pause ends on this confirmed card.
-            require_transition("suspended", "active")
-        elif not reinstall:
-            require_transition("sandboxed", "tested", verifier_passed=True)
-            require_transition("tested", "reviewed")
-            # The card the operator just confirmed IS the human action (I6/I7
-            # — asked once, never re-asked).
-            require_transition("reviewed", "approved", human_action=True)
-            require_transition("approved", "active")
-        python = forge.commit_locked_venv(skep_home, plugin_id, binding["lock_sha256"], staging)
-        installed = forge.install_source(holder.current, plugin_id, source)
-        server = MCPServerConfig(
-            server_id=record.server_id, transport="stdio", command=(python, str(installed))
-        )
-        try:
-            save_mcp_server(store, server)
-        except MCPError as exc:
-            raise ValueError(str(exc)) from exc
-        record = dataclasses.replace(
-            record,
-            state="active",
-            approved_hosts=hosts,
-            source_sha256=binding["source_sha256"],
-            lock_sha256=binding["lock_sha256"],
-        )
-        forge.save_plugin(store, record)
+            installed = forge.installed_tools_root(holder.current) / f"{plugin_id}.py"
+            server = MCPServerConfig(
+                server_id=record.server_id, transport="stdio", command=(python, str(installed))
+            )
+            server_id = record.server_id
+            previous = load_mcp_servers(store).get(server_id)
+
+            def commit() -> None:
+                save_mcp_server(store, server)
+                forge.save_plugin(store, published)
+
+            def unregister() -> None:  # registered ⟺ active, also on failure
+                if previous is not None:
+                    save_mcp_server(store, previous)
+                elif server_id in load_mcp_servers(store):
+                    remove_mcp_server(store, server_id)
+
+            try:
+                forge.publish_source(holder.current, plugin_id, source, commit, unregister)
+            except MCPError as exc:
+                raise ValueError(f"{exc} — {kept}") from exc
+        record = published
         if reinstall:
             store.record_registry_event(
                 kind="plugin",
@@ -5413,13 +5471,14 @@ def _execute_mutation(
             "source_sha256": record.source_sha256,
             "lock_sha256": record.lock_sha256 or None,
             "approved_hosts": list(hosts),
-            "tools": None if record.trial is None else record.trial.get("tools"),
-            "self_test": None if record.trial is None else record.trial.get("self_test"),
+            "tools": evidence.get("tools"),
+            "self_test": evidence.get("self_test"),
             "discovered": discovered,
         }
     if name == "suspend_tool":
         # v71-F1: suspension IS deregistration — registered ⟺ active, so a
         # suspended tool has no callable surface left anywhere (I5).
+        import contextlib
         import dataclasses
 
         from .. import forge
@@ -5427,23 +5486,22 @@ def _execute_mutation(
         from ..plugin_lifecycle import PluginLifecycleError, require_transition
 
         plugin_id = str(args["plugin_id"])
-        record = forge.load_plugins(store).get(plugin_id)
-        if record is None:
-            raise ValueError(f"no forged plugin {plugin_id!r}; list_plugins shows them")
         target = "rolled_back" if bool(args.get("rollback")) else "suspended"
-        try:
-            require_transition(record.state, target)
-        except PluginLifecycleError as exc:
-            raise ValueError(
-                f"{exc} — suspend pauses an ACTIVE tool; rollback=true retires a "
-                "plugin from any non-terminal state"
-            ) from exc
-        import contextlib
-
-        # MCPError here = never registered (e.g. rolling back a draft).
-        with contextlib.suppress(MCPError):
-            remove_mcp_server(store, record.server_id)
-        forge.save_plugin(store, dataclasses.replace(record, state=target))
+        with forge.PROMOTION_LOCK:  # review R1 (K7): never mid-publish
+            record = forge.load_plugins(store).get(plugin_id)
+            if record is None:
+                raise ValueError(f"no forged plugin {plugin_id!r}; list_plugins shows them")
+            try:
+                require_transition(record.state, target)
+            except PluginLifecycleError as exc:
+                raise ValueError(
+                    f"{exc} — suspend pauses an ACTIVE tool; rollback=true retires a "
+                    "plugin from any non-terminal state"
+                ) from exc
+            # MCPError here = never registered (e.g. rolling back a draft).
+            with contextlib.suppress(MCPError):
+                remove_mcp_server(store, record.server_id)
+            forge.save_plugin(store, dataclasses.replace(record, state=target))
         return {"plugin_id": plugin_id, "state": target, "deregistered": record.server_id}
     if name == "promote_skill_pack":
         # v85-F5: the pack ladder from chat — the card the operator just

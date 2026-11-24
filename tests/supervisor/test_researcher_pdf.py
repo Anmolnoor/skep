@@ -32,6 +32,7 @@ _ENCRYPTED = build(
 _PAGES: dict[str, tuple[int, dict[str, str], bytes]] = {
     "/paper.pdf": (200, {"Content-Type": "application/pdf"}, _PDF),
     "/untyped": (200, {}, _PDF),
+    "/download": (200, {"Content-Type": "application/octet-stream"}, _PDF),
     "/locked.pdf": (200, {"Content-Type": "application/pdf"}, _ENCRYPTED),
     "/missing": (404, {}, b"no"),
     "/busy": (429, {"Retry-After": "30"}, b""),
@@ -78,6 +79,13 @@ def test_a_pdf_source_is_read_and_quoted(site: str) -> None:
     assert f"### {site}/paper.pdf\n\nAttention is all you need" in report
     assert f"### {site}/untyped\n\nAttention is all you need" in report  # decided by the bytes
     assert "binary" not in report
+
+
+def test_a_pdf_served_as_octet_stream_is_read(site: str) -> None:
+    """Review R1 (K13, N S12): a download served as application/octet-stream
+    is sniffed for %PDF- like an untyped one, not listed as binary."""
+    report = _research(site, "/download")
+    assert f"### {site}/download\n\nAttention is all you need" in report
 
 
 def test_an_unreadable_pdf_is_listed_with_the_reason(site: str) -> None:

@@ -771,6 +771,22 @@ def test_an_assistant_queen_gets_no_script_trial_through_promote_tool(
     assert _promote_seed(config, None, monkeypatch) == []
 
 
+def test_the_dispatched_trial_is_the_role_gate_and_runs_no_candidate_code(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (K1): the run_code half of a trial kept the R3-F2 chain but
+    executed the candidate — with its wheels — outside forged_lane, under the
+    forge project's own wall. It now runs the gate line only; the candidate
+    runs behind the wall alone (forge.wall_trial)."""
+    from skep.supervisor.forge import GATE_MARKER, seed_tool_source
+
+    (submitted,) = _promote_seed(config, "operator", monkeypatch)
+    assert GATE_MARKER in submitted["instructions"]
+    source = seed_tool_source("yt_transcript.py")
+    assert "get_transcript" in source and "get_transcript" not in submitted["instructions"]
+    assert "base64" not in submitted["instructions"]  # no encoded candidate either
+
+
 # --- T2 audit: every Queen dispatch face carries the chain; every resume keeps it
 
 

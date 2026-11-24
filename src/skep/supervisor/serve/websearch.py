@@ -44,6 +44,9 @@ READ_URL_MAX_CHARS = 10_000
 # to read, so the per-URL card lane keeps the small caps above.
 GRANTED_READ_MAX_BYTES = 262_144
 GRANTED_READ_MAX_CHARS = 40_000
+# Review R1 (K3): one wall-clock budget for a whole read, redirects included —
+# the per-read timeout alone lets a trickling server run forever.
+READ_DEADLINE_SECONDS = 30.0
 _READ_HEADERS = {
     # Same posture as the researcher (v42-F2): a mainstream UA, honest tag.
     "User-Agent": (
@@ -107,12 +110,15 @@ def fetch_url_text(
     7.3: a PDF (by type or by its bytes) is read as text; an HTTP error, a
     timeout, or a non-text type raises WebReadError naming the next step.
     """
+    import time
+
     import httpx
 
     from skep.seeds.tools import doc_extract
     from skep.workers.html_text import html_to_markdown, html_to_text
-    from skep.workers.researcher import is_text_type
+    from skep.workers.researcher import binary_bytes, http_error_message, is_text_type
 
+    deadline = time.monotonic() + READ_DEADLINE_SECONDS
     # W6: no env proxy — a proxy would resolve the name itself, out of sight
     # of the resolved-address check below. The operator's CA bundle
     # (SSL_CERT_FILE / SSL_CERT_DIR) still counts: it hides no lookup. No
@@ -135,6 +141,7 @@ def fetch_url_text(
                     "try again later or read another source"
                 ) from exc
             if response.status_code in (301, 302, 303, 307, 308):
+                response.close()  # review R1 (K3): a hop's body is never read
                 target = urllib.parse.urljoin(current, response.headers.get("location", ""))
                 target_host = urllib.parse.urlparse(target).hostname or ""
                 if not target_host or (
@@ -150,37 +157,72 @@ def fetch_url_text(
             break
         else:
             raise ValueError("too many redirects (5) — refusing the chain")
-    if response.is_error:
-        raise WebReadError(
-            doc_extract.http_error_message(
-                response.status_code, response.reason_phrase, response.headers.get("retry-after")
-            )
-        )
-    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    if kind == "application/pdf" or response.content.startswith(b"%PDF-"):
-        if len(response.content) > doc_extract.MAX_BYTES:
-            raise WebReadError(
-                f"the PDF is larger than {doc_extract.MAX_BYTES // (1024 * 1024)} MiB — "
-                "too big to read here; download it yourself"
-            )
         try:
-            text, cut = doc_extract.pdf_to_text(response.content), False
-        except ValueError as exc:
-            raise WebReadError(str(exc)) from exc
-    elif kind and not is_text_type(kind):
-        raise WebReadError(
-            f"content type {kind} is not a page — read_url reads HTML, text, JSON/XML "
-            "and PDF; open other files yourself"
-        )
-    else:
-        body = response.text
-        convert = html_to_markdown if markdown else html_to_text
-        text, cut = convert(body[:max_bytes]), len(body) > max_bytes
+            if response.is_error:  # status and headers only: the body stays unread
+                raise WebReadError(
+                    http_error_message(
+                        response.status_code,
+                        response.reason_phrase,
+                        response.headers.get("retry-after"),
+                    )
+                )
+            kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+            host = urllib.parse.urlsplit(current).hostname or current
+            chunks = response.iter_bytes()
+            body = _take(chunks, bytearray(), max_bytes + 1, deadline, host)
+            if kind == "application/pdf" or body.startswith(b"%PDF-"):
+                body = _take(chunks, body, doc_extract.MAX_BYTES + 1, deadline, host)
+                if len(body) > doc_extract.MAX_BYTES:
+                    raise WebReadError(
+                        f"the PDF is larger than {doc_extract.MAX_BYTES // (1024 * 1024)} MiB "
+                        "— too big to read here; download it yourself"
+                    )
+                try:
+                    text, cut = doc_extract.pdf_to_text(bytes(body), max_chars=max_chars), False
+                except ValueError as exc:
+                    raise WebReadError(str(exc)) from exc
+            elif kind and not is_text_type(kind) and binary_bytes(bytes(body[:max_bytes])):
+                # K13 (O S7): the bytes are sniffed before a label is refused
+                raise WebReadError(
+                    f"content type {kind} is not a page — read_url reads HTML, text, "
+                    "JSON/XML and PDF; open other files yourself"
+                )
+            else:
+                try:
+                    page = bytes(body[:max_bytes]).decode(
+                        response.charset_encoding or "utf-8", errors="replace"
+                    )
+                except LookupError:  # a charset Python does not know
+                    page = bytes(body[:max_bytes]).decode("utf-8", errors="replace")
+                convert = html_to_markdown if markdown else html_to_text
+                text, cut = convert(page), len(body) > max_bytes
+        finally:
+            response.close()
     truncated = cut or len(text) > max_chars
     excerpt = text[:max_chars]
     if truncated:
         excerpt += f"\n\n[truncated at {max_chars} chars — the page continues]"
     return {"url": current, "text": excerpt, "truncated": truncated}
+
+
+def _take(chunks: Any, body: bytearray, limit: int, deadline: float, host: str) -> bytearray:
+    """Review R1 (K3): pull from a streamed body until ``limit`` bytes (one
+    chunk over at most, trimmed), the end, or the read deadline — never
+    the whole body first."""
+    import time
+
+    while len(body) < limit:
+        if time.monotonic() > deadline:
+            raise WebReadError(
+                f"reading {host} took longer than {READ_DEADLINE_SECONDS:g}s — the site is "
+                "slow or trickling; try again later or read another source"
+            )
+        chunk = next(chunks, None)
+        if chunk is None:
+            break
+        body += chunk
+    del body[limit:]
+    return body
 
 
 def _ambiguous_ip(host: str) -> str | None:
@@ -253,7 +295,7 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
             extensions={"sni_hostname": named.raw_host.decode("ascii")},
         )
         try:
-            return client.send(request)
+            return client.send(request, stream=True)  # K3: headers first, body on demand
         except httpx.ConnectError as exc:
             error = exc
     proxy = next((k for k in _PROXY_VARS if os.environ.get(k)), None)

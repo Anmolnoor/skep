@@ -15,6 +15,7 @@ to them (I2). A failure anywhere leaves the active tool as it was.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -41,7 +42,6 @@ from skep.supervisor.forge import (
     save_plugin,
     script_dependencies,
     sha256_text,
-    trial_script,
     wall_trial,
 )
 from skep.supervisor.mcp_client import cached_tools, load_mcp_servers
@@ -50,6 +50,8 @@ from skep.supervisor.serve.cards import card_summary, recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
+
+from .forge_rig import GATE_PASSED, gate, install
 
 needs_wall = pytest.mark.skipif(
     sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
@@ -221,17 +223,8 @@ class _Lanes:
 
 
 def _passing_stage_one(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    seen: list[dict[str, Any]] = []
-
-    def trial(*_a: Any, **kwargs: Any) -> dict[str, Any]:
-        seen.append(kwargs)
-        return {
-            "state": "completed",
-            "output": 'FORGE_TRIAL {"ok": true, "tools": ["echo", "self_test"], "self_test": "ok"}',
-        }
-
-    monkeypatch.setattr(tools_module, "_forge_trial", trial)
-    return seen
+    """The dispatched role gate passes (K1: it runs no candidate code)."""
+    return gate(monkeypatch)
 
 
 def _card(store: RunStore) -> dict[str, Any]:
@@ -307,7 +300,7 @@ def test_a_stdlib_tool_promotes_with_no_venv_and_one_offline_stage(
         assert lanes.calls == []  # no install lane at all
         # stage 1 only (no hosts), then the cache refresh on the runtime path
         assert lanes.trials == [(sys.executable, ()), ("runtime", ())]
-        assert stage_one[0]["python"] == sys.executable
+        assert set(stage_one[0]) == {"repo", "decision", "delegation_chain"}  # no source
         assert not (config.home.parent / "tools" / ".venvs").exists()
         record = load_plugins(store)["pdf-tool"]
         assert record.source_sha256 == sha256_text(ECHO_SERVER_SOURCE)
@@ -326,18 +319,18 @@ def test_a_locked_tool_installs_wheels_only_from_hashes_through_pypi(
     store = RunStore(config.db_path)
     try:
         _seed(store, shelf, _DEPS_TOOL, _LOCK)
-        stage_one = _passing_stage_one(monkeypatch)
+        _passing_stage_one(monkeypatch)
         lanes = _Lanes(monkeypatch)
         _promote(config, store, _card(store))
         (venv_argv, venv_hosts), (install_argv, install_hosts) = lanes.calls
         assert venv_hosts == ()  # making the venv needs no network
         assert install_hosts == forge.PYPI_HOSTS
         assert "--require-hashes" in install_argv and "--no-config" in install_argv
+        assert "--no-deps" in install_argv  # K13: only what the lock pins installs
         assert install_argv[install_argv.index("--only-binary") + 1] == ":all:"
         staged = venv_argv[-1]
         assert Path(staged).name.startswith(".staging-")
         # both stages ran the STAGED venv; stage 2 pinned to the card's hosts
-        assert stage_one[0]["python"] == f"{staged}/bin/python"
         assert lanes.trials == [
             (f"{staged}/bin/python", ()),
             (f"{staged}/bin/python", ("*.example.net", "api.example.org")),
@@ -410,7 +403,7 @@ def test_a_legacy_active_tool_can_be_promoted_again(
         _seed(store, shelf, ECHO_SERVER_SOURCE)
         record = load_plugins(store)["pdf-tool"]
         save_plugin(store, dataclasses.replace(record, state="active"))
-        forge.install_source(config, "pdf-tool", ECHO_SERVER_SOURCE)
+        install(config, "pdf-tool", ECHO_SERVER_SOURCE)
         _passing_stage_one(monkeypatch)
         _Lanes(monkeypatch)
         promoted = _promote(config, store, _card(store))
@@ -421,16 +414,6 @@ def test_a_legacy_active_tool_can_be_promoted_again(
 
 
 # --- the stages themselves -----------------------------------------------
-
-
-def test_the_harness_runs_the_interpreter_it_is_given(tmp_path: Path) -> None:
-    script = trial_script(ECHO_SERVER_SOURCE, python="/nonexistent/python")
-    proc = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path
-    )
-    assert "FORGE_TRIAL" in proc.stdout
-    evidence = json.loads(proc.stdout.split("FORGE_TRIAL ", 1)[1])
-    assert evidence["ok"] is False and "/nonexistent/python" in evidence["error"]
 
 
 @needs_wall
@@ -610,3 +593,300 @@ def test_read_file_errors_name_the_next_step(config: SupervisorConfig, tmp_path:
         store.close()
     assert "search_files" in missing["next_step"] and "nope.txt" in missing["error"]
     assert "directory" in directory["next_step"] and "search_files" in directory["next_step"]
+
+
+# --- review R1 -----------------------------------------------------------
+
+
+def test_the_lock_grammar_takes_pep508_markers_only_and_installs_canonical_pins() -> None:
+    """K13: a marker is PEP 508 environment markers and nothing else; the
+    install lane gets the canonical pins parse_lock accepted, never the raw
+    text; every declared dependency must be pinned; deps never resolve."""
+    for marker in ('__import__("os")', 'python_version < "3.11" or evil', "x()"):
+        with pytest.raises(ValueError, match="lock"):
+            parse_lock(f"pypdf==5.1.0 ; {marker} --hash=sha256:{_HASH_A}\n")
+    assert forge.install_lock(parse_lock(_LOCK)) == (
+        f"pypdf==5.1.0 --hash=sha256:{_HASH_A} --hash=sha256:{_HASH_B}\n"
+        f'typing-extensions==4.12.2 ; python_version < "3.11" --hash=sha256:{_HASH_A}\n'
+    )
+    with pytest.raises(ValueError, match=r"requests.*pins no version"):
+        promotion_binding(_DEPS_TOOL.replace('"pypdf==5.1.0"', '"pypdf==5.1.0", "requests"'), _LOCK)
+    assert "--no-deps" in forge.install_command("uv", Path("/v/bin/python"), Path("/l.txt"))
+
+
+def _locked_active(
+    config: SupervisorConfig, store: RunStore, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> _Lanes:
+    _seed(store, shelf, _DEPS_TOOL, _LOCK)
+    _passing_stage_one(monkeypatch)
+    lanes = _Lanes(monkeypatch)
+    _promote(config, store, _card(store))
+    return lanes
+
+
+def test_a_tampered_venv_never_runs_and_promote_tool_rebuilds_it(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K5 (I6, I12): the venv the hashed install produced is sealed with the
+    approval; a changed file, a swapped interpreter or a link out of the
+    tree is refused at launch (naming promote_tool), never reused by a
+    promotion — which rebuilds it from the approved lock."""
+    store = RunStore(config.db_path)
+    try:
+        lanes = _locked_active(config, store, shelf, monkeypatch)
+        record = load_plugins(store)["pdf-tool"]
+        venv = forge.venv_python(config.home.parent, "pdf-tool", record.lock_sha256).parent.parent
+        assert record.venv_sha256 == forge.seal_venv(venv)
+        home = config.home.parent
+        forge.runtime_launch(store, home, "forge-pdf-tool")  # sealed: it runs
+        package = venv / "lib" / "site-packages" / "pypdf.py"
+        package.parent.mkdir(parents=True)
+        package.write_text("import os  # planted", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"not the tree its install sealed.*promote_tool"):
+            forge.runtime_launch(store, home, "forge-pdf-tool")
+        package.unlink()
+        package.parent.rmdir()
+        package.parent.parent.rmdir()
+        forge.runtime_launch(store, home, "forge-pdf-tool")
+        (venv / "lib").mkdir(exist_ok=True)
+        (venv / "lib" / "escape").symlink_to("/etc")
+        with pytest.raises(ValueError, match="links out of the venv"):
+            forge.seal_venv(venv)
+        with pytest.raises(ValueError, match="promote_tool pdf-tool"):
+            forge.runtime_launch(store, home, "forge-pdf-tool")
+        # K9: the verb the refusal names does not answer "already active" —
+        # and it rebuilds the venv instead of reusing the tampered tree.
+        lanes.calls.clear()
+        promoted = _promote(config, store, _card(store))
+        assert promoted.get("note") != "already active" and promoted["reinstalled"] is True
+        assert [argv[1] for argv, _ in lanes.calls] == ["venv", "pip"]
+        assert not (venv / "lib" / "escape").is_symlink()
+        forge.runtime_launch(store, home, "forge-pdf-tool")
+        # An intact sealed tree is reused: no install lane at all.
+        lanes.calls.clear()
+        sealed = load_plugins(store)["pdf-tool"]
+        save_plugin(store, dataclasses.replace(sealed, approved_hosts=()))  # a changed binding
+        _promote(config, store, _card(store))
+        assert lanes.calls == []
+    finally:
+        store.close()
+
+
+def test_a_swapped_interpreter_is_refused(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        _locked_active(config, store, shelf, monkeypatch)
+        record = load_plugins(store)["pdf-tool"]
+        python = forge.venv_python(config.home.parent, "pdf-tool", record.lock_sha256)
+        python.write_text("#!/bin/sh\nexec /bin/sh", encoding="utf-8")
+        with pytest.raises(ValueError, match="promote_tool pdf-tool"):
+            forge.runtime_launch(store, config.home.parent, "forge-pdf-tool")
+    finally:
+        store.close()
+
+
+def test_a_suspend_confirmed_during_the_trial_wins(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K7: the promotion re-reads its record before it publishes; a suspend
+    (or rollback) confirmed elsewhere while the trial ran is never
+    overwritten, and the tool is not reactivated."""
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        _promote(config, store, _card(store))
+        _seed(store, shelf, ECHO_SERVER_SOURCE + "# v2\n")  # an update to promote
+        card = _card(store)
+
+        def suspended_meanwhile(*_a: Any, **_k: Any) -> dict[str, Any]:
+            execute_mutation(
+                "suspend_tool", {"plugin_id": "pdf-tool"}, store=store,
+                holder=ConfigHolder(config, store), runner=cast(Dispatcher, None), actor="op",
+            )  # fmt: skip
+            return GATE_PASSED
+
+        monkeypatch.setattr(tools_module, "_forge_trial", suspended_meanwhile)
+        with pytest.raises(ValueError, match=r"changed while its trial ran \(it is now suspended"):
+            _promote(config, store, card)
+        record = load_plugins(store)["pdf-tool"]
+        assert record.state == "suspended"
+        assert record.source_sha256 == sha256_text(ECHO_SERVER_SOURCE)
+        assert "forge-pdf-tool" not in load_mcp_servers(store)
+        installed = config.home.parent / "tools" / "pdf-tool.py"
+        assert installed.read_text(encoding="utf-8") == ECHO_SERVER_SOURCE
+    finally:
+        store.close()
+
+
+def test_a_failed_publish_leaves_the_previous_tool_byte_identical_and_running(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K7: the new source is staged first; if recording its binding fails,
+    the old bytes go back, the old record and registration stand, and the
+    old tool still launches."""
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        _promote(config, store, _card(store))
+        before = load_plugins(store)["pdf-tool"]
+        registered = load_mcp_servers(store)["forge-pdf-tool"]
+        installed = config.home.parent / "tools" / "pdf-tool.py"
+        _seed(store, shelf, ECHO_SERVER_SOURCE + "# v2\n")
+        card = _card(store)
+        real_save = forge.save_plugin
+
+        def save(store_: RunStore, record: ForgedPlugin) -> None:
+            if record.source_sha256 and record.source_sha256 != before.source_sha256:
+                raise RuntimeError("disk full")
+            real_save(store_, record)
+
+        monkeypatch.setattr(forge, "save_plugin", save)
+        with pytest.raises(RuntimeError, match="disk full"):
+            _promote(config, store, card)
+        after = load_plugins(store)["pdf-tool"]
+        assert (after.state, after.source_sha256) == ("active", before.source_sha256)
+        assert installed.read_bytes() == ECHO_SERVER_SOURCE.encode()
+        assert load_mcp_servers(store)["forge-pdf-tool"] == registered
+        assert not list(installed.parent.glob(".pdf-tool.*"))  # no staged copy left behind
+        forge.runtime_launch(store, config.home.parent, "forge-pdf-tool")
+    finally:
+        store.close()
+
+
+def test_an_active_tool_with_a_changed_or_tampered_candidate_takes_a_fresh_trial(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K9: runtime refuses a tampered installed copy and names promote_tool;
+    promote_tool must not answer 'already active' — it trials and reinstalls."""
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        dispatched = _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        _promote(config, store, _card(store))
+        assert _promote(config, store, _card(store))["note"] == "already active"
+        installed = config.home.parent / "tools" / "pdf-tool.py"
+        installed.write_text(ECHO_SERVER_SOURCE + "# tampered\n", encoding="utf-8")
+        dispatched.clear()
+        promoted = _promote(config, store, _card(store))
+        assert promoted["reinstalled"] is True and len(dispatched) == 1
+        assert installed.read_text(encoding="utf-8") == ECHO_SERVER_SOURCE
+    finally:
+        store.close()
+
+
+def test_every_confirming_surface_shows_the_whole_binding(
+    config: SupervisorConfig, shelf: Path
+) -> None:
+    """K6 (I6, I8): the CLI (`skep chat`) and the messengers rendered a
+    promote_tool card with neither its binding nor its risk line. The CLI
+    shows all of it; a messenger shows it only when it fits whole, else it
+    points to the web UI or CLI and the card is web-UI-only for everyone —
+    the channel's admin included."""
+    from skep.supervisor.serve.channels import (
+        card_notes,
+        forge_fits_a_messenger,
+        render_confirm_card,
+    )
+
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, _DEPS_TOOL, _LOCK)
+        recorded = _card(store)
+        forged = recorded["forge"]
+        summary = card_summary("promote_tool", {"plugin_id": "pdf-tool"}, recorded=recorded)
+    finally:
+        store.close()
+    cli = card_notes(summary, messenger=False)
+    assert f"source sha256: {forged['source_sha256']}" in cli
+    assert f"lock sha256: {forged['lock_sha256']}" in cli
+    assert "network: *.example.net, api.example.org" in cli
+    assert all(f"- {pin}" in cli for pin in forged["locked"])
+    assert all(line in cli for line in forged["diff"].splitlines())
+    assert any(note.startswith("risk: ") for note in cli)
+    assert not forge_fits_a_messenger(forged)
+    phone = card_notes(summary, admin=True)
+    assert any("web UI or the CLI" in note for note in phone)
+    assert f"source sha256: {forged['source_sha256']}" not in phone
+    view = render_confirm_card("plugin", (), summary, admin=True)
+    assert view.web_ui_only and view.too_long
+    small = {**forged, "locked": [], "lock_sha256": "", "diff": "+print(1)\n"}
+    fits = card_notes({**summary, "forge": small})
+    assert f"source sha256: {forged['source_sha256']}" in fits and "+print(1)" in fits
+    assert not render_confirm_card("plugin", (), {**summary, "forge": small}, admin=True).too_long
+
+
+def test_a_failing_trial_on_a_refused_active_tool_says_it_stays_refused(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I8: a tampered active tool does not 'keep running' — the runtime
+    refuses it until a promotion passes, and the failure says so."""
+    from .forge_rig import failing_wall
+
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        _promote(config, store, _card(store))
+        installed = config.home.parent / "tools" / "pdf-tool.py"
+        installed.write_text(ECHO_SERVER_SOURCE + "# tampered\n", encoding="utf-8")
+        failing_wall(monkeypatch, "boom")
+        with pytest.raises(ValueError, match=r"boom.*stays installed, and refused"):
+            _promote(config, store, _card(store))
+    finally:
+        store.close()
+
+
+def test_a_failed_first_publish_leaves_nothing_installed_or_registered(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        real_save = forge.save_plugin
+
+        def save(store_: RunStore, record: ForgedPlugin) -> None:
+            if record.state == "active":
+                raise RuntimeError("disk full")
+            real_save(store_, record)
+
+        monkeypatch.setattr(forge, "save_plugin", save)
+        with pytest.raises(RuntimeError, match="disk full"):
+            _promote(config, store, _card(store))
+        assert load_plugins(store)["pdf-tool"].state == "sandboxed"
+        assert not (config.home.parent / "tools" / "pdf-tool.py").exists()
+        assert "forge-pdf-tool" not in load_mcp_servers(store)  # registered ⟺ active
+    finally:
+        store.close()
+
+
+def test_a_venv_changed_after_its_trial_is_not_committed(tmp_path: Path) -> None:
+    """I2: what was trialed is what runs — the staged tree must still match
+    the seal the trials ran against when it moves into place."""
+    staging = tmp_path / "tools" / ".venvs" / "p" / ".staging-x"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "bin" / "python").write_text("#!fake", encoding="utf-8")
+    seal = forge.seal_venv(staging)
+    (staging / "bin" / "python").write_text("#!swapped", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed after its trial"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    with pytest.raises(ValueError, match="not a venv directory"):
+        forge.seal_venv(tmp_path / "missing")
+
+
+def test_an_unbindable_tool_card_says_why_on_every_surface() -> None:
+    from skep.supervisor.serve.channels import card_notes
+
+    card = {"forge": {"error": "no hash lock landed beside it"}}
+    expected = "it cannot be installed as shown: no hash lock landed beside it"
+    assert expected in card_notes(card, messenger=False)
+    assert expected in card_notes(card)

@@ -13,22 +13,25 @@ The three subsystems this joins already existed; none was connected:
 A forged tool is ONE Python file (stdlib-only unless it opts into a locked
 PEP 723 dependency list, Phase 07) in the operator's forge repo
 (``<skep home>/forge``), written by a normal coding run, landed by a normal
-approval, then promoted through the lifecycle: a sandboxed no-network trial
-(``tools/list`` plus a mandatory zero-argument ``self_test`` call) gates
-``tested`` — the supervisor parses the trial evidence itself, never the
-worker's word (I2); the operator's confirmed card gates ``approved`` (I6);
+approval, then promoted through the lifecycle: a trial behind the
+forged-tool wall (``tools/list`` plus a mandatory zero-argument
+``self_test`` call, offline; then pinned to any approved hosts) gates
+``tested`` — the supervisor reads every reply itself, never the worker's
+word (I2); the operator's confirmed card gates ``approved`` (I6);
 activation installs the landed source under ``<skep home>/tools/`` and
-registers it as an ordinary stdio MCP server.
+registers it as a stdio MCP server that only ever runs from its bound
+record (``runtime_launch``).
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,7 +42,16 @@ from .store import RunStore
 PLUGINS_SETTINGS_KEY = "plugins"
 FORGE_DIR_NAME = "forge"
 INSTALLED_TOOLS_DIR_NAME = "tools"
-TRIAL_MARKER = "FORGE_TRIAL "
+TRIAL_MARKER = "FORGE_TRIAL "  # a skill pack's trial evidence (skill_packs.py)
+GATE_MARKER = "FORGE_GATE "
+# Review R1 (K1): the dispatched half of a trial is the R3-F2 role/chain gate
+# and nothing else — it runs this line, never the candidate. Every candidate
+# execution is behind forged_lane (``wall_trial``).
+GATE_SCRIPT = f'print("{GATE_MARKER}the role chain admitted this trial")\n'
+# Review R1 (K7): a promotion's last look at its record and its publish, and
+# a suspend/rollback, happen one at a time — a verdict given elsewhere while
+# a trial ran is never overwritten.
+PROMOTION_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,7 @@ class ForgedPlugin:
     approved_hosts: tuple[str, ...] = ()  # () = deny-all egress
     source_sha256: str = ""  # "" = activated before the binding: refused until re-promoted
     lock_sha256: str = ""  # "" = stdlib-only: no venv
+    venv_sha256: str = ""  # review R1 (K5): the sealed venv tree the install produced
 
 
 def plugin_slug(name: str) -> str:
@@ -105,6 +118,7 @@ def load_plugins(store: RunStore) -> dict[str, ForgedPlugin]:
                 approved_hosts=tuple(map(str, hosts)) if isinstance(hosts, list) else (),
                 source_sha256=str(entry.get("source_sha256") or ""),
                 lock_sha256=str(entry.get("lock_sha256") or ""),
+                venv_sha256=str(entry.get("venv_sha256") or ""),
             )
             plugins[record.plugin_id] = record
     return plugins
@@ -117,7 +131,7 @@ def save_plugin(store: RunStore, record: ForgedPlugin) -> None:
 
 
 def authoring_instructions(name: str, purpose: str, rel_path: str) -> str:
-    """The coding worker's brief. Every line is enforced by the trial harness."""
+    """The coding worker's brief. Every line is enforced by the trial (``wall_trial``)."""
     lock = lock_rel_path(rel_path)
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
     return f"""Create the file {rel_path} — a single-file stdio MCP tool server named {name!r}.
@@ -160,7 +174,7 @@ Do not modify any other file."""
 
 
 # The reference server the forge repo is seeded with: the contract, executable.
-# It is also the fixture the forge's own tests hold the trial harness against.
+# It is also the fixture the forge's own tests hold the trial contract against.
 ECHO_SERVER_SOURCE = '''"""echo — the forge's reference MCP server: the contract, executable."""
 
 import json
@@ -339,14 +353,6 @@ def landed_source(repo: Path, branch: str, rel_path: str) -> str:
     return source
 
 
-def install_source(config: Any, plugin_id: str, source: str) -> Path:
-    root = installed_tools_root(config)
-    root.mkdir(parents=True, exist_ok=True)
-    installed = root / f"{plugin_id}.py"
-    installed.write_text(source, encoding="utf-8")
-    return installed
-
-
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -409,96 +415,24 @@ def runtime_launch(store: RunStore, skep_home: Path, server_id: str) -> ForgedLa
     python = sys.executable
     if record.lock_sha256:
         locked = venv_python(skep_home, plugin, record.lock_sha256)
-        if not locked.is_file():
+        try:
+            sealed = bool(record.venv_sha256) and seal_venv(locked.parent.parent) == (
+                record.venv_sha256
+            )
+        except (OSError, ValueError):
+            sealed = False
+        if not sealed:
             raise ValueError(
-                f"the locked environment of {plugin!r} ({locked.parent.parent}) is missing — "
-                f"promote_tool {plugin} rebuilds it from its approved lock"
+                f"the locked environment of {plugin!r} ({locked.parent.parent}) is missing or "
+                "is not the tree its install sealed, so it does not run — promote_tool "
+                f"{plugin} rebuilds it from its approved lock"
             )
         python = str(locked)
     return ForgedLaunch(raw.decode("utf-8"), python, record.approved_hosts)
 
 
-# The sandboxed trial harness: write the candidate into the workspace, then
-# hold it to the contract. chr(10) instead of a newline escape keeps this
-# template free of backslashes that would need double-escaping.
-_TRIAL_HARNESS = """import base64, json, os, subprocess, sys
-
-SOURCE = base64.b64decode("__SOURCE_B64__").decode("utf-8")
-TOOL = os.path.join(os.getcwd(), "forge_trial_candidate.py")
-with open(TOOL, "w") as handle:
-    handle.write(SOURCE)
-
-
-PYTHON = __PYTHON__ or sys.executable
-
-
-def exchange(method, params):
-    requests = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-         "params": {"protocolVersion": "2024-11-05", "capabilities": {}}},
-        {"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
-    ]
-    payload = chr(10).join(json.dumps(request) for request in requests) + chr(10)
-    try:
-        proc = subprocess.run(
-            [PYTHON, TOOL], input=payload, capture_output=True, text=True, timeout=60
-        )
-    except OSError as exc:  # the interpreter itself would not start
-        proc = subprocess.CompletedProcess([PYTHON], 127, "", PYTHON + ": " + str(exc))
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(message, dict) and message.get("id") == 2:
-            return message, proc
-    return None, proc
-
-
-evidence = {"ok": False, "tools": [], "self_test": None, "error": None}
-reply, proc = exchange("tools/list", {})
-if reply is None:
-    evidence["error"] = "no JSON-RPC reply to tools/list; stderr tail: " + proc.stderr[-400:]
-elif "error" in reply:
-    evidence["error"] = "tools/list returned an error: " + json.dumps(reply["error"])[:400]
-else:
-    tools = (reply.get("result") or {}).get("tools") or []
-    names = [str(tool.get("name")) for tool in tools if isinstance(tool, dict)]
-    evidence["tools"] = names
-    if "self_test" not in names:
-        evidence["error"] = (
-            "the contract requires a zero-argument self_test tool; tools/list has none"
-        )
-    elif len(names) < 2:
-        evidence["error"] = "self_test alone is not a tool server — expose the real tool(s) too"
-    else:
-        reply, proc = exchange("tools/call", {"name": "self_test", "arguments": {}})
-        result = None if reply is None else reply.get("result")
-        if not isinstance(result, dict):
-            evidence["error"] = (
-                "no usable reply to the self_test call; stderr tail: " + proc.stderr[-400:]
-            )
-        elif result.get("isError"):
-            evidence["error"] = "self_test FAILED: " + str(result.get("content"))[:400]
-        else:
-            evidence["self_test"] = str(result.get("content"))[:400]
-            evidence["ok"] = True
-print("FORGE_TRIAL " + json.dumps(evidence), flush=True)
-"""
-
-
-def trial_script(source: str, python: str | None = None) -> str:
-    """The harness for ``source``, run by ``python`` (a locked tool's staged
-    venv; None = the script worker's own interpreter, a stdlib-only tool)."""
-    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
-    return _TRIAL_HARNESS.replace("__SOURCE_B64__", encoded).replace("__PYTHON__", repr(python))
-
-
 def trial_verdict(run_result: Mapping[str, Any]) -> tuple[bool, str, dict[str, Any]]:
-    """Supervisor-side reading of the trial run's output.
+    """Supervisor-side reading of a skill pack's trial run (``TRIAL_MARKER``).
 
     The evidence line is parsed HERE (I2): neither the script's exit code nor
     any claim inside the sandbox gates the transition on its own — a missing
@@ -526,6 +460,21 @@ def trial_verdict(run_result: Mapping[str, Any]) -> tuple[bool, str, dict[str, A
     return False, str(evidence.get("error") or "trial failed"), evidence
 
 
+def gate_verdict(run_result: Mapping[str, Any]) -> tuple[bool, str]:
+    """Review R1 (K1): the dispatched gate's outcome, read supervisor-side.
+    It ran ``GATE_SCRIPT`` — no candidate code — so passing it means only
+    that the Queen's role chain may run a script (R3-F2); the contract is
+    judged behind the wall by ``wall_trial``."""
+    state = str(run_result.get("state") or "")
+    if state != "completed":
+        detail = str(run_result.get("error") or run_result.get("stderr") or "").strip()
+        reason = f"the trial's role gate ended {state or 'without a terminal state'}"
+        return False, f"{reason}: {detail}" if detail else reason
+    if GATE_MARKER not in str(run_result.get("output") or ""):
+        return False, "the trial's role gate printed no marker — the script lane itself failed"
+    return True, "the role chain admitted the trial"
+
+
 # --- Phase 07 (7.2): opt-in locked dependencies + the card binding ---------
 
 # PEP 723's reference regex: one ``# /// script`` block of ``#``-prefixed TOML.
@@ -537,9 +486,19 @@ _LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
 _HOST_ENTRY = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
 # What a lock may hold: ``name==version [; marker] --hash=sha256:…`` lines.
 _LOCK_LINE = re.compile(
-    r"(?P<pin>[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9.+!_-]+)"
+    r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?P<extras>\[[A-Za-z0-9._,-]+\])?"
+    r"==(?P<version>[A-Za-z0-9.+!_-]+)"
     r"(?:\s*;\s*(?P<marker>[^-\\]+?))?"
     r"(?P<hashes>(?:\s+--hash=sha256:[0-9a-f]{64})+)"
+)
+# Review R1 (K13): a marker is PEP 508 environment markers and nothing else —
+# the named variables, comparison operators, quoted literals, and/or/not and
+# parentheses.
+_MARKER_TOKEN = re.compile(
+    r"\s+|\(|\)|===|==|!=|<=|>=|~=|<|>|\b(?:and|or|not|in)\b|\"[^\"\\]*\"|'[^'\\]*'|\b(?:"
+    r"python_version|python_full_version|os_name|sys_platform|platform_release|"
+    r"platform_system|platform_version|platform_machine|platform_python_implementation|"
+    r"implementation_name|implementation_version|extra)\b"
 )
 PYPI_HOSTS = ("pypi.org", "files.pythonhosted.org")
 INSTALL_TIMEOUT_SECONDS = 300.0
@@ -613,18 +572,46 @@ def parse_lock(text: str) -> tuple[str, ...]:
     pins: list[str] = []
     for line in logical:
         match = _LOCK_LINE.fullmatch(line)
-        if match is None:
+        marker = (match.group("marker") or "").strip() if match else ""
+        if match is None or (marker and not _is_marker(marker)):
             raise ValueError(
                 f"lock line {line[:120]!r} is not a pinned, hash-locked requirement — the lock "
-                "may hold only `name==version --hash=sha256:…` lines (regenerate it with "
-                "`uv pip compile --generate-hashes --only-binary :all:`)"
+                "may hold only `name==version [; PEP 508 marker] --hash=sha256:…` lines "
+                "(regenerate it with `uv pip compile --generate-hashes --only-binary :all:`)"
             )
         hashes = " ".join(h.removeprefix("--hash=") for h in match.group("hashes").split())
-        marker = f" ; {match.group('marker').strip()}" if match.group("marker") else ""
-        pins.append(f"{match.group('pin')}{marker} {hashes}")
+        pin = f"{match.group('name')}{match.group('extras') or ''}=={match.group('version')}"
+        pins.append(f"{pin}{f' ; {marker}' if marker else ''} {hashes}")
     if not pins:
         raise ValueError("the lock lists no requirements — regenerate it from the tool's deps")
     return tuple(pins)
+
+
+def _is_marker(marker: str) -> bool:
+    pos = 0
+    while pos < len(marker):
+        token = _MARKER_TOKEN.match(marker, pos)
+        if token is None or token.end() == pos:
+            return False
+        pos = token.end()
+    return True
+
+
+def _project(requirement: str) -> str:
+    """PEP 503: the normalized project name a requirement or pin names."""
+    name = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    return re.sub(r"[-_.]+", "-", name.group(1)).lower() if name else requirement
+
+
+def install_lock(pins: tuple[str, ...]) -> str:
+    """Review R1 (K13): what the install lane is handed — the canonical pins
+    ``parse_lock`` accepted, re-written, never the raw lock text."""
+    lines = []
+    for pin in pins:
+        requirement, _, hashes = pin.partition(" sha256:")
+        digests = ("sha256:" + hashes).split()
+        lines.append(f"{requirement} " + " ".join(f"--hash={d}" for d in digests))
+    return "\n".join(lines) + "\n"
 
 
 def lock_rel_path(rel_path: str) -> str:
@@ -647,6 +634,14 @@ def promotion_binding(source: str, lock: str | None) -> dict[str, Any]:
             "--generate-hashes --only-binary :all:`; skep installs only locked wheels"
         )
     locked = parse_lock(lock) if deps and lock is not None else ()
+    pinned = {_project(pin) for pin in locked}
+    unpinned = [dep for dep in deps if _project(dep) not in pinned]
+    if unpinned:
+        raise ValueError(
+            f"the tool declares {', '.join(unpinned)} but its lock pins no version of it — "
+            "regenerate <tool>.lock.txt from the tool's dependencies (`uv pip compile "
+            "--generate-hashes --only-binary :all:`)"
+        )
     return {
         "source_sha256": sha256_text(source),
         "lock_sha256": sha256_text(lock) if locked and lock is not None else "",
@@ -723,29 +718,74 @@ def install_command(uv: str, python: Path, lock_file: Path) -> list[str]:
     """The one install a locked tool gets: wheels only (no sdist build code
     ever runs), every file matched to a lock hash, no user/project uv config."""
     return [
-        uv, "pip", "install", "--no-config", "--python", str(python),
+        uv, "pip", "install", "--no-config", "--python", str(python), "--no-deps",
         "--require-hashes", "--only-binary", ":all:", "-r", str(lock_file),
     ]  # fmt: skip
 
 
+def seal_venv(root: Path) -> str:
+    """Review R1 (K5, I6, I12): one digest of a venv tree — every path, every
+    file's bytes and mode, every link's target. A link may leave the tree
+    only as ``bin/python*`` (the base interpreter, the system toolchain);
+    any other link out, or a node that is not a file, dir or link, refuses
+    (ValueError). Hashed when the install lane finishes and again before
+    every reuse and every launch, so a swapped interpreter or a modified
+    package never runs under the approved hosts.
+    ponytail: re-hashed on every launch; cache by inode+mtime if call volume
+    on a large venv ever matters."""
+    import stat
+
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError(f"{root} is not a venv directory")
+    digest = hashlib.sha256()
+    resolved_root = root.resolve()
+    for current, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted([*dirs, *files]):
+            path = Path(current) / name
+            rel = path.relative_to(root).as_posix()
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                target = os.readlink(path)
+                inside = (path.parent / target).resolve().is_relative_to(resolved_root)
+                if not inside and not re.fullmatch(r"bin/python[0-9.]*", rel):
+                    raise ValueError(f"{rel} in {root} links out of the venv (to {target})")
+                entry = f"l\0{rel}\0{target}"
+            elif stat.S_ISDIR(info.st_mode):
+                entry = f"d\0{rel}"
+            elif stat.S_ISREG(info.st_mode):
+                body = hashlib.sha256(path.read_bytes()).hexdigest()
+                entry = f"f\0{rel}\0{info.st_mode & 0o111:o}\0{body}"
+            else:
+                raise ValueError(f"{rel} in {root} is not a file, directory or link")
+            digest.update(entry.encode("utf-8", "surrogateescape") + b"\n")
+    return digest.hexdigest()
+
+
 def stage_locked_python(
-    skep_home: Path, plugin_id: str, lock: str | None, lock_sha256: str
-) -> tuple[str, Path | None]:
-    """The interpreter both trial stages run: skep's own for a stdlib-only
-    tool; for a locked one its venv — already built for this exact lock, or
-    built now in a staging dir (returned, for ``commit_locked_venv`` or the
-    caller's cleanup) by the install lane: wheels only, every file matched
-    to a lock hash, egress pinned to PyPI, inside the forged-tool wall."""
+    skep_home: Path, plugin_id: str, lock: str | None, lock_sha256: str, sealed: str = ""
+) -> tuple[str, Path | None, str]:
+    """The interpreter both trial stages run, its staging dir and its seal:
+    skep's own for a stdlib-only tool; for a locked one its venv — reused
+    only when it still matches ``sealed`` (the seal its last install
+    recorded), else built in a staging dir (returned, for
+    ``commit_locked_venv`` or the caller's cleanup) by the install lane:
+    wheels only, the canonical pins only, every file matched to a lock
+    hash, egress pinned to PyPI, inside the forged-tool wall."""
     import shutil
     import tempfile
 
     from . import mcp_client
 
     if not lock_sha256 or lock is None:
-        return sys.executable, None
+        return sys.executable, None, ""
     final = venv_python(skep_home, plugin_id, lock_sha256)
-    if final.is_file():
-        return str(final), None
+    if sealed and final.parent.parent.is_dir():
+        try:
+            if seal_venv(final.parent.parent) == sealed:
+                return str(final), None, sealed
+        except (OSError, ValueError):
+            pass  # not the sealed tree any more: built afresh below
     uv = shutil.which("uv")
     if uv is None:
         raise ValueError("installing a forged tool's locked dependencies needs uv on PATH")
@@ -756,7 +796,7 @@ def stage_locked_python(
         with tempfile.TemporaryDirectory(prefix="skep-forge-install-") as tmp:
             workspace = Path(tmp)
             lock_file = workspace / "lock.txt"
-            lock_file.write_text(lock, encoding="utf-8")
+            lock_file.write_text(install_lock(parse_lock(lock)), encoding="utf-8")
             steps = (
                 (venv_command(uv, staging), ()),
                 (install_command(uv, staging / "bin" / "python", lock_file), PYPI_HOSTS),
@@ -776,31 +816,79 @@ def stage_locked_python(
                         "be a wheel (an sdist is never built) whose hash the lock lists, "
                         f"served by {' / '.join(PYPI_HOSTS)}"
                     )
+        seal = seal_venv(staging)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    return str(staging / "bin" / "python"), staging
+    return str(staging / "bin" / "python"), staging, seal
 
 
 def commit_locked_venv(
-    skep_home: Path, plugin_id: str, lock_sha256: str, staging: Path | None
+    skep_home: Path, plugin_id: str, lock_sha256: str, staging: Path | None, seal: str
 ) -> str:
     """After both stages passed: the staged venv moves to its lock-keyed
-    home (``--relocatable``), and that interpreter is what runs.
+    home (``--relocatable``) — replacing a tree there that no longer matches
+    — and must still match the seal the trials ran against (I2: what was
+    trialed is what runs).
     ponytail: superseded lock venvs stay on disk; prune them if disk matters."""
     import shutil
+    import tempfile
 
     if not lock_sha256:
         return sys.executable
     final = venv_python(skep_home, plugin_id, lock_sha256)
+    home = final.parent.parent
     if staging is not None:
-        try:
-            staging.rename(final.parent.parent)
-        except OSError:  # a twin promote landed this exact lock first
-            shutil.rmtree(staging, ignore_errors=True)
-    if not final.is_file():
-        raise ValueError(f"the locked environment did not land at {final.parent.parent}")
+        if home.exists() or home.is_symlink():
+            stale = Path(tempfile.mkdtemp(prefix=".stale-", dir=home.parent))
+            home.rename(stale / "venv")
+            shutil.rmtree(stale, ignore_errors=True)
+        staging.rename(home)
+    try:
+        landed = seal_venv(home)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"the locked environment did not land at {home}: {exc}") from exc
+    if landed != seal:
+        raise ValueError(
+            f"the locked environment at {home} changed after its trial (its seal no longer "
+            "matches) — nothing was activated; propose promote_tool again"
+        )
     return str(final)
+
+
+def publish_source(
+    config: Any, plugin_id: str, source: str, commit: Any, restore: Any = None
+) -> Path:
+    """Review R1 (K7): swap the installed copy for ``source`` and run
+    ``commit`` (the record write that binds it) as one step: the new bytes
+    are staged beside the old ones first, and if anything after the swap
+    fails the old bytes go back — the previous tool stays byte-identical
+    and keeps running. ``restore`` undoes the caller's other writes."""
+    import tempfile
+
+    root = installed_tools_root(config)
+    root.mkdir(parents=True, exist_ok=True)
+    installed = root / f"{plugin_id}.py"
+    old = installed.read_bytes() if installed.is_file() else None
+    with tempfile.NamedTemporaryFile("wb", dir=root, prefix=f".{plugin_id}.", delete=False) as fh:
+        fh.write(source.encode("utf-8"))
+    staged = Path(fh.name)
+    try:
+        os.replace(staged, installed)
+        commit()
+    except BaseException:
+        if old is None:
+            installed.unlink(missing_ok=True)
+        else:
+            with tempfile.NamedTemporaryFile("wb", dir=root, delete=False) as back:
+                back.write(old)
+            os.replace(back.name, installed)
+        if restore is not None:
+            restore()
+        raise
+    finally:
+        staged.unlink(missing_ok=True)
+    return installed
 
 
 def wall_trial(
@@ -832,6 +920,15 @@ def wall_trial(
         probe = "smoke_test" if stage_hosts and "smoke_test" in names else "self_test"
         if probe not in names:
             return False, f"stage {stage} ({wall}): tools/list has no {probe} tool", evidence
+        if len(set(names)) < 2:
+            return (
+                False,
+                (
+                    f"stage {stage} ({wall}): self_test alone is not a tool server — expose the "
+                    "real tool(s) too"
+                ),
+                evidence,
+            )
         call = client.call_tool(probe, {})
         detail = str(call.content if call.ok else call.error)[:400]
         evidence[stage] = {"tools": names, "called": probe, "ok": call.ok, "result": detail}

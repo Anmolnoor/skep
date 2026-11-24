@@ -459,3 +459,55 @@ def test_a_forged_readonly_hint_never_skips_the_card(
         assert verdict("forge-weather") != "require_approval"
     finally:
         store.close()
+
+
+# --- review R1 (K8): the forge-* prefix is reserved before any transport ---
+
+
+def test_a_forge_id_never_takes_the_http_transport(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recordless forge-* HTTP registration made host-side requests at
+    discovery and on every call: the transport was chosen before the
+    reserved prefix was checked. Every forge-* id runs only from its bound
+    record behind forged_lane, whatever transport its config names."""
+    import httpx
+
+    def no_http(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("a forge-* id reached the http transport")
+
+    monkeypatch.setattr(httpx, "Client", no_http)
+    store = _store(home)
+    try:
+        stray = MCPServerConfig("forge-web", "http", url="http://127.0.0.1:9/mcp")
+        with pytest.raises(MCPError, match="no forged plugin"):
+            runner_for_config(stray, skep_home=home, store=store)("tools/list", {})
+        config = _activate(store, home)
+        seen = _capture_lane(monkeypatch)
+        posing = MCPServerConfig(config.server_id, "http", url="http://127.0.0.1:9/mcp")
+        runner_for_config(posing, skep_home=home, store=store)("tools/list", {})
+        assert seen["profile"]["read_allowlist"] == ()  # the bound record ran, walled
+    finally:
+        store.close()
+
+
+def test_register_mcp_server_refuses_the_reserved_forge_prefix(config: SupervisorConfig) -> None:
+    from typing import cast
+
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.tools import execute_mutation
+
+    store = RunStore(config.db_path)
+    try:
+        for transport, extra in (("http", {"url": "http://127.0.0.1:9/mcp"}),
+                                 ("stdio", {"command": ["python3", "x.py"]})):  # fmt: skip
+            with pytest.raises(ValueError, match=r"forge-.*reserved.*promote_tool"):
+                execute_mutation(
+                    "register_mcp_server",
+                    {"server_id": "forge-web", "transport": transport, **extra},
+                    store=store, holder=ConfigHolder(config, store),
+                    runner=cast(Dispatcher, None), actor="test",
+                )  # fmt: skip
+        assert load_mcp_servers(store) == {}
+    finally:
+        store.close()
