@@ -1083,4 +1083,12 @@ def card_summary(
     if high is not None:
         summary["tier"] = "high"
         summary["high"] = high
+    if store is not None and live_tier:
+        # R4 K1: the thread's card is where a landing or PR is approved — it
+        # names every run it lands or publishes, each with its G10 and V1.
+        from .console import run_evidence
+
+        runs = run_evidence(store, tool, safe_args)
+        if runs:
+            summary["runs"] = runs
     return summary

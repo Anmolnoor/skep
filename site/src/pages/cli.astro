@@ -3,7 +3,9 @@
 // synopsis was read from `skep <command> --help` under a throwaway home.
 // tests/supervisor/test_site_facts.py holds each `skep <command> [<subcommand>]`
 // named here against the argparse surface. The slash deck is not typed: it is
-// read at build from the web app's own COMMANDS table.
+// read at build from src/lib/slash-deck.json, which scripts/site-slash-deck.py
+// writes from the one command registry (serve/commands.py) and the same test
+// holds against it.
 import Base from '../layouts/Base.astro';
 import Callout from '../components/Callout.astro';
 import Chip from '../components/Chip.astro';
@@ -22,11 +24,8 @@ skep ${version} (worker contract ${contract})
 `;
 
 // ---- the slash deck, from the code ----
-const appJs = readRepoFile('src/skep/supervisor/serve/static/app.js');
-const deckSource = /const COMMANDS = \{\n([\s\S]*?)\n\};/.exec(appJs)?.[1];
-if (!deckSource) throw new Error('app.js: the COMMANDS table was not found');
-// The table is a plain object literal of strings in this repository's own file.
-const DECK: Record<string, { usage: string; desc: string }> = new Function(`return {${deckSource}}`)();
+const slashDeck: { web: { name: string; usage: string; help: string }[]; cli_only: string[] } =
+  JSON.parse(readRepoFile('site/src/lib/slash-deck.json'));
 const CARD = ' (confirm card)';
 // src/skep/cli_chat.py: /trust and /steer act at once; /btw is a read-only model turn.
 const AT_ONCE = new Set(['trust', 'steer']);
@@ -38,24 +37,22 @@ const effects = {
 } as const;
 const effectOf = (name: string, desc: string): keyof typeof effects =>
   desc.includes(CARD) ? 'card' : AT_ONCE.has(name) ? 'at once' : name === 'btw' ? 'model turn' : 'read';
-const deck = Object.entries(DECK).map(([name, { usage, desc }]) => ({
+const deck = slashDeck.web.map(({ name, usage, help }) => ({
   usage,
-  desc: desc.replace(CARD, ''),
-  effect: effects[effectOf(name, desc)],
+  desc: help.replace(CARD, ''),
+  effect: effects[effectOf(name, help)],
 }));
 
-// The five commands that exist only in the terminal (usage from src/skep/cli_chat.py COMMANDS).
+// The four commands that exist only in the terminal (usage from the registry's cli rows).
 const terminalOnly = [
-  ['/status', 'Print the startup line again: assistant readiness, approvals and cards waiting.'],
   ['/model [name] [--scope chat|default]', 'Show the model this chat uses. With a name, propose a change of model on a card.'],
   ['/replay', 'Print the last messages of this chat.'],
   ['/stop', 'Stop this chat\'s running turn at its next step. The web chat has a Stop button on its working line.'],
   ['/exit', 'Leave the chat. A bare exit or quit also works.'],
 ];
-const cliOnly = /CLI_ONLY = frozenset\(\{([^}]*)\}\)/.exec(readRepoFile('src/skep/cli_chat.py'))?.[1];
-const cliOnlyNames = (cliOnly?.match(/[a-z]+/g) ?? []).sort().join(' ');
-if (cliOnlyNames !== 'exit model replay status stop') {
-  throw new Error(`cli_chat.py CLI_ONLY is now "${cliOnlyNames}": update terminalOnly in cli.astro`);
+const cliOnlyNames = slashDeck.cli_only.join(' ');
+if (cliOnlyNames !== 'exit model replay stop') {
+  throw new Error(`the registry's terminal-only commands are now "${cliOnlyNames}": update terminalOnly in cli.astro`);
 }
 
 // ---- the commands ----
@@ -132,6 +129,7 @@ const groups: Group[] = [
     title: 'Read the evidence, then decide',
     lead: 'Approving a completed run applies its patch on a branch. The branch, pull-request and repository commands are your half of git: they run on your own credentials.',
     rows: [
+      ['skep review', 'With no id, on a terminal: walk every run waiting on you, each as its card, G10 and V1, and the exact diff, then one key: a approve, d deny, f forensics, p receipt, s skip, q quit. Off a terminal it only lists them.'],
       ['skep review <task_id>', 'The run\'s evidence, re-verification result, approval state and diff. A unique prefix of the id is enough.'],
       ['skep review <task_id> --approve [--branch NAME] [--pr] [--pr-base BRANCH] [--note TEXT] [--actor NAME]', 'On a completed run, apply the patch on <code>skep/&lt;task_id&gt;</code> or the branch you name; the default branch is refused. On a run waiting at a gate, resume it. <code>--pr</code> then pushes that branch and opens a pull request with the GitHub CLI.'],
       ['skep review <task_id> --deny', 'Reject the pending approval.'],
@@ -177,6 +175,7 @@ const groups: Group[] = [
       ['skep policy revoke RULE_ID', 'Remove one learned grant. What it allowed asks again.'],
       ['skep policy decisions [--actor GLOB] [--since TIME] [--limit N] [--team ID]', 'The decision log, newest first, with counts per verdict.'],
       ['skep ledger verify [--path FILE] [--json]', 'Check every hash-chained row of the decision log, across rotations. Exits 1 naming the first break by file and line.'],
+      ['skep forensics TASK_ID [--md|--json]', 'One run\'s evidence in one read, the same report as <code>skep run forensics</code>.'],
       ['skep proof export TASK_ID [--format md|json]', 'One run\'s local receipt for a PR: posture, G10 and V1, decision count, ledger head hash. A local chain catches an edited row, not a rewrite by someone who can write your skep home: the published receipt is the outside anchor.'],
       ['skep role list', 'Every role; <code>*</code> marks the one new chats open in.'],
       ['skep role show NAME', 'One role\'s record and its policy layer as a table.'],
@@ -339,7 +338,7 @@ const groups: Group[] = [
 
   <Section id="deck" band={groups.length % 2 === 0} eyebrow="Slash commands" title="The command deck" lead="In the web chat and in skep chat, a message that starts with / is a command of yours. The model never sees it.">
     <div class="grid">
-      <Table caption="The deck, read at build from the web app's COMMANDS table">
+      <Table caption="The deck, read at build from skep's one command registry">
         <thead>
           <tr><th scope="col">Command</th><th scope="col">What it does</th><th scope="col">Effect</th></tr>
         </thead>
@@ -363,7 +362,7 @@ const groups: Group[] = [
             <li>There is no command that starts a run. Ask for the work in a plain message and confirm the card the assistant proposes, or use <code>skep run</code>.</li>
           </ul>
         </div>
-        <Table caption="Terminal only: these five exist in skep chat, not in the web chat">
+        <Table caption="Terminal only: these four exist in skep chat, not in the web chat">
           <thead>
             <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
           </thead>

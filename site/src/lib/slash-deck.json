@@ -1,0 +1,130 @@
+{
+  "web": [
+    {
+      "name": "help",
+      "usage": "/help",
+      "help": "list the command deck"
+    },
+    {
+      "name": "policy",
+      "usage": "/policy [repo]",
+      "help": "effective policy for a repo (default: last used)"
+    },
+    {
+      "name": "repos",
+      "usage": "/repos",
+      "help": "registered repos"
+    },
+    {
+      "name": "skills",
+      "usage": "/skills",
+      "help": "learned-skill candidates and admitted skills"
+    },
+    {
+      "name": "runs",
+      "usage": "/runs [n]",
+      "help": "recent runs (/runs 10)"
+    },
+    {
+      "name": "approvals",
+      "usage": "/approvals",
+      "help": "the pending approval queue"
+    },
+    {
+      "name": "state",
+      "usage": "/state <repo>",
+      "help": "a repo's git state: branches, HEAD, recent commits"
+    },
+    {
+      "name": "setup",
+      "usage": "/setup <repo> [--pack X] [--phase Y]",
+      "help": "bind a repo to a trusted project (confirm card)"
+    },
+    {
+      "name": "phase",
+      "usage": "/phase <project-id> <bootstrap|build|maintain>",
+      "help": "move a project's trust phase (confirm card)"
+    },
+    {
+      "name": "unregister",
+      "usage": "/unregister <project-id>",
+      "help": "unregister a project: skep forgets it, its folder stays (confirm card)"
+    },
+    {
+      "name": "land",
+      "usage": "/land <task-id> [branch]",
+      "help": "land a completed run's patch (confirm card)"
+    },
+    {
+      "name": "approve",
+      "usage": "/approve <review-id|card-id> [branch]",
+      "help": "approve a pending review (confirm card), or a pending card by its id"
+    },
+    {
+      "name": "deny",
+      "usage": "/deny <review-id|card-id>",
+      "help": "deny a pending review (confirm card), or a pending card by its id"
+    },
+    {
+      "name": "workon",
+      "usage": "/workon <path> [--pack X] [--phase Y]",
+      "help": "make a local directory a first-class workspace \u2014 git baseline + trusted project (confirm card)"
+    },
+    {
+      "name": "schedule",
+      "usage": "/schedule <name> <repo> <every> <instructions\u2026>",
+      "help": "create a recurring schedule the ticker dispatches \u2014 every takes 30m/6h/1d (confirm card)"
+    },
+    {
+      "name": "persona",
+      "usage": "/persona <text\u2026|default>",
+      "help": "set the profile-level identity every chat starts with \u2014 identity only, never policy (confirm card)"
+    },
+    {
+      "name": "role",
+      "usage": "/role <builder|operator|assistant|custom-role>",
+      "help": "switch this chat's role \u2014 prompt, voice and policy layer together; a role only tightens the baseline (confirm card)"
+    },
+    {
+      "name": "personality",
+      "usage": "/personality <concise|technical|friendly|custom:text|default>",
+      "help": "set this chat's reply style \u2014 style only, never policy (confirm card)"
+    },
+    {
+      "name": "btw",
+      "usage": "/btw <question\u2026>",
+      "help": "a read-only side question, even beside a pending card: no cards, no mutations"
+    },
+    {
+      "name": "trust",
+      "usage": "/trust [private|untrusted]",
+      "help": "trust this chat again: clear its taint (both bits by default) \u2014 yours only, never the model's; outside content read later sets it again"
+    },
+    {
+      "name": "steer",
+      "usage": "/steer <task-id> <text\u2026>",
+      "help": "send a steering note into a RUNNING react run \u2014 input, never authority: resolves no card, approval, or gate"
+    },
+    {
+      "name": "resume",
+      "usage": "/resume <task-id>",
+      "help": "continue a crashed/timed-out run from its checkpoint \u2014 model-free (confirm card)"
+    },
+    {
+      "name": "browser",
+      "usage": "/browser",
+      "help": "register the built-in Playwright browser under the browse scope (confirm card)"
+    },
+    {
+      "name": "status",
+      "usage": "/status",
+      "help": "what is running and what waits on you"
+    }
+  ],
+  "cli_only": [
+    "exit",
+    "model",
+    "replay",
+    "stop"
+  ]
+}

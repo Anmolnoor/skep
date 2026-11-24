@@ -1645,6 +1645,7 @@ class LlmConfigUpdate(BaseModel):
     vision: bool | None = None  # v44-F9: the model accepts image input
     num_ctx: int | None = None  # v56-F1: requested ollama context window; 0 = auto (v74-F2)
     tool_delivery: Literal["indexed", "full"] | None = None  # v74-F3: the escape hatch
+    tested: dict[str, Any] | None = None  # R4 K6: the endpoint the probe resolved
 
 
 class LlmTestRequest(BaseModel):
@@ -1819,7 +1820,9 @@ def provider_state(store: RunStore, home: Path) -> ProviderState:
     )
 
 
-def _restore(store: RunStore, home: Path, state: ProviderState) -> None:
+def _restore(
+    store: RunStore, home: Path, state: ProviderState, stamps: dict[str, str | None]
+) -> None:
     rows, settings, saved = state
     kept = {row.provider_id for row in rows}
     for profile in store.list_provider_profiles():
@@ -1836,8 +1839,8 @@ def _restore(store: RunStore, home: Path, state: ProviderState) -> None:
             continue
         if value is None:  # absent before: deleted, not a JSON null row
             store.delete_setting(key)
-        else:
-            store.set_setting(key, value)
+        else:  # as it was, updated_at too: a refused save leaves no trace
+            store.set_setting(key, value, updated_at=stamps.get(key))
     for path in _state_files(home):
         if path not in saved:
             path.unlink(missing_ok=True)
@@ -1871,10 +1874,11 @@ def provider_rollback(
                 "the provider settings changed while this save was being tested — nothing "
                 "was saved: reload them and save again"
             )
+        stamps = {key: store.setting_updated_at(key) for key in state[1]}
         try:
             yield
         except BaseException:
-            _restore(store, home, state)
+            _restore(store, home, state, stamps)
             raise
 
 
@@ -1978,6 +1982,76 @@ def _env_key_for(home: Path, target: str, store: RunStore) -> str | None:
     return key if key and owner in (target.strip().rstrip("/"), "") else None
 
 
+@dataclasses.dataclass(frozen=True)
+class _Staged:
+    """Phase 10 R2 I6: what a provider save stages, resolved ONCE — Save
+    probes and activates it, and Test (``probe_staged``) probes the same
+    profile, model, protocol and credential."""
+
+    target: str
+    wire: LLMProtocol
+    active: ProviderProfile | None
+    same: bool  # target is the saved endpoint (P8: its saved model applies)
+    saved_model: str | None
+    # moved or orphaned: the endpoint's own profile (registered, or new keyless)
+    candidate: ProviderProfile | None
+    registered: bool
+
+
+def _stage(
+    view: RunStore,
+    *,
+    base_url: str | None,
+    model: str | None,
+    protocol: LLMProtocol | None,
+    api_key: str | None,
+) -> _Staged:
+    active = view.active_provider_profile()
+    saved_url, saved_model, saved_protocol = assistant_llm(view)
+    target = (base_url or saved_url or "").strip().rstrip("/")
+    wire = protocol or saved_protocol
+    moved = active is not None and target != active.base_url.rstrip("/")
+    # R3 (H3): nothing active on a non-empty registry (the active profile was
+    # removed) — the save activates its target's profile, probed like a
+    # switch; a bare clear only clears (it sends nothing anywhere)
+    orphaned = (
+        active is None
+        and bool(target)
+        and bool(view.list_provider_profiles())
+        and (api_key != "" or (base_url, model, protocol) != (None, None, None))
+    )
+    same = target == (saved_url or "").rstrip("/")  # P8: the saved model only for its endpoint
+    candidate, registered = (
+        _endpoint_profile(view, target, protocol, wire, model or (saved_model if same else None))
+        if moved or orphaned
+        else (None, False)
+    )
+    return _Staged(target, wire, active, same, saved_model, candidate, registered)
+
+
+def _staged_endpoint(staged: _Staged) -> dict[str, Any]:
+    """R4 K6: the endpoint a staged request resolves to — what Test probed,
+    and what Save must still resolve to when it sends this back."""
+    candidate = staged.candidate
+    protocol = REGISTRY_PROTOCOLS[candidate.protocol] if candidate is not None else staged.wire
+    return {"base_url": staged.target, "protocol": protocol}
+
+
+def _candidate_probe(
+    view: RunStore, home: Path, staged: _Staged, *, model: str | None, api_key: str | None
+) -> dict[str, Any]:
+    """The probe a staged candidate gets — Save's and Test's alike (I6)."""
+    candidate = staged.candidate
+    assert candidate is not None
+    return {
+        "base_url": staged.target,
+        "model": model or candidate.model or None,
+        "protocol": REGISTRY_PROTOCOLS[candidate.protocol],
+        "api_key": _committed_key(view, home, staged.target, candidate, staged.registered, api_key),
+        "provider_id": candidate.provider_id,
+    }
+
+
 def save_assistant_llm(
     store: RunStore,
     home: Path,
@@ -1987,6 +2061,7 @@ def save_assistant_llm(
     protocol: LLMProtocol | None = None,
     api_key: str | None = None,
     settings: dict[str, Any] | None = None,
+    tested: dict[str, Any] | None = None,
 ) -> None:
     """``_save_assistant_llm`` — R6 (Sol R6-1): while a legacy key is still
     unowned, resolving it, probing with it and pinning it are ONE step under
@@ -2002,12 +2077,12 @@ def save_assistant_llm(
         if unowned:  # resolve, probe and pin as one step
             _save_assistant_llm(
                 store, home, base_url=base_url, model=model, protocol=protocol,
-                api_key=api_key, settings=settings,
+                api_key=api_key, settings=settings, tested=tested,
             )  # fmt: skip
             return
     _save_assistant_llm(
         store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
-        settings=settings,
+        settings=settings, tested=tested,
     )  # fmt: skip
 
 
@@ -2020,6 +2095,7 @@ def _save_assistant_llm(
     protocol: LLMProtocol | None = None,
     api_key: str | None = None,
     settings: dict[str, Any] | None = None,
+    tested: dict[str, Any] | None = None,
 ) -> None:
     """Phase 05 (5.1): THE write of the assistant's provider/model — Web
     Settings and the Queen's model dial land here, ``use_provider`` (CLI
@@ -2045,37 +2121,33 @@ def _save_assistant_llm(
     ProviderError (ProviderConflict when staged-on state moved), having
     written nothing."""
     from ..codex_login import uses_codex_login
-    from ..providers import ProviderError, migrate_legacy_provider, provider_host
+    from ..providers import ProviderConflict, ProviderError, migrate_legacy_provider, provider_host
 
     if base_url and provider_host(base_url) is None:
         raise ProviderError(f"base_url must be a valid http(s) URL, got {base_url!r}")
     staged = provider_state(store, home)
     view = _staged_view(store, home)  # P9/F6: adopted for staging, written only on commit
-    active = view.active_provider_profile()
-    saved_url, saved_model, saved_protocol = assistant_llm(view)
-    target = (base_url or saved_url or "").strip().rstrip("/")
-    wire = protocol or saved_protocol
+    plan = _stage(view, base_url=base_url, model=model, protocol=protocol, api_key=api_key)
+    if tested is not None and _staged_endpoint(plan) != tested:
+        # R4 K6 / R5 item 8: Save writes only the endpoint its Test resolved —
+        # checked on the one plan this save probes and commits
+        raise ProviderConflict(
+            f"this save would go to {plan.target}, not the {tested.get('base_url')} the test "
+            "reached: test again. Nothing was saved"
+        )
+    target, wire, active, same, saved_model = (
+        plan.target,
+        plan.wire,
+        plan.active,
+        plan.same,
+        plan.saved_model,
+    )
+    candidate = plan.candidate
     if api_key and not target:
         raise ProviderError(
             "save a base URL first — a key is tested against the endpoint it is for, "
             "and none is configured"
         )
-    moved = active is not None and target != active.base_url.rstrip("/")
-    # R3 (H3): nothing active on a non-empty registry (the active profile was
-    # removed) — the save activates its target's profile, probed like a
-    # switch; a bare clear only clears (it sends nothing anywhere)
-    orphaned = (
-        active is None
-        and bool(target)
-        and bool(view.list_provider_profiles())
-        and (api_key != "" or (base_url, model, protocol) != (None, None, None))
-    )
-    same = target == (saved_url or "").rstrip("/")  # P8: the saved model only for its endpoint
-    candidate, registered = (
-        _endpoint_profile(view, target, protocol, wire, model or (saved_model if same else None))
-        if moved or orphaned
-        else (None, False)
-    )
     codex = uses_codex_login(target)
     switched = (
         active is not None
@@ -2088,13 +2160,7 @@ def _save_assistant_llm(
     try:
         if candidate is not None:
             model = _probe_or_refuse(
-                view,
-                home,
-                base_url=target,
-                model=model or candidate.model or None,
-                protocol=REGISTRY_PROTOCOLS[candidate.protocol],
-                api_key=_committed_key(view, home, target, candidate, registered, api_key),
-                provider_id=candidate.provider_id,
+                view, home, **_candidate_probe(view, home, plan, model=model, api_key=api_key)
             )
         elif (api_key and not codex) or switched:
             _probe_or_refuse(
@@ -2347,6 +2413,92 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
     # profile is the source (save_assistant_llm) and these are its mirrors.
 
 
+def probe_staged(
+    run_store: RunStore, home: Path, body: LlmTestRequest, *, window: bool = False
+) -> dict[str, Any]:
+    """The staged probe of /api/llm/test: the candidate's listing and one
+    1-token completion with ITS key, nothing saved. ``window`` (Phase 10 R1,
+    the Settings flow's probe): also the model the token asked and its
+    context window as the save would resolve it — provider-api (asked of the
+    endpoint now), catalog, or default; the key never comes back."""
+    saved_url, saved_model, saved_protocol = assistant_llm(run_store)
+    base_url = (body.base_url or "").strip().rstrip("/") or saved_url
+    if not base_url:
+        return {"ok": False, "detail": "no base URL configured"}
+    protocol = body.protocol or saved_protocol
+    same = base_url.rstrip("/") == (saved_url or "").rstrip("/")
+    from ..codex_login import uses_codex_login
+
+    try:
+        # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
+        # P2: a saved key only for the endpoint it was saved for.
+        pasted = (body.api_key or "").strip()
+        api_key = (
+            _codex_login_key(base_url)
+            if uses_codex_login(base_url)
+            # R2 (F10): a pasted key as the wire takes it (Copilot: exchanged)
+            else wire_key(base_url, pasted)
+            if pasted
+            else saved_key_for(run_store, home, base_url)
+        )
+    except OllamaError as exc:
+        return {"ok": False, "detail": str(exc)}
+    # Phase 05 (5.1): the listing AND one 1-token completion — the probe
+    # a dead key cannot pass (ollama.com lists models to anyone). P8: the
+    # saved model only for its own endpoint; another lists its own.
+    named = (body.default_model or "").strip() or (saved_model if same else None)
+    probe: dict[str, Any] = {
+        "base_url": base_url,
+        "model": named,
+        "protocol": protocol,
+        "api_key": api_key,
+    }
+    view = _staged_view(run_store, home)
+    plan = _stage(
+        view,
+        base_url=base_url,
+        model=named,
+        protocol=body.protocol,
+        api_key=pasted or None,
+    )
+    if plan.candidate is not None:
+        # R2 I6: another endpoint is the profile Save would activate — the
+        # registered one's pinned model, protocol and key, not a listing's first.
+        try:
+            probe = _candidate_probe(view, home, plan, model=named, api_key=pasted or None)
+        except OllamaError as exc:
+            return {"ok": False, "detail": str(exc)}
+    health = probe_candidate(view, home, **probe)
+    if not health.ok:
+        return {"ok": False, "detail": health.error, "http_status": health.http_status}
+    verdict: dict[str, Any] = {"ok": True, "models": len(health.models)}
+    if window:
+        verdict["endpoint"] = _staged_endpoint(plan)  # R4 K6: what Save sends back
+        from ..provider_presets import MODEL_CONTEXT_WINDOWS
+
+        model = probe["model"] or (health.models[0] if health.models else "")
+        # v118-F1: no context endpoint behind the Codex login (refresh_model_ctx)
+        detected = (
+            None
+            if not model or uses_codex_login(base_url)
+            else detect_model_ctx(
+                base_url, probe["api_key"], model=model, protocol=probe["protocol"]
+            )
+        )
+        if detected is not None:
+            context = {"window": detected[0], "max_output": detected[1], "source": "provider-api"}
+        elif model in MODEL_CONTEXT_WINDOWS:
+            context = {
+                "window": MODEL_CONTEXT_WINDOWS[model],
+                "max_output": None,
+                "source": "catalog",
+            }
+        else:
+            context = {"window": DEFAULT_NUM_CTX, "max_output": None, "source": "default"}
+        verdict.update(model=model, context_window=context)
+    return verdict
+
+
 def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
     @app.get("/api/llm/config")
     def get_llm_config() -> dict[str, Any]:
@@ -2386,6 +2538,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
                     protocol=body.protocol,
                     api_key=key,
                     settings=settings,
+                    tested=body.tested,
                 )
             else:
                 with provider_rollback(run_store, home):
@@ -2417,42 +2570,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
     @app.post("/api/llm/test")
     def test_llm(body: LlmTestRequest) -> dict[str, Any]:
         """Always 200: the verdict is the payload, so the UI shows it inline."""
-        saved_url, saved_model, saved_protocol = assistant_llm(run_store)
-        base_url = (body.base_url or "").strip().rstrip("/") or saved_url
-        if not base_url:
-            return {"ok": False, "detail": "no base URL configured"}
-        protocol = body.protocol or saved_protocol
-        same = base_url.rstrip("/") == (saved_url or "").rstrip("/")
-        try:
-            from ..codex_login import uses_codex_login
-
-            # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
-            # P2: a saved key only for the endpoint it was saved for.
-            pasted = (body.api_key or "").strip()
-            api_key = (
-                _codex_login_key(base_url)
-                if uses_codex_login(base_url)
-                # R2 (F10): a pasted key as the wire takes it (Copilot: exchanged)
-                else wire_key(base_url, pasted)
-                if pasted
-                else saved_key_for(run_store, home, base_url)
-            )
-        except OllamaError as exc:
-            return {"ok": False, "detail": str(exc)}
-        # Phase 05 (5.1): the listing AND one 1-token completion — the probe
-        # a dead key cannot pass (ollama.com lists models to anyone). P8: the
-        # saved model only for its own endpoint; another lists its own.
-        health = probe_candidate(
-            run_store,
-            home,
-            base_url=base_url,
-            model=(body.default_model or "").strip() or (saved_model if same else None),
-            protocol=protocol,
-            api_key=api_key,
-        )
-        if not health.ok:
-            return {"ok": False, "detail": health.error, "http_status": health.http_status}
-        return {"ok": True, "models": len(health.models)}
+        return probe_staged(run_store, home, body)
 
     @app.get("/api/llm/usage")
     def get_llm_usage(chat_id: str | None = None) -> dict[str, Any]:

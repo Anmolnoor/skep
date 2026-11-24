@@ -14,6 +14,10 @@ from skep.supervisor import SupervisorConfig
 from skep.supervisor.serve import create_app
 from skep.supervisor.serve.app import STATIC_DIR
 
+# Phase 10 10.1: pages that left app.js keep their text in js/pages/.
+LIBRARY_JS = STATIC_DIR / "js" / "pages" / "library.js"
+SCHEDULES_JS = STATIC_DIR / "js" / "pages" / "schedules.js"
+
 
 def test_memory_workspace_routes_and_nav(config: SupervisorConfig) -> None:
     """The web memory workspace: propose -> review -> approve -> search -> forget,
@@ -225,7 +229,7 @@ def test_projects_cards_and_detail_route() -> None:
     assert set(re.findall(r"^\s{2}(\w+):", tone_map, re.M)) == set(PROJECT_PHASES)
 
     detail = app_js[app_js.index("async function viewProjectDetail") :]
-    detail = detail[: detail.index("async function viewSchedules")]
+    detail = detail[: detail.index("// ---------- Policies")]
     for call in (
         'api("GET", "/api/projects")',
         'api("GET", "/api/schedules")',
@@ -296,7 +300,7 @@ def test_approvals_sort_filter_and_age_use_requested_at() -> None:
     css = (STATIC_DIR / "style.css").read_text()
 
     approvals = app_js[app_js.index("async function viewApprovals") :]
-    approvals = approvals[: approvals.index("// ---------- Templates")]
+    approvals = approvals[: approvals.index("// ---------- Projects")]
     assert "const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 }" in approvals
     assert "approvalPriority(a)" in approvals
     # Stable within a tier: oldest requested first.
@@ -322,11 +326,10 @@ def test_schedules_relative_next_run_and_health_banners() -> None:
     consecutive failures with an inline disable at 5 that rides the EXISTING
     PATCH toggle (I5); the banner names the server's own auto-disable-at-5
     guard (I8). A clean page renders no banner."""
-    app_js = (STATIC_DIR / "app.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    sched = app_js[app_js.index("async function viewSchedules") :]
-    sched = sched[: sched.index("// ---------- Policies")]
+    sched = SCHEDULES_JS.read_text()
+    sched = sched[sched.index("async function viewSchedules") :]
     # Relative next-run, overdue mapping, absolute hover; last-run absolute.
     assert '? "overdue" : relativeTime(s.next_run_at)' in sched
     assert "title: fmtTs(s.next_run_at)" in sched
@@ -352,10 +355,10 @@ def test_notes_render_markdown_and_tasks_group_by_due() -> None:
     rides the existing PATCH, and the EXPLICIT run:<id> token links runs —
     deliberately no bare-hex autolinking (I8). The full editor stays
     reachable."""
-    app_js = (STATIC_DIR / "app.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    nt = app_js[app_js.index("// ---------- Notes & Tasks (v76-F7") :]
+    library = LIBRARY_JS.read_text()
+    nt = library[library.index("// ---------- Notes & Tasks (v76-F7") :]
     nt = nt[: nt.index("// ---------- Curated memory")]
     # Markdown + tags + filter; the run token is explicit syntax.
     assert "renderMarkdown(note.content)" in nt
@@ -404,16 +407,16 @@ def test_memory_chips_and_chat_sidebar_search_pinning() -> None:
 
     from skep.supervisor import MEMORY_CLASSES
 
-    app_js = (STATIC_DIR / "app.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    chip_map = app_js[app_js.index("const MEMORY_CLASS_COLORS") :]
+    library = LIBRARY_JS.read_text()
+    chip_map = library[library.index("const MEMORY_CLASS_COLORS") :]
     chip_map = chip_map[: chip_map.index("function memoryClassChip")]
     js_classes = set(re.findall(r"^\s{2}(\w+): \"var\(", chip_map, re.M))
     assert js_classes == set(MEMORY_CLASSES)  # the true lockstep pin
 
-    memory = app_js[app_js.index("async function viewMemory") :]
-    memory = memory[: memory.index("// ---------- Deep research")]
+    memory = library[library.index("async function viewMemory") :]
+    memory = memory[: memory.index("// ---------- Templates & Skills")]
     assert "memoryClassChip(p.memory_class)" in memory
     assert "memoryClassChip(item.memory_class)" in memory
     assert "proposed ${relativeTime(p.created_at)}" in memory
@@ -442,14 +445,14 @@ def test_memory_chips_and_chat_sidebar_search_pinning() -> None:
     # v101-F8: the tint mechanism survived the fold into .chip — memory chips
     # still set their own --chip-color inline rather than using a named tone.
     assert "color-mix(in srgb, var(--chip-color, var(--muted)) 15%, transparent)" in css
-    assert 'class: "chip upper"' in app_js
+    assert 'class: "chip upper"' in library
 
 
 def test_schedule_view_renders_health_from_real_routes(config: SupervisorConfig) -> None:
     """v14 Step 8: the schedules view fetches the schedule + provider health
     routes (which exist), and app.js still parses (route-consistency + ES-module
     tests below guard the rest)."""
-    app_js = (STATIC_DIR / "app.js").read_text()
+    app_js = SCHEDULES_JS.read_text()
     assert "/api/schedules/health" in app_js
     assert "/api/providers/health" in app_js
     assert "/api/nodes" in app_js
@@ -503,13 +506,13 @@ def test_index_and_assets_are_public(config: SupervisorConfig) -> None:
 
 
 def test_ui_calls_only_routes_that_exist(config: SupervisorConfig) -> None:
-    """Every /api/ path mentioned in app.js — or a module it imports (H1) —
-    resolves to a real route."""
+    """Every /api/ path mentioned in app.js — or a module it imports (H1, and
+    js/ since Phase 10 10.1) — resolves to a real route."""
     import re
 
     app = create_app(config)
     known = {route.path for route in app.routes}
-    source = "\n".join(p.read_text() for p in sorted(STATIC_DIR.glob("*.js")))
+    source = "\n".join(p.read_text() for p in sorted(STATIC_DIR.rglob("*.js")))
     for raw in set(re.findall(r"\"(/api/[^\"?$`]*)", source)) | set(
         re.findall(r"`(/api/[^`?]*)`?", source)
     ):
@@ -524,8 +527,9 @@ def test_app_js_parses_as_an_es_module(tmp_path: Path) -> None:
     """No build step means no compile check — parse it with node when available."""
     if shutil.which("node") is None:
         pytest.skip("node not installed; parsing is exercised by the browser instead")
-    for source in sorted(STATIC_DIR.glob("*.js")):  # H1: and every module it imports
-        target = tmp_path / f"{source.stem}.mjs"  # .mjs makes --check parse it as a module
+    for source in sorted(STATIC_DIR.rglob("*.js")):  # H1: and every module it imports
+        flat = "-".join(source.relative_to(STATIC_DIR).with_suffix("").parts)
+        target = tmp_path / f"{flat}.mjs"  # .mjs makes --check parse it as a module
         target.write_text(source.read_text())
         result = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
         assert result.returncode == 0, f"{source.name}: {result.stderr}"
@@ -637,7 +641,7 @@ def test_run_detail_ui_formats_policy_decisions_for_approvals_and_events() -> No
 def test_runs_and_schedules_ui_show_project_column() -> None:
     """v75-F4 re-pin (C4): the runs table became cards — the project string
     and the autonomy summary now ride each card instead of columns."""
-    source = (STATIC_DIR / "app.js").read_text()
+    source = (STATIC_DIR / "app.js").read_text() + SCHEDULES_JS.read_text()
 
     assert "? `${run.project_context.project_id} (${run.project_context.phase})`" in source
     assert "const autonomy = formatRunAutonomy(run);" in source
@@ -673,14 +677,14 @@ def test_approvals_card_renders_v19_f1_batch_commands() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert "const batchCommands = Array.isArray(approval.commands)" in source
+    assert "const batchCommands = approvalCommands(approval)" in source  # R4 K8
     assert 'class: "command-list mono"' in source
     assert "`Approve all ${batchCommands.length}`" in source
     assert ".command-list" in styles
 
 
 def test_templates_ui_exposes_learned_suggestion_flow() -> None:
-    source = (STATIC_DIR / "app.js").read_text()
+    source = (STATIC_DIR / "app.js").read_text() + LIBRARY_JS.read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
     assert "function renderSuggestionGrant" in source
@@ -772,7 +776,15 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     chat_model = source[source.index("async function renderAssistantTab") :]
     chat_model = chat_model[: chat_model.index("// -- worker provider")]
     assert 'api("GET", "/api/llm/config")' in chat_model
-    assert 'api("POST", "/api/llm/test", {})' in chat_model
+    # Phase 10 R1 (E4): the connection is staged, probed (nothing saved), then
+    # saved by its own button — js/pages/settings-provider.js, mounted here.
+    assert "stagedConnection({ protocol, baseUrl, apiKey })" in chat_model
+    provider = (STATIC_DIR / "js" / "pages" / "settings-provider.js").read_text()
+    assert 'api("POST", "/api/llm/probe", body)' in provider
+    assert (  # R4 K6: Save is bound to the endpoint its Test resolved
+        'api("PUT", "/api/llm/config", { ...body, default_model: answered, tested: endpoint })'
+        in provider
+    )
     assert 'api("GET", "/api/llm/models")' in chat_model
     assert 'api("PUT", "/api/llm/config"' in chat_model
     assert 'api("PUT", "/api/llm/config"' not in page  # not a second time
@@ -833,7 +845,8 @@ def test_chat_utility_controls_are_icon_only() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert "function iconButton" in source
+    # Phase 10 10.1: the builder moved to js/dom.js with el().
+    assert "export function iconButton" in (STATIC_DIR / "js" / "dom.js").read_text()
     assert 'class: "chat-message-action icon-button"' in source
     assert 'class: "composer-send icon-button"' in source
     assert 'class: "chat-toolbar-action icon-button ghost"' in source
@@ -921,7 +934,8 @@ def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
     styles = (STATIC_DIR / "style.css").read_text()
 
     assert "const cardBody = (d)" in source
-    assert source.count("...cardBody(d)") == 3  # actionCard, commandCard, gateCard
+    # actionCard, commandCard, gateCard, and Phase 10 R1 D1's elsewhereCard
+    assert source.count("...cardBody(d)") == 4
     # The description and args are reference, reachable but not the default view.
     assert 'el("details", { class: "card-details" }' in source
     # The three restatements are deleted.
@@ -1510,7 +1524,8 @@ def test_run_detail_timeline_tabs_and_copy_id() -> None:
     assert 'tabs.panels.get("transitions")' in detail
     assert "main.append(tabs.bar, tabs.content)" in detail
     # The live stream wires into the persistent panel (SSE survives switches).
-    assert "new EventSource(`/api/runs/${taskId}/events?stream=1`)" in detail
+    # Phase 10 10.1: through js/sse.js, which reopens it after a daemon restart.
+    assert "liveSource(`/api/runs/${taskId}/events?stream=1`" in detail
     # Copy-ID: the full id + clipboard via the shared helper.
     assert "copyText(taskId)" in detail
     assert '"copy task ID"' in detail
@@ -1533,7 +1548,7 @@ def test_templates_and_skills_split_into_tabs() -> None:
     tolerates the query — C9; parsing ships v76-F4); the skill stepper claims
     ONLY states skills.py can produce: draft → tested → approved, rejected as
     the failure branch — no invented sandboxed/reviewed/active (I8)."""
-    source = (STATIC_DIR / "app.js").read_text()
+    source = (STATIC_DIR / "app.js").read_text() + LIBRARY_JS.read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
     assert '{ key: "templates", label: "Templates", render: renderTemplatesTab }' in source
@@ -1619,8 +1634,9 @@ def test_pending_cards_reconcile_without_a_reload() -> None:
     undrawn card exists. Both key off data-action-id on the card DOM."""
     source = (STATIC_DIR / "app.js").read_text()
 
-    # The id rides the DOM on ALL card kinds (assistant, command, v87-F2 gate).
-    assert source.count('"data-action-id": d.action_id') == 3
+    # The id rides the DOM on ALL card kinds (assistant, command, v87-F2 gate,
+    # and the read-only card skep chat must answer, Phase 10 R1 D1).
+    assert source.count('"data-action-id": d.action_id') == 4
     # One shared reconciler; replay and the stream finally both use it.
     assert "const renderPendingCards" in source
     assert source.count("renderPendingCards();") >= 2
@@ -1767,7 +1783,7 @@ def test_assign_dispatches_the_whole_roster_and_can_name_an_engine() -> None:
     source = (STATIC_DIR / "app.js").read_text()
 
     assign = source[source.index("async function viewAssign") :]
-    assign = assign[: assign.index("// ---------- Templates")]
+    assign = assign[: assign.index("// ---------- Runs")]
 
     # Built from the API, not a literal — a caste added to the registry is
     # dispatchable with no edit in app.js. The pin is on the SOURCE of the
@@ -1796,7 +1812,7 @@ def test_every_caste_select_reads_the_registry() -> None:
     """Three selects had the same two-option literal. One helper, one source —
     the F1 defect was five diverged copies of the roster, and a UI that keeps
     its own is the sixth."""
-    source = (STATIC_DIR / "app.js").read_text()
+    source = (STATIC_DIR / "app.js").read_text() + LIBRARY_JS.read_text()
     assert source.count("casteSelect(roster.castes)") == 3
     assert 'el("option", {}, "audit")' not in source
 
@@ -1824,7 +1840,7 @@ def test_run_cards_and_detail_say_who_ran() -> None:
     assert "...workerChips(run)" in card
 
     detail = source[source.index("async function viewRunDetail") :]
-    detail = detail[: detail.index("// ---------- Templates")]
+    detail = detail[: detail.index("// ---------- Approvals")]
     assert "const who = workerChips(run)" in detail
     assert "if (who.length) kv(" in detail  # absent stays absent
 
@@ -1907,6 +1923,69 @@ def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
     assert guards == fetches == 2
 
 
+def test_the_receipt_endpoint_is_the_cli_receipt_read_only_and_redacted(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """Phase 10 R1 D8: GET /api/runs/<id>/receipt is `skep proof export` over
+    HTTP — the same builder, so redact_export applies — token-gated and
+    read-only; md (the PR paste) or json."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.ledger_proof import build_receipt
+
+    from .conftest import serve_client
+    from .test_forensics import _run
+
+    task_id = _run(config, tmp_path, state="completed")
+    store = RunStore(config.db_path)
+    try:
+        store.record_reverification(
+            task_id,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=["git clone https://usr9:pw7x@git.example/r"],
+            exit_codes=[0],
+            detail="ok [command from the project's pinned verify_command]",
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    md = client.get(f"/api/runs/{task_id}/receipt")
+    assert md.status_code == 200
+    assert md.headers["content-type"].startswith("text/markdown")
+    assert md.text.startswith("<details>") and task_id in md.text
+    as_json = client.get(f"/api/runs/{task_id}/receipt?format=json")
+    data = as_json.json()
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        expected = build_receipt(store, config.home, config.audit_dir, task_id)
+    finally:
+        store.close()
+    assert data == expected | {"exported_at": data["exported_at"]}
+    for out in (md.text, as_json.text):
+        assert "git.example/r" in out
+        assert "usr9" not in out and "pw7x" not in out
+    assert client.get("/api/runs/no-such-run/receipt").status_code == 404
+    assert client.get(f"/api/runs/{task_id}/receipt?format=pdf").status_code == 422
+    assert TestClient(create_app(config)).get(f"/api/runs/{task_id}/receipt").status_code == 401
+
+
+def test_diff_syntax_colour_is_tokens_that_clear_aa_and_never_inner_html() -> None:
+    """Phase 10 R1 D2: the diff's offline syntax colour is five :root tokens,
+    each AA on every surface a diff is painted on, so a light theme overrides
+    tokens, not rules; and diff.js builds every token as a text node."""
+    from .test_style_tokens import _contrast, _tokens
+
+    css = (STATIC_DIR / "style.css").read_text()
+    tokens = _tokens()
+    for kind in ("kw", "str", "num", "key", "com"):
+        assert f".diff .tok-{kind} {{ color: var(--syntax-{kind});" in css, kind
+        for surface in ("--bg", "--panel", "--panel-2", "--panel-3"):
+            ratio = _contrast(tokens[f"--syntax-{kind}"], tokens[surface])
+            assert ratio >= 4.5, (kind, surface, ratio)
+    assert "innerHTML" not in (STATIC_DIR / "js" / "diff.js").read_text()
+
+
 def test_diagnose_run_executes_in_the_kept_worktree_and_teaches_when_gone(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:
@@ -1984,3 +2063,67 @@ def test_the_ledger_nudge_has_a_face_on_the_approvals_view() -> None:
     # grant (P3-4: card.keep, tests/web pins keepSelect).
     assert "keepSelect(d.card)" in source
     assert "card-keep" in source
+
+
+# ---------- Phase 10 10.1: zero egress, real API statuses, the module graph ----------
+
+_LOADS = (
+    r'<script[^>]*\ssrc="([^"]+)"',
+    r'<link[^>]*\shref="([^"]+)"',
+    r'^import [^;]*? from "([^"]+)";$',
+    r'\bimport\(\s*["\'`]([^"\'`]+)',
+    r'url\(\s*["\']?([^"\')]+)',
+    r'@import\s+["\']([^"\']+)',
+)
+
+
+def test_the_served_ui_loads_nothing_from_another_origin(config: SupervisorConfig) -> None:
+    """I11, Phase 10 10.1: crawl the UI as a browser loads it — the index, its
+    stylesheet and module, every module those import, every font the CSS
+    names. Each reference is this daemon's own path and answers 200 — no CDN,
+    no external font, nothing to fetch offline — and the crawl reaches every
+    shipped module and stylesheet (an orphan module would be dead weight)."""
+    import re
+    from urllib.parse import urljoin, urlsplit
+
+    client = TestClient(create_app(config))  # assets are public: no token
+    seen: set[str] = set()
+    queue = ["/"]
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        response = client.get(path)
+        assert response.status_code == 200, path
+        if not path.endswith((".html", ".js", ".css", "/")):
+            continue  # a font: a leaf
+        for pattern in _LOADS:
+            for ref in re.findall(pattern, response.text, flags=re.MULTILINE):
+                parts = urlsplit(ref)
+                assert not parts.scheme and not parts.netloc, f"{path} loads {ref} from elsewhere"
+                queue.append(urljoin(path, ref))
+    shipped = {
+        "/static/" + p.relative_to(STATIC_DIR).as_posix()
+        for p in STATIC_DIR.rglob("*")
+        if p.suffix in {".js", ".css", ".woff2"}
+    }
+    assert shipped <= seen, f"never loaded: {sorted(shipped - seen)}"
+    # Requests the code makes at run time stay on this daemon too.
+    sources = "\n".join(p.read_text() for p in STATIC_DIR.rglob("*.js"))
+    sink = r"(?:fetch|EventSource|WebSocket|sendBeacon)\(\s*[\"'`]https?:|src:\s*[\"'`]https?:"
+    assert re.findall(sink, sources) == []
+
+
+def test_api_paths_keep_their_real_401_and_404(config: SupervisorConfig) -> None:
+    """Phase 10 10.1: no SPA fallback swallows an API miss — the UI's 401 and
+    404 states (js/api.js) depend on the daemon saying which it is."""
+    from .conftest import serve_client
+
+    anonymous = TestClient(create_app(config))
+    assert anonymous.get("/api/invalid").status_code == 401
+    missing = serve_client(config).get("/api/invalid")
+    assert missing.status_code == 404
+    assert missing.headers["content-type"].startswith("application/json")
+    assert serve_client(config).get("/api/runs/no-such-run/forensics").status_code == 404
+    assert anonymous.get("/no-such-page").status_code == 404  # not index.html

@@ -31,6 +31,7 @@
    every view that drew a green accent now draws neutral emphasis. Every
    legacy variable name is preserved so the views inherit it without churn. */
 :root {
+  color-scheme: dark;
   --bg: #0f1011;          /* canvas */
   --chrome: #0b0c0d;      /* sidebar */
   --panel: #17181a;       /* raised surface: cards, tiles, composer */
@@ -53,6 +54,14 @@
   --warn: #f0b23e;        /* status: waiting on you */
   --info: #a1a4aa;        /* low-priority pills: neutral */
   --on-accent: #0f1011;   /* text on the white primary */
+  /* Phase 10 R1 D2: offline syntax colour in diffs (js/diff.js). Each clears
+     AA on every surface a diff sits on, in both themes (test_serve_ui and
+     test_style_tokens pin it). */
+  --syntax-kw: #c4a7ff;
+  --syntax-str: #7fd1e0;
+  --syntax-num: #f5a97f;
+  --syntax-key: #8fb8ff;
+  --syntax-com: #85888e;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -64,7 +73,7 @@
   --content-max: 1180px;
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --shadow-focus: 0 0 0 1px var(--focus), 0 0 0 4px rgba(139, 142, 148, .18);
+  --shadow-focus: 0 0 0 1px var(--focus), 0 0 0 4px color-mix(in srgb, var(--focus) 18%, transparent);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .45);
   /* v75-F1: additive tokens — elevation, motion, a second (clay) accent. */
   --accent-2: #a1a4aa;
@@ -73,6 +82,12 @@
   --transition-fast: 120ms ease;
   --transition-normal: 200ms ease;
   --radius-xl: 16px;
+  /* Phase 10 R1 G1: the last colour literals in the rules moved here, so a
+     theme is a token block and never a per-component fork. */
+  --accent-hover: #ffffff;  /* primary button hover */
+  --scrollbar: rgba(255, 255, 255, .14);
+  --scrollbar-hover: rgba(255, 255, 255, .24);
+  --scrim: rgba(0, 0, 0, .45);  /* behind a modal */
   /* v101-F5: the type scale. v75 shipped colour, radius, shadow and motion
      tokens and no type or spacing scale, so eighteen versions of components
      each picked their own number — 12 distinct font sizes, of which .card-kicker
@@ -100,13 +115,92 @@
   --space-6: 32px;
 }
 
+/* Phase 10 R1 G1: the light theme — colour tokens only, every one the dark
+   :root defines. The OS preference picks it unless the page pins
+   data-theme="dark"; data-theme="light" pins it on a dark OS. The two blocks
+   must stay identical (test_style_tokens pins that and AA in both themes). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f6f6f7;
+    --chrome: #ededef;
+    --panel: #ffffff;
+    --panel-2: #f1f1f3;
+    --panel-3: #e7e7ea;
+    --border: rgba(0, 0, 0, .13);
+    --border-soft: rgba(0, 0, 0, .08);
+    --chip-fill: rgba(0, 0, 0, .05);
+    --text: #1b1c1e;
+    --text-strong: #0b0c0d;
+    --muted: #56595f;
+    --muted-2: #5d6066;  /* a step lighter than --muted, still AA on --panel-3 */
+    --accent: #1b1c1e;   /* the primary flips to near-black */
+    --focus: #6b6e74;
+    --ok: #086640;
+    --bad: #a82424;
+    --warn: #7e5200;
+    --info: #56595f;
+    --on-accent: #ffffff;
+    --syntax-kw: #6a3fb5;
+    --syntax-str: #0a6573;
+    --syntax-num: #9a4510;
+    --syntax-key: #1d58b0;
+    --syntax-com: #56595f;
+    --shadow-focus: 0 0 0 1px var(--focus), 0 0 0 4px color-mix(in srgb, var(--focus) 18%, transparent);
+    --shadow-pop: 0 12px 32px rgba(0, 0, 0, .16);
+    --accent-2: #56595f;
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, .08);
+    --shadow-raised: 0 8px 24px rgba(0, 0, 0, .12);
+    --accent-hover: #000000;
+    --scrollbar: rgba(0, 0, 0, .18);
+    --scrollbar-hover: rgba(0, 0, 0, .3);
+    --scrim: rgba(0, 0, 0, .3);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f6f7;
+  --chrome: #ededef;
+  --panel: #ffffff;
+  --panel-2: #f1f1f3;
+  --panel-3: #e7e7ea;
+  --border: rgba(0, 0, 0, .13);
+  --border-soft: rgba(0, 0, 0, .08);
+  --chip-fill: rgba(0, 0, 0, .05);
+  --text: #1b1c1e;
+  --text-strong: #0b0c0d;
+  --muted: #56595f;
+  --muted-2: #5d6066;  /* a step lighter than --muted, still AA on --panel-3 */
+  --accent: #1b1c1e;   /* the primary flips to near-black */
+  --focus: #6b6e74;
+  --ok: #086640;
+  --bad: #a82424;
+  --warn: #7e5200;
+  --info: #56595f;
+  --on-accent: #ffffff;
+  --syntax-kw: #6a3fb5;
+  --syntax-str: #0a6573;
+  --syntax-num: #9a4510;
+  --syntax-key: #1d58b0;
+  --syntax-com: #56595f;
+  --shadow-focus: 0 0 0 1px var(--focus), 0 0 0 4px color-mix(in srgb, var(--focus) 18%, transparent);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, .16);
+  --accent-2: #56595f;
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, .08);
+  --shadow-raised: 0 8px 24px rgba(0, 0, 0, .12);
+  --accent-hover: #000000;
+  --scrollbar: rgba(0, 0, 0, .18);
+  --scrollbar-hover: rgba(0, 0, 0, .3);
+  --scrim: rgba(0, 0, 0, .3);
+}
+
 * { box-sizing: border-box; }
 /* H1-G4: a thin themed scrollbar instead of the bright native one. */
-* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .14) transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar) transparent; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); border-radius: 999px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .24); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 /* v104-F0: `hidden` means hidden.
    The UA stylesheet's `[hidden] { display: none }` loses to ANY author rule
@@ -166,7 +260,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 .sidebar .brand::before {
   content: "S"; font-family: var(--font-sans); font-weight: 700; font-size: 13px;
 }
-.sidebar .brand:hover { background: #fff; }
+.sidebar .brand:hover { background: var(--accent-hover); }
 .sidebar-machine {
   flex: 1; min-width: 0; color: var(--text-strong); font-weight: 600; font-size: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -333,7 +427,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   border-radius: var(--radius-sm); font-weight: 600; font-size: 13px; white-space: nowrap;
 }
 .topbar-assign.primary { background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent); }
-.topbar-assign.primary:hover { background: #fff; color: var(--on-accent); }
+.topbar-assign.primary:hover { background: var(--accent-hover); color: var(--on-accent); }
 /* graphite-nav: closes the Settings surface (hidden outside it). */
 .surface-close.icon-button {
   flex: none; width: 30px; min-width: 30px; height: 30px; min-height: 30px;
@@ -389,7 +483,7 @@ h3 { color: var(--text-strong); font-size: 15px; font-weight: 650; margin: 0 0 1
   flex: none; width: 34px; min-width: 34px; height: 34px; min-height: 34px; padding: 0;
   border-radius: 999px; background: var(--text-strong); color: var(--on-accent); border-color: var(--text-strong);
 }
-.dock-send.icon-button:hover { background: #fff; }
+.dock-send.icon-button:hover { background: var(--accent-hover); }
 
 /* widgets */
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
@@ -439,11 +533,11 @@ button {
 }
 button:hover { background: var(--panel-3); filter: none; }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-button.primary:hover { background: #fff; }
+button.primary:hover { background: var(--accent-hover); }
 button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
 button.ghost:hover { background: var(--panel); }
-button.danger { background: rgba(239,107,107,.14); color: var(--bad); border-color: rgba(239,107,107,.32); }
-button.danger:hover { background: rgba(239,107,107,.2); }
+button.danger { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
+button.danger:hover { background: color-mix(in srgb, var(--bad) 20%, transparent); }
 button:disabled { opacity: .5; cursor: default; }
 .icon-button {
   width: 34px; min-width: 34px; min-height: 34px; padding: 0;
@@ -456,37 +550,47 @@ button:disabled { opacity: .5; cursor: default; }
 }
 
 .state { padding: 1px 8px; border-radius: var(--radius-md); font-size: 12px; white-space: nowrap; }
-.state.completed { background: rgba(62,207,142,.15); color: var(--ok); }
+.state.completed { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
 .state.failed, .state.worker_crashed, .state.worker_timeout, .state.rejected, .state.denied
-  { background: rgba(239,107,107,.15); color: var(--bad); }
-.state.pending_approval, .state.pending { background: rgba(240,178,62,.15); color: var(--warn); }
+  { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+.state.pending_approval, .state.pending { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
 .state.running, .state.dispatched, .state.created, .state.draft
-  { background: rgba(161,164,170,.15); color: var(--muted); }
-.state.tested, .state.approved { background: rgba(62,207,142,.15); color: var(--ok); }
-.state.learned { background: rgba(240,178,62,.14); color: var(--warn); }
-.state.user { background: rgba(161,164,170,.15); color: var(--muted); }
-.state.superseded { background: rgba(161,164,170,.12); color: var(--muted); }
+  { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.state.tested, .state.approved { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.state.learned { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.state.user { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.state.superseded { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); }
 /* v19-F8: a superseded run was resumed as a successor — de-emphasise it. */
 tr.click.superseded { opacity: .55; }
 
 /* run detail */
-.kv { display: grid; grid-template-columns: 160px 1fr; gap: 4px 16px; }
+/* Phase 10 R2 I9: minmax(0, …) and anywhere-wrap, so a long repo, workspace
+   or binding path wraps inside its cell instead of widening the page. */
+.kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 4px 16px; }
 .kv dt { color: var(--muted); }
+.kv dt, .kv dd { min-width: 0; overflow-wrap: anywhere; }
 .kv dd { margin: 0; }
 pre.log, pre.diff {
   background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
   padding: 14px; overflow-x: auto; max-height: 420px; overflow-y: auto;
 }
-.diff .add { color: var(--ok); }
-.diff .del { color: var(--bad); }
+/* D2: a tint marks the side, so a coloured token never hides it. */
+.diff .add { color: var(--ok); background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.diff .del { color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, transparent); }
 .diff .hunk { color: var(--accent); }
+.diff .tok-kw { color: var(--syntax-kw); }
+.diff .tok-str { color: var(--syntax-str); }
+.diff .tok-num { color: var(--syntax-num); }
+.diff .tok-key { color: var(--syntax-key); }
+.diff .tok-com { color: var(--syntax-com); font-style: italic; }
+.diff-raw summary { cursor: pointer; color: var(--muted); }
 .event { color: var(--muted); }
 .event .etype { color: var(--text); }
 .actions { display: flex; gap: 8px; margin: 10px 0; }
 .note { color: var(--muted); font-size: 13px; }
 .flash { margin: 10px 0; padding: 10px 14px; border-radius: var(--radius-sm); }
-.flash.ok { background: rgba(62,207,142,.12); color: var(--ok); }
-.flash.bad { background: rgba(239,107,107,.12); color: var(--bad); }
+.flash.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.flash.bad { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); }
 .suggestion-preview { display: flex; flex-direction: column; gap: 8px; }
 .suggestion-result {
   border-top: 1px solid var(--border-soft); padding-top: 10px;
@@ -506,7 +610,7 @@ pre.log, pre.diff {
   color: var(--muted);
   border-radius: var(--radius-md);
   padding: 18px;
-  background: rgba(255,255,255,.015);
+  background: color-mix(in srgb, var(--text-strong) 1.5%, transparent);
 }
 
 /* notes + tasks (v7 Stage B) */
@@ -519,7 +623,7 @@ pre.log, pre.diff {
   padding: 12px 14px;
 }
 .item-card textarea { min-height: 74px; }
-.state.due { background: rgba(240,178,62,.15); color: var(--warn); }
+.state.due { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
 
 /* chat (v6) */
 /* H1-G2: the thread view runs edge to edge under its header line; the
@@ -572,6 +676,11 @@ main.chat-view { padding: 0; max-width: none; }
   border-left: 2px solid var(--warn); padding-left: 8px;
 }
 .card-risk-label { color: var(--warn); font-weight: 600; }
+/* R4 K1: each run a landing / PR card lands, with its own G10 and V1 */
+.card-runs { margin: 0 0 8px; font-size: 12px; }
+.card-runs ul { margin: 4px 0 0; padding-left: 18px; }
+.card-runs li { overflow-wrap: anywhere; margin: 0 0 4px; }
+.card-runs .banner { margin: 4px 0 0; }
 .card-details { margin: 0 0 8px; }
 .card-details > summary {
   cursor: pointer; color: var(--muted-2); font-size: 12px;
@@ -644,7 +753,7 @@ main.chat-view { padding: 0; max-width: none; }
 .chat-message-body { white-space: pre-wrap; line-height: 1.5; }
 .chat-thinking {
   border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
-  background: rgba(255,255,255,.035); overflow: hidden;
+  background: color-mix(in srgb, var(--text-strong) 3.5%, transparent); overflow: hidden;
 }
 .chat-thinking-toggle {
   cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px;
@@ -791,7 +900,7 @@ main.chat-view { padding: 0; max-width: none; }
 .onboard-table:empty { display: none; }
 .worker-activity-gate {
   padding: 6px 8px; border-radius: var(--radius-sm); font-size: 13px;
-  background: rgba(240,178,62,.12); color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn);
 }
 .worker-plan { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
 .composer {
@@ -901,7 +1010,7 @@ main.chat-view { padding: 0; max-width: none; }
   flex: none; width: 40px; min-width: 40px; min-height: 40px; padding: 0;
   border-radius: 999px; background: var(--accent); color: var(--on-accent); border-color: var(--accent);
 }
-.composer .composer-send.icon-button:hover { background: #fff; }
+.composer .composer-send.icon-button:hover { background: var(--accent-hover); }
 .composer-meta {
   display: flex; gap: 8px; align-items: center; color: var(--muted);
   font-size: 12px; white-space: nowrap;
@@ -920,7 +1029,7 @@ main.chat-view { padding: 0; max-width: none; }
   background: conic-gradient(
     var(--warn) var(--context-floor, 0%),
     var(--accent) 0 var(--context-load),
-    rgba(161,164,170,.34) 0);
+    color-mix(in srgb, var(--info) 34%, transparent) 0);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 0);
   mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 0);
 }
@@ -928,7 +1037,7 @@ main.chat-view { padding: 0; max-width: none; }
   display: none; position: absolute; bottom: calc(100% + 10px); right: -4px;
   width: 260px; padding: 10px 12px; z-index: 40; text-align: left;
   background: var(--panel-2); border: 1px solid var(--border);
-  border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-pop);
   font-size: 12px; line-height: 1.55; color: var(--text); cursor: default;
 }
 .composer-context-meter:hover .context-popover,
@@ -937,7 +1046,7 @@ main.chat-view { padding: 0; max-width: none; }
 .context-popover-line { color: var(--muted); }
 .context-bar {
   display: flex; height: 8px; margin: 6px 0; border-radius: 999px;
-  overflow: hidden; background: rgba(161,164,170,.22);
+  overflow: hidden; background: color-mix(in srgb, var(--info) 22%, transparent);
 }
 .context-bar-floor { background: var(--warn); }
 .context-bar-history { background: var(--accent); }
@@ -973,7 +1082,7 @@ main.chat-view { padding: 0; max-width: none; }
 }
 .confirm-card:not(.resolved):not(.receipt-card):not(.card-high) {
   border-color: color-mix(in srgb, var(--warn) 45%, transparent);
-  box-shadow: 0 0 0 3px rgba(240, 178, 62, .06);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 6%, transparent);
 }
 .confirm-card:not(.resolved):not(.receipt-card) .card-kicker::before {
   content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
@@ -1156,7 +1265,7 @@ main.chat-view { padding: 0; max-width: none; }
 .note-tags { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }
 .note-tag {
   font-size: 11px; padding: 1px 8px; border-radius: var(--radius-md);
-  background: rgba(236, 236, 237, .12); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
 }
 .run-token { color: var(--accent); }
 .task-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -1179,11 +1288,11 @@ main.chat-view { padding: 0; max-width: none; }
   font-size: 13px;
 }
 .health-banner.warn {
-  background: rgba(240, 178, 62, .08); border: 1px solid rgba(240, 178, 62, .2);
+  background: color-mix(in srgb, var(--warn) 8%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 20%, transparent);
   color: var(--warn);
 }
 .health-banner.bad {
-  background: rgba(239, 107, 107, .08); border: 1px solid rgba(239, 107, 107, .2);
+  background: color-mix(in srgb, var(--bad) 8%, transparent); border: 1px solid color-mix(in srgb, var(--bad) 20%, transparent);
   color: var(--bad);
 }
 .health-banner-item { display: flex; align-items: center; gap: 6px; }
@@ -1289,7 +1398,7 @@ main.chat-view { padding: 0; max-width: none; }
 .welcome-back {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   flex-wrap: wrap; margin: 0 0 16px; padding: 10px 14px;
-  background: rgba(236, 236, 237, .08); border: 1px solid rgba(236, 236, 237, .2);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
   border-radius: var(--radius-md); color: var(--text);
 }
 
@@ -1308,9 +1417,9 @@ main.chat-view { padding: 0; max-width: none; }
   font-size: 11px; font-weight: 600;
   padding: 2px 8px; border-radius: var(--radius-sm);
 }
-.prio-high { background: rgba(239, 107, 107, .16); color: var(--bad); }
-.prio-medium { background: rgba(240, 178, 62, .16); color: var(--warn); }
-.prio-low { background: rgba(161, 164, 170, .15); color: var(--info); }
+.prio-high { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.prio-medium { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.prio-low { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
 
 /* ---------- Markdown in assistant chat bubbles ---------- */
 .chat-message.assistant .chat-message-body { white-space: normal; }
@@ -1382,7 +1491,7 @@ main.chat-view { padding: 0; max-width: none; }
   margin-left: 6px; padding: 1px 7px; border-radius: var(--radius-md);
   background: var(--panel-3); color: var(--muted); font-size: 11px;
 }
-.filter-tab.active .filter-count { background: rgba(236, 236, 237, .15); color: var(--accent); }
+.filter-tab.active .filter-count { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 
 /* v75-F3: Settings → Channels status summary strip. */
 .channel-summary {
@@ -1431,7 +1540,7 @@ main.chat-view { padding: 0; max-width: none; }
 
 /* v75-F8: the ⌘K command palette — navigation only (I5/I6). */
 .palette-overlay {
-  position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .45);
+  position: fixed; inset: 0; z-index: 60; background: var(--scrim);
   display: flex; align-items: flex-start; justify-content: center;
   padding: 12vh 16px 16px;
 }
@@ -1651,8 +1760,8 @@ main.chat-view { padding: 0; max-width: none; }
 .run-card-verify {
   font-size: 11px; padding: 1px 7px; border-radius: var(--radius-sm); flex: none;
 }
-.run-card-verify.passed { background: rgba(62, 207, 142, .15); color: var(--ok); }
-.run-card-verify.failed, .run-card-verify.error { background: rgba(239, 107, 107, .15); color: var(--bad); }
+.run-card-verify.passed { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.run-card-verify.failed, .run-card-verify.error { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
 .run-card-summary {
   margin-top: 6px; color: var(--text); font-size: 13px; line-height: 1.4;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1755,7 +1864,7 @@ main.chat-view { padding: 0; max-width: none; }
   /* #main beats the `main` padding above on purpose — this is the narrowing. */
   #main { width: 100%; padding: 12px; box-sizing: border-box; }
   table { display: block; overflow-x: auto; white-space: nowrap; }
-  .kv { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .row { flex-direction: column; align-items: stretch; }
   .field { min-width: 0; width: 100%; }
   .actions { flex-wrap: wrap; }
@@ -1768,7 +1877,14 @@ main.chat-view { padding: 0; max-width: none; }
   .run-card-summary { white-space: normal; }
   /* v75-F6: the timeline scrolls sideways instead of squeezing its nodes. */
   .run-timeline { overflow-x: auto; }
+  .run-timeline { max-width: 100%; min-width: 0; } /* R2 I9: scrolls inside its card */
   .timeline-node { min-width: 76px; }
+  /* Phase 10 R2 I9: the New run form fits. A wrapping column flex sizes its
+     line to the widest child's max-content (a long <select> option), so the
+     form does not wrap here; no control is wider than its column. */
+  .composer.stacky { flex-wrap: nowrap; }
+  .composer.stacky .field, .composer.stacky .field.grow { min-width: 0; }
+  input, textarea, select { max-width: 100%; min-width: 0; }
   /* v75-F7: template card headers wrap; the stepper scrolls if cramped. */
   .template-card-header { flex-wrap: wrap; }
   .skill-stepper { overflow-x: auto; }
@@ -1804,3 +1920,84 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
 .sidebar-chat-pinned-label:not(.sidebar-thread-project)::first-letter {
   text-transform: uppercase;
 }
+
+/* Phase 10 10.1: the review-first console — Inbox queue, review page,
+   file-by-file diff, forensics panel, the not-found state. Tokens only. */
+.inbox-heading { font-size: 13px; color: var(--muted); margin: 14px 0 2px; }
+.inbox-group { font-size: 12px; color: var(--muted-2); margin: 8px 0 0; font-weight: 500; }
+.inbox-item .review-warning { color: var(--warn); }
+.thread-dot.bad { background: var(--bad); border-color: var(--bad); }
+.note.keys { font-size: 12px; color: var(--muted-2); }
+.review { display: flex; flex-direction: column; gap: 16px; max-width: 1100px; }
+.review:focus { outline: 0; }
+.review-step h2, .review-verdict h2 { font-size: 15px; margin: 0 0 8px; }
+.review-verdict {
+  position: sticky; bottom: 0; background: var(--bg); padding: 10px 0;
+  border-top: 1px solid var(--border-soft); align-items: center;
+}
+.review-verdict h2 { margin: 0 8px 0 0; }
+.banner { margin: 8px 0; padding: 10px 14px; border-radius: var(--radius-sm); font-weight: 600; }
+.banner.bad { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 32%, transparent); }
+.banner.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent); }
+.diff-view { display: flex; flex-direction: column; gap: 10px; }
+.diff-files { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+.diff-file-link { padding: 2px 6px; min-height: 0; height: auto; }
+.diff-file { scroll-margin-top: 12px; }
+.diff-file-head { font-size: 13px; margin: 6px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.diff-stat .add { color: var(--ok); }
+.diff-stat .del { color: var(--bad); }
+.diff .meta { color: var(--muted); }
+.diff-ln {
+  display: inline-block; width: 4ch; margin-right: 1ch; text-align: right;
+  color: var(--muted-2); user-select: none;
+}
+.forensics h3 { font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+.forensics-section summary { cursor: pointer; }
+.not-found h2 { margin: 0 0 6px; }
+/* Phase 10 R1 (E1): the decision ledger's search, its verify badge, and a
+   project's walls. Tokens only; every row wraps at phone width. */
+.ledger-row { margin: 0 0 var(--space-2); }
+.ledger-badge { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.ledger-badge.loud {
+  font-size: var(--text-sm); font-weight: 600; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--bad); border-radius: var(--radius-sm);
+}
+/* Phase 10 R2 I9 (N4): .row.decision-filters outranks the phone block's
+   column-flipped .row, so the filters wrap two to a line, not 9rem tall each. */
+.row.decision-filters { flex-direction: row; flex-wrap: wrap; align-items: flex-end; }
+.decision-filters .field { min-width: 9rem; flex: 1 1 9rem; }
+.decision-older { margin: var(--space-2) 0; }
+.policy-baseline-sha { overflow-wrap: anywhere; }
+.project-walls-row {
+  display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); align-items: center;
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft);
+}
+.project-walls-row .grow { flex: 1 1 16rem; min-width: 0; }
+/* Phase 10 R1 (E2): an Inbox row — its title is the link, its verdicts are
+   buttons; banners and actions sit in the text column and wrap on a phone. */
+.review-row > small, .review-row > .banner, .review-row > .inbox-actions { grid-column: 2; }
+.review-row > .banner { margin: var(--space-1) 0 0; font-size: var(--text-sm); }
+.inbox-open { color: var(--text-strong); overflow-wrap: anywhere; }
+.inbox-open:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-radius: var(--radius-sm); }
+.inbox-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: var(--space-1); }
+.inbox-elsewhere { font-size: var(--text-sm); }
+/* Phase 10 R1 (E3): a captured SKILL.md in full, a forged tool's binding. */
+.capture-md, .forge-pins pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22rem; overflow-y: auto;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3); font-size: var(--text-sm); margin: var(--space-2) 0;
+}
+.capture-accept { align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); }
+.forge-digest { overflow-wrap: anywhere; font-size: var(--text-sm); margin: var(--space-1) 0; }
+.forge-card .chip { margin: 0 var(--space-1) var(--space-1) 0; white-space: normal; overflow-wrap: anywhere; }
+/* Phase 10 R1 (E4): the staged probe's verdict and the provider shelf. */
+.probe-result { margin: var(--space-2) 0 0; overflow-wrap: anywhere; }
+.probe-result.tone-ok { color: var(--ok); }
+.probe-result.tone-warn { color: var(--warn); }
+.probe-result.tone-bad { color: var(--bad); }
+.provider-shelf { margin-top: var(--space-3); }
+.provider-shelf-title { margin: 0 0 var(--space-1); }
+.provider-row { padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft); }
+.provider-row .row { flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.provider-where { overflow-wrap: anywhere; margin: var(--space-1) 0; }
+.provider-row .chip { white-space: normal; overflow-wrap: anywhere; }

@@ -28,7 +28,7 @@ from skep.worker_contract import Event
 
 from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
-from ..forensics import build_run_forensics, filtered_decisions
+from ..forensics import _commands_source, build_run_forensics, filtered_decisions
 from ..store import RunStore
 from .actions import (
     allow_network_host_and_resume,
@@ -49,6 +49,7 @@ from .actions import (
     deny_approval,
     diagnose_run,
     dispatch_manifest,
+    display_patch,
     effective_policy_view,
     land_run,
     landing_reason,
@@ -103,6 +104,7 @@ from .chat import (
     add_chat_routes,
     run_completion_turn,
 )
+from .console import add_console_routes
 from .jobs import Dispatcher
 from .llm import add_llm_routes
 from .memory import add_memory_routes
@@ -645,6 +647,8 @@ def create_app(
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
+        from .channels.commands import status_text
+
         return {
             "status": "ok",
             # H1 (hive-rooms): the sidebar names the machine this daemon runs on.
@@ -652,6 +656,9 @@ def create_app(
             "home": str(config.home),
             "store_ready": config.db_path.is_file(),
             "pending_approvals": len(run_store.pending_approvals()),
+            # Phase 10 R1 (Test 10.5): the web deck's /status prints the very
+            # text a messenger's /status answers — one meaning on every face.
+            "summary": status_text(run_store),
         }
 
     @app.get("/api/setup/status")
@@ -1375,7 +1382,10 @@ def create_app(
             "approvals": approvals,
             "policy_blocks": policy_block_views(events),
             "applied_branch": applied_branch_for(run_store, task_id),
-            "reverification": None if reverify is None else asdict(reverify),
+            # Phase 10 R2 I10: whose command G10 re-ran, as forensics reads it
+            "reverification": None
+            if reverify is None
+            else {**asdict(reverify), "commands_source": _commands_source(reverify.detail)},
             # ES-F291 follow-up (I8): a landable patch with no G10 record says
             # so (still running, or never ran) instead of showing nothing.
             "reverification_missing": (
@@ -1428,6 +1438,17 @@ def create_app(
         """Phase 02 2.2: the `skep run forensics --json` report (ADR 0050)."""
         return build_run_forensics(run_store, holder.current.audit_dir, task_id)
 
+    @app.get("/api/runs/{task_id}/receipt")
+    def run_receipt(task_id: str, format: Literal["md", "json"] = "md") -> PlainTextResponse:
+        """Phase 10 R1 D8: `skep proof export` over HTTP — read-only, built by
+        the same receipt builder (redact_export applies); the bytes the CLI
+        prints, md to paste into a PR or json. An unknown run is a 404."""
+        from ..ledger_proof import build_receipt, render_receipt
+
+        receipt = build_receipt(run_store, holder.current.home, holder.current.audit_dir, task_id)
+        media = "text/markdown" if format == "md" else "application/json"
+        return PlainTextResponse(render_receipt(receipt, format), media_type=media)
+
     @app.get("/api/runs/{task_id}/events")
     def run_events(task_id: str, stream: int = 0) -> Any:
         _require_run(task_id)
@@ -1442,7 +1463,13 @@ def create_app(
         patch = artifacts.get("patch")
         if patch is None or not Path(patch).is_file():
             raise HTTPException(status_code=404, detail="no patch artifact for this run")
-        return PlainTextResponse(Path(patch).read_text(encoding="utf-8"))
+        try:  # R4 K5 / R5-5: non-UTF-8 bytes shown reversibly (\xe9), never a 500
+            raw = Path(patch).read_bytes()
+            return PlainTextResponse(display_patch(raw))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=409, detail=f"patch unreadable: {exc.strerror or exc}"
+            ) from exc
 
     add_registry_routes(app, holder=holder, run_store=run_store)
     add_notes_tasks_routes(app, run_store=run_store)
@@ -1457,6 +1484,8 @@ def create_app(
         get_run_repeat_delay_seconds=chat_get_run_repeat_delay_seconds,
         sleep=chat_sleep,
     )
+    # Phase 10 R1: the review console's reads (one queue, ledger, forge, probe).
+    add_console_routes(app, holder=holder, run_store=run_store, engine=chat_engine)
     # v26-F4: signature-authenticated Slack webhooks over the same engine.
     # v130-F6: the live status line only where channels run for real.
     add_slack_routes(

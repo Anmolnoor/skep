@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...roles import ROLE_LESS_CHAT_ROLE
+from ..commands import CommandRefused, commands_for, resolve
 from . import ChannelConfig, ChannelMessage, channel_admin, state_emoji
 
 Reply = tuple[str, list[dict[str, object]]]
@@ -111,7 +112,10 @@ def _cards(store: Any, chat_id: str | None) -> list[Any]:
 
 def _help(ctx: CommandContext, _args: str) -> Reply:
     lines = ["skep commands (answered here, no model turn):"]
-    lines += [f"/{name} — {summary}" for name, (summary, _) in COMMANDS.items()]
+    lines += [
+        f"/{row.name} — {row.help_on(ctx.message.channel)}"
+        for row in commands_for(ctx.message.channel)
+    ]
     lines.append("Anything else goes to the Queen.")
     if ctx.message.channel == "slack":  # Slack's client eats an unregistered /word
         lines.append("On Slack, type a leading space: ' /stop', ' /approve'.")
@@ -399,23 +403,28 @@ def _model(ctx: CommandContext, args: str) -> Reply:
 
 Handler = Callable[[CommandContext, str], Reply]
 
+HANDLERS: dict[str, Handler] = {
+    "help": _help,
+    "new": _new,
+    "sessions": _sessions,
+    "resume": _resume,
+    "title": _title,
+    "btw": _btw,
+    "status": _status,
+    "runs": _runs,
+    "approvals": _approvals,
+    "whoami": _whoami,
+    "stop": _stop,
+    "approve": _approve,
+    "deny": _deny,
+    "compact": _compact,
+    "usage": _usage,
+    "model": _model,
+}
+# Phase 10 10.2: the deck is a view of the one registry (serve/commands.py);
+# every channel carries the same rows, so Telegram's stands for all three.
 COMMANDS: dict[str, tuple[str, Handler]] = {
-    "help": ("this list", _help),
-    "new": ("start a fresh session here (/new trip planning)", _new),
-    "sessions": ("this conversation's earlier sessions", _sessions),
-    "resume": ("go back to a session from /sessions (/resume 2)", _resume),
-    "title": ("show or rename this session (/title trip planning)", _title),
-    "btw": ("a read-only side question, even beside a pending card (/btw what is X?)", _btw),
-    "status": ("what is running and what waits on you", _status),
-    "runs": ("the latest runs (/runs 10)", _runs),
-    "approvals": ("cards waiting in this conversation", _approvals),
-    "whoami": ("who skep thinks you are here, and whether you are admin", _whoami),
-    "stop": ("stop the turn running here (cards stay, runs keep running)", _stop),
-    "approve": ("confirm the waiting card (/approve 1a2b3c4d when several wait)", _approve),
-    "deny": ("deny the waiting card (/deny 1a2b3c4d)", _deny),
-    "compact": ("fold this chat's overflow into its digest now", _compact),
-    "usage": ("tokens skep spent: this chat and all, 5h and 7d", _usage),
-    "model": ("which model answers here (change it at the desk)", _model),
+    row.name: (row.help_on("telegram"), HANDLERS[row.name]) for row in commands_for("telegram")
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}
@@ -462,7 +471,10 @@ def discord_subcommands() -> list[dict[str, object]]:
 
 
 def run_command(ctx: CommandContext, name: str, args: str) -> Reply:
-    entry = COMMANDS.get(ALIASES.get(name, name))
-    if entry is None:
-        return f"skep: unknown command /{name}. /help lists them.", []
-    return entry[1](ctx, args)
+    """Dispatch through the registry: a name this channel does not carry
+    (/role, /policy: desk verbs) is refused before any handler runs (I6)."""
+    try:
+        row = resolve(ctx.message.channel, ALIASES.get(name, name))
+    except CommandRefused as refused:
+        return f"skep: {refused}. /help lists what works here.", []
+    return HANDLERS[row.name](ctx, args)

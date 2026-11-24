@@ -13,10 +13,12 @@ from typing import cast
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.packs import get_policy_pack
 from skep.supervisor.serve import actions
+from skep.supervisor.serve.commands import WEB, commands_for
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import COMMAND_TOOL_NAMES, execute_mutation
@@ -361,6 +363,78 @@ def test_operator_command_deny_cancels_without_execution(
     assert resolved["status"] == "denied"
 
 
+MODEL_CARD_ON_THE_WEB = "/model is not available on web; it runs on cli — answer it in skep chat"
+
+
+def _model_card(client: TestClient, chat_id: str) -> str:
+    """The one card only skep chat carries: /model's set_assistant_model."""
+    response = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "set_assistant_model", "args": {"model": "m2"}},
+    )
+    return str(response.json()["action_id"])
+
+
+def test_surface_is_a_hint_confirm_answers_where_asked_and_cancel_is_anywhere(
+    config: SupervisorConfig,
+) -> None:
+    """Phase 10 R1 D1 (I7, I8): web and skep chat share one token — one
+    operator — so ``?surface=`` is a client hint, not authorization. Confirm
+    still answers a card where it was asked (the web is told where); a cancel
+    only narrows, so any desk surface may give it."""
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    action_id = _model_card(client, chat_id)
+    refused = client.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == MODEL_CARD_ON_THE_WEB
+    (card,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert card["status"] == "proposed"
+    assert card["web_refusal"] == MODEL_CARD_ON_THE_WEB  # the web draws it read-only
+    canceled = client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+    assert canceled.status_code == 200 and canceled.json()["denied"] is True
+    (card,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert card["status"] == "denied" and "web_refusal" not in card
+    # A card the web carries is never marked.
+    web_card = client.post(
+        f"/api/chats/{chat_id}/commands", json={"tool": "set_role", "args": {"name": "x"}}
+    ).json()["action_id"]
+    marked = {a["action_id"]: a for a in client.get(f"/api/chats/{chat_id}").json()["actions"]}
+    assert "web_refusal" not in marked[web_card]
+
+
+def test_a_card_the_web_cannot_confirm_never_holds_the_web_composer(
+    config: SupervisorConfig,
+) -> None:
+    """D1: the web composer locks on exactly the cards the web can confirm,
+    and the server's 409 follows the same rule for the web — while skep chat
+    (no hint: the strict rule) still answers its own card first."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client = serve_client(config)
+        client.put(
+            "/api/llm/config",
+            json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+        )
+        chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+        _model_card(client, chat_id)
+        held = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        assert held.status_code == 409  # skep chat: resolve its card first
+        ollama.script_reply("hello")
+        web = client.post(f"/api/chats/{chat_id}/messages?surface=web", json={"content": "hi"})
+        assert web.status_code == 200, web.text
+        assert "hello" in web.text
+        client.post(
+            f"/api/chats/{chat_id}/commands", json={"tool": "set_role", "args": {"name": "x"}}
+        )
+        again = client.post(f"/api/chats/{chat_id}/messages?surface=web", json={"content": "hi"})
+        assert again.status_code == 409  # a card the web can confirm holds it
+    finally:
+        ollama.stop()
+
+
 def test_command_endpoint_rejects_tools_outside_the_deck(config: SupervisorConfig) -> None:
     client = serve_client(config)
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
@@ -402,14 +476,17 @@ def test_chat_composer_intercepts_slash_commands() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert "const COMMANDS" in source
     assert "function parseSlashCommand" in source
     assert 'content.startsWith("/")' in source
     assert "await runSlashCommand(content)" in source
-    # /help and unknown commands render from the same COMMANDS table.
-    assert "Object.values(COMMANDS)" in source
+    # Phase 10 10.3: /help, completion and refusals render from the registry's
+    # web slice (GET /api/commands), never from a table of app.js's own.
+    assert 'api("GET", "/api/commands")' in source
+    assert "deck.commands.map(command =>" in source
+    assert "commandHelp(deckRefusal(deck, name))" in source
     assert "commandHelp(`unknown command: /${name}`)" in source
-    # The plan's command set is all present (F2 adds /workon).
+    # The plan's command set is all on the web surface (F2 adds /workon).
+    web = {row.name for row in commands_for(WEB)}
     for command in (
         "help:",
         "policy:",
@@ -425,7 +502,7 @@ def test_chat_composer_intercepts_slash_commands() -> None:
         "deny:",
         "schedule:",
     ):
-        assert command in source, command
+        assert command[:-1] in web, command
     # Mutations go through the operator-command card endpoints, reads direct.
     assert "`/api/chats/${activeChatId}/commands`" in source
     assert "/api/chats/${activeChatId}/commands/${d.action_id}/${verb}" in source
@@ -445,22 +522,23 @@ def test_deck_reads_map_to_existing_routes() -> None:
     assert "dangerous_grant_warnings" in source
 
 
-def test_help_table_and_executor_cannot_drift() -> None:
-    """v25-F3 drift guard: every command in COMMANDS has an executor branch
-    and every executor branch has a COMMANDS entry (/help renders from the
-    same table, so the three surfaces stay one surface)."""
+def test_web_executors_and_the_registry_web_slice_cannot_drift() -> None:
+    """The drift guard (v25-F3, Phase 10 10.3): app.js keeps no command table
+    — /help, completion and refusals read the registry's web slice over
+    GET /api/commands — so its executor branches and that slice must be one
+    set, both ways. A web row with no executor would answer "unknown command";
+    an executor with no web row is dead code, refused before it can run."""
     import re
 
     from skep.supervisor.serve.app import STATIC_DIR
 
     source = (STATIC_DIR / "app.js").read_text()
-    start = source.index("const COMMANDS = {")
-    table = source[start : source.index("};", start)]
-    declared = set(re.findall(r"^  (\w+): \{", table, flags=re.MULTILINE))
     executor_start = source.index("const runSlashCommand")
     executor = source[executor_start : source.index("const runStream", executor_start)]
     handled = set(re.findall(r'name === "(\w+)"', executor))
-    assert declared == handled
+    web = {row.name for row in commands_for(WEB)}
+    assert handled - web == set(), "app.js executors with no web row in serve/commands.py"
+    assert web - handled == set(), "web rows in serve/commands.py with no app.js executor"
 
 
 def test_composer_autocomplete_offers_the_deck() -> None:
@@ -471,8 +549,8 @@ def test_composer_autocomplete_offers_the_deck() -> None:
     assert 'class: "command-suggest"' in source
     assert "const updateSuggest" in source
     assert 'input.addEventListener("input", updateSuggest)' in source
-    # Suggestions come from the same COMMANDS table as the parser and /help.
-    assert "Object.entries(COMMANDS).filter(([name]) => name.startsWith(needle))" in source
+    # Suggestions come from the same registry slice as the parser and /help.
+    assert "deck.commands.filter(command => command.name.startsWith(needle))" in source
     assert ".command-suggest" in styles
     assert ".command-suggest-item" in styles
 

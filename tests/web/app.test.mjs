@@ -557,3 +557,32 @@ test("Resend fills exactly the text the user's bubble shows (Phase 06 R1 F7)", (
     .find(b => b.getAttribute("aria-label") === "resend message").click();
   assert.deepEqual(filled, ["merge these pdfs"]);
 });
+
+// ---------- Phase 10 R2 I8: a late error never paints over the next page ----------
+
+for (const [status, detail] of [[404, "no run bogus"], [500, "boom"]]) {
+  test(`route(): a ${status} that lands after the operator moved on draws nothing`, async () => {
+    const app = loadApp();
+    const nodes = {};
+    app.document.getElementById = id => (nodes[id] ||= app.el("div"));
+    app.document.getElementById("app-search").closest = () => null;
+    app.location.hash = "#/runs/bogus";
+    let fail;
+    app.api = async (_method, path) => {
+      if (path === "/api/setup/status") return { complete: true };
+      return new Promise((_ok, reject) => { fail = () => reject(Object.assign(new Error(detail), { status })); });
+    };
+    const routed = app.routeImpl();
+    for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0));
+    // The operator navigated: a newer route() stamped #main and drew its page.
+    nodes.main.dataset.route = "next-page";
+    nodes.main.replaceChildren(app.el("p", { class: "next-page" }, "the page moved to"));
+    app.document.getElementById("topbar-title").textContent = "Inbox";
+    fail();
+    await routed;
+    assert.ok(nodes.main.querySelector(".next-page"), "the page moved to still stands");
+    assert.equal(nodes.main.querySelector(".not-found"), null);
+    assert.equal(nodes["topbar-title"].textContent, "Inbox");
+    assert.deepEqual(app.flashes, []);
+  });
+}

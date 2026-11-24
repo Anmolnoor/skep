@@ -3012,6 +3012,9 @@ def approval_view(
         ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
+    stored = store.approval_commands(approval.review_id)
+    if stored:  # R3 J8: what THIS review grants, quoted as a shell would read it
+        row["command_lines"] = [shlex.join(argv) for argv in stored]
     if approval.status == "pending":  # R1 G6: the card's boundary, one classifier
         from .cards import boundary
 
@@ -3205,6 +3208,23 @@ def require_run(store: RunStore, task_id: str) -> dict[str, Any]:
     return asdict(record)
 
 
+ESCAPED_NOTE = (
+    "# not valid UTF-8: every invalid byte is shown as \\xNN and every literal backslash is doubled"
+)
+
+
+def display_patch(raw: bytes) -> str:
+    """R6-3: a patch as text for a person: valid UTF-8 as it is; otherwise
+    every invalid byte as \\xNN and every literal backslash doubled, under a
+    first line that says so (R7) — without that line `caf` + byte 0xE9 read
+    the same as a valid patch spelling `caf\\xe9`."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        escaped = raw.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+        return f"{ESCAPED_NOTE}\n{escaped}"
+
+
 def patch_path(store: RunStore, task_id: str) -> Path | None:
     artifacts = {kind: path for kind, path, _ in store.artifacts_for(task_id)}
     patch = artifacts.get("patch")
@@ -3229,7 +3249,7 @@ def patch_digest(store: RunStore, task_id: str) -> dict[str, Any] | None:
     if patch is None:
         return None
     try:
-        text = patch.read_text(encoding="utf-8", errors="replace")
+        text = display_patch(patch.read_bytes())  # R5-5 / R6-3
     except OSError:
         return None
     files: list[dict[str, Any]] = []

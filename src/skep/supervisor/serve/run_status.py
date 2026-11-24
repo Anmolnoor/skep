@@ -90,7 +90,8 @@ def _changed_file_count(patch: Path | None) -> int:
         except (json.JSONDecodeError, OSError):
             pass
     try:
-        return patch.read_text().count("diff --git ")
+        # R4 K5: a patch of non-UTF-8 text is still a patch to count
+        return patch.read_text(errors="replace").count("diff --git ")
     except OSError:
         return 0
 
@@ -166,6 +167,7 @@ def run_terminal_text(
     *,
     audit_dir: Path | None = None,
     completion_opt_in: bool = True,
+    light: bool = False,
 ) -> tuple[str, str] | None:
     """The one honest (line, kind) for a terminal run — None when there is
     nothing the operator must hear (a healthy landed completion without the
@@ -175,7 +177,9 @@ def run_terminal_text(
     waiting-on-you shapes (pending gate, unlanded patch, G10 disagreement,
     crash with a live resume checkpoint), "info" for everything else.
     ``completion_opt_in=False`` ignores the notify_run_completion opt-in:
-    only the shapes the operator must hear regardless."""
+    only the shapes the operator must hear regardless. ``light`` (R3 J7):
+    the same (kind, line) decision without opening the patch — the line names
+    no changed files; for a poll that needs membership only."""
     from .actions import (
         applied_branch_for,
         created_transition_views_for_task,
@@ -198,7 +202,22 @@ def run_terminal_text(
     # the operator concluded the work was destroyed. Patchless completions
     # stay opt-in (the model's own continuation reports success).
     patch = patch_path(store, task_id) if run.state == "completed" else None
-    unlanded_patch = patch is not None and applied_branch_for(store, task_id) is None
+    landed = run.state == "completed" and applied_branch_for(store, task_id) is not None
+    unlanded_patch = patch is not None and not landed
+    # v128-F7: the newest landing verdict a human denied (not a failed
+    # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
+    # R4 K4: a superseded review was never answered — it does not count.
+    landings = [
+        a
+        for a in store.approvals_for(task_id)
+        if a.action == "apply_patch" and a.status != "superseded"
+    ]
+    last = landings[-1] if landings else None
+    human_denied = (
+        last is not None
+        and last.status == "denied"
+        and "apply failed:" not in (last.resolution_note or "")
+    )
     # v56-F5 (ADR 0038): a gate is a call to action, not an opt-in — a run
     # waiting on the operator must never sit silent in the queue.
     pending_gate = run.state == "pending_approval"
@@ -207,7 +226,14 @@ def run_terminal_text(
     # Only outcome "failed" is the disagreement shape: "not_applicable" is
     # benign (v65) and "unavailable" already rides the unlanded-patch line.
     reverify = store.reverification_for(task_id) if run.state == "completed" else None
-    disagreed = reverify is not None and not reverify.confirmed and reverify.outcome == "failed"
+    # R3 J6: like an unlanded patch, a landed or human-denied run asks nothing more.
+    disagreed = (
+        reverify is not None
+        and not reverify.confirmed
+        and reverify.outcome == "failed"
+        and not landed
+        and not human_denied
+    )
     if (
         run.state not in FAILED_STATES
         and not completed_opt_in
@@ -245,12 +271,12 @@ def run_terminal_text(
         )
         kind = "action_needed"
     elif unlanded_patch:
-        changed = _changed_file_count(patch)
+        changed = 0 if light else _changed_file_count(patch)
         files = f" ({changed} file{'s' if changed != 1 else ''})" if changed else ""
         # v87-F4: name what changed, right in the call to action — the
         # operator (and the Queen reading history) sees WHAT completed,
         # not just that something did.
-        digest = patch_digest(store, task_id)
+        digest = None if light else patch_digest(store, task_id)
         if changed and digest is not None and digest.get("files"):
             shown = ", ".join(str(entry["path"]) for entry in digest["files"][:3])
             more = ", …" if changed > 3 else ""
@@ -277,15 +303,8 @@ def run_terminal_text(
                 f"work is on no branch){unverified}"
             )
         kind = "action_needed"
-        # v128-F7: the newest landing verdict a human denied (not a failed
-        # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
-        landings = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
-        last = landings[-1] if landings else None
-        if (
-            last is not None
-            and last.status == "denied"
-            and "apply failed:" not in (last.resolution_note or "")
-        ):
+        if human_denied:
+            assert last is not None
             text = (
                 f"run {task_id[:13]}… completed — landing denied by {last.resolved_by}"
                 f"{files}; the patch is kept: land_run {task_id} still lands it"

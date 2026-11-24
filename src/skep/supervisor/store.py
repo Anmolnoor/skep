@@ -1640,6 +1640,30 @@ class RunStore:
         return [RunRecord(*row) for row in rows]
 
     @_locked
+    def runs_awaiting_review(self) -> list[RunRecord]:
+        """Phase 10 R3 J7: the runs `skep review` and the Inbox can still owe
+        a verdict, oldest first — a gated run, or a completed one that has not
+        landed (no approved apply_patch) and holds a patch artifact or an
+        unconfirmed failed re-verification. A superset of run_terminal_text's
+        waiting shapes, so the walk never reads the rest of history."""
+        rows = self._conn.execute(
+            "SELECT task_id, trace_id, repo, ref, workspace, execution_mode, instructions,"
+            " state, summary, verification_outcome, verification_details, worker_version,"
+            " manifest_fingerprint, resume_of, created_at, updated_at, base_commit,"
+            " worker_kind, coding_engine"
+            " FROM runs r WHERE r.state = 'pending_approval'"
+            " OR (r.state = 'completed'"
+            "  AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = r.task_id"
+            "   AND a.action = 'apply_patch' AND a.status = 'approved')"
+            "  AND (EXISTS (SELECT 1 FROM artifacts f WHERE f.task_id = r.task_id"
+            "    AND f.kind = 'patch')"
+            "   OR EXISTS (SELECT 1 FROM reverifications v WHERE v.task_id = r.task_id"
+            "    AND v.outcome = 'failed' AND v.confirmed = 0)))"
+            " ORDER BY created_at",
+        ).fetchall()
+        return [RunRecord(*row) for row in rows]
+
+    @_locked
     def task_ids_with_prefix(self, prefix: str) -> list[str]:
         """v59-F8: resolve a truncated task id — LIKE with escaped wildcards."""
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -1984,6 +2008,40 @@ class RunStore:
         return self.enqueue_approval(task_id, action=action, reason=reason)
 
     @_locked
+    def enqueue_approval_if_unchanged(
+        self, task_id: str, *, known: tuple[str, ...], action: str, reason: str
+    ) -> str | None:
+        """Phase 10 R2 I1: mint the review a card implied — only if the task's
+        approvals are still exactly the ``known`` ones it was read with, in
+        ONE locked call. None: a review came (and maybe went) since."""
+        with self._conn:  # the database's write lock across the read and the insert
+            self._begin_immediate()
+            rows = self._conn.execute(
+                "SELECT review_id FROM approvals WHERE task_id = ?", (task_id,)
+            ).fetchall()
+            if {str(row[0]) for row in rows} != set(known):
+                return None
+            return self.enqueue_approval(task_id, action=action, reason=reason)
+
+    @_locked
+    def supersede_approval(
+        self, review_id: str, *, actor: str, note: str, claimed: bool = False
+    ) -> bool:
+        """Phase 10 R3 J4: withdraw a review minted for one verdict that was
+        then refused — 'superseded', with why: never left pending for nobody,
+        and never a 'denied' (which would read as a human's answer, v128-F7,
+        and reject a gated run, v48-F3). From 'pending' — or, R4 K3, with
+        ``claimed`` from the caller's own 'applying' claim, in this one
+        update, so the review is never pending in between."""
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'superseded', resolved_at = ?, resolved_by = ?,"
+            " resolution_note = ?, claim_owner = NULL WHERE review_id = ? AND status = ?",
+            (_now(), actor, note, review_id, "applying" if claimed else "pending"),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
     def claim_approval(self, review_id: str, *, owner: str | None | object = _THIS_PROCESS) -> bool:
         """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
         card claim (ES-F1) for landings. Only the winner runs git. W27: the
@@ -2246,6 +2304,18 @@ class RunStore:
             (review_id,),
         ).fetchone()
         return None if row is None else ApprovalRecord(*row)
+
+    @_locked
+    def runs_landed_on(self, branch: str) -> list[str]:
+        """R4 K1: the runs whose approved landing named ``branch``, oldest
+        first — a pre-v30 row with no recorded branch landed on skep/<task_id>."""
+        rows = self._conn.execute(
+            "SELECT task_id FROM approvals WHERE action = 'apply_patch' AND status = 'approved'"
+            " AND (landing_branch = ? OR (landing_branch IS NULL AND 'skep/' || task_id = ?))"
+            " ORDER BY resolved_at, review_id",
+            (branch, branch),
+        ).fetchall()
+        return list(dict.fromkeys(str(row[0]) for row in rows))
 
     @_locked
     def pending_approvals(self) -> list[ApprovalRecord]:
@@ -3108,7 +3178,14 @@ class RunStore:
         return None if row is None else json.loads(row[0])
 
     @_locked
-    def set_setting(self, key: str, value: Any) -> None:
+    def setting_updated_at(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT updated_at FROM settings WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
+    @_locked
+    def set_setting(self, key: str, value: Any, *, updated_at: str | None = None) -> None:
+        """``updated_at``: a rollback putting a row back as it was (see
+        ``setting_updated_at``); every other writer stamps now."""
         encoded = json.dumps(value, ensure_ascii=True)
         if key in _PROVIDER_SETTINGS:
             # ES-F13 (B86): a provider ceiling measured ONE provider+model —
@@ -3123,7 +3200,7 @@ class RunStore:
                 )
         self._conn.execute(
             "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-            (key, encoded, _now()),
+            (key, encoded, updated_at or _now()),
         )
         self._conn.commit()
 

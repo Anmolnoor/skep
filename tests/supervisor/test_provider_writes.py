@@ -1235,6 +1235,29 @@ def test_a_staged_key_never_takes_over_another_staged_endpoints_key(
 # --- R3 H4 / H5 / H6: workers resolve the credential Settings probed -----------------
 
 
+def test_a_save_refused_mid_write_puts_each_setting_back_with_its_own_timestamp(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback restores an llm_* setting row as it was, updated_at too —
+    even when the clock moved between the write and the refusal (this was a
+    one-second-boundary flake in the test above)."""
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        client.put("/api/llm/config", json={"base_url": a.base_url, "api_key": "ka1"})
+        before = _raw(config.home)
+        monkeypatch.setattr("skep.supervisor.store._now", lambda: "2099-01-01T00:00:00Z")
+        refused = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": "kb1"})
+        monkeypatch.undo()
+        after = _raw(config.home)
+    finally:
+        a.stop()
+        b.stop()
+    assert refused.status_code == 400, refused.text
+    assert after == before
+
+
 def test_a_workers_key_replaces_profile_jsons_env_var(
     installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1651,3 +1674,36 @@ def test_a_legacy_read_takes_the_file_lock_even_before_any_commit(
         assert not (config.home / llm.PROVIDER_LOCK_FILE).exists()
         assert llm.legacy_api_key(config.home, "https://a.example", store) == "env-r11"
     assert (config.home / llm.PROVIDER_LOCK_FILE).exists() and held == [True]
+
+
+# --- Phase 10 R2 I6: Test and Save resolve ONE staged candidate --------------------
+
+
+def test_testing_an_inactive_registered_endpoint_probes_the_model_save_activates(
+    config: SupervisorConfig,
+) -> None:
+    """R2 I6: Test probed the endpoint's first listed model while Save picked
+    (and probed) the registered profile's pinned one — the operator saw a
+    green check for a model that was never the one activated."""
+    old = FakeOllama(models=["m1"]).start()
+    other = FakeOllama(models=["first", "pinned"]).start()
+    other.show_context_lengths = {"first": 8192, "pinned": 65536}
+    client = serve_client(config)
+    try:
+        _configured(client, old, "m1")
+        with _store(config) as store:
+            store.upsert_provider_profile(
+                ProviderProfile("other", "ollama", other.base_url, "pinned")
+            )
+        probed = client.post("/api/llm/probe", json={"base_url": other.base_url}).json()
+        saved = client.put("/api/llm/config", json={"base_url": other.base_url})
+    finally:
+        old.stop()
+        other.stop()
+    assert probed["ok"] is True and probed["model"] == "pinned"
+    assert probed["context_window"]["window"] == 65536
+    assert saved.status_code == 200, saved.text
+    with _store(config) as store:
+        active = store.active_provider_profile()
+    assert active is not None and active.provider_id == "other"
+    assert active.model == probed["model"]

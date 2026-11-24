@@ -84,8 +84,9 @@ def test_confirmed_set_personality_sticks_and_shapes_the_prompt(
 
 def test_personality_command_is_in_the_deck() -> None:
     from skep.supervisor.serve.app import STATIC_DIR
+    from skep.supervisor.serve.commands import WEB, resolve
 
     source = (STATIC_DIR / "app.js").read_text()
-    assert "personality: {" in source
+    assert resolve(WEB, "personality").name == "personality"  # the web deck's row
     assert 'name === "personality"' in source
     assert "/personality" in SYSTEM_PROMPT

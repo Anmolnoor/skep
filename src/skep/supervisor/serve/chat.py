@@ -66,6 +66,7 @@ from .cards import (
     recorded_card,
     unreadable_under_deny,
 )
+from .commands import WEB, CommandRefused, check_card, web_deck
 from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
@@ -538,13 +539,53 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     )
 
 
-def blocking_cards(store: RunStore, chat_id: str) -> list[ChatActionRecord]:
+def card_refusal(surface: str, card: ChatActionRecord) -> str | None:
+    """Phase 10 R1 D1: why ``surface`` will not confirm ``card`` — a desk card
+    whose command only another desk surface carries (/model's card, born in
+    skep chat) — or None. ``surface`` is a client hint, not authorization:
+    the web and skep chat share one token, so one operator (I8 — never call
+    this a boundary). The refusal is usability: a card is answered where it
+    was asked. A cancel is never refused here — a deny only narrows (I7)."""
+    if card.source not in ("operator", "gate"):
+        return None  # a model proposal resolves on /actions, not the deck
+    try:
+        check_card(surface, card.tool)
+    except CommandRefused as exc:
+        return f"{exc} — answer it in {'skep chat' if surface == WEB else 'the web console'}"
+    return None
+
+
+def blocking_cards(
+    store: RunStore, chat_id: str, *, surface: str | None = None
+) -> list[ChatActionRecord]:
     """ES-F5 (B100): the pending cards that hold the conversation — all but a
     gate mirror (v87-F2: a gate can wait; the conversation must not). The web
-    composer locks on exactly this set (app.js renderPendingCards); the
+    composer locks on exactly this set (app.js blocksComposer); the
     server 409'd on every card, so a gate that never times out locked the
-    chat while the UI showed it open."""
-    return [card for card in store.pending_chat_actions(chat_id) if card.source != "gate"]
+    chat while the UI showed it open. D1: with a ``surface`` hint, a card
+    that surface cannot confirm does not hold its composer either."""
+    return [
+        card
+        for card in store.pending_chat_actions(chat_id)
+        if card.source != "gate" and (surface is None or card_refusal(surface, card) is None)
+    ]
+
+
+def executed_payload(tool: str, result: Any) -> dict[str, Any]:
+    """R5-7 (I8): a mutation's tool payload — an open_pr whose result says no
+    PR was opened did not do what its card asked, so it is not ok, with the
+    result's own detail (and the result kept beside it)."""
+    if tool == "open_pr" and isinstance(result, dict) and result.get("opened") is False:
+        return {
+            "ok": False,
+            "error": f"the PR was not opened: {result.get('detail')}",
+            "result": result,
+        }
+    # Phase 09 R3 (S8): merge_pr's result says whether it merged — a merge
+    # that did not happen is a failed card (github.merge_record).
+    if tool == "merge_pr" and isinstance(result, dict) and result.get("ok") is False:
+        return {"ok": False, "result": result}
+    return {"ok": True, "result": result}
 
 
 def executed_status(payload: dict[str, Any]) -> str:
@@ -1889,6 +1930,9 @@ class ActionConfirm(BaseModel):
     else once (P3-4, B32 — an explicit keep the card cannot honour is a 400)."""
 
     keep: str | None = None
+    # R3 J2: how many items the confirmer was shown — a card that holds a
+    # different set (a fold added one since) is refused, nothing runs.
+    items: int | None = None
 
 
 class ChatEngine:
@@ -2937,7 +2981,7 @@ class ChatEngine:
                                 decision=decision,
                                 chat_id=chat_id,
                             )
-                            payload = {"ok": True, "result": result}
+                            payload = executed_payload(name, result)
                         except HTTPException as exc:
                             payload = {"ok": False, "error": str(exc.detail)}
                         except (KeyError, ValueError, TypeError) as exc:
@@ -3415,6 +3459,7 @@ class ChatEngine:
         confirm: bool,
         actor: str = CHAT_ACTOR,
         keep: str | None = None,
+        items: int | None = None,
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
@@ -3427,6 +3472,15 @@ class ChatEngine:
         action = self.store.get_chat_action(action_id)
         if action is None or action.chat_id != chat_id:
             raise HTTPException(status_code=404, detail=f"no action {action_id!r} in this chat")
+        held = len(action.fold_items())
+        if confirm and items is not None and held != items:
+            # R3 J2: the approve binds to the set the confirmer saw; the items
+            # run below are this snapshot's, so a match here is exactly that set.
+            raise HTTPException(
+                status_code=409,
+                detail=f"this card now holds {held} items, not the {items} you were shown. "
+                "Nothing ran. Open it in its thread to read every item",
+            )
         # v112-F1: the keep choice rides the confirm — "once" grants nothing,
         # "session" (bound to this chat) is the default where the card can keep
         # a grant, "always" writes the durable tier.
@@ -3584,8 +3638,9 @@ class ChatEngine:
         if lock is None:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
-                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-                )
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep,
+                    high=high is not None, shown_items=items,
+                )  # fmt: skip
             queued = not blocking_cards(self.store, chat_id)
             if queued:
                 self.store.queue_follow_up(action_id, actor)
@@ -3598,8 +3653,9 @@ class ChatEngine:
         try:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
-                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-                )
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep,
+                    high=high is not None, shown_items=items,
+                )  # fmt: skip
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()
@@ -3693,10 +3749,7 @@ class ChatEngine:
                     "memory_id": item.memory_id,
                     "note": "approved on its card — active in future prompts",
                 }
-            # R3 (S8, I8): merge_pr's result says whether it merged — a merge
-            # that did not happen is a failed card (github.merge_record).
-            ok = result.get("ok") is not False if tool == "merge_pr" else True
-            payload: dict[str, Any] = {"ok": ok, "result": result}
+            payload: dict[str, Any] = executed_payload(tool, result)
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
             # always-tier writes to, so resolve() composes it unchanged and
@@ -3731,6 +3784,7 @@ class ChatEngine:
         actor: str,
         keep: str,
         high: bool = False,
+        shown_items: int | None = None,
     ) -> dict[str, Any]:
         """Claim, execute (or deny) and record one card; the tool row's payload.
 
@@ -3744,6 +3798,17 @@ class ChatEngine:
             # second confirm, a Deny or the timeout sweep now lose with a 409.
             if not self.store.claim_chat_action(action_id):
                 raise card_taken(self.store, action_id)
+            # R4 K2: a fold lands only on a 'proposed' card, so the claimed row
+            # is the set that runs — the count the confirmer saw is checked on it.
+            action = self.store.get_chat_action(action_id) or action
+            items = action.fold_items()
+            if shown_items is not None and len(items) != shown_items:
+                self.store.unclaim_chat_action(action_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"this card now holds {len(items)} items, not the {shown_items} "
+                    "you were shown. Nothing ran. Open it in its thread to read every item",
+                )
             payloads: list[dict[str, Any]] = []
             # P4-2 (ADR 0059 D6): the operator approving a dispatch card at
             # their desk answers the deferred asks its manifest LISTED, for
@@ -4283,6 +4348,10 @@ def add_chat_routes(
                     )
         return detail
 
+    def _web_refusal(action: ChatActionRecord) -> dict[str, str]:
+        refusal = card_refusal(WEB, action) if action.status == "proposed" else None
+        return {"web_refusal": refusal} if refusal else {}
+
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
@@ -4295,6 +4364,9 @@ def add_chat_routes(
                     "description": tool_description(a.tool),
                     # W39: the same card, decision and why-line the live event had
                     **engine.card_fields(chat_id, a),
+                    # D1: a pending card the web cannot confirm says where to
+                    # answer it; the web draws it read-only, Cancel still works.
+                    **_web_refusal(a),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],
@@ -4354,7 +4426,9 @@ def add_chat_routes(
         return FileResponse(path, media_type=attachment_mime(name))
 
     @app.post("/api/chats/{chat_id}/messages")
-    def post_message(chat_id: str, body: MessageRequest) -> StreamingResponse:
+    def post_message(
+        chat_id: str, body: MessageRequest, surface: Literal["web", "cli"] | None = None
+    ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
         for name in body.attachments:
@@ -4366,7 +4440,9 @@ def add_chat_routes(
         # ES-F2 (B14): the pending-card check happens under the turn lock —
         # checked outside it, two POSTs both passed and both ran turns.
         lock = take_turn(chat_id)
-        if blocking_cards(run_store, chat_id) and not body.read_only:
+        # D1: ``surface`` (a client hint) — a card it cannot confirm does
+        # not hold it; no hint is the strict rule (every non-gate card).
+        if blocking_cards(run_store, chat_id, surface=surface) and not body.read_only:
             # v67-F3: a read-only /btw may run beside a pending card — safe
             # precisely because nothing it does can need confirmation.
             lock.release()
@@ -4409,6 +4485,12 @@ def add_chat_routes(
     # -- the command deck (v25-F1): operator-typed /commands. The model is not
     # in this loop — no transcript writes, no continuation stream. The card +
     # the chat_actions row keep the same audit shape as a Queen proposal.
+
+    @app.get("/api/commands")
+    def command_deck() -> dict[str, Any]:
+        """Phase 10 10.3: the web deck is a view of the one registry — its
+        rows, and what every other surface's command gets here. Read-only."""
+        return web_deck()
 
     @app.post("/api/chats/{chat_id}/stop")
     def stop_turn(chat_id: str, body: StopRequest | None = None) -> dict[str, Any]:
@@ -4491,7 +4573,9 @@ def add_chat_routes(
             ),
         }
 
-    def _resolve_command(chat_id: str, action_id: str, *, confirm: bool) -> dict[str, Any]:
+    def _resolve_command(
+        chat_id: str, action_id: str, *, confirm: bool, surface: str
+    ) -> dict[str, Any]:
         _require_chat(chat_id)
         action = run_store.get_chat_action(action_id)
         if action is None or action.chat_id != chat_id:
@@ -4502,6 +4586,14 @@ def add_chat_routes(
                 detail="this is an assistant proposal; resolve it via "
                 f"/api/chats/{chat_id}/actions/{action_id}/confirm or /deny",
             )
+        # Phase 10 R1 D1: ``surface`` is a client hint, not authorization —
+        # web and skep chat share one token, one operator. A confirm is
+        # answered where the card was asked (refused before the claim, so
+        # nothing runs and it stays pending); a cancel is taken anywhere,
+        # since a deny only narrows (I7).
+        refusal = card_refusal(surface, action) if confirm else None
+        if refusal is not None:
+            raise HTTPException(status_code=403, detail=refusal)
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
@@ -4540,7 +4632,7 @@ def add_chat_routes(
                     actor=COMMAND_ACTOR,
                     chat_id=chat_id,
                 )
-                payload: dict[str, Any] = {"ok": True, "result": result}
+                payload: dict[str, Any] = executed_payload(tool, result)
                 if not confirm:
                     payload["denied"] = True
             except HTTPException as exc:
@@ -4582,13 +4674,19 @@ def add_chat_routes(
             record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
+    # The desk's two surfaces share this path; skep chat says it is the cli —
+    # a client hint (one token, one operator), never an authorization check.
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")
-    def confirm_command(chat_id: str, action_id: str) -> dict[str, Any]:
-        return _resolve_command(chat_id, action_id, confirm=True)
+    def confirm_command(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] = "web"
+    ) -> dict[str, Any]:
+        return _resolve_command(chat_id, action_id, confirm=True, surface=surface)
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/deny")
-    def deny_command(chat_id: str, action_id: str) -> dict[str, Any]:
-        return _resolve_command(chat_id, action_id, confirm=False)
+    def deny_command(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] = "web"
+    ) -> dict[str, Any]:
+        return _resolve_command(chat_id, action_id, confirm=False, surface=surface)
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/confirm")
     def confirm_action(
@@ -4596,13 +4694,16 @@ def add_chat_routes(
     ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         keep = body.keep if body is not None else None
+        shown = body.items if body is not None else None
         return StreamingResponse(
             _as_sse(
                 _mirror_desk_turn(  # v129-F1
                     run_store,
                     home,
                     chat_id,
-                    engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep),
+                    engine.verdict_events(
+                        chat_id, chat, action_id, confirm=True, keep=keep, items=shown
+                    ),
                 )
             ),
             media_type="text/event-stream",

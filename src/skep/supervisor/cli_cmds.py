@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import pydoc
@@ -19,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -112,17 +113,30 @@ def _stdin_is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _read_single_key() -> str:
+REVIEW_KEY_TIMEOUT_SECONDS = 300  # Phase 10 R1 D4: an unanswered card skips (I7)
+
+
+def _read_single_key(timeout: float = REVIEW_KEY_TIMEOUT_SECONDS) -> str:
+    """One key, no Enter. Input typed before the prompt is flushed first, so a
+    key pressed while a card was still drawing never answers it (I7); no key
+    within ``timeout``, or EOF, reads "" — the caller's skip. A terminal that
+    refuses raw mode raises OSError, so the caller reads a line instead."""
+    import select
     import termios
     import tty
 
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
     try:
-        tty.setcbreak(fd)
-        return sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            ready, _, _ = select.select([fd], [], [], timeout)
+            return os.read(fd, 1).decode("utf-8", errors="replace") if ready else ""
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    except termios.error as exc:
+        raise OSError(f"single-key input unavailable: {exc}") from exc
 
 
 def _read_approval_choice() -> str:
@@ -135,9 +149,31 @@ def _read_approval_choice() -> str:
         else:
             print()
             return choice.strip().lower() or "s"
+    return _read_line()
+
+
+def _read_line() -> str:
+    """R2 I4 (I7): the no-raw-terminal fallback, under the single key's
+    timeout — no line within it, or EOF, is a skip ("s"), never a wait
+    forever. A stdin without a descriptor (a test's) reads directly."""
     try:
-        return input("> ").strip().lower()
-    except EOFError:
+        fd: int | None = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is not None:
+        import select
+
+        print("> ", end="", flush=True)
+        try:
+            ready, _, _ = select.select([fd], [], [], REVIEW_KEY_TIMEOUT_SECONDS)
+        except (OSError, ValueError):
+            ready = [fd]  # not selectable here: read as before
+        if not ready:
+            print()
+            return "s"
+    try:
+        return input("" if fd is not None else "> ").strip().lower()
+    except (EOFError, OSError):  # a hung-up terminal reads EIO on some systems
         return "s"
 
 
@@ -241,9 +277,18 @@ def _parse_shell_allow(commands: list[str]) -> tuple[tuple[str, ...], ...]:
 class _PhaseTail(threading.Thread):
     """Live-print coarse phases by tailing the active worktree's event stream."""
 
-    def __init__(self, config: SupervisorConfig, *, since: str | None = None) -> None:
+    def __init__(
+        self,
+        config: SupervisorConfig,
+        *,
+        since: str | None = None,
+        emit: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(name="phase-tail", daemon=True)
         self._config = config
+        # Phase 10 R1: a terminal's spinner takes each phase line; None is the
+        # plain `  → ` print every pipe, NO_COLOR and CI run gets.
+        self._emit = emit
         # Named _stop_event because threading.Thread itself owns a private
         # _stop() method that join() invokes — shadowing it breaks join().
         self._stop_event = threading.Event()
@@ -431,7 +476,10 @@ class _PhaseTail(threading.Thread):
             return
         if text != self._last_line:
             self._last_line = text
-            print(f"  → {text}", flush=True)
+            if self._emit is not None:
+                self._emit(text)
+            else:
+                print(f"  → {text}", flush=True)
 
 
 def _phase_tail_decision(raw: object) -> str:
@@ -764,8 +812,12 @@ def cmd_run_forensics(args: argparse.Namespace) -> int:
         return _err(str(exc.detail), next_command="skep status --personal  # list recent task ids")
     finally:
         store.close()
+    from .. import cli_ui
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
+    elif not args.md and cli_ui.rich_enabled():
+        cli_ui.print_report(render_forensics(report, markdown=False))
     else:
         print(render_forensics(report, markdown=args.md))
     return 0
@@ -1105,7 +1157,10 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
             held.clear()
             record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
+    from .. import cli_ui
+
     tail: _PhaseTail | None = None
+    spinner: cli_ui.PhaseSpinner | None = None
     if matched_template is not None:
         print(
             f"matched template: {matched_template.name}"
@@ -1113,7 +1168,13 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
         )
     if not args.quiet:
         print(f"dispatching task against {repo}{source}")
-        tail = _PhaseTail(config, since=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if cli_ui.rich_enabled():  # Phase 10 R1: a terminal gets the live spinner
+            spinner = cli_ui.PhaseSpinner("dispatching")
+        tail = _PhaseTail(
+            config,
+            since=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            emit=None if spinner is None else spinner.phase,
+        )
         tail.start()
     started = time.monotonic()
     # v70-F3: the explicit flag wins; otherwise the project policy knob
@@ -1155,6 +1216,8 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
     finally:
         if tail is not None:
             tail.stop()
+        if spinner is not None:
+            spinner.stop()
 
     record = outcome.record
     # R1 G1 (I5, I6): only a run whose grants ARE the project's policy — the
@@ -1336,10 +1399,16 @@ def cmd_status_personal(args: argparse.Namespace) -> int:
         if not audit_task.is_file():
             continue
         audited_tasks[record.task_id] = CodingWorkerTask.model_validate_json(audit_task.read_text())
-    print(
-        f"{'task':<14} {'state':<17} {'project':<28} {'autonomy':<58} {'verify':<12} "
-        f"{'re-verify':<14} {'usage':<9} summary"
-    )
+    from .. import cli_ui
+
+    rich = cli_ui.rich_enabled()  # Phase 10 R1: a drawn table on a terminal only
+    columns = ("task", "state", "project", "autonomy", "verify", "re-verify", "usage", "summary")
+    table: list[tuple[str, ...]] = []
+    if not rich:
+        print(
+            f"{'task':<14} {'state':<17} {'project':<28} {'autonomy':<58} {'verify':<12} "
+            f"{'re-verify':<14} {'usage':<9} summary"
+        )
     unconfirmed: list[str] = []
     for record in runs:
         summary = (record.summary or "-").replace("\n", " ")
@@ -1358,12 +1427,30 @@ def cmd_status_personal(args: argparse.Namespace) -> int:
         project_context = None if audited_task is None else audited_task.project_context
         project_cell = _project_summary(project_context)
         autonomy_cell = _status_autonomy_summary(audited_task)
+        verify_cell = record.verification_outcome or "-"
+        usage_cell = _usage_cell(usages.get(record.task_id))
+        if rich:
+            table.append(
+                (
+                    record.task_id[:12],
+                    record.state,
+                    project_cell,
+                    autonomy_cell,
+                    verify_cell,
+                    rv_cell,
+                    usage_cell,
+                    summary,
+                )
+            )
+            continue
         print(
             f"{record.task_id[:12]:<14} {record.state:<17} "
-            f"{project_cell:<28} {autonomy_cell:<58} {record.verification_outcome or '-':<12} "
+            f"{project_cell:<28} {autonomy_cell:<58} {verify_cell:<12} "
             f"{rv_cell:<14} "
-            f"{_usage_cell(usages.get(record.task_id)):<9} {summary}"
+            f"{usage_cell:<9} {summary}"
         )
+    if rich:
+        cli_ui.print_table(columns, table)
     if totals.provider_calls:
         print(f"\nusage: {_usage_summary(totals)} across recorded runs (G8)")
     if unconfirmed:
@@ -1437,6 +1524,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             evidence=str(config.db_path),
             next_command='skep run <repo> "<instructions>"',
         )
+    if args.task_id is None:
+        return _review_inbox(args, config)
     store = RunStore(config.db_path)
     try:
         record = _find_run(store, args.task_id)
@@ -1566,9 +1655,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             elif blocked:
                 lines.append(f"  auto-landing: not fired ({blocked})")
             patch_path = artifacts.get("patch")
+            patch_text = None
+            patch_at = -1  # R2 I5: where the patch sits in lines (it may be "")
             if patch_path is not None and patch_path.is_file():
+                from .serve.actions import display_patch
+
+                # R5-5 / R6-3: a byte and its \xNN spelling never read the same
+                patch_text = display_patch(patch_path.read_bytes())
                 lines.append("")
-                lines.append(patch_path.read_text())
+                patch_at = len(lines)
+                lines.append(patch_text)
                 lines.append(
                     f"next: git -C {shlex.quote(record.repo)} switch {landed}  # landed"
                     if landed
@@ -1577,23 +1673,54 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
             else:
                 lines.append("  patch:        none produced")
-            pydoc.pager("\n".join(lines))
+            from .. import cli_ui
+
+            if sys.stdout.isatty():  # R2 I3: a screen gets control bytes as escapes
+                lines = [cli_ui.visible(line) for line in lines]
+            if patch_text is not None and cli_ui.rich_enabled():
+                # D4 (N8): on a terminal the patch is lit as a diff.
+                head, tail = lines[:patch_at], lines[patch_at + 1 :]
+                cli_ui.page_ansi(
+                    cli_ui.review_ansi("\n".join(head), lines[patch_at], "\n".join(tail))
+                )
+            else:
+                pydoc.pager("\n".join(lines))
             return 0
 
         actor = args.actor or getpass.getuser()
+        shown = getattr(args, "shown", None)  # Phase 10 R1 D4: set by `skep review`'s walk
         from .serve.actions import landing_reason
 
+        if shown is not None and (args.approve or args.deny):
+            # R3 J4: read-only here — a review is minted only right before
+            # the claim (or the deny), after every eligibility check passed.
+            stale = _stale_verdict(store, record, shown)
+            if stale is not None:
+                return _stale_err(record, stale, audit_dir)
+
         if args.deny:
-            review_id = _pending_or_new(
-                store, record, reason=landing_reason(record.instructions, None)
-            )
+            minted = False
+            if shown is not None:
+                review_id, minted = _shown_review(store, record, shown)
+                if review_id is None:
+                    return _stale_err(record, _RECORDED_SINCE, audit_dir)
+            else:
+                review_id = _pending_or_new(
+                    store, record, reason=landing_reason(record.instructions, None)
+                )
             from fastapi import HTTPException
 
-            from .serve.actions import deny_approval
+            from .serve import actions as serve_actions
 
             try:
-                deny_approval(store, review_id, actor, args.note)
+                serve_actions.deny_approval(store, review_id, actor, args.note)
             except HTTPException as exc:  # W27c: a resume or landing holds it
+                if minted:  # R4 K3: minted for this deny — withdrawn, never pending
+                    store.supersede_approval(
+                        review_id,
+                        actor="skep review",
+                        note=f"minted for a verdict refused: {exc.detail}",
+                    )
                 return _err(
                     str(exc.detail),
                     state=record.state,
@@ -1643,7 +1770,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         # Q8 true resume: approving a suspended task continues it past the gate
         # (a fresh worker run carrying the granted verdict), not "apply a patch".
         if record.state == "pending_approval":
-            return _resume_pending_approval(config, store, record, actor)
+            return _resume_pending_approval(config, store, record, actor, shown=shown)
 
         from .serve.actions import applied_branch_for
 
@@ -1696,8 +1823,20 @@ def cmd_review(args: argparse.Namespace) -> int:
             branch = f"skep/{record.task_id}"
         # B150: the same claim serve's apply_patch takes (ES-F4) — without it
         # a CLI approve during serve's landing applied the patch a second time.
-        review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
-        if not store.claim_approval(review_id):
+        if shown is not None:
+            shown_review, minted = _shown_review(store, record, shown)
+            if shown_review is None:
+                return _stale_err(record, _RECORDED_SINCE, audit_dir)
+            refused = _claim_shown(store, record.task_id, shown_review, shown, minted=minted)
+            if refused is not None:
+                return _stale_err(record, refused, audit_dir)
+            review_id = shown_review
+        else:
+            shown_review = None
+            review_id = _pending_or_new(
+                store, record, reason=landing_reason(record.instructions, None)
+            )
+        if review_id != shown_review and not store.claim_approval(review_id):
             from .serve.actions import landing_taken
 
             return _err(
@@ -1810,6 +1949,15 @@ def _auto_apply_blocked(store: RunStore, task_id: str) -> str | None:
     return None
 
 
+def _stale_err(record: RunRecord, why: str, audit_dir: Path) -> int:
+    return _err(
+        f"{why}; nothing done",
+        state=record.state,
+        evidence=str(audit_dir),
+        next_command=f"skep review {record.task_id}  # read it again, then decide",
+    )
+
+
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
     # ES-F4: one locked store call, the same pending-or-new the serve uses.
     review_id = store.pending_or_enqueue_approval(
@@ -1895,6 +2043,317 @@ def _prompt_inline_approval(
             run_store.close()
 
 
+@dataclass(frozen=True)
+class _Shown:
+    """Phase 10 R1 D4: what an interactive review card displayed. The verdict
+    typed at it binds to exactly this (I7, I13)."""
+
+    state: str
+    review_id: str | None  # the open review the verb would answer; None: none open
+    patch_sha256: str | None  # the bytes of the patch the card showed
+    # R2 I1: every review the run had when read — a review minted for a card
+    # that showed none is minted only while this is still the whole set.
+    approvals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ReviewCard:
+    task_id: str
+    label: str  # CONFIRMED / NOT CONFIRMED / TAMPER / ASK / NOTHING TO RE-VERIFY
+    style: str
+    waiting: str
+    lines: list[str]
+    patch: str | None
+    shown: _Shown
+    batch: int = 0  # R2 I2: how many commands approving this card's gate grants
+
+
+def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
+    """Phase 10 R1 D4: why a verdict typed at a review card no longer matches
+    what the card showed — the run moved, its review was answered elsewhere,
+    another review opened, or the patch's bytes changed — or None. It only
+    refuses; the verdict itself still runs through the existing verbs (I5)."""
+    task_id = record.task_id
+    open_review = store.pending_or_enqueue_approval(
+        task_id, action="apply_patch", reason="", create=False
+    )
+    if shown.review_id is not None and open_review != shown.review_id:
+        was = store.get_approval(shown.review_id)
+        status = "gone" if was is None else f"{was.status} by {was.resolved_by or '-'}"
+        return f"review {shown.review_id} is no longer pending ({status})"
+    if shown.review_id is None and open_review is not None:
+        return f"review {open_review} is waiting on this run since you read it"
+    return _moved_since_shown(store, record, shown)
+
+
+def _moved_since_shown(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
+    """The run's state or its patch's bytes differ from what the card showed."""
+    task_id = record.task_id
+    if record.state != shown.state:
+        return f"task {task_id} moved from {shown.state} to {record.state} since you read it"
+    from .serve.actions import patch_path
+
+    # R3 J3: absence is evidence too — a card that showed no patch refuses one now.
+    path = patch_path(store, task_id)
+    try:
+        now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:  # R4 K5: no verdict on bytes nobody could read
+        return f"the patch is unreadable: {exc.strerror or exc}"
+    was = shown.patch_sha256 or "none"
+    if now != was:
+        return f"the patch changed since you read it (sha256 {was[:12]} → {now[:12]})"
+    return None
+
+
+_RECORDED_SINCE = "an approval was recorded on this run since you read it"
+
+
+def _shown_review(store: RunStore, record: RunRecord, shown: _Shown) -> tuple[str | None, bool]:
+    """Phase 10 R2 I1 (I7, I13): the review a card's verdict answers — the one
+    it displayed, never a fresh one looked up after the stale check — and
+    whether it was minted for this verdict. A card that displayed none gets
+    one minted only while the run's approvals are still the set it was read
+    with (None: something was recorded since). R3 J4: called only once every
+    read-only check passed, with the reason its verb records — a gated run's
+    is a resume's, a completed run's a landing's."""
+    if shown.review_id is not None:
+        return shown.review_id, False
+    from .serve.actions import landing_reason
+
+    reason = (
+        "resumed past approval gate"
+        if record.state == "pending_approval"
+        else landing_reason(record.instructions, None)
+    )
+    minted = store.enqueue_approval_if_unchanged(
+        record.task_id, known=shown.approvals, action="apply_patch", reason=reason
+    )
+    return minted, minted is not None
+
+
+def _claim_shown(
+    store: RunStore, task_id: str, review_id: str, shown: _Shown, *, minted: bool = False
+) -> str | None:
+    """Phase 10 R2 I1: claim exactly the shown review, then bind the claim to
+    the run state and patch bytes the card showed; a mismatch hands the claim
+    back — and R3 J4: a review ``minted`` for this verdict is withdrawn
+    (superseded, with why), never left pending. Returns why the verdict is
+    refused, or None (claimed)."""
+    if not store.claim_approval(review_id):
+        was = store.get_approval(review_id)
+        status = "gone" if was is None else f"{was.status} by {was.resolved_by or '-'}"
+        return f"review {review_id} is no longer pending ({status})"
+    record = store.get_run(task_id)
+    moved = (
+        f"task {task_id} is gone" if record is None else _moved_since_shown(store, record, shown)
+    )
+    if moved is not None:
+        if minted:  # R4 K3: from the owned claim straight to superseded
+            store.supersede_approval(
+                review_id,
+                actor="skep review",
+                note=f"minted for a verdict refused: {moved}",
+                claimed=True,
+            )
+        else:
+            store.unclaim_approval(review_id)
+    return moved
+
+
+def _review_interactive() -> bool:
+    """Prompts need a terminal on both ends: `skep review | less` never asks."""
+    return _stdin_is_interactive() and sys.stdout.isatty()
+
+
+def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
+    """What waits on the operator — the same "action needed" every face pushes
+    (``run_terminal_text``): a gated run, an unlanded patch, a G10 disagreement.
+    Phase 10 R1 D6 (I13): every run in a waiting state is read, newest first,
+    before anything is limited — an old gate is never off the walk. R3 J7: the
+    walk is the store's runs_awaiting_review (not all history), and ``light``
+    (the badge poll) is task id, label and waiting line only — no patch is
+    opened or hashed, no card text built.
+    """
+    from .serve.actions import display_patch, patch_path, tamper_note
+    from .serve.run_status import run_terminal_text
+
+    cards = []
+    for record in reversed(store.runs_awaiting_review()):
+        notice = run_terminal_text(store, record.task_id, completion_opt_in=False, light=light)
+        if notice is None or notice[1] != "action_needed":
+            continue
+        reverify = store.reverification_for(record.task_id)
+        if record.state == "pending_approval":
+            label, style = "ASK", "yellow"
+        elif reverify is not None and reverify.outcome == "tampered":
+            label, style = "TAMPER", "red"
+        elif reverify is not None and reverify.confirmed:
+            label, style = "CONFIRMED", "green"
+        elif reverify is not None and reverify.outcome == "not_applicable":
+            label, style = "NOTHING TO RE-VERIFY", "cyan"  # v65: benign, never a scream
+        else:
+            label, style = "NOT CONFIRMED", "red"
+        if light:
+            shown = _Shown(record.state, None, None)
+            cards.append(_ReviewCard(record.task_id, label, style, notice[0], [], None, shown))
+            continue
+        open_review = store.pending_or_enqueue_approval(
+            record.task_id, action="apply_patch", reason="", create=False
+        )
+        lines = [
+            f"state:    {record.state}",
+            f"summary:  {record.summary or '-'}",
+            f"waiting:  {notice[0]}",
+        ]
+        batch = 0
+        for gate in store.approvals_for(record.task_id):
+            if gate.status == "pending":
+                lines.append(f"card:     review {gate.review_id} — {gate.action}: {gate.reason}")
+                # R2 I2 (I8): an approve grants EVERY stored command (ES-F8),
+                # not only the reason's first — the card shows each one.
+                commands = store.approval_commands(gate.review_id) or []
+                if commands:
+                    many = "command" if len(commands) == 1 else "commands"
+                    lines.append(f"grants:   {len(commands)} {many}")
+                    lines += [f"            {shlex.join(argv)}" for argv in commands]
+                if gate.review_id == open_review:
+                    batch = len(commands)
+        if reverify is not None:
+            lines += _g10_lines(reverify)
+        note = tamper_note(reverify)
+        if note:
+            lines.append(f"V1:       {note}")
+        patch = patch_path(store, record.task_id)
+        raw, sha = None, None
+        try:
+            raw = patch.read_bytes() if patch is not None else None
+        except OSError as exc:  # R4 K5: this card says so; the walk goes on
+            lines.append(f"patch:    patch unreadable: {exc.strerror or exc}")
+            sha = "unreadable"
+        if raw is not None:
+            sha = hashlib.sha256(raw).hexdigest()
+        cards.append(
+            _ReviewCard(
+                record.task_id,
+                label,
+                style,
+                notice[0],
+                lines,
+                None if raw is None else display_patch(raw),
+                _Shown(
+                    record.state,
+                    open_review,
+                    sha,
+                    tuple(a.review_id for a in store.approvals_for(record.task_id)),
+                ),
+                batch,
+            )
+        )
+    return cards
+
+
+def _g10_lines(reverify: Any) -> list[str]:
+    """Phase 10 R1 D3 (I2, I8): what G10 did, as recorded — "re-ran … → exit"
+    only when a command executed, whose command it was, and the counts."""
+    from .forensics import _commands_source
+    from .ledger_proof import _SOURCE
+
+    if reverify.outcome == "not_applicable":
+        return [f"G10:      nothing to re-verify: {reverify.detail}"]
+    lines = [f"G10:      {reverify.outcome} confirmed={reverify.confirmed}"]
+    if reverify.exit_codes:
+        lines.append(f"          re-ran {reverify.commands} → exit {reverify.exit_codes}")
+    elif reverify.commands:
+        lines.append(f"          recorded verify: {reverify.commands} — nothing executed")
+    if reverify.commands:
+        source = _SOURCE.get(_commands_source(reverify.detail), "source unknown")
+        lines.append(f"          command {source}")
+    counts = reverify.test_counts or {}
+    if counts.get("status") == "ok":
+        base, patched = counts["baseline"], counts["patched"]
+        lines.append(
+            f"tests:    baseline {base.get('total_executed', '?')} executed → "
+            f"patched {patched.get('total_executed', '?')} executed"
+        )
+    return lines
+
+
+def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
+    """Phase 10 10.2: ``skep review`` with no id walks every waiting run — card
+    (named id, G10/V1), the exact diff, then ONE explicit key per run. Every
+    verdict is the existing ``skep review <id> --approve/--deny`` (I5); EOF and
+    any other key skip (I7). Off a terminal it lists and never prompts."""
+    if args.approve or args.deny or args.allow_command or args.reverify:
+        return _err("a verdict needs a task id.", next_command="skep review <task_id> --approve")
+    from .. import cli_ui
+
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        cards = _review_cards(store)
+    finally:
+        store.close()
+    if not cards:
+        print("nothing waits on you: no run is gated or holding an unlanded patch")
+        return 0
+    if not _review_interactive():
+        for card in cards:
+            print(f"{card.task_id}  {card.label}  {card.waiting}")
+        print("next: skep review <task_id>  # one run's evidence; --approve or --deny decides it")
+        return 0
+    rich = cli_ui.rich_enabled()
+    code = 0
+    for card in cards:
+        title = f"{card.label} · task {card.task_id}"
+        # R2 I3: evidence reaches the screen with its control bytes as escapes.
+        body = cli_ui.visible("\n".join(card.lines))
+        patch = cli_ui.visible(card.patch or "")
+        if rich:
+            cli_ui.print_panel(body, title=title, style=card.style)
+            if patch:
+                cli_ui.print_diff(patch)
+        else:
+            print(title)
+            print("\n".join(f"  {line}" for line in body.split("\n")))
+            if patch:
+                print(patch)
+        act = "resume" if card.label == "ASK" else "land"
+        every = f" all {card.batch}" if card.batch > 1 else ""
+        keys = (
+            f"  [a] approve{every} & {act}  [d] deny  [f] forensics  [p] receipt"
+            "  [s] skip  [q] quit"
+        )
+        while True:
+            print(keys)
+            choice = _read_approval_choice()
+            if choice == "f":
+                cmd_run_forensics(
+                    argparse.Namespace(
+                        home=args.home, instructions=card.task_id, md=False, json=False
+                    )
+                )
+                continue
+            if choice == "p":
+                cmd_proof_export(
+                    argparse.Namespace(home=args.home, task_id=card.task_id, format="md")
+                )
+                continue
+            if choice == "q":
+                return code
+            if choice in ("a", "d"):
+                # D4: the verdict carries what the card showed; a stale one is refused.
+                verdict = {
+                    "task_id": card.task_id,
+                    "approve": choice == "a",
+                    "deny": choice == "d",
+                    "shown": card.shown,
+                }
+                code = max(code, cmd_review(argparse.Namespace(**{**vars(args), **verdict})))
+            else:
+                print(f"skipped: task {card.task_id} still waits")
+            break
+    return code
+
+
 def _approval_can_be_remembered(action: str, reason: str) -> bool:
     if action == "shell.run":
         return _shell_command_from_approval_reason(reason) is not None
@@ -1914,6 +2373,7 @@ def _resume_pending_approval(
     actor: str,
     *,
     remembered: bool = False,
+    shown: _Shown | None = None,
 ) -> int:
     """Q8: grant the approval and continue the suspended task as a true resume.
 
@@ -1931,11 +2391,25 @@ def _resume_pending_approval(
             next_command=f'skep run {record.repo} "..." --resume-of {record.task_id}',
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
-    review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+    if shown is not None:
+        # R2 I1: the gate the card showed, bound to what it showed — never a
+        # fresh one minted behind an answer given elsewhere. R3 J4: minted
+        # (as a resume) only now, after the envelope check above.
+        shown_review, minted = _shown_review(store, record, shown)
+        if shown_review is None:
+            return _stale_err(record, _RECORDED_SINCE, config.audit_dir / record.task_id)
+        refused = _claim_shown(store, record.task_id, shown_review, shown, minted=minted)
+        if refused is not None:
+            return _stale_err(record, refused, config.audit_dir / record.task_id)
+        review_id = shown_review
+        claimed = True
+    else:
+        review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+        claimed = False
     # W27a: the claim serve's resume_past_gate takes (B142), held across this
     # foreground run under this process's pid — a serve approve, or a serve
     # restart's sweep, sees a live owner and leaves the gate alone.
-    if not store.claim_approval(review_id):
+    if not claimed and not store.claim_approval(review_id):
         from .serve.actions import gate_taken
 
         return _err(
@@ -3469,7 +3943,12 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
         )
     except ValueError as exc:
         return _err(str(exc))
-    print(json.dumps(view, indent=2, sort_keys=True))
+    from .. import cli_ui
+
+    if args.json or not cli_ui.rich_enabled():
+        print(json.dumps(view, indent=2, sort_keys=True))
+    else:
+        cli_ui.print_decisions(view)
     return 0
 
 
@@ -3980,7 +4459,13 @@ def register_supervisor_commands(
             "(pending), --allow-command persists a pending shell command and resumes"
         ),
     )
-    review.add_argument("task_id")
+    review.add_argument(
+        "task_id",
+        nargs="?",
+        default=None,
+        help="omit to walk every run waiting on you (diff, G10/V1, then a verdict key); "
+        "off a terminal it only lists them",
+    )
     review.add_argument("--approve", action="store_true")
     review.add_argument("--deny", action="store_true")
     review.add_argument("--allow-command", action="store_true")
@@ -4613,6 +5098,9 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
     policy_decisions.add_argument("--task", help="one run's rows (rows that name no task skip)")
     policy_decisions.add_argument("--engine", help="one coding engine's rows, e.g. claude_code")
+    policy_decisions.add_argument(
+        "--json", action="store_true", help="JSON on a terminal too (off one it always is)"
+    )
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     trust = subcommands.add_parser(
@@ -4666,6 +5154,19 @@ def register_supervisor_commands(
     )
     ledger_verify.add_argument("--json", action="store_true", help="the result as JSON")
     ledger_verify.set_defaults(func=cmd_ledger_verify)
+    forensics = subcommands.add_parser(
+        "forensics", help="one run's evidence in one read (= skep run forensics)"
+    )
+    forensics.add_argument("instructions", metavar="task_id")
+    forensics_format = forensics.add_mutually_exclusive_group()
+    forensics_format.add_argument(
+        "--md", action="store_true", help="a paste-ready Markdown bug report"
+    )
+    forensics_format.add_argument(
+        "--json", action="store_true", help="the report as JSON (= the REST body)"
+    )
+    forensics.set_defaults(func=cmd_run_forensics)
+
     proof = subcommands.add_parser("proof", help="verifiable local receipts")
     proof.set_defaults(func=_group_usage(proof))
     proof_sub = proof.add_subparsers(dest="proof_command")
