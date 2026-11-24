@@ -372,6 +372,10 @@ def test_an_interpreter_reached_through_a_linked_dir_runs_in_the_wall(
 
     (site / "skep.pth").write_text(str(Path(skep.__file__).resolve().parents[1]) + "\n")
     monkeypatch.setattr(sys, "executable", str(overlay_python))
+    # as on CI: the link's target (the patch dir) is the base prefix, already
+    # bound; the real stdlib stays bound through exec_prefix
+    monkeypatch.setattr(sys, "exec_prefix", sys.base_prefix)
+    monkeypatch.setattr(sys, "base_prefix", str(pythons / "cpython-3.12.99"))
     work = tmp_path / "work"
     work.mkdir()
     profile = sandbox.write_profile(
@@ -383,3 +387,24 @@ def test_an_interpreter_reached_through_a_linked_dir_runs_in_the_wall(
         cwd=work, capture_output=True, text=True, check=False, timeout=60,
     )  # fmt: skip
     assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr
+
+
+def test_a_linked_dir_on_the_interpreter_s_path_never_opens_its_whole_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W2: the link is recreated only when its target is already bound — a
+    linked dir whose target holds more than the interpreter stays closed."""
+    real = Path(os.path.realpath(sys.executable))
+    broad = tmp_path / "broad"
+    (broad / "bin").mkdir(parents=True)
+    (broad / "bin" / "python3.12").symlink_to(real)
+    (broad / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(broad)
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linked" / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert (broad / "bin").resolve() in roots
+    assert broad.resolve() not in roots

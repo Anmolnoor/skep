@@ -268,16 +268,12 @@ def _in_place(path: Path, skep_home: Path) -> bool:
 
 
 def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
-    """The env (or bin dir) of each hop in ``executable``'s symlink chain,
-    plus any linked dir a hop is reached through — uv's ``cpython-3.12-…``
-    minor-version link to its patch dir: binding only the resolved dir left
-    that link missing in the wall (``_alias_links`` recreates it)."""
+    """The env (or bin dir) of each hop in ``executable``'s symlink chain."""
     hops: list[Path] = []
     current = executable
     for _ in range(limit):
         env = current.parent.parent
-        hop = env if (env / "pyvenv.cfg").is_file() else current.parent
-        hops += [hop, *(parent for parent in hop.parents if parent.is_symlink())]
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current.parent)
         if not current.is_symlink():
             break
         target = Path(os.readlink(current))
@@ -293,6 +289,7 @@ def _strict_candidates(
     version link, which a venv's python points through) as a symlink to the
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
+    chain = _interpreter_chain(Path(sys.executable))
     detected = [
         Path(sys.prefix),
         Path(sys.base_prefix),
@@ -303,7 +300,7 @@ def _strict_candidates(
         # every env along the interpreter's link chain: CI's `uv run --with`
         # overlay python links to an activated .venv's python, which links on
         # to the base one — an unbound middle hop dangles inside the wall
-        *_interpreter_chain(Path(sys.executable)),
+        *chain,
         # the uv binary itself (never its directory): G10's pinned
         # `uv run pytest` needs it wherever it was installed
         *(Path(found) for found in [shutil.which("uv")] if found),
@@ -343,6 +340,16 @@ def _strict_candidates(
         )
     detected = [Path(os.path.abspath(root)) for root in detected]
     found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
+    # a linked dir a hop is reached through (uv's ``cpython-3.12-…`` minor-version
+    # link to its patch dir) must exist in the wall, or exec by that path is ENOENT
+    # (_alias_links recreates it) — but only one whose target a root above already
+    # binds: a linked ~/.local never opens its whole target (W2)
+    bound = [root.resolve() for root in found]
+    found += [
+        link
+        for link in dict.fromkeys(p for hop in chain for p in hop.parents if p.is_symlink())
+        if any(link.resolve().is_relative_to(root) for root in bound)
+    ]
     # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
     # above makes the bind fail closed instead of narrowing the worker's wall.
     return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))
