@@ -195,23 +195,28 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
         ),
         None,
     )
-    taint = store.get_chat_taint(chat_id)
     chat = store.get_chat(chat_id)
-    if (
-        last_user is None
-        or taint.untrusted is not None
-        or chat is None
-        or chat.source not in _OPERATOR_CHAT_SOURCES
-    ):
+    if last_user is None or chat is None:
+        return None
+    turn = messages[last_user:]
+    from .skill_cmds import _turn_taint
+
+    # Review R2 (F6): the turn's bits, as capture marks them, read AFTER its
+    # rows — a /trust in between leaves a turn from before it both bits.
+    taint = _turn_taint(store, chat, turn)
+    if "untrusted" in taint:
         # Phase 08 (8.2): never an automatic capture of a turn outside
         # content may have steered — `skep skill capture` drafts it, marked.
         # Review R1 (Q11): a channel's members write as the operator.
         return None
-    turn = messages[last_user:]
     tools = [m.tool_name for m in turn if m.role == "tool" and m.tool_name]
     if len(tools) < MIN_TOOL_STEPS or turn[-1].role != "assistant":
         return None
-    ask = turn[0].content.strip()
+    from .policy_v3 import redact_export
+
+    # Review R3 (R3-1): a draft is shared like a capture — the ask passes the
+    # export redactor before it names, describes or instructs it (I8, I13).
+    ask = redact_export(turn[0].content.strip())
     if not ask:
         return None
     name = "conv-" + (_SLUG_RE.sub("-", ask.lower()).strip("-")[:40] or chat_id[:8])
@@ -231,19 +236,22 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
     except TemplateError:
         return None
     signature = candidate_signature(template)
-    if store.get_candidate(name) is not None or store.get_template(name) is not None:
-        return None
     if any(c.signature == signature for c in store.list_candidates()):
         return None
-    store.add_candidate(
-        SkillCandidate(
-            name=name,
-            signature=signature,
-            status=DRAFT,
-            template=template,
-            source_task_ids=(f"chat:{chat_id}",),
-            occurrences=1,
-            taint=tuple(taint.bits()),
-        )
+    candidate = SkillCandidate(
+        name=name,
+        signature=signature,
+        status=DRAFT,
+        template=template,
+        source_task_ids=(f"chat:{chat_id}",),
+        occurrences=1,
+        taint=tuple(sorted(taint)),
     )
+    # Review R2 (F7): reserve the name atomically, as capture does — a name a
+    # capture (or any candidate or template) holds by now is skipped, never replaced
+    detail = {"source": f"chat:{chat_id}", "taint": list(candidate.taint)}
+    if not store.add_new_candidate(
+        candidate, action="observed", actor="chat-observer", detail=detail
+    ):
+        return None
     return name

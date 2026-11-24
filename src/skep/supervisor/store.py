@@ -1380,18 +1380,30 @@ class RunStore:
         for table in ("notes", "tasks", "memory_proposals", "skill_candidates"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
-                # W21: the bits of the chat that wrote the row (a JSON list,
-                # NULL = none); a chat that reads the row takes them on.
-                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
-                if table == "skill_candidates":
-                    # Review R1 (Q10): the observer drafted from untrusted chats
-                    # before taint was recorded; what an open conversation draft
-                    # read is unknown — both bits, so approving it names them.
-                    self._conn.execute(
-                        "UPDATE skill_candidates SET taint = ? WHERE status IN ('draft', 'tested')"
-                        " AND json_extract(template_json, '$.provenance') = 'conversation'",
-                        (_taint_json(TAINT_BITS),),
-                    )
+                # Review R2 (F4): the column and its backfill in one transaction
+                # (SQLite DDL is transactional; a bare ALTER commits on its own)
+                # — a reopen after a crash between them sees neither, not a
+                # column that marks no old draft.
+                with self._conn:
+                    self._begin_immediate()
+                    # Review R3 (R3-2): another open may have migrated while
+                    # this one waited for the lock — re-check under it.
+                    pragma = f"PRAGMA table_info({table})"
+                    if "taint" in {row[1] for row in self._conn.execute(pragma)}:
+                        continue
+                    # W21: the bits of the chat that wrote the row (a JSON list,
+                    # NULL = none); a chat that reads the row takes them on.
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
+                    if table == "skill_candidates":
+                        # Review R1 (Q10): the observer drafted from untrusted chats
+                        # before taint was recorded; what an open conversation draft
+                        # read is unknown — both bits, so approving it names them.
+                        self._conn.execute(
+                            "UPDATE skill_candidates SET taint = ?"
+                            " WHERE status IN ('draft', 'tested')"
+                            " AND json_extract(template_json, '$.provenance') = 'conversation'",
+                            (_taint_json(TAINT_BITS),),
+                        )
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")

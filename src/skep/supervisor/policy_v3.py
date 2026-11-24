@@ -1250,7 +1250,8 @@ def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass  # no log yet
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({**body, "hash": digest}) + "\n")
+            # Review R2 (F1): sorted keys, so the verifier can rebuild these exact bytes
+            handle.write(json.dumps({**body, "hash": digest}, sort_keys=True) + "\n")
         if (seq + 1) % CHECKPOINT_EVERY == 0:
             _checkpoint(path.parent / CHAIN_DB, seq + 1, digest)
 
