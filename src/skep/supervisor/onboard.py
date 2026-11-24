@@ -209,6 +209,28 @@ def _preset_for(provider: str, endpoint: str | None, model: str, api_key_env: st
     )
 
 
+def _unregistered_key_fix(candidate: Any, key_env: str | None) -> str | None:
+    """What works when the key of a provider that is not registered yet is
+    refused; None where no stored key would (the ChatGPT login, Bedrock)."""
+    from .codex_login import uses_codex_login
+
+    if key_env:
+        return (
+            f"set {key_env} to a working key (it is unset or holds a refused one) "
+            "and run skep onboard again"
+        )
+    if uses_codex_login(candidate.base_url) or candidate.protocol == "bedrock":
+        return None
+    pid = candidate.provider_id
+    return (
+        f"{pid!r} is not registered yet, so there is no stored key to replace: run "
+        f"skep provider add {pid} --protocol {candidate.protocol} "
+        f"--base-url {candidate.base_url} --model {candidate.model}, then skep provider "
+        f"set-key {pid}, then skep onboard again (or pass --api-key-env NAME for a "
+        "variable that holds the key)"
+    )
+
+
 def onboard_model(
     holder: ConfigHolder,
     store: RunStore,
@@ -283,22 +305,11 @@ def onboard_model(
         )
     )
     # I9: an unregistered candidate has no stored key for set-key to replace
-    key_fix = None
-    if store.get_provider_profile(pid) is None:
-        key_fix = (
-            f"set {key_env} to a working key (it is unset or holds a refused one) "
-            "and run skep onboard again"
-            if key_env
-            else f"{pid!r} is not registered yet, so there is no stored key to replace: run "
-            f"skep provider add {pid} --protocol {candidate.protocol} "
-            f"--base-url {candidate.base_url} --model {model}, then skep provider set-key "
-            f"{pid}, then skep onboard again (or pass --api-key-env NAME for a variable "
-            "that holds the key)"
-        )
+    registered = store.get_provider_profile(pid) is not None
     health = check_provider_health(
         candidate,
         now=_now(),
-        key_fix=key_fix,
+        key_fix=None if registered else _unregistered_key_fix(candidate, key_env),
         **live_probes(holder.current.home, store, timeout=15.0),
     )
     if not health.ok:

@@ -219,6 +219,21 @@ def test_a_refused_key_from_a_named_env_var_says_to_fix_that_variable(
         fake.stop()
 
 
+def test_a_provider_that_takes_no_stored_key_is_not_taught_set_key() -> None:
+    """The ChatGPT login and Bedrock take no stored key (`skep provider
+    set-key` refuses the first; the second signs with AWS credentials), so the
+    add-then-set-key sequence is never printed for them."""
+    from skep.supervisor.onboard import _unregistered_key_fix
+    from skep.supervisor.providers import ProviderProfile
+
+    def fix(protocol: str, base_url: str) -> str | None:
+        return _unregistered_key_fix(ProviderProfile("p", protocol, base_url, "m"), None)
+
+    assert fix("openai_responses", "https://chatgpt.com/backend-api/codex") is None
+    assert fix("bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com") is None
+    assert "skep provider set-key p" in (fix("ollama", "https://ollama.com") or "")
+
+
 def _answers(monkeypatch: pytest.MonkeyPatch, *replies: str | type[BaseException]) -> list[str]:
     """Script ``input()``; an exception class in the list is raised there."""
     prompts: list[str] = []
