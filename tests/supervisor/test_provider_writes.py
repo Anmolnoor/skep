@@ -1443,3 +1443,18 @@ def test_a_profile_named_env_key_wins_before_a_stale_legacy_token(
     finally:
         a.stop()
     assert worker is not None and worker.profile.api_key_env == "COP_TOKEN"
+
+
+def test_clearing_on_the_first_endpoint_probes_with_the_unowned_env_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5 (Sol R5-1): an unowned SKEP_LLM_API_KEY is inherited by the first
+    endpoint saved (pin_legacy_key), so a save there that clears the file key
+    probes with it — the same switch without the clear already did."""
+    from skep.supervisor.serve import llm
+
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u1")
+    with _store(config) as store:
+        profile = ProviderProfile("w", "openai_compat", "https://w.example", "m")
+        got = llm._committed_key(store, config.home, "https://w.example", profile, False, "")
+    assert got == "env-u1"

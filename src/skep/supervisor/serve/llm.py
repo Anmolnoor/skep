@@ -1639,11 +1639,12 @@ def _committed_key(
 
 
 def _env_key_for(home: Path, target: str, store: RunStore) -> str | None:
-    """SKEP_LLM_API_KEY when ``target`` owns it — clearing a saved key never
-    clears the environment's."""
+    """SKEP_LLM_API_KEY when ``target`` owns it — or owns it once saved: an
+    unowned one is the first endpoint saved's (pin_legacy_key; R5, Sol
+    R5-1). Clearing a saved key never clears the environment's."""
     marker, key = _legacy_values(home)[0]
     owner = legacy_key_endpoint(home, store, marker)
-    return key if key and owner == target.strip().rstrip("/") else None
+    return key if key and owner in (target.strip().rstrip("/"), "") else None
 
 
 def save_assistant_llm(
