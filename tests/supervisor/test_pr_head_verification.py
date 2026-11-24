@@ -12,6 +12,7 @@ import json
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -252,10 +253,10 @@ def test_every_gh_call_names_the_repo_and_ends_with_the_bare_number(repo: Path) 
     for call in calls:
         if call[1] == "api":
             assert call[2:4] == ["--hostname", "github.com"], call
+            assert f"repos/{ORIGIN}/" in " ".join(call) or "graphql" in call, call
             continue
         assert call[3:5] == ["--repo", HOST_ORIGIN] and call[-2:] == ["--", "7"], call
-    merge = ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--merge", "--match-head-commit", sha]
-    assert [*merge, "--", "7"] in calls
+    assert [*MERGE_PUT, "-f", "merge_method=merge"] in calls  # R3 (D8): REST, no selector
     assert ["gh", "pr", "close", "--repo", HOST_ORIGIN, "--delete-branch", "--", "7"] in calls
 
 
@@ -488,6 +489,47 @@ def test_a_resumed_review_keeps_its_pin_or_starts_fresh_never_mixed(
         assert retry.base_commit == newer
 
 
+def test_an_unpinned_pr_run_resumed_never_pairs_its_old_tree_with_a_new_pin(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (N5): a retry of a PR run that recorded NO pin (one dispatched
+    before pins) takes the latest fetch as its pin — and its warm worktree,
+    still at the old head, is discarded, never paired with the new pin."""
+    from skep.supervisor.dispatch import run_task
+
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        fetch: dict[str, Any] = {
+            "pr_repo": ORIGIN, "number": 7, "base_branch": "main", "base_commit": base,
+        }  # fmt: skip
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=head)
+        first = run_task(repo, "Review. MODE:badresult", config=config, ref=PR_REF).record
+        assert first.state == "failed" and first.workspace
+        store._conn.execute("UPDATE runs SET pr_json = NULL WHERE task_id = ?", (first.task_id,))
+        store._conn.commit()
+        git(repo, "checkout", "-q", "dependabot/bump")
+        (repo / "existing.py").write_text("value = 0  # pushed again\n", encoding="utf-8")
+        git(repo, "commit", "-qam", "push")
+        newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "-q", "main")
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
+    finally:
+        store.close()
+
+    retry = run_task(
+        repo, "Review. MODE:happy", config=config, ref=PR_REF, resume_of=first.task_id
+    ).record
+
+    store = RunStore(config.db_path)
+    try:
+        pinned = store.run_pr(retry.task_id)
+    finally:
+        store.close()
+    assert pinned == _pair(base, newer) and retry.workspace != first.workspace
+    assert retry.base_commit == newer
+
+
 # --- 2. G10 + V1 across base...head when the review run changed nothing --------
 
 
@@ -643,6 +685,19 @@ def test_v1_flags_a_binary_test_blob_without_a_skip_marker(
     assert record.tamper_flags == ("test_file_uninspectable:tests/test_app.py",)
 
 
+def test_v1_reads_a_test_suffix_case_blind(repo: Path) -> None:
+    """R3 (N6): `tests/helper.PY` is test code too — a binary blob there is
+    uninspectable, whatever the suffix's case."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    _seed(repo)
+    base, head = _pr(repo, {"tests/helper.PY": "\x00\x01" + TESTS})
+
+    flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
+
+    assert "test_file_uninspectable:tests/helper.PY" in flags
+
+
 def test_a_git_read_v1_needs_that_fails_is_a_flag_never_clean(repo: Path) -> None:
     """R2 (S5, N2): every git read V1 depends on checks its exit status."""
     from skep.supervisor.reverify import static_tamper_flags
@@ -654,6 +709,45 @@ def test_a_git_read_v1_needs_that_fails_is_a_flag_never_clean(repo: Path) -> Non
     missing = "f" * 40
     assert static_tamper_flags(repo, patch, seed, head=missing) == ["tamper_check_failed:diff"]
     assert static_tamper_flags(repo, patch, missing) == ["tamper_check_failed:read_tree"]
+
+
+def test_a_runner_config_v1_cannot_read_is_a_flag_never_equal(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S12): a failed read of a present pyproject.toml side used to
+    become None — the same None as "absent" — so both sides compared equal
+    and a runner-config change read clean. The raw diff's modes say which
+    sides exist; a present side that cannot be read is a flag."""
+    from skep.supervisor import policy
+    from skep.supervisor.reverify import static_tamper_flags
+
+    _seed(repo)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "pytest config")
+    base, head = _pr(repo, {"pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-k nope'\n"})
+    git(repo, "checkout", "-qb", "drop-config", base)
+    git(repo, "rm", "-q", "pyproject.toml")
+    git(repo, "commit", "-qm", "drop")
+    dropped = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    patch = repo.parent / "unused.diff"
+    real = policy._git_text
+
+    def flaky(repo_: Path, *args: str, env: dict[str, str] | None = None) -> str | None:
+        if args[0] == "show" and args[1].endswith(":pyproject.toml"):
+            return None  # the read fails, whatever the side
+        return real(repo_, *args, env=env)
+
+    monkeypatch.setattr(policy, "_git_text", flaky)
+    assert static_tamper_flags(repo, patch, base, head=head) == [
+        "tamper_check_failed:config_show:pyproject.toml"
+    ]
+    monkeypatch.undo()
+    # A side the diff says is absent is absent, never a read error.
+    assert static_tamper_flags(repo, patch, base, head=dropped) == [
+        "test_config_changed:pyproject.toml"
+    ]
 
 
 def test_a_patch_v1_cannot_apply_on_a_passing_rerun_is_flagged(repo: Path) -> None:
@@ -1157,6 +1251,93 @@ def test_a_merge_card_is_the_same_question_only_for_the_same_pinned_tuple(
     assert newer is not None and newer[0].action_id == pending and newer[1] is False
 
 
+def test_a_merge_card_key_covers_branch_and_strategy_and_a_pinless_card_gives_way(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (S7/N4): the key is (repo, PR, head, base SHA, base branch,
+    effective strategy) — another strategy or base branch is a new question
+    that supersedes; a pending card with NO recorded pin for the same PR
+    gives way to a valid proposal."""
+    from skep.supervisor.serve.chat import pending_duplicate_action
+
+    _github_origin(repo)
+    _verdict(config, repo)
+    args = {"repo": str(repo), "pr": "7"}
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        card = recorded_card("merge_pr", args, None, store)
+        pending = store.add_chat_action(chat_id, tool="merge_pr", args=args, card=card)
+        squash = pending_duplicate_action(
+            store, chat_id, "merge_pr", {**args, "strategy": "squash"}
+        )
+        spelled = pending_duplicate_action(
+            store, chat_id, "merge_pr", {**args, "strategy": "merge"}
+        )
+        other = store.create_chat(title="d", model=None).chat_id
+        pinless = store.add_chat_action(
+            other, tool="merge_pr", args={**args, "pr": "#7"}, card={"merge": {"error": "x"}}
+        )
+        superseded = pending_duplicate_action(store, other, "merge_pr", args)
+    finally:
+        store.close()
+    retarget = {**_pair("b" * 40, "a" * 40), "base_branch": "release", "merge_base": "b" * 40}
+    _verdict(config, repo, pr=retarget)
+    store = RunStore(config.db_path)
+    try:
+        branch = pending_duplicate_action(store, chat_id, "merge_pr", args)
+    finally:
+        store.close()
+
+    assert squash is not None and squash[0].action_id == pending and squash[1] is False
+    assert spelled is not None and spelled[1] is True  # omitted strategy is "merge"
+    assert superseded is not None and superseded[0].action_id == pinless
+    assert superseded[1] is False
+    assert branch is not None and branch[0].action_id == pending and branch[1] is False
+
+
+def test_a_merge_proposal_reads_one_pin_and_carries_it_through(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S6): a chat merge_pr proposal resolves ONE pin — validated, then
+    the very same pin de-duplicated and saved on the card. A verdict that
+    lands between those steps never slips onto the card unvalidated."""
+    from .fake_ollama import FakeOllama
+    from .test_serve_chat_tools import chat_client
+
+    _github_origin(repo)
+    _verdict(config, repo)
+    reads: list[int] = []
+    real = RunStore.pr_head_verdict
+
+    def counted(self: RunStore, repo_name: str, number: int) -> Any:
+        reads.append(number)
+        verdict = real(self, repo_name, number)
+        if len(reads) > 1 and verdict is not None:  # a newer, unvalidated verdict
+            return replace(
+                verdict, head_commit="f" * 40, pr={**(verdict.pr or {}), "head_commit": "f" * 40}
+            )
+        return verdict
+
+    monkeypatch.setattr(RunStore, "pr_head_verdict", counted)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client, chat_id = chat_client(config, ollama)
+        ollama.script_tool_call("merge_pr", {"repo": str(repo), "pr": "7"})
+        ollama.script_reply("card up")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "merge 7"})
+    finally:
+        ollama.stop()
+    store = RunStore(config.db_path)
+    try:
+        (action,) = store.chat_actions(chat_id)
+    finally:
+        store.close()
+
+    assert action.card is not None and action.card["merge"]["head_commit"] == "a" * 40
+    assert reads == [7]
+
+
 def test_a_saved_merge_card_without_a_pin_shows_the_refusal(
     repo: Path, config: SupervisorConfig
 ) -> None:
@@ -1184,55 +1365,111 @@ PIN_7 = {**_pair("b" * 40, "a" * 40), "merge_base": "b" * 40, "task_id": "t"}
 def _merge_gh(
     calls: list[list[str]],
     live: dict[str, Any] | None = None,
-    after: dict[str, Any] | None = None,
-    merge_code: int = 0,
+    merge_status: int = 200,
+    merge_body: Any = None,
     queue: Any = None,
     landed_on: str = "b" * 40,
     api_code: int = 0,
+    graphql: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> github.Runner:
     """gh as GitHub answers: the PR now (``live``), the base branch's merge
-    queue (``queue``), then the PR after the merge and its merge commit,
-    whose first parent is ``landed_on``."""
+    queue (``queue``), the REST merge endpoint (``merge_status`` and its
+    JSON body, R3 D8), then the merge commit, whose first parent is
+    ``landed_on``."""
     now = {
         "headRefOid": "a" * 40, "baseRefOid": "b" * 40, "baseRefName": "main", "state": "OPEN",
         "autoMergeRequest": None, **(live or {}),
     }  # fmt: skip
-    merged = after or {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
+    body = {"sha": "c" * 40, "merged": True, "message": "Pull Request successfully merged"}
 
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[0] != "gh":
             return subprocess.run(args, **kwargs)
         calls.append(list(args))
+        if "PUT" in args:  # gh api --include: status line, headers, body
+            answer = body if merge_body is None else merge_body
+            text = answer if isinstance(answer, str) else json.dumps(answer)
+            out = f"HTTP/2.0 {merge_status} X\r\nContent-Type: application/json\r\n\r\n{text}"
+            return subprocess.CompletedProcess(args, 0 if merge_status == 200 else 1, out, "")
         if args[1] == "api":
             if api_code:
                 return subprocess.CompletedProcess(args, api_code, "", "HTTP 401")
             if args[4] == "graphql":
-                answer: Any = {"data": {"repository": {"mergeQueue": queue}}}
+                if graphql is not None:
+                    return graphql(args)
+                answer = {"data": {"repository": {"mergeQueue": queue}}}
             else:
                 answer = {"sha": "c" * 40, "parents": [{"sha": landed_on}, {"sha": "a" * 40}]}
             return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
-        if args[2] == "merge":
-            return subprocess.CompletedProcess(args, merge_code, "", "" if not merge_code else "no")
-        answer = merged if any(c[1:3] == ["pr", "merge"] for c in calls) else now
-        return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
+        return subprocess.CompletedProcess(args, 0, json.dumps(now), "")
 
     return run
 
 
+MERGE_PUT = [
+    "gh", "api", "--hostname", "github.com", "--include", "-X", "PUT",
+    f"repos/{ORIGIN}/pulls/7/merge", "-f", f"sha={'a' * 40}",
+]  # fmt: skip
+
+
 def test_merge_pull_request_merges_exactly_the_pinned_head(repo: Path) -> None:
+    """R3 (D8): GitHub's REST merge endpoint — immediate only (it never
+    queues or enables auto-merge) and atomically pinned to the head SHA."""
     calls: list[list[str]] = []
 
     result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls))
 
     assert result.merged, result.detail
-    assert "c" * 40 in result.detail  # the merge commit GitHub reports
-    merge = [c for c in calls if c[2] == "merge"]
-    assert merge == [
-        ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--merge", "--match-head-commit", "a" * 40,
-         "--", "7"],
-    ]  # fmt: skip
+    assert "c" * 40 in result.detail  # the merge commit GitHub returned
+    assert [c for c in calls if "PUT" in c] == [[*MERGE_PUT, "-f", "merge_method=merge"]]
+    assert [f"repos/{ORIGIN}/commits/{'c' * 40}"] == [c[4] for c in calls if "commits" in c[4]]
     assert result.landed_base == "b" * 40 and "re-verify" not in result.detail
-    assert not any(flag in c for c in calls for flag in ("--auto", "--admin"))
+    assert not [c for c in calls if c[1:3] == ["pr", "merge"]]
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (405, "Changes must be made through the merge queue"),
+        (409, "Head branch was modified. Review and try the merge again."),
+        (405, "Pull Request is not mergeable"),  # merged by someone else meanwhile
+        (422, "Pull Request is already merged"),
+    ],
+    ids=["merge-queue-required", "sha-mismatch", "merged-by-someone-else", "already-merged"],
+)
+def test_a_merge_github_refuses_claims_nothing(repo: Path, status: int, message: str) -> None:
+    """R3 (D8): 405/409/422 are GitHub's refusals — its message, nothing
+    merged, and a merge someone else made is never credited to skep."""
+    calls: list[list[str]] = []
+    runner = _merge_gh(calls, merge_status=status, merge_body={"message": message})
+
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+
+    assert not result.merged and result.landed_base is None
+    assert message in result.detail and "nothing merged" in result.detail
+    assert f"HTTP {status}" in result.detail
+    assert not [c for c in calls if "commits" in " ".join(c)]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, "<html>gateway</html>"),
+        (200, {"merged": False, "message": "?"}),
+        (200, {"merged": True}),
+        (502, {"message": "Bad Gateway"}),
+    ],
+    ids=["unparseable", "merged-false", "no-sha", "server-error"],
+)
+def test_an_unreadable_merge_answer_is_unknown_never_merged(
+    repo: Path, status: int, body: Any
+) -> None:
+    runner = _merge_gh([], merge_status=status, merge_body=body)
+
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+
+    assert not result.merged and "queued" not in result.detail
+    assert "outcome unknown — check GitHub" in result.detail
 
 
 @pytest.mark.parametrize(
@@ -1273,8 +1510,9 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
     repo: Path, live: dict[str, Any] | None, queue: Any, api_code: int
 ) -> None:
     """R2 (D5, S2/N7): auto-merge or a merge queue lands later, at whatever
-    the base is then — skep refuses before gh pr merge, and a queue it
-    cannot rule out counts as one."""
+    the base is then — skep refuses before it merges, and a queue it
+    cannot rule out counts as one (R3: the REST merge is the safety; this
+    pre-check names the reason)."""
     calls: list[list[str]] = []
     runner = _merge_gh(calls, live, queue=queue, api_code=api_code)
 
@@ -1282,35 +1520,45 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
 
     assert not result.merged and "nothing merged" in result.detail
     assert "merge it on GitHub" in result.detail
-    assert not [c for c in calls if c[1:3] == ["pr", "merge"]]
+    assert not [c for c in calls if "PUT" in c]
 
 
-def test_a_merge_that_set_auto_merge_instead_is_disabled(repo: Path) -> None:
-    """R2 (D5): gh exited 0 but GitHub holds an auto-merge request — skep
-    disables it, and says not merged (never "queued")."""
+@pytest.mark.parametrize(
+    ("code", "answer", "needle"),
+    [
+        (
+            1,
+            {
+                "data": {"repository": {"mergeQueue": None}},
+                "errors": [{"message": "Resource not accessible by personal access token"}],
+            },
+            "Resource not accessible by personal access token",
+        ),
+        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}, "no repo"),
+        (0, {"data": {"repository": None}}, "could not check"),
+        (0, {"data": {"repository": "x"}}, "could not check"),
+    ],
+    ids=["exit-1-with-null-queue", "errors-with-exit-0", "repository-null", "repository-not-dict"],
+)
+def test_a_merge_queue_probe_that_failed_is_never_read_as_no_queue(
+    repo: Path, code: int, answer: Any, needle: str
+) -> None:
+    """R3 (S5/N3): a fine-grained token without Merge queues: Read gets
+    ``mergeQueue: null`` AND an error — the probe checks the exit code,
+    ``errors`` and that ``data.repository`` is an object, and refuses
+    naming GitHub's own words."""
     calls: list[list[str]] = []
-    after = {"state": "OPEN", "mergeCommit": None, "autoMergeRequest": {"enabledAt": "x"}}
 
-    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls, after=after))
+    def graphql(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, code, json.dumps(answer), "gh: error")
 
-    assert not result.merged and "queued" not in result.detail
-    assert "not merged; the auto-merge request was disabled" in result.detail
-    assert ["gh", "pr", "merge", "--repo", HOST_ORIGIN, "--disable-auto", "--", "7"] in calls
+    result = github.merge_pull_request(
+        repo=repo, pin=PIN_7, runner=_merge_gh(calls, graphql=graphql)
+    )
 
-
-def test_an_unreadable_outcome_is_unknown_never_queued(repo: Path) -> None:
-    calls: list[list[str]] = []
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        done = _merge_gh(calls)(args, **kwargs)
-        if any(c[1:3] == ["pr", "merge"] for c in calls[:-1]) and args[1:3] == ["pr", "view"]:
-            return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
-        return done
-
-    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=run)
-
-    assert not result.merged and "queued" not in result.detail
-    assert "outcome unknown — check GitHub" in result.detail
+    assert not result.merged and needle in result.detail and "nothing merged" in result.detail
+    assert "merge it on GitHub" in result.detail
+    assert not [c for c in calls if "PUT" in c]
 
 
 @pytest.mark.parametrize("strategy", ["merge", "squash"])
@@ -1347,8 +1595,6 @@ def test_merge_pull_request_refuses_when_the_pr_cannot_be_read(repo: Path) -> No
     assert not result.merged and "HTTP 502" in result.detail and "nothing merged" in result.detail
     incomplete = github.merge_pull_request(repo=repo, pin={"repo": ORIGIN}, runner=broken)
     assert not incomplete.merged and "propose merge_pr again" in incomplete.detail
-    failed = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh([], merge_code=1))
-    assert not failed.merged and "gh pr merge failed" in failed.detail
 
 
 # --- faces: chat (refresh_repo pr=) and CLI (skep repo refresh --pr, skep pr merge)
@@ -1415,9 +1661,14 @@ def test_rest_refresh_takes_the_same_pr_selector_as_chat_and_cli(
     client = serve_client(config)
 
     fetched = client.post(f"/api/repos/{repo}/refresh", json={"pr": "#7"})
+    number = client.post(f"/api/repos/{repo}/refresh", json={"pr": 7})  # R3 (S18)
+    flag = client.post(f"/api/repos/{repo}/refresh", json={"pr": True})
 
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["ref"] == PR_REF and calls[0]["pr"] == "#7"
+    assert number.status_code == 200, number.text
+    assert calls[1]["pr"] == "7"  # the same strict parser reads it, as text
+    assert flag.status_code == 422 and len(calls) == 2  # a bool is no PR number
     (spec,) = [t for t in TOOL_SPECS if t["function"]["name"] == "refresh_repo"]
     assert "pr" in spec["function"]["parameters"]["properties"]
     assert _parser().parse_args(["repo", "refresh", "x", "--pr", "7"]).pr == "7"
@@ -1521,6 +1772,59 @@ def test_skep_pr_merge_records_the_decision_before_gh_and_the_outcome_after(
     assert after.result["landed_base"] == "b" * 40
 
 
+@pytest.mark.parametrize("merged", [True, False], ids=["merged", "not-merged"])
+def test_chat_and_cli_record_a_merge_outcome_the_same_way(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, merged: bool
+) -> None:
+    """R3 (S8, I8): a merge that did not happen is a FAILED card in chat, as
+    it is a failed row from `skep pr merge` — one outcome→status mapping."""
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
+
+    from .test_cli import _registered_clone
+
+    home = tmp_path / "home"
+    clone = _registered_clone(home, repo)
+    git(clone, "remote", "set-url", "origin", ORIGIN_URL)
+    config = build_config(home, None)
+    _verdict(config, clone)
+    said = "merged acme/widget#7" if merged else "refused by GitHub (HTTP 409): moved"
+    landed = "b" * 40 if merged else None
+    monkeypatch.setattr(
+        github, "merge_pull_request", lambda **_: github.MergeResult(merged, said, landed)
+    )
+    assert main(["--home", str(home), "pr", "merge", "fixture", "7"]) == (0 if merged else 1)
+    store = RunStore(config.db_path)
+    try:
+        (cli,) = [a for c in store.list_chats() for a in store.chat_actions(c.chat_id)]
+        store.set_setting(LLM_BASE_URL, "http://127.0.0.1:9")  # the continuation never runs
+        store.set_setting(LLM_DEFAULT_MODEL, "m")
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(store=store, holder=holder),
+            home=config.home,
+        )  # fmt: skip
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        action_id = store.add_chat_action(
+            chat_id, tool="merge_pr", args={"repo": str(clone), "pr": "7"},
+            card={"merge": cli.card["merge"] if cli.card else {}},
+        )  # fmt: skip
+        engine.verdict_events(chat_id, store.get_chat(chat_id), action_id, confirm=True)
+        chat = store.get_chat_action(action_id)
+        cli = store.get_chat_action(cli.action_id) or cli
+    finally:
+        store.close()
+
+    status = "confirmed" if merged else "failed"
+    assert chat is not None and chat.status == status and cli.status == status
+    assert chat.result is not None and cli.result is not None
+    assert chat.result["ok"] is merged and chat.result["result"]["merged"] is merged
+    shown = {k: v for k, v in cli.result.items() if k != "actor"}
+    assert chat.result["result"] == shown
+
+
 # --- 4. the PR tuple rides every face that reads the run (N6, S14/N7) ----------
 
 
@@ -1581,6 +1885,84 @@ def test_the_receipt_and_forensics_carry_the_verified_pr_tuple(
     assert f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {fork})" in render_forensics(
         report, markdown=False
     )
+
+
+def test_an_early_g10_refusal_still_names_the_pr_it_refused(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (S13): the read-wall/sandbox refusals return before the PR block —
+    the patchless review's verdict still carries its dispatch pin (merge-base
+    None), and the receipt never labels the PR head "baseline"."""
+    from skep.supervisor.ledger_proof import build_receipt
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo.parent / "ws-wall", instructions="review PR 7")
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        wall = json.dumps({"read_allowlist": [str(repo)]})  # ADR 0068: a strict wall
+        store.transition(task.task_id, "dispatched", wall)
+        store.transition(task.task_id, "completed", None)
+        outcome = reverify_run(
+            store=store, task_id=task.task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=replace(config, sandbox=False), changed_files=(), verify_command=PIN,
+        )  # fmt: skip
+        record = store.reverification_for(task.task_id)
+        receipt = build_receipt(store, config.home, config.audit_dir, task.task_id)
+    finally:
+        store.close()
+
+    assert outcome.outcome == "unavailable" and "strict read wall" in outcome.detail
+    assert record is not None and record.pr == {**_pair(base, head), "merge_base": None}
+    assert record.head_commit == head and record.base_commit == base
+    assert receipt["baseline_sha"] == "merge-base unavailable"
+
+
+def test_a_crash_before_g10_never_strands_a_patchless_pr_review(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S14): ingest committed a PR review `completed`, then the
+    supervisor died before G10. A patchless review has no patch on disk by
+    design — recovery (startup and on demand) still re-verifies its pinned
+    head, inside the same orphan-sweep shield the live dispatch uses."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.worktree import create_worktree
+
+    reverify_module = sys.modules[reverify_run.__module__]
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    shielded: list[bool] = []
+
+    def spy(repo_: Path, root: Path, name: str, ref: str | None = None) -> Path:
+        shielded.append(name in dispatch._ACTIVE.snapshot())
+        return create_worktree(repo_, root, name, ref)
+
+    monkeypatch.setattr(reverify_module, "create_worktree", spy)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(
+            workspace=repo.parent / "ws-crash", instructions="review PR 7", verify_command=PIN
+        )
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        store.transition(task.task_id, "completed", None)
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        done = dispatch.reverify_unverified_runs(store, config)
+        record = store.reverification_for(task.task_id)
+    finally:
+        store.close()
+
+    assert done == [task.task_id]
+    assert record is not None and record.outcome == "passed" and record.head_commit == head
+    assert record.pr == {**_pair(base, head), "merge_base": base}
+    assert shielded == [True]
 
 
 # --- 5. the failure paths say what happened and move nothing --------------------

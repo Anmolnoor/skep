@@ -4515,7 +4515,9 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
-def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str | None:
+def landing_card_error(
+    store: RunStore, name: str, args: dict[str, Any], *, merge: dict[str, Any] | None = None
+) -> str | None:
     """ES-F292 (L9, B22): what a land_run / approve_review (landing) confirm
     would refuse, asked when the card is proposed, so no card shows a landing
     it cannot do: the chat branch menu (v81-F4), the branch safety check
@@ -4527,7 +4529,7 @@ def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str 
             # Phase 09 R1 (D3): no card for a merge its confirm must refuse.
             from .cards import merge_pin
 
-            pin = merge_pin(store, args)
+            pin = merge_pin(store, args) if merge is None else merge  # R3 (S6): one read
             return f"merge_pr refused: {pin['error']}" if "error" in pin else None
         if name == "open_pr" and not args.get("branch"):
             # ES-F292 follow-up: open_pr lands each run first (land_run).
@@ -4608,7 +4610,12 @@ def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str
 
 
 def policy_write_preview(
-    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any]
+    store: RunStore,
+    holder: ConfigHolder,
+    name: str,
+    args: dict[str, Any],
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """P3-5 (V11, ADR 0059 D6): the card fields a policy-write proposal
     carries — ``replay`` (what its confirm would flip among recent decisions)
@@ -4624,7 +4631,7 @@ def policy_write_preview(
     from ..policy_write import PolicyWriteRejected, vet_write
 
     def check() -> dict[str, Any]:
-        landing_error = landing_card_error(store, name, args)
+        landing_error = landing_card_error(store, name, args, merge=merge)
         if landing_error is not None:  # ES-F292: a landing card, B22's lesson too
             raise PolicyWriteRejected(landing_error)
         if name in actions.REMEMBERABLE_TOOLS:
@@ -5890,13 +5897,7 @@ def _execute_mutation(
         merge = github.merge_pull_request(
             repo=repo_path, pin=pin, strategy=str(args.get("strategy") or "merge")
         )
-        return {
-            "merged": merge.merged,
-            "detail": merge.detail,
-            "head_commit": pin["head_commit"],
-            "base_commit": pin["base_commit"],
-            "landed_base": merge.landed_base,  # R2 (D4): the base it actually landed on
-        }
+        return github.merge_record(merge, pin)
     if name == "close_pr":
         # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
         # reopens) — but NOT with delete_branch: deleting the head ref cascade-

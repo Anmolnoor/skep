@@ -820,6 +820,14 @@ def run_task(
                         f"pr={pr_match[1]} first, then dispatch the review"
                     )
                 pr_pin.pop("fetched_at")
+                if (
+                    resume_workspace is not None
+                    and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]
+                ):
+                    # R3 (N5): an unpinned run's warm tree is at whatever head
+                    # it had — never paired with this newly resolved pin.
+                    resume_workspace = None
+                    effective_worker_state = strip_resume_cursor(effective_worker_state)
         # v89-F1: shield registration and the sweep share one lock, and the
         # keep-set snapshot sits INSIDE it with the sweep it feeds — a snapshot
         # taken outside would reopen the very window the lock exists to close.
@@ -1672,7 +1680,8 @@ def recover_interrupted_runs(
 
 def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: RunRecord) -> str:
     """ES-F290/F291 (L1, I2 I8): re-verify one completed run that has a patch
-    but no re-verification record — the supervisor stopped between ingest
+    (or is a pinned PR review, which verifies the PR head: R3 S14) but no
+    re-verification record — the supervisor stopped between ingest
     committing COMPLETED and G10. The same restart path (pinned verify, no
     auto-apply) a late deposit takes. Returns "" when it re-verified, else
     why it did not (a teaching line for ``skep review --reverify``)."""
@@ -1693,7 +1702,10 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
             f"`skep review {task_id}` shows it"
         )
     patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
-    if not patches or not patches[0].is_file():
+    # Phase 09 R3 (S14): a pinned PR review that changed nothing has no patch
+    # by design — G10 verifies the PR head itself, in ``reverify-<task_id>``.
+    pr_review = PR_HEAD_REF.fullmatch(record.ref or "") and run_store.run_pr(task_id)
+    if not pr_review and (not patches or not patches[0].is_file()):
         return "no patch on disk — nothing to re-verify or land"
     me = process_owner()
     supervisor = run_store.run_supervisor(task_id)
@@ -1718,7 +1730,7 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
         return in_flight
     if run_store.reverification_for(task_id) is not None:  # one finished meanwhile
         return f"already re-verified (G10) — `skep review {task_id}` shows it"
-    name = f"reverify-{patches[0].stem}"
+    name = f"reverify-{task_id if pr_review else patches[0].stem}"
     with TREE_LOCK:  # shield it from a concurrent run's orphan sweep (v89-F1)
         _ACTIVE.add(name)
         # The stopped re-verify's half-built tree would make create_worktree fail.
@@ -1745,7 +1757,8 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
 def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
     """ES-F290 (L1): at serve startup, after ``recover_interrupted_runs``
     (which only looks at in-flight states), re-verify every completed,
-    unlanded run with a patch and no re-verification record. Serve runs it on
+    unlanded run with a patch (or a pinned PR review) and no re-verification
+    record. Serve runs it on
     a background thread (landing refuses those runs until their record
     exists, ES-F291); ``reverify_unverified`` claims each run first. Returns
     the task ids it re-verified."""

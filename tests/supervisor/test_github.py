@@ -26,11 +26,14 @@ def _make_runner(
     pr_code: int = 0,
     pr_url: str = "https://github.com/me/repo/pull/7",
     base_missing: bool = False,
+    origin: str = "git@github.com:Me/repo.git",
 ) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[list[str]]]:
     calls: list[list[str]] = []
 
     def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
+        if args[0] == "git" and "remote.origin.url" in args:
+            return _cp(args, 0 if origin else 1, f"{origin}\n" if origin else "")
         if args[0] == "git" and "ls-remote" in args:
             # v60-F2 base probe: a present base answers with a sha line.
             out = "" if base_missing else "abc123\trefs/heads/main\n"
@@ -53,13 +56,28 @@ def test_open_pull_request_success(tmp_path: Path) -> None:
     assert result.url == "https://github.com/me/repo/pull/7"
     # The PR targets the skep branch as head and never pushes to the base directly.
     gh_call = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
-    assert "--head" in gh_call and "skep/abc" in gh_call
-    assert "--base" in gh_call and "main" in gh_call
+    # R3 (S16): the repo named as HOST/OWNER/REPO, the head as OWNER:BRANCH.
+    assert gh_call[3:5] == ["--repo", "github.com/me/repo"]
+    assert gh_call[gh_call.index("--head") + 1] == "me:skep/abc"
+    assert gh_call[gh_call.index("--base") + 1] == "main"
     # v60-F2: the base probe runs before any side effect.
     probe_call = next(c for c in calls if "ls-remote" in c)
     assert probe_call[-2:] == ["origin", "main"]
     push_call = next(c for c in calls if "push" in c)
     assert push_call[-2:] == ["origin", "skep/abc"]  # pushes the branch, not main
+
+
+def test_open_pull_request_on_an_origin_that_is_not_github_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """R3 (S16): no github.com origin, no repo to name to gh — refused
+    before anything is pushed."""
+    run, calls = _make_runner(origin="https://gitlab.com/me/repo.git")
+    result = open_pull_request(
+        repo=tmp_path, branch="skep/abc", base="main", title="t", body="b", runner=run
+    )
+    assert not result.opened and "not a github.com repository" in result.detail
+    assert [c for c in calls if "push" in c or c[0] == "gh"] == []
 
 
 def test_open_pull_request_teaches_when_remote_base_is_missing(tmp_path: Path) -> None:
@@ -140,8 +158,9 @@ def _gh_fake(
 
 
 def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
-    """v47-F5: the only base-branch advance — gh pr merge, honest on failure.
-    Phase 09 R1 (D3): it merges only a pinned, verified head."""
+    """v47-F5: the only base-branch advance, honest on failure.
+    Phase 09 R1 (D3): it merges only a pinned, verified head (R3 D8: via
+    GitHub's REST merge endpoint, pinned to that head's SHA)."""
     import json
 
     from skep.supervisor.github import merge_pull_request
@@ -155,18 +174,19 @@ def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> 
 
     def gh(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
+        if "PUT" in args:  # R3 (D8): the REST merge endpoint, --include
+            body = json.dumps({"merged": True, "sha": "c" * 40})
+            return _cp(args, 0, f"HTTP/2.0 200 OK\nContent-Type: application/json\n\n{body}")
         if args[1] == "api":  # R2 (D4, D5): no merge queue; the commit's parent
             answer = {"data": {"repository": {"mergeQueue": None}}, "parents": [{"sha": "b" * 40}]}
             return _cp(args, 0, json.dumps(answer))
-        merged = any(call[1:3] == ["pr", "merge"] for call in calls)
-        state = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}} if merged else {}
-        return _cp(args, 0, json.dumps({**live, "state": "OPEN", **state}))
+        return _cp(args, 0, json.dumps({**live, "state": "OPEN"}))
 
     result = merge_pull_request(repo=tmp_path, pin=pin, strategy="squash", runner=gh)
     assert result.merged and "7" in result.detail
     assert calls[2] == [
-        "gh", "pr", "merge", "--repo", "github.com/me/repo", "--squash", "--match-head-commit",
-        "a" * 40, "--", "7",
+        "gh", "api", "--hostname", "github.com", "--include", "-X", "PUT",
+        "repos/me/repo/pulls/7/merge", "-f", f"sha={'a' * 40}", "-f", "merge_method=squash",
     ]  # fmt: skip
 
     broken = _gh_fake(1, "", "not mergeable")

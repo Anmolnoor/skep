@@ -230,8 +230,8 @@ g push -q --atomic "${leases[@]}" origin main "${branches[@]}"
 echo "fixture: $REPO (origin $URL)"
 for shape in "${SHAPES[@]}"; do
   IFS='|' read -r key branch title expect <<< "$shape"
-  if [ -n "$GITHUB" ] && [ "$(gh pr list --repo "$GITHUB" --head "$branch" --state open --json number --jq length)" = "0" ]; then
-    gh pr create --repo "$GITHUB" --base main --head "$branch" --title "$title" \
+  if [ -n "$GITHUB" ] && [ "$(gh pr list --repo "github.com/$GITHUB" --head "$branch" --state open --json number --jq length)" = "0" ]; then
+    gh pr create --repo "github.com/$GITHUB" --base main --head "$branch" --title "$title" \
       --body "Seeded by skep's seed-dependabot-fixture.sh, shape ($key). Expected: $expect." >/dev/null
   fi
   echo "  ($key) $branch $(g rev-parse --short=12 "$branch") — $expect"

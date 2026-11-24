@@ -299,7 +299,8 @@ def fakes(tmp_path: Path) -> dict[str, str]:
         "#!/bin/sh\n"
         'case "$1 $2" in\n'
         '  "repo view") echo "$FAKE_GH_REMOTE" ;;\n'
-        '  "pr list") cat "$FAKE_GH_OPEN" 2>/dev/null || echo 0 ;;\n'
+        '  "pr list") echo "$*" >> "$FAKE_GH_LOG.list"\n'
+        '    cat "$FAKE_GH_OPEN" 2>/dev/null || echo 0 ;;\n'
         '  "pr create") echo "$*" >> "$FAKE_GH_LOG" ;;\n'
         "  *) exit 1 ;;\n"
         "esac\n"
@@ -519,6 +520,10 @@ def test_github_mode_pushes_and_opens_each_pr_once(tmp_path: Path, fakes: dict[s
     assert _git(remote, "rev-parse", SHAPES["a"]) == _git(target / "repo", "rev-parse", SHAPES["a"])
     created = Path(fakes["FAKE_GH_LOG"]).read_text().splitlines()
     assert len(created) == 4 and all("--base main" in line for line in created)
+    # R3 (S16): every gh pr call names its repo as HOST/OWNER/REPO (GH_HOST-proof).
+    listed = Path(fakes["FAKE_GH_LOG"] + ".list").read_text().splitlines()
+    for line in created + listed:
+        assert "--repo github.com/me/dependabot-fixture " in line, line
     assert not (target / "origin.git").exists()
 
     Path(fakes["FAKE_GH_OPEN"]).write_text("1\n")  # every PR is open now

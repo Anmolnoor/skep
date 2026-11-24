@@ -62,6 +62,7 @@ from .cards import (
     headline,
     high_tier,
     merge_pin,
+    merge_target,
     recorded_card,
     unreadable_under_deny,
 )
@@ -391,11 +392,16 @@ def _proposal_subject(tool: str, args: dict[str, Any]) -> str | None:
     return json.dumps([tool, values], ensure_ascii=True)
 
 
-def _merge_key(pin: Any) -> tuple[str, int, str, str] | None:
-    """A merge_pr card's identity (R2, S13): the tuple it pins, or None."""
+def _merge_key(pin: Any, args: dict[str, Any]) -> tuple[str, int, str, str, str, str] | None:
+    """A merge_pr card's identity (R2 S13, R3 S7/N4): the tuple it pins —
+    repo, PR, head, base SHA, base branch — and the effective strategy, or
+    None when it pins nothing."""
     if not isinstance(pin, dict) or "error" in pin:
         return None
-    return (str(pin["repo"]), int(pin["number"]), str(pin["head_commit"]), str(pin["base_commit"]))
+    return (
+        str(pin["repo"]), int(pin["number"]), str(pin["head_commit"]),
+        str(pin["base_commit"]), str(pin["base_branch"]), str(args.get("strategy") or "merge"),
+    )  # fmt: skip
 
 
 def _canonical_args(args: dict[str, Any]) -> str:
@@ -403,27 +409,37 @@ def _canonical_args(args: dict[str, Any]) -> str:
 
 
 def pending_duplicate_action(
-    store: RunStore, chat_id: str, tool: str, args: dict[str, Any]
+    store: RunStore,
+    chat_id: str,
+    tool: str,
+    args: dict[str, Any],
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> tuple[ChatActionRecord, bool] | None:
     """The pending card already asking this question, with whether its args
     are byte-identical. Only 'proposed' rows count — a denied card is a
-    verdict, and re-proposing after one is a new question for the human."""
+    verdict, and re-proposing after one is a new question for the human.
+    ``merge`` is a merge_pr proposal's pin, already read (R3 S6)."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
-    proposed = _merge_key(merge_pin(store, args)) if tool == "merge_pr" else None
+    proposed = None
+    if tool == "merge_pr":
+        proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
     for record in store.pending_chat_actions(chat_id):
         if record.tool != tool:
             continue
-        held = _merge_key((record.card or {}).get("merge"))
+        held = _merge_key((record.card or {}).get("merge"), record.args)
         if proposed is not None and held is not None:
-            # Phase 09 R2 (S13): a merge card IS its pinned (repo, PR, head,
-            # base) — the same tuple is the pending card whatever was typed;
-            # a new tuple for that PR (a newer verdict) supersedes it.
+            # Phase 09 R2 (S13): a merge card IS its pinned tuple — the same
+            # tuple is the pending card whatever was typed; a new one for
+            # that PR (a newer verdict, another branch or strategy) supersedes.
             if held == proposed:
                 return record, True
             if held[:2] == proposed[:2]:
                 return record, False
             continue
+        if proposed is not None and merge_target(store, record.args) == proposed[:2]:
+            return record, False  # R3 (S7/N4): it pins nothing; a valid proposal stands
         if _canonical_args(record.args) == args_key:
             return record, True
         if subject is not None and _proposal_subject(record.tool, record.args) == subject:
@@ -2977,8 +2993,13 @@ class ChatEngine:
                     # P3-5 (V11): a policy write is checked at PROPOSAL — one
                     # the write-time check refuses gets no card (its confirm
                     # could only fail, B22); one it passes carries the replay.
+                    # R3 (S6): a merge_pr proposal reads its pin ONCE; the
+                    # check, the de-duplication and the card all use it.
+                    pin = merge_pin(self.store, args) if name == "merge_pr" else None
                     try:
-                        checked = policy_write_preview(self.store, self.holder, name, args)
+                        checked = policy_write_preview(
+                            self.store, self.holder, name, args, merge=pin
+                        )
                     except PolicyWriteRejected as exc:
                         payload = {"ok": False, "error": str(exc)}
                         self.store.add_chat_message(
@@ -3004,7 +3025,7 @@ class ChatEngine:
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
                     # superseded and the fresh one stands alone.
-                    duplicate = pending_duplicate_action(self.store, chat_id, name, args)
+                    duplicate = pending_duplicate_action(self.store, chat_id, name, args, merge=pin)
                     if duplicate is not None and (
                         duplicate[1]
                         # I7: a model proposal never supersedes an operator's
@@ -3052,6 +3073,7 @@ class ChatEngine:
                                     proposed_schedule_role(self.store, self.holder, args, chat_id)
                                     if name == "propose_schedule"
                                     else None,
+                                    merge=pin,
                                 )
                                 or {}
                             ),
@@ -3668,7 +3690,10 @@ class ChatEngine:
                     "memory_id": item.memory_id,
                     "note": "approved on its card — active in future prompts",
                 }
-            payload: dict[str, Any] = {"ok": True, "result": result}
+            # R3 (S8, I8): merge_pr's result says whether it merged — a merge
+            # that did not happen is a failed card (github.merge_record).
+            ok = result.get("ok") is not False if tool == "merge_pr" else True
+            payload: dict[str, Any] = {"ok": ok, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
             # always-tier writes to, so resolve() composes it unchanged and

@@ -42,7 +42,7 @@ from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .github import PR_HEAD_REF
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
-from .policy import test_config_changes
+from .policy import ConfigUnreadable, test_config_changes
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
@@ -264,7 +264,7 @@ def static_tamper_flags(
     and so is a git read that exits non-zero (R2)."""
     try:
         return _static_tamper_flags(repo, patch_path, base, head)
-    except _UnreadableForV1 as exc:
+    except (_UnreadableForV1, ConfigUnreadable) as exc:
         return [f"tamper_check_failed:{exc.what}"]
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return [f"tamper_check_failed:{type(exc).__name__}"]
@@ -317,7 +317,12 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
         flags = [
             f"test_config_changed:{path}"
             for path in test_config_changes(
-                repo, patch_path, base, tuple(c[3] for c in changes), head=head
+                repo,
+                patch_path,
+                base,
+                tuple(c[3] for c in changes),
+                head=head,
+                modes={c[3]: (c[0], c[1]) for c in changes},  # R3 (S12)
             )
         ]
         for old_mode, new_mode, code, path in changes:
@@ -333,7 +338,8 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
                     blob = git(f"show:{path}", "show", f"{at}{path}")
                     if code == "M" and not blob.strip():
                         flags.append(f"test_file_emptied:{path}")
-                    if PurePosixPath(path).suffix in _SOURCE_SUFFIXES and not _is_text(blob):
+                    code_file = PurePosixPath(path).suffix.lower() in _SOURCE_SUFFIXES  # R3 N6
+                    if code_file and not _is_text(blob):
                         # R2 (S5): test code V1 cannot read as text is never clean
                         flags.append(f"test_file_uninspectable:{path}")
             if code == "D" or not readable or path.endswith(_DOC_SUFFIXES):
@@ -1259,6 +1265,15 @@ def reverify_run(
     pr_pin = store.run_pr(task_id)
     pr_head: str | None = None  # set once this is a PR-head verdict
     verdict_pr: dict[str, Any] | None = None
+    pr = PR_HEAD_REF.fullmatch(ref or "")
+    patchless_pr = (
+        bool(pr) and not changed_files and (patch_path is None or not patch_path.is_file())
+    )
+    if patchless_pr and pr_pin is not None:
+        # R3 (S13): the dispatch pin is the verdict's PR from the start, so
+        # every refusal below — the sandbox and read-wall ones included —
+        # names the PR it refused; merge-base None until found (R2 S9).
+        pr_head, verdict_pr = pr_pin["head_commit"], {**pr_pin, "merge_base": None}
 
     def unavailable(detail: str) -> ReverifyOutcome:
         outcome = ReverifyOutcome(
@@ -1335,9 +1350,8 @@ def reverify_run(
         else resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
     )
 
-    pr = PR_HEAD_REF.fullmatch(ref or "")
     checkout: str | None = None
-    if pr and not changed_files and (patch_path is None or not patch_path.is_file()):
+    if pr and patchless_pr:
         # Phase 09 (9.0, I2): a review run that changed nothing on a fetched
         # PR head — the PR itself is what G10 verifies. R1 (D2): the pinned
         # command runs on the exact head commit; V1 reads the PR's own diff,
@@ -1349,8 +1363,7 @@ def reverify_run(
                 f"so there is nothing G10 may verify — refresh_repo pr={pr[1]} and dispatch "
                 "the review again"
             )
-        # R2 (S9, N3): None until found — a refusal below records that.
-        pr_head, verdict_pr = pr_pin["head_commit"], {**pr_pin, "merge_base": None}
+        assert verdict_pr is not None and pr_head is not None  # set above (R3 S13)
         if not pinned:
             # v88-F4: a PR is never confirmed by a command the worker chose.
             return unavailable(
