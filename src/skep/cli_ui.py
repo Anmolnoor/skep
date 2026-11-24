@@ -71,6 +71,36 @@ def print_diff(patch: str) -> None:
     console().print(Syntax(patch, "diff", theme="ansi_dark", word_wrap=True))
 
 
+def review_ansi(head: str, patch: str, tail: str) -> str:
+    """``skep review <id>`` on a terminal: the evidence, the patch lit as a
+    diff, then the next step — rendered to ANSI text for the pager."""
+    from rich.syntax import Syntax
+    from rich.text import Text
+
+    con = console()
+    with con.capture() as captured:
+        con.print(Text(head))
+        con.print(Syntax(patch, "diff", theme="ansi_dark", word_wrap=True))
+        con.print(Text(tail))
+    return captured.get()
+
+
+def page_ansi(text: str) -> None:
+    """Page ANSI text. less draws colour only with -R: pydoc passes it from
+    3.13 on; 3.12 inherits LESS, so -R is added for this one call."""
+    import pydoc
+
+    before = os.environ.get("LESS")
+    os.environ["LESS"] = f"{before} -R" if before else "-R"
+    try:
+        pydoc.pager(text)
+    finally:
+        if before is None:
+            os.environ.pop("LESS", None)
+        else:
+            os.environ["LESS"] = before
+
+
 def print_report(text: str) -> None:
     """The forensics text with its section heads and alarms lit."""
     from rich.text import Text

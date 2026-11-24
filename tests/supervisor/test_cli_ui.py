@@ -277,6 +277,182 @@ def test_interactive_review_deny_skip_and_quit(
         assert f"skipped: task {task_id} still waits" in out
 
 
+def _press(monkeypatch: pytest.MonkeyPatch, key: str, meanwhile: Any) -> None:
+    """One key, after something changed on another surface while the card
+    was on screen (D4: the verdict binds to what was shown)."""
+    monkeypatch.setattr(cli_cmds, "_review_interactive", lambda: True)
+
+    def read() -> str:
+        meanwhile()
+        return key
+
+    monkeypatch.setattr(cli_cmds, "_read_approval_choice", read)
+
+
+def _patch_of(home: Path, task_id: str) -> Path:
+    store = RunStore(build_config(home, None).db_path, readonly=True)
+    try:
+        return next(Path(p) for kind, p, _ in store.artifacts_for(task_id) if kind == "patch")
+    finally:
+        store.close()
+
+
+def test_interactive_review_refuses_a_verdict_on_a_patch_that_changed(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 10 R1 D4 (I7, I13): `a` lands the patch that was SHOWN — a patch
+    rewritten while the card was on screen is refused, and nothing lands."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    _press(monkeypatch, "a", lambda: patch.write_text(patch.read_text() + "+sneaked = 1\n"))
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert "the patch changed since you read it" in err and "nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert store.approvals_for(task_id) == []
+    finally:
+        store.close()
+
+
+def test_interactive_review_refuses_when_another_review_opened(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: the card showed no open review; one opened elsewhere before the key
+    — the verdict would have gone to an approval nobody here read."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+
+    def open_review() -> None:
+        store = RunStore(db)
+        try:
+            store.enqueue_approval(task_id, action="apply_patch", reason="from the web")
+        finally:
+            store.close()
+
+    _press(monkeypatch, "d", open_review)
+    assert _run_cli(home, "review") == 2
+    assert "is waiting on this run since you read it" in capsys.readouterr().err
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["pending"]
+    finally:
+        store.close()
+
+
+def test_interactive_review_refuses_a_gate_answered_elsewhere(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: the shown gate was denied from the web while the card was up — the
+    key gives no second verdict, on it or on anything else."""
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    capsys.readouterr()
+    task_id = _only_task_id(home)
+    db = build_config(home, None).db_path
+    store = RunStore(db)
+    try:
+        (gate,) = [a for a in store.approvals_for(task_id) if a.status == "pending"]
+    finally:
+        store.close()
+
+    def denied_on_the_web() -> None:
+        store = RunStore(db)
+        try:
+            store.resolve_approval(gate.review_id, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _press(monkeypatch, "a", denied_on_the_web)
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert f"review {gate.review_id} is no longer pending (denied" in err
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied"]
+        assert len(store.recent_runs(10)) == 1  # nothing resumed
+    finally:
+        store.close()
+
+
+def _pty_stdin(monkeypatch: pytest.MonkeyPatch) -> int:
+    """A real terminal on stdin; returns the master end to type into. Echo is
+    off: nothing reads the master here, and an echoed key would sit in the
+    output queue the mode switch waits to drain."""
+    import pty
+    import termios
+
+    master, slave = pty.openpty()
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    stdin = open(slave, encoding="utf-8")  # noqa: SIM115 - closed by the monkeypatch's owner
+    monkeypatch.setattr(sys, "stdin", stdin)
+    return master
+
+
+def test_a_single_key_never_answers_with_what_was_typed_before_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4 (I7): pending input is flushed before the key is read, and no key
+    within the timeout reads as nothing (the caller's skip)."""
+    import os
+    import threading
+
+    master = _pty_stdin(monkeypatch)
+    os.write(master, b"a")  # typed before the card was drawn
+    assert cli_cmds._read_single_key(timeout=0.3) == ""
+    threading.Timer(0.2, lambda: os.write(master, b"d")).start()
+    assert cli_cmds._read_single_key(timeout=5) == "d"
+    assert cli_cmds._read_single_key(timeout=0.1) == ""  # the timeout skips
+
+
+def test_a_terminal_that_refuses_raw_mode_falls_back_to_a_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D4: termios.error is an OSError to the caller, so it reads a line."""
+    import os
+    import termios
+
+    def refuse(fd: int) -> Any:
+        raise termios.error(25, "Inappropriate ioctl for device")
+
+    master = _pty_stdin(monkeypatch)
+    monkeypatch.setattr(termios, "tcgetattr", refuse)
+    with pytest.raises(OSError):
+        cli_cmds._read_single_key()
+    os.write(master, b"d\n")
+    assert cli_cmds._read_approval_choice() == "d"
+
+
+def test_review_reads_a_patch_that_is_not_utf8_and_lights_it_on_a_terminal(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: a patch with a non-UTF-8 byte never crashes a review; on a terminal
+    `skep review <id>` shows the diff lit by rich, plain bytes otherwise."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    patch.write_bytes(patch.read_bytes() + b"+latin = '\xe9'\n")
+    store = RunStore(build_config(home, None).db_path, readonly=True)
+    try:
+        (card,) = cli_cmds._review_cards(store)
+    finally:
+        store.close()
+    assert "+latin = '\ufffd'" in (card.patch or "")
+    assert _run_cli(home, "review", task_id) == 0
+    plain = capsys.readouterr().out
+    assert "+value = 1" in plain and ANSI not in plain
+    _on_a_terminal(monkeypatch, color=True)
+    assert _run_cli(home, "review", task_id) == 0
+    lit = capsys.readouterr().out
+    assert ANSI in lit and "value" in lit and f"task {task_id}" in lit
+
+
 def test_review_cards_say_what_g10_ran_whose_command_and_the_counts(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

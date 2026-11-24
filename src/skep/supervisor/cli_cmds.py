@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import pydoc
@@ -112,17 +113,30 @@ def _stdin_is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def _read_single_key() -> str:
+REVIEW_KEY_TIMEOUT_SECONDS = 300  # Phase 10 R1 D4: an unanswered card skips (I7)
+
+
+def _read_single_key(timeout: float = REVIEW_KEY_TIMEOUT_SECONDS) -> str:
+    """One key, no Enter. Input typed before the prompt is flushed first, so a
+    key pressed while a card was still drawing never answers it (I7); no key
+    within ``timeout``, or EOF, reads "" — the caller's skip. A terminal that
+    refuses raw mode raises OSError, so the caller reads a line instead."""
+    import select
     import termios
     import tty
 
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
     try:
-        tty.setcbreak(fd)
-        return sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            ready, _, _ = select.select([fd], [], [], timeout)
+            return os.read(fd, 1).decode("utf-8", errors="replace") if ready else ""
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    except termios.error as exc:
+        raise OSError(f"single-key input unavailable: {exc}") from exc
 
 
 def _read_approval_choice() -> str:
@@ -1572,9 +1586,11 @@ def cmd_review(args: argparse.Namespace) -> int:
             elif blocked:
                 lines.append(f"  auto-landing: not fired ({blocked})")
             patch_path = artifacts.get("patch")
+            patch_text = None
             if patch_path is not None and patch_path.is_file():
+                patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
                 lines.append("")
-                lines.append(patch_path.read_text())
+                lines.append(patch_text)
                 lines.append(
                     f"next: git -C {shlex.quote(record.repo)} switch {landed}  # landed"
                     if landed
@@ -1583,10 +1599,27 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
             else:
                 lines.append("  patch:        none produced")
-            pydoc.pager("\n".join(lines))
+            from .. import cli_ui
+
+            if patch_text is not None and cli_ui.rich_enabled():
+                # D4 (N8): on a terminal the patch is lit as a diff.
+                head, tail = lines[: lines.index(patch_text)], lines[lines.index(patch_text) + 1 :]
+                cli_ui.page_ansi(cli_ui.review_ansi("\n".join(head), patch_text, "\n".join(tail)))
+            else:
+                pydoc.pager("\n".join(lines))
             return 0
 
         actor = args.actor or getpass.getuser()
+        shown = getattr(args, "shown", None)  # Phase 10 R1 D4: set by `skep review`'s walk
+        if shown is not None and (args.approve or args.deny):
+            stale = _stale_verdict(store, record, shown)
+            if stale is not None:
+                return _err(
+                    f"{stale}; nothing done",
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # read it again, then decide",
+                )
         from .serve.actions import landing_reason
 
         if args.deny:
@@ -1902,13 +1935,54 @@ def _prompt_inline_approval(
 
 
 @dataclass(frozen=True)
+class _Shown:
+    """Phase 10 R1 D4: what an interactive review card displayed. The verdict
+    typed at it binds to exactly this (I7, I13)."""
+
+    state: str
+    review_id: str | None  # the open review the verb would answer; None: none open
+    patch_sha256: str | None  # the bytes of the patch the card showed
+
+
+@dataclass(frozen=True)
 class _ReviewCard:
     task_id: str
-    label: str  # CONFIRMED / NOT CONFIRMED / TAMPER / ASK
+    label: str  # CONFIRMED / NOT CONFIRMED / TAMPER / ASK / NOTHING TO RE-VERIFY
     style: str
     waiting: str
     lines: list[str]
     patch: str | None
+    shown: _Shown
+
+
+def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
+    """Phase 10 R1 D4: why a verdict typed at a review card no longer matches
+    what the card showed — the run moved, its review was answered elsewhere,
+    another review opened, or the patch's bytes changed — or None. It only
+    refuses; the verdict itself still runs through the existing verbs (I5)."""
+    task_id = record.task_id
+    open_review = store.pending_or_enqueue_approval(
+        task_id, action="apply_patch", reason="", create=False
+    )
+    if shown.review_id is not None and open_review != shown.review_id:
+        was = store.get_approval(shown.review_id)
+        status = "gone" if was is None else f"{was.status} by {was.resolved_by or '-'}"
+        return f"review {shown.review_id} is no longer pending ({status})"
+    if shown.review_id is None and open_review is not None:
+        return f"review {open_review} is waiting on this run since you read it"
+    if record.state != shown.state:
+        return f"task {task_id} moved from {shown.state} to {record.state} since you read it"
+    if shown.patch_sha256 is not None:
+        from .serve.actions import patch_path
+
+        path = patch_path(store, task_id)
+        now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
+        if now != shown.patch_sha256:
+            return (
+                f"the patch changed since you read it "
+                f"(sha256 {shown.patch_sha256[:12]} → {now[:12]})"
+            )
+    return None
 
 
 def _review_interactive() -> bool:
@@ -1957,6 +2031,10 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
         if note:
             lines.append(f"V1:       {note}")
         patch = patch_path(store, record.task_id)
+        raw = patch.read_bytes() if patch is not None else None
+        open_review = store.pending_or_enqueue_approval(
+            record.task_id, action="apply_patch", reason="", create=False
+        )
         cards.append(
             _ReviewCard(
                 record.task_id,
@@ -1964,7 +2042,12 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
                 style,
                 notice[0],
                 lines,
-                patch.read_text() if patch is not None else None,
+                None if raw is None else raw.decode("utf-8", errors="replace"),
+                _Shown(
+                    record.state,
+                    open_review,
+                    None if raw is None else hashlib.sha256(raw).hexdigest(),
+                ),
             )
         )
     return cards
@@ -2051,7 +2134,13 @@ def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
             if choice == "q":
                 return code
             if choice in ("a", "d"):
-                verdict = {"task_id": card.task_id, "approve": choice == "a", "deny": choice == "d"}
+                # D4: the verdict carries what the card showed; a stale one is refused.
+                verdict = {
+                    "task_id": card.task_id,
+                    "approve": choice == "a",
+                    "deny": choice == "d",
+                    "shown": card.shown,
+                }
                 code = max(code, cmd_review(argparse.Namespace(**{**vars(args), **verdict})))
             else:
                 print(f"skipped: task {card.task_id} still waits")
