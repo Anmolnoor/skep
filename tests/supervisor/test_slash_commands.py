@@ -78,6 +78,26 @@ def test_a_shared_command_is_one_row_on_every_surface_it_names() -> None:
     assert resolve(CLI, "resume") is not resolve("telegram", "resume")
 
 
+def test_status_is_one_row_on_web_cli_and_every_channel(config: SupervisorConfig) -> None:
+    """Test 10.5: /status answers on the web, in skep chat and on a messenger —
+    one row, one meaning — and the messenger deck stays exactly its own."""
+    from skep.supervisor.serve.channels.commands import status_text
+
+    status = resolve(WEB, "status")
+    assert status is resolve(CLI, "status")
+    assert all(resolve(channel, "status") is status for channel in CHANNELS)
+    assert status.verb is None  # read-only: no card, no mutation
+    for name in ("role", "policy"):
+        with pytest.raises(CommandRefused):
+            resolve("telegram", name)
+    # The web executor reads the channels' own status text off GET /api/status.
+    from skep.supervisor.store import RunStore
+
+    store = RunStore(config.db_path)
+    summary = serve_client(config, store=store).get("/api/status").json()["summary"]
+    assert summary == status_text(store) == "skep: 0 running · 0 approval(s) waiting"
+
+
 def test_the_three_decks_are_views_of_the_registry(config: SupervisorConfig) -> None:
     from skep import cli_chat
     from skep.supervisor.serve.channels.commands import COMMANDS as CHANNEL_DECK
@@ -119,8 +139,8 @@ def test_the_web_deck_endpoint_is_read_only_and_token_gated(config: SupervisorCo
         with pytest.raises(CommandRefused) as refused:
             resolve(WEB, row.name)
         assert deck["refusals"][row.name] == str(refused.value)
-    assert deck["refusals"]["status"] == (
-        "/status is not available on web; it runs on cli, discord, slack, telegram"
+    assert deck["refusals"]["stop"] == (
+        "/stop is not available on web; it runs on cli, discord, slack, telegram"
     )
     assert desk.post("/api/commands", json={}).status_code == 405  # no mutation path
     assert TestClient(create_app(config)).get("/api/commands").status_code == 401

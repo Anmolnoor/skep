@@ -636,6 +636,8 @@ def create_app(
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
+        from .channels.commands import status_text
+
         return {
             "status": "ok",
             # H1 (hive-rooms): the sidebar names the machine this daemon runs on.
@@ -643,6 +645,9 @@ def create_app(
             "home": str(config.home),
             "store_ready": config.db_path.is_file(),
             "pending_approvals": len(run_store.pending_approvals()),
+            # Phase 10 R1 (Test 10.5): the web deck's /status prints the very
+            # text a messenger's /status answers — one meaning on every face.
+            "summary": status_text(run_store),
         }
 
     @app.get("/api/setup/status")
