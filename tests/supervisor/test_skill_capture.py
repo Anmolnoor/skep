@@ -95,6 +95,7 @@ def _completed_run(
     ),
     chat_taint: list[str] | None = None,
     resume_of: str | None = None,
+    network: tuple[str, ...] = ("pypi.org",),
 ) -> str:  # fmt: skip
     repo.mkdir(parents=True, exist_ok=True)
     decision = None
@@ -107,7 +108,7 @@ def _completed_run(
         workspace=repo,
         instructions="Run the test suite and fix what fails.",
         permissions=Permissions(
-            read=[str(repo)], write=[str(repo)], network=["pypi.org"], env_allowlist=[]
+            read=[str(repo)], write=[str(repo)], network=list(network), env_allowlist=[]
         ),
         budget=DEFAULT_BUDGET,
         dispatch_decision=decision,
@@ -650,3 +651,20 @@ def test_review_r1_skill_show_names_the_approve_that_will_work(
     ):
         assert _cli(home, "skill", "show", name) == 0
         assert hint in capsys.readouterr().out, name
+
+
+# -- review round 2 ------------------------------------------------------------
+
+
+def test_review_r2_a_run_capture_strips_userinfo_from_its_declared_hosts(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """Review R2 (F3): the declared hosts pass the export redactor like the
+    ask, steps and paths — user:password and a username-only token alike."""
+    audit = tmp_path / "audit"
+    hosts = (f"https://{USER}:{WORD}@git.example", f"https://{TOKEN}@api.example")
+    run = _completed_run(store, audit, tmp_path / "repo", network=hosts)
+    candidate, text = capture_skill(store, audit, run, name="hosts", actor="op")
+    for each in (text, candidate.template.instructions):
+        _no_secret(each)
+    assert "https://***@git.example, https://***@api.example" in text

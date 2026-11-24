@@ -508,10 +508,12 @@ def draft_capture(
         raise SkillError(f"no run or chat {source!r}")
     if not steps:
         raise SkillError(f"{label} ran no command that succeeded — nothing to capture")
-    # Review R1 (Q3): a SKILL.md is written to be shared — no credential, no URL userinfo
-    ask, steps, paths = (
+    # Review R1 (Q3): a SKILL.md is written to be shared — no credential, no URL
+    # userinfo; Review R2 (F3): the declared hosts too
+    ask, steps, hosts, paths = (
         redact_export(ask),
         [redact_export(x) for x in steps],
+        [redact_export(x) for x in hosts],
         [redact_export(x) for x in paths],
     )
     description = f"captured procedure: {' '.join(ask.split())[:80]}"
