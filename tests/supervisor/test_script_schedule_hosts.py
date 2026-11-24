@@ -89,3 +89,27 @@ def test_the_cli_refuses_the_wildcard(
                  "--caste", "script",
                  "--every", "1d", "--network", "*"])  # fmt: skip
     assert code != 0 and "not a host name" in capsys.readouterr().err
+
+
+def test_the_cli_adds_a_repo_less_script_schedule_with_its_hosts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N8b (ADR 0050 parity with propose_schedule / REST): a script needs no
+    repo; the one positional after NAME is its command, verbatim."""
+    command = "python3 /abs//brief.py --out x/"
+    add = ["--home", str(tmp_path), "schedule", "add", "brief", command, "--caste", "script"]
+    assert main([*add, "--every", "1d", "--network", "api.example.com"]) == 0
+    store = RunStore(build_config(tmp_path, None).db_path)
+    try:
+        schedule = store.get_schedule("brief")
+    finally:
+        store.close()
+    assert schedule is not None
+    assert (schedule.repo, schedule.instructions, schedule.network) == (
+        "",
+        command,
+        ["api.example.com"],
+    )
+    code = main(["--home", str(tmp_path), "schedule", "add", "s", "echo hi", "--caste", "script",
+                 "--every", "1d", "--network", "*"])  # fmt: skip
+    assert code != 0 and "not a host name" in capsys.readouterr().err

@@ -617,7 +617,9 @@ the launch path `forged_lane` now shares, so the two cannot drift:
 - **Writes:** a throwaway workspace (its `HOME`, `TMPDIR`), deleted after
   the run.
 - **Egress:** the schedule's `network` hosts through a FilteringProxy, none
-  by default. The REST face and `skep schedule add --network` set it. Each
+  by default. The REST face, `propose_schedule` and `skep schedule add
+  NAME "<command>" --caste script --network HOST` (repo-less since Phase 09
+  R2, like the other two) set it. Each
   entry is one concrete host (`api.example.com`, `*.example.com`,
   `host:8443`); `*` alone would make the wall allow-all, past the proxy, so
   every creation face and `wall.walled` itself refuse it (Phase 09 R2).
