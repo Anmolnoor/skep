@@ -1274,6 +1274,37 @@ def skill_index_block(store: RunStore) -> str:
     return "\n".join([_SKILL_INDEX_HEADER, *described, *([", ".join(names)] if names else [])])
 
 
+# Phase 06 (6.2): the seeds the user's message names, as ONE line stored on
+# that user turn. Never in the system prompt: re-ranking the index per turn
+# would change the prompt every turn and void the provider's prompt cache.
+# Stored on the row, every later turn replays the same bytes. Seeds only —
+# the operator's own skills are already described in the index above.
+SKILL_HINT_MAX = 5
+SKILL_HINT_CHARS = 40
+_SKILL_HINT_STOPWORDS = frozenset({"a", "an", "the", "and", "of", "to", "for", "with", "on"})
+
+
+def skill_hint(store: RunStore, content: str) -> str:
+    """A seed matches when every word of its name (stopwords aside) is a word
+    of the message — deterministic, no model. Most words matched first."""
+    from ..seed_skills import SEED_PROVENANCE
+
+    words = set(re.findall(r"[a-z0-9]+", content.lower()))
+    words |= {word[:-1] for word in words if word.endswith("s")}  # pdfs → pdf
+    hits = []
+    for template in store.list_templates():
+        tokens = set(template.name.lower().split("-")) - _SKILL_HINT_STOPWORDS
+        if template.provenance == SEED_PROVENANCE and tokens and tokens <= words:
+            hits.append((len(tokens), template))
+    hits.sort(key=lambda hit: -hit[0])  # stable: name order within a tie
+    shown = [
+        f"{t.name} — {short_description(t.description, SKILL_HINT_CHARS)}" if t.description
+        else t.name
+        for _, t in hits[:SKILL_HINT_MAX]
+    ]  # fmt: skip
+    return f"[Relevant skills: {'; '.join(shown)}]" if shown else ""
+
+
 # v74-F5: ONE "what you can reach" roof — tools by category (F3), skills by
 # name (v53-F7), MCP servers by id — each section naming its detail verb
 # (describe_tools / view_skill / list_mcp_tools), so "what can you reach?"
@@ -1282,18 +1313,27 @@ def skill_index_block(store: RunStore) -> str:
 # index with zero prompt edits.
 _REACH_HEADER = "You can reach:"
 _MCP_INDEX_HEADER = (
-    "Registered MCP servers (call list_mcp_tools with a server_id for that "
-    "server's tools and what policy decides for each):"
+    "Registered MCP servers, with their tools as last listed ('*'=not a read: "
+    "it asks unless policy allows it). Call a tool with call_mcp_tool; "
+    "list_mcp_tools with a server_id re-lists that server's tools with "
+    "descriptions and what policy decides for each (a server shown without "
+    "tools has not been listed yet):"
 )
 
 
 def mcp_index_block(store: RunStore) -> str:
-    from ..mcp_client import load_mcp_servers
+    """Phase 06 (6.2): each server's tool names from the discovery cache —
+    never a tools/list here, so a turn spawns no server process."""
+    from ..mcp_client import index_tool_names, load_mcp_servers
 
     servers = load_mcp_servers(store)
     if not servers:
         return ""
-    lines = [f"- {server_id} ({config.transport})" for server_id, config in servers.items()]
+    lines = []
+    for server_id, config in servers.items():
+        names = index_tool_names(store, config)
+        tools = f": {', '.join(names)}" if names else ""
+        lines.append(f"- {server_id} ({config.transport}){tools}")
     return "\n".join([_MCP_INDEX_HEADER, *lines])
 
 
@@ -4099,8 +4139,12 @@ def add_chat_routes(
             )
         if chat.title == DEFAULT_TITLE and not run_store.chat_messages(chat_id):
             run_store.set_chat_title(chat_id, _title_from(body.content))
+        hint = skill_hint(run_store, body.content)
         run_store.add_chat_message(
-            chat_id, role="user", content=body.content, attachments=body.attachments or None
+            chat_id,
+            role="user",
+            content=f"{body.content}\n\n{hint}" if hint else body.content,
+            attachments=body.attachments or None,
         )
         return StreamingResponse(
             _as_sse(

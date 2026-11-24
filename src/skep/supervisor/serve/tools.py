@@ -2518,6 +2518,58 @@ CORE_TOOL_NAMES = frozenset(
         CLARIFY_TOOL_NAME,
         "search_chats",
         DESCRIBE_TOOL_NAME,
+        # Phase 06 (6.2): the web verbs, full schema on turn 1. A role that
+        # denies network search/fetch still hides them (hidden_tools wins).
+        "search_web",
+        "read_url",
+    }
+)
+
+# Phase 06 (6.2): set-once admin verbs (policy plumbing, providers, persona,
+# Discord moderation, pack/plugin lifecycle) index as name(…) — no args, no
+# gloss — which pays for the two promotions above. Still listed, still
+# callable by name; describe_tools has the schema.
+RARE_ADMIN_TOOLS = frozenset(
+    {
+        "set_policy",
+        "setup_project",
+        "copy_project_policy",
+        "set_operator_policy",
+        "apply_policy_preset",
+        "allow_env_bootstrap",
+        "approve_policy_baseline",
+        "revoke_policy_rule",
+        "set_policy_group",
+        "delete_policy_group",
+        "attach_policy_group",
+        "detach_policy_group",
+        "list_policy_groups",
+        "policy_registry",
+        "policy_decisions",
+        "policy_explain",
+        "set_assistant_model",
+        "list_providers",
+        "add_provider",
+        "use_provider",
+        "remove_provider",
+        "list_provider_presets",
+        "set_tts_provider",
+        "set_persona",
+        "set_personality",
+        "set_role",
+        "discord_delete_message",
+        "discord_timeout_member",
+        "set_run_completion_notify",
+        "set_skill_observer",
+        "promote_skill_pack",
+        "suspend_skill_pack",
+        "promote_tool",
+        "suspend_tool",
+        "list_plugins",
+        "unregister_mcp_server",
+        "push_baseline",
+        "unregister_repo",
+        "sync_notes",
     }
 )
 
@@ -2681,7 +2733,8 @@ _TOOL_INDEX_HEADER = (
     "'*'=goes through the confirmation path: it shows the user a card UNLESS "
     "project policy auto-allows it. No gloss after a tool means its name says "
     "what it does; a tool listed name-only already carries its full schema in "
-    "this request. Call any tool directly by name; call "
+    "this request; '(…)'=a rare admin verb: describe it first. Call any tool "
+    "directly by name; call "
     f"describe_tools(names=[...]) for up to {DESCRIBE_TOOLS_MAX} full schemas "
     "when an index line is not enough:"
 )
@@ -2769,6 +2822,8 @@ def _index_line(spec: dict[str, Any]) -> str:
     mark = "*" if name in MUTATING_TOOL_NAMES else ""
     if name in CORE_TOOL_NAMES:
         return f"{name}{mark}"  # its full schema is in this same request
+    if name in RARE_ADMIN_TOOLS:
+        return f"{name}{mark}(…)"
     args = _index_args(spec)
     gloss = _index_gloss(spec, args)
     return f"{name}{mark}({args})" + (f" — {gloss}" if gloss else "")
@@ -3671,12 +3726,11 @@ def execute_read_tool(
         }
     if name == "list_mcp_tools":
         from ..mcp_client import (
-            MCPClient,
             MCPError,
             classify_mcp_risk,
             load_mcp_servers,
             mcp_scope_decision,
-            runner_for_config,
+            refresh_listed_tools,
         )
 
         server_id = str(args["server_id"])
@@ -3684,9 +3738,9 @@ def execute_read_tool(
         if config is None:
             return {"error": f"no MCP server {server_id!r}; register_mcp_server first"}
         try:
-            tools = MCPClient(
-                config, runner=runner_for_config(config, skep_home=holder.current.home.parent)
-            ).list_tools()
+            # Phase 06 (6.2): the explicit refresh — it also feeds the prompt's
+            # MCP index, which only ever reads the cache.
+            tools = refresh_listed_tools(store, config)
         except MCPError as exc:
             return {"error": str(exc)}
         from ..mcp_client import classify_browse_action
@@ -4753,10 +4807,9 @@ def _execute_mutation(
         # a missing npx reports honestly instead of leaving a dead entry
         # silently registered (I8).
         from ..mcp_client import (
-            MCPClient,
             MCPError,
             MCPServerConfig,
-            runner_for_config,
+            refresh_listed_tools,
             save_mcp_server,
         )
 
@@ -4781,10 +4834,7 @@ def _execute_mutation(
             ),
         }
         try:
-            handshake = MCPClient(
-                browser_config,
-                runner=runner_for_config(browser_config, skep_home=holder.current.home.parent),
-            ).list_tools()
+            handshake = refresh_listed_tools(store, browser_config)  # 6.2: feeds the index
             result_view["tools"] = [tool.name for tool in handshake]
         except MCPError as exc:
             result_view["handshake_failed"] = (
