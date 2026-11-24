@@ -69,7 +69,7 @@ from .contracts_io import (
     read_result,
     write_task_file,
 )
-from .github import PR_HEAD_REF
+from .github import PR_HEAD_REF, pr_ref
 from .ingest import IngestOutcome, ingest_run
 from .monitor import (
     AdoptedWorker,
@@ -820,6 +820,16 @@ def run_task(
                         f"pr={pr_match[1]} first, then dispatch the review"
                     )
                 pr_pin.pop("fetched_at")
+                # R4 (S4): the pin and refs/skep/pr/<N>/* publish together under
+                # refresh_repo's lock; apart, neither one is the PR skep fetched.
+                published = [resolve_commit(repo, pr_ref(pr_match[1], s)) for s in ("head", "base")]
+                if published != [pr_pin["head_commit"], pr_pin["base_commit"]]:
+                    raise WorktreeError(
+                        f"{ref}: the recorded fetch of PR #{pr_match[1]} (head "
+                        f"{pr_pin['head_commit']}, base {pr_pin['base_commit']}) is not what "
+                        f"refs/skep/pr/{pr_match[1]}/ holds now ({' '.join(map(str, published))}) "
+                        f"— refresh_repo pr={pr_match[1]} again, then dispatch the review"
+                    )
                 if (
                     resume_workspace is not None
                     and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]

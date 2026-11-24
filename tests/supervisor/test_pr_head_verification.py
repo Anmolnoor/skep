@@ -2264,3 +2264,69 @@ def test_skep_pr_list_shows_each_author_and_marks_a_bot(
     assert main(["--home", str(home), "pr", "list", "fixture"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "app/dependabot (bot)" in out[0] and "mallory" in out[1] and "(bot)" not in out[1]
+
+
+def test_pr_pin_publication_holds_one_lock_under_the_skep_home(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 (S4): CLI and serve publish a PR pin — fetch, ref update, store row
+    — under one file lock in the skep home, so two refreshes never leave
+    the refs from one and the stored pin from the other."""
+    import fcntl
+
+    from skep.supervisor.serve.actions import refresh_repo
+
+    held: list[bool] = []
+    fetch = _fake_fetch([])
+
+    def probing_fetch(**kwargs: Any) -> github.PrHead:
+        with open(config.home / "pr-pin.lock", "a") as other:  # another process's open
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                held.append(False)
+        answer: github.PrHead = fetch(**kwargs)
+        return answer
+
+    monkeypatch.setattr(github, "fetch_pr_head", probing_fetch)
+    store = RunStore(config.db_path)
+    real_record = store.record_pr_fetch
+
+    def probing_record(*args: Any, **kwargs: Any) -> None:
+        probing_fetch(repo=repo, pr="7")
+        real_record(*args, **kwargs)
+
+    monkeypatch.setattr(store, "record_pr_fetch", probing_record)
+    try:
+        refresh_repo(ConfigHolder(config, store), str(repo), store=store, pr="7")
+    finally:
+        store.close()
+
+    assert held == [True, True]  # held across the fetch AND the store write
+
+
+@pytest.mark.parametrize("side", ["head", "base"])
+def test_a_fresh_review_refuses_a_pin_the_published_refs_disagree_with(
+    repo: Path, config: SupervisorConfig, side: str
+) -> None:
+    """R4 (S4): the stored pin and refs/skep/pr/N/* are published together;
+    a dispatch that finds them apart (a refresh raced, or a ref was moved by
+    hand) refuses and asks for a refresh instead of pinning either one."""
+    from skep.supervisor import WorktreeError
+    from skep.supervisor.dispatch import run_task
+
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        store.record_pr_fetch(
+            str(repo.resolve()), pr_repo=ORIGIN, number=7, base_branch="main",
+            base_commit=base, head_commit=head,
+        )  # fmt: skip
+    finally:
+        store.close()
+    git(repo, "update-ref", f"refs/skep/pr/7/{side}", base if side == "head" else head)
+
+    with pytest.raises(WorktreeError, match="refresh_repo pr=7 again"):
+        run_task(repo, "Review it. MODE:happy", config=config, ref=PR_REF)
