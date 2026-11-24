@@ -534,21 +534,37 @@ _WINDOW_FIELDS = ("context_length", "max_model_len", "max_context_length")
 _UNREACHABLE = object()
 
 
-def _get_json(url: str, api_key: str | None, deadline: float) -> Any:
-    """The body, None on an HTTP or JSON error, or _UNREACHABLE when the host
-    did not answer within what is left of ``deadline`` (R1 F10: one budget
-    for every probe, and a host that timed out is not asked again)."""
+def _fetch_json(url: str, api_key: str | None, deadline: float, body: Any = None) -> Any:
+    """The body (a POST of ``body`` when given), None on an HTTP, decoding,
+    URL or JSON error, or _UNREACHABLE when the host did not answer within
+    what is left of ``deadline`` (R1 F10: one budget for every probe, and a
+    host that timed out is not asked again). R2 (G3): read as a stream that
+    stops at the deadline — httpx's timeout is per read, so a host trickling
+    bytes kept the probe going. R2 (G5): a bad gzip body or URL is a miss."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return _UNREACHABLE
+    chunks: list[bytes] = []
     try:
-        response = httpx.get(url, headers=_headers(api_key), timeout=remaining)
+        with httpx.stream(
+            "POST" if body is not None else "GET",
+            url,
+            headers=_headers(api_key),
+            json=body,
+            timeout=remaining,
+        ) as response:
+            if response.is_error:
+                return None
+            for chunk in response.iter_bytes():
+                if time.monotonic() >= deadline:
+                    return _UNREACHABLE
+                chunks.append(chunk)
     except httpx.TransportError:
         return _UNREACHABLE
-    if response.is_error:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     try:
-        return response.json()
+        return json.loads(b"".join(chunks))
     except ValueError:
         return None
 
@@ -579,16 +595,21 @@ def _lmstudio_window(body: Any, model: str) -> int | None:
 
 
 def _openai_style_window(
-    base_url: str, api_key: str | None, model: str, timeout: float
+    base_url: str, api_key: str | None, model: str, deadline: float, lmstudio: bool
 ) -> tuple[int, int | None] | None:
     """The model's row in GET <prefix>/models — OpenRouter's context_length
     (+ top_provider.max_completion_tokens), vLLM's max_model_len — else LM
     Studio's native GET /api/v1/models, else llama.cpp's GET /props n_ctx.
-    All of them inside one ``timeout``."""
-    deadline = time.monotonic() + timeout
+
+    R2 (G1, I11): those two live outside the configured prefix, so the key
+    goes there only for a local server whose API sits at the host root (one
+    port on this machine is one server) — the native listing also for an LM
+    Studio preset profile. Elsewhere <base>/tenant/api/v1/models may be
+    another service on the same gateway."""
     prefix = openai_style_prefix(base_url)
     root = prefix.removesuffix("/v1")
-    listing = _get_json(f"{prefix}/models", api_key, deadline)
+    local_root = _is_loopback(base_url) and urlparse(root).path in ("", "/")
+    listing = _fetch_json(f"{prefix}/models", api_key, deadline)
     if listing is _UNREACHABLE:
         return None
     entry = next((r for r in _rows(listing, "data") if r.get("id") == model), {})
@@ -597,13 +618,17 @@ def _openai_style_window(
     for field in _WINDOW_FIELDS:
         if _valid_ctx(entry.get(field)):
             return int(entry[field]), (int(out) if _valid_ctx(out) else None)
-    native = _get_json(f"{root}/api/v1/models", api_key, deadline)
+    if not (local_root or lmstudio):
+        return None
+    native = _fetch_json(f"{root}/api/v1/models", api_key, deadline)
     if native is _UNREACHABLE:
         return None
-    lmstudio = _lmstudio_window(native, model)
-    if lmstudio is not None:
-        return lmstudio, None
-    props = _get_json(f"{root}/props", api_key, deadline)
+    lmstudio_window = _lmstudio_window(native, model)
+    if lmstudio_window is not None:
+        return lmstudio_window, None
+    if not local_root:
+        return None
+    props = _fetch_json(f"{root}/props", api_key, deadline)
     settings = props.get("default_generation_settings") if isinstance(props, dict) else None
     n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
     return (int(n_ctx), None) if _valid_ctx(n_ctx) else None
@@ -616,9 +641,11 @@ def detect_model_ctx(
     model: str,
     protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
     timeout: float = 3.0,
+    lmstudio: bool = False,
 ) -> tuple[int, int | None] | None:
     """(window, max output) from the endpoint's own API, or None — detection
-    never breaks a save; the whole probe is bounded by ``timeout``.
+    never breaks a save; the whole probe is bounded by ``timeout``, wall
+    clock (R2, G3: the probe thread is abandoned at the deadline).
 
     ollama reports it via POST /api/show under an architecture-prefixed
     ``model_info`` key (``llama.context_length``, ``qwen3.context_length``, …);
@@ -626,25 +653,36 @@ def detect_model_ctx(
     answer through their model listing (Phase 06). anthropic and bedrock
     have no such endpoint — the catalog answers for them.
     """
-    if protocol in ("openai-compat", "openai-responses"):
-        return _openai_style_window(base_url, api_key, model, timeout)
-    if protocol != "ollama":
-        return None
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/api/show",
-            headers=_headers(api_key),
-            json={"model": model},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        info = response.json().get("model_info") or {}
-    except (httpx.HTTPError, json.JSONDecodeError, AttributeError):
-        return None
+    deadline = time.monotonic() + timeout
+    found: list[tuple[int, int | None] | None] = []
+
+    def probe() -> None:
+        if protocol in ("openai-compat", "openai-responses"):
+            found.append(_openai_style_window(base_url, api_key, model, deadline, lmstudio))
+        elif protocol == "ollama":
+            found.append(_ollama_window(base_url, api_key, model, deadline))
+
+    worker = threading.Thread(target=probe, name="skep-context-detect", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return found[0] if found else None
+
+
+def _ollama_window(
+    base_url: str, api_key: str | None, model: str, deadline: float
+) -> tuple[int, int | None] | None:
+    body = _fetch_json(f"{base_url.rstrip('/')}/api/show", api_key, deadline, {"model": model})
+    info = body.get("model_info") if isinstance(body, dict) else None
     for key, value in info.items() if isinstance(info, dict) else ():
         if str(key).endswith(".context_length") and _valid_ctx(value):
             return int(value), None
     return None
+
+
+# R2 (G4): the newest refresh per cache key — an older probe still in flight
+# (the startup one, under a key or protocol since replaced) never publishes.
+_CTX_LOCK = threading.Lock()
+_CTX_GENERATION: dict[str, int] = {}
 
 
 def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
@@ -659,30 +697,45 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
 
     if uses_codex_login(base_url):
         return  # v118-F1: no context endpoint, and llm-secret never goes there
+    key = context_cache_key(provider_id, base_url, model)
+    with _CTX_LOCK:
+        generation = _CTX_GENERATION[key] = _CTX_GENERATION.get(key, 0) + 1
+    active = store.active_provider_profile()
     try:
         # Phase 05 R1: the key saved for this endpoint, or none (P2)
         api_key = resolve_active_api_key(store, home, base_url=base_url)
     except OllamaError:  # R1 (F9): a refused credential (Copilot exchange) is a miss
         detected = None
     else:
-        detected = detect_model_ctx(base_url, api_key, model=model, protocol=protocol)
-    key = context_cache_key(provider_id, base_url, model)
-    if detected is None:
-        store.set_setting(key, None)
-    else:
-        store.set_setting(key, {"window": detected[0], "max_output": detected[1]})
+        detected = detect_model_ctx(
+            base_url,
+            api_key,
+            model=model,
+            protocol=protocol,
+            lmstudio=active is not None and active.source == "preset:lmstudio",
+        )
+    with _CTX_LOCK:
+        if _CTX_GENERATION[key] != generation:
+            return
+        if detected is None:
+            store.set_setting(key, None)
+        else:
+            store.set_setting(key, {"window": detected[0], "max_output": detected[1]})
 
 
 def refresh_missing_model_ctx(store: RunStore, home: Path) -> None:
     """R1 (F8): serve startup probes the active window once when it has no
-    provider-keyed row (an upgraded home has only v74 bare-name rows)."""
-    provider_id, base_url, model, _protocol = _context_identity(store, None)
+    provider-keyed row (an upgraded home has only v74 bare-name rows).
+    R2 (G2): keyed as Settings will read it — the legacy adoption applied in
+    memory (Phase 05's staged view), never written here."""
+    view = _staged_view(store, home)
+    provider_id, base_url, model, _protocol = _context_identity(view, None)
     if (
         base_url
         and model
         and store.get_setting(context_cache_key(provider_id, base_url, model)) is None
     ):
-        refresh_model_ctx(store, home, model)
+        refresh_model_ctx(view, home, model)
 
 
 def _headers(api_key: str | None) -> dict[str, str]:

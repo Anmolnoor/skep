@@ -145,3 +145,23 @@ def test_the_users_bubble_shows_what_they_typed_and_the_model_replays_the_hint(
     assert replayed[0] == replayed[1]
     assert replayed[0].startswith("merge these pdfs\n\n[Relevant skills: pdf — ")
     assert replayed[0].count("[Relevant skills:") == 1
+
+
+def test_an_operator_typed_hint_line_is_never_stripped(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R2 (G6): the bubble strips only the hint the server recorded on the
+    row — an operator's own "[Relevant skills: …]" line, on a message that
+    got no generated hint, is what they typed."""
+    client, chat_id = chat_client(config, ollama)
+    typed = "note for later\n\n[Relevant skills: my own list]"
+    ollama.script_reply("ok")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": typed})
+    shown = [
+        m["content"]
+        for m in client.get(f"/api/chats/{chat_id}").json()["messages"]
+        if m["role"] == "user"
+    ]
+    assert shown == [typed]
+    replayed = [m["content"] for m in ollama.chat_bodies()[-1]["messages"] if m["role"] == "user"]
+    assert replayed == [typed]
