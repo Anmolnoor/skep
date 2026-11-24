@@ -3997,6 +3997,7 @@ async function viewRunDetail(main, taskId) {
     if (!live()) return;
     main.append(el("h2", {}, "diff"), renderDiff(diff).node);
   } catch { /* no patch artifact — nothing to show */ }
+  if (!live()) return; // R3 J10: a failed diff read after navigation draws nothing either
   // Phase 10 10.1: the forensics report (G10, V1, ledger, blame), on demand.
   main.append(forensicsSection(taskId));
 }

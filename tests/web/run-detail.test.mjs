@@ -280,3 +280,23 @@ test("run detail's G10 rows name the command source and the test counts", async 
   await app.viewRunDetail(main, "t1");
   assert.match(main.textContent, /worker fallback/);
 });
+
+test("R3 J10: a diff request that fails after navigation appends no Forensics panel to the next page", async () => {
+  for (const fail of [true, false]) {
+    const app = loadApp();
+    const main = app.el("main");
+    main.dataset.route = "1";
+    const body = { ...RUNNING, run: { ...RUNNING.run, state: "completed" }, artifacts: [{ kind: "patch" }] };
+    app.api = async (method, path) => {
+      if (path === "/api/runs/t1") return body;
+      if (path === "/api/runs/t1/diff") {
+        main.dataset.route = "2"; // the operator moved on while the diff was in flight
+        if (fail) throw new Error("404");
+        return "diff --git a/a b/a\n";
+      }
+      return { events: [] };
+    };
+    await app.viewRunDetail(main, "t1");
+    assert.equal(main.querySelectorAll(".forensics-section").length, 0, `fail=${fail}`);
+  }
+});
