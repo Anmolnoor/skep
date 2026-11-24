@@ -810,3 +810,97 @@ def test_an_item_folded_between_the_count_check_and_the_claim_runs_nothing(
         assert len(record.fold_items()) == 2
     finally:
         store.close()
+
+
+def test_a_latin_1_patch_neither_500s_the_queue_nor_the_diff(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R4 K5: a valid patch whose text is not UTF-8 (a Latin-1 source file)
+    is counted and shown with replacement characters — the full queue still
+    equals the badge, and the diff route serves it instead of a 500."""
+    import hashlib
+
+    from skep.supervisor import RunStore
+
+    raw = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1 +1,2 @@\n x\n+caf\xe9\n"
+    data = raw.encode("latin-1")
+    store = RunStore(config.db_path)
+    try:
+        latin = _completed(
+            store, tmp_path, "latin", patch=False, outcome="passed", confirmed=True,
+            exit_codes=[0],
+        )  # fmt: skip
+        path = tmp_path / "latin.patch"
+        path.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        store.add_artifact(latin, kind="patch", audit_path=path, sha256=digest)
+        gate = _completed(
+            store, tmp_path, "gated", patch=False, outcome="passed", confirmed=True,
+            exit_codes=[0],
+        )  # fmt: skip
+        store.add_artifact(gate, kind="patch", audit_path=path, sha256=digest)
+        store.enqueue_approval(gate, action="apply_patch", reason="land it")
+    finally:
+        store.close()
+    client = serve_client(config)
+    full = client.get("/api/review-queue")
+    assert full.status_code == 200, full.text
+    badge = client.get("/api/review-queue", params={"detail": "false"}).json()
+    assert [(i["kind"], i["id"]) for i in full.json()["items"]] == [
+        (i["kind"], i["id"]) for i in badge["items"]
+    ]
+    rows = {i["id"]: i for i in full.json()["items"]}
+    assert rows[latin]["files"] == [{"path": "n.txt", "added": 1, "removed": 0}]
+    diff = client.get(f"/api/runs/{latin}/diff")
+    assert diff.status_code == 200 and "+caf�" in diff.text
+
+
+def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R4 K5: a patch file the server cannot read says so on its own row
+    ("patch unreadable: …"); every other item still lists, and the full
+    queue still equals the badge."""
+    import os
+
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        locked = _completed(
+            store, tmp_path, "locked", patch=True, outcome="passed", confirmed=True,
+            exit_codes=[0],
+        )  # fmt: skip
+        fine = _completed(
+            store, tmp_path, "fine", patch=True, outcome="passed", confirmed=True,
+            exit_codes=[0],
+        )  # fmt: skip
+    finally:
+        store.close()
+    (tmp_path / "locked.patch").chmod(0)
+    try:
+        if os.access(tmp_path / "locked.patch", os.R_OK):
+            pytest.skip("running as a user who reads mode-000 files")
+        client = serve_client(config)
+        full = client.get("/api/review-queue")
+        assert full.status_code == 200, full.text
+        badge = client.get("/api/review-queue", params={"detail": "false"}).json()
+        assert {i["id"] for i in full.json()["items"]} == {i["id"] for i in badge["items"]}
+        rows = {i["id"]: i for i in full.json()["items"]}
+        assert set(rows) == {locked, fine}
+        assert rows[locked]["files_note"].startswith("patch unreadable: ")
+        assert rows[fine]["files"] == [{"path": "app.py", "added": 1, "removed": 0}]
+        diff = client.get(f"/api/runs/{locked}/diff")
+        assert diff.status_code == 500 and "patch unreadable" in diff.json()["detail"]
+        from skep.supervisor.cli_cmds import _moved_since_shown, _Shown
+
+        store = RunStore(config.db_path, readonly=True)
+        try:
+            record = store.get_run(locked)
+            assert record is not None
+            moved = _moved_since_shown(store, record, _Shown("completed", None, "unreadable"))
+            assert moved is not None and moved.startswith("the patch is unreadable: ")
+        finally:
+            store.close()
+    finally:
+        (tmp_path / "locked.patch").chmod(0o644)

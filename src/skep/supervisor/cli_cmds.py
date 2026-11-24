@@ -2092,7 +2092,10 @@ def _moved_since_shown(store: RunStore, record: RunRecord, shown: _Shown) -> str
 
     # R3 J3: absence is evidence too — a card that showed no patch refuses one now.
     path = patch_path(store, task_id)
-    now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
+    try:
+        now = "none" if path is None else hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:  # R4 K5: no verdict on bytes nobody could read
+        return f"the patch is unreadable: {exc.strerror or exc}"
     was = shown.patch_sha256 or "none"
     if now != was:
         return f"the patch changed since you read it (sha256 {was[:12]} → {now[:12]})"
@@ -2218,7 +2221,14 @@ def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
         if note:
             lines.append(f"V1:       {note}")
         patch = patch_path(store, record.task_id)
-        raw = patch.read_bytes() if patch is not None else None
+        raw, sha = None, None
+        try:
+            raw = patch.read_bytes() if patch is not None else None
+        except OSError as exc:  # R4 K5: this card says so; the walk goes on
+            lines.append(f"patch:    patch unreadable: {exc.strerror or exc}")
+            sha = "unreadable"
+        if raw is not None:
+            sha = hashlib.sha256(raw).hexdigest()
         cards.append(
             _ReviewCard(
                 record.task_id,
@@ -2230,7 +2240,7 @@ def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
                 _Shown(
                     record.state,
                     open_review,
-                    None if raw is None else hashlib.sha256(raw).hexdigest(),
+                    sha,
                     tuple(a.review_id for a in store.approvals_for(record.task_id)),
                 ),
                 batch,

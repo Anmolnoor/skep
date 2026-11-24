@@ -90,7 +90,8 @@ def _changed_file_count(patch: Path | None) -> int:
         except (json.JSONDecodeError, OSError):
             pass
     try:
-        return patch.read_text().count("diff --git ")
+        # R4 K5: a patch of non-UTF-8 text is still a patch to count
+        return patch.read_text(errors="replace").count("diff --git ")
     except OSError:
         return 0
 

@@ -1449,7 +1449,12 @@ def create_app(
         patch = artifacts.get("patch")
         if patch is None or not Path(patch).is_file():
             raise HTTPException(status_code=404, detail="no patch artifact for this run")
-        return PlainTextResponse(Path(patch).read_text(encoding="utf-8"))
+        try:  # R4 K5: non-UTF-8 text is shown replaced, never a 500
+            return PlainTextResponse(Path(patch).read_bytes().decode("utf-8", errors="replace"))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"patch unreadable: {exc.strerror or exc}"
+            ) from exc
 
     add_registry_routes(app, holder=holder, run_store=run_store)
     add_notes_tasks_routes(app, run_store=run_store)

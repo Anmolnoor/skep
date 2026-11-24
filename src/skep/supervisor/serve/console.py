@@ -23,6 +23,7 @@ from .actions import (
     approval_views,
     never_reverified_error,
     patch_digest,
+    patch_path,
     policy_decisions,
     require_run,
     reverification_warning,
@@ -84,6 +85,19 @@ def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     if not isinstance(ids, list):
         return []
     return list(dict.fromkeys(canonical_task_id(store, str(t)) for t in ids if t))
+
+
+def _patch_unreadable(store: RunStore, task_id: str) -> str | None:
+    """R4 K5: "patch unreadable: …" for a patch file the server cannot open —
+    said on that item's row, never a 500 for the whole queue."""
+    path = patch_path(store, task_id)
+    if path is None:
+        return None
+    try:
+        with path.open("rb"):
+            return None
+    except OSError as exc:
+        return f"patch unreadable: {exc.strerror or exc}"
 
 
 def _tamper_of(store: RunStore) -> Any:
@@ -286,6 +300,7 @@ def review_queue(
         }  # fmt: skip
         if detail:
             digest = patch_digest(store, waiting.task_id) or {}
+            unreadable = _patch_unreadable(store, waiting.task_id)
             item.update(
                 task_id=waiting.task_id,
                 g10=waiting.label,
@@ -296,7 +311,7 @@ def review_queue(
                 files=[
                     {k: f[k] for k in ("path", "added", "removed")} for f in digest.get("files", [])
                 ],
-                files_note=digest.get("note"),
+                files_note=unreadable or digest.get("note"),
             )
         items.append(item)
     for proposal in store.list_memory_proposals(state="pending_review"):
