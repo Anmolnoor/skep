@@ -1596,3 +1596,34 @@ def test_legacy_keys_are_read_under_the_writers_lock(
     with _store(config) as store:
         llm.legacy_api_key(config.home, "https://a.example", store)
     assert held and all(held)
+
+
+def test_a_commit_in_another_process_holds_off_the_legacy_read(config: SupervisorConfig) -> None:
+    """R10 (Sol R10-1): `skep provider set-key` runs in its own process, so a
+    process-local lock let serve pair the old key with the new owner. The
+    provider lock is also a file lock in the supervisor home: a read waits
+    for the other process's commit."""
+    import subprocess
+    import sys
+    import time
+
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import sys, time\nfrom pathlib import Path\n"
+            "from skep.supervisor.serve.llm import provider_lock\n"
+            "with provider_lock(Path(sys.argv[1])):\n"
+            "    print('held', flush=True)\n    time.sleep(1.0)\n"
+        ), str(config.home)],
+        stdout=subprocess.PIPE, text=True,
+    )  # fmt: skip
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        began = time.monotonic()
+        with _store(config) as store:
+            llm.legacy_api_key(config.home, "https://a.example", store)
+        assert time.monotonic() - began >= 0.5  # it waited for the other process
+    finally:
+        holder.wait(10)

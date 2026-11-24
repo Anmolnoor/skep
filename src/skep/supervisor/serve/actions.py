@@ -1436,11 +1436,11 @@ def add_provider(
                 f"(e.g. {staged.provider_id}-2)"
             )
 
-    from .llm import _PROVIDER_WRITES, provider_rollback
+    from .llm import provider_lock, provider_rollback
 
     _endpoint_kept()
     if not activate:
-        with _PROVIDER_WRITES:  # R3 (H2): checked and written under the provider lock
+        with provider_lock(home):  # R3 (H2): checked and written under the provider lock
             _endpoint_kept()
             return _registered(store, profile, preset)
     if home is None:

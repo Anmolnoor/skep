@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import fcntl
 import json
 import os
 import threading
@@ -346,7 +347,7 @@ def legacy_api_key(
     # holding the writers' lock every commit holds throughout — a write (or
     # an A→B→A pair of them) can no longer land between the two reads. The
     # caller's probe runs after, outside the lock.
-    with _PROVIDER_WRITES:
+    with provider_lock(home, shared=True):
         for marker, key in _legacy_values(home):
             if key and legacy_key_endpoint(home, store, marker) in owners:
                 return key
@@ -1478,9 +1479,47 @@ _ROLLBACK_SETTINGS = (
     LLM_ENV_KEY_ENDPOINT,  # R4 (Sol R4-2): pin_legacy_key writes it too
 )
 # Phase 05 R2 (F5): provider commits are serialized; a save stages and probes
-# outside this lock. ponytail: one in-process lock — the CLI committing beside
-# serve is another process, which only the staged-state re-check sees.
+# outside this lock. R10 (Sol R10-1): ``provider_lock`` adds a file lock in
+# the supervisor home, so the CLI committing beside serve serializes too.
 _PROVIDER_WRITES = threading.RLock()
+PROVIDER_LOCK_FILE = ".provider-writes.lock"
+_HELD: dict[str, Any] = {"fd": None}
+
+
+@contextlib.contextmanager
+def provider_lock(home: Path | None, *, shared: bool = False) -> Iterator[None]:
+    """THE provider-writes lock: this process's reentrant lock, plus a flock
+    on ``<home>/.provider-writes.lock`` taken by the outermost holder that
+    names ``home`` (the supervisor home) — so ``skep provider set-key`` in
+    its own process and serve never interleave a legacy-key commit with a
+    read. A commit takes it exclusive (creating the file); a ``shared`` read
+    only joins one that exists and is openable (a sandboxed worker, whose
+    home is read-only, reads under the in-process lock alone). ``home``
+    None: the in-process lock only."""
+    with _PROVIDER_WRITES:
+        took = False
+        if _HELD["fd"] is None and home is not None:
+            try:
+                if shared:
+                    fd = os.open(home / PROVIDER_LOCK_FILE, os.O_RDONLY)
+                else:
+                    home.mkdir(parents=True, exist_ok=True)
+                    fd = os.open(home / PROVIDER_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError:
+                if not shared:
+                    raise
+            else:
+                fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                _HELD["fd"], took = fd, True
+        try:
+            yield
+        finally:
+            if took:
+                fcntl.flock(_HELD["fd"], fcntl.LOCK_UN)
+                os.close(_HELD["fd"])
+                _HELD["fd"] = None
+
+
 ProviderState = tuple[list[Any], dict[str, Any], dict[Path, bytes]]
 
 
@@ -1549,7 +1588,7 @@ def provider_rollback(
     moved, ProviderConflict, and nothing is written."""
     from ..providers import ProviderConflict
 
-    with _PROVIDER_WRITES:
+    with provider_lock(home):
         state = provider_state(store, home)
         if expect is not None and state != expect:
             raise ProviderConflict(
@@ -1679,7 +1718,7 @@ def save_assistant_llm(
     is being probed with it. An owned key keeps the probe outside the lock."""
     # R7 (Sol R6-1): decided HOLDING the lock — another save's temporary
     # owner (pinned, then rolled back) exists only inside its locked commit
-    with _PROVIDER_WRITES:
+    with provider_lock(home):
         unowned = any(
             key and legacy_key_endpoint(home, store, marker) == ""
             for marker, key in _legacy_values(home)
