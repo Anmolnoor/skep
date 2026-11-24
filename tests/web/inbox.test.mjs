@@ -86,7 +86,7 @@ test("every row has Approve and Deny, each wired to the item's existing route", 
   for (const row of rows) await button(row, "Approve").click();
   assert.deepEqual(posts(calls), [
     ["/api/approvals/r1/approve", {}],
-    ["/api/chats/c1/actions/a1/confirm", { keep: "once" }], // an inline approve keeps nothing
+    ["/api/chats/c1/actions/a1/confirm", { keep: "once", items: 1 }], // an inline approve keeps nothing
     ["/api/chats/c1/commands/a2/confirm", undefined],
     ["/api/memory/proposals/m1/approve", undefined],
     ["/api/skills/learned-one/approve", {}],
@@ -355,4 +355,20 @@ test("R3 J1: an open_pr card that publishes a warned or tampered run has no inli
     assert.match(row.querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
     assert.ok(button(row, "Deny"));
   }
+});
+
+test("R3 J2: a folded card lists every item, approves 'all N' bound to that count; past 10 → its thread", async () => {
+  const urls = n => Array.from({ length: n }, (_, i) => `read_url — https://x.dev/${i}`);
+  const fold = { ...CARD, id: "F1", headline: "read_url — https://x.dev/0 (+2 more)", items: urls(3) };
+  const big = { ...CARD, id: "F2", headline: "read_url — https://x.dev/0 (+10 more)", items: urls(11) };
+  const { rows, calls } = await render([fold, big]);
+  assert.deepEqual(rows[0].querySelectorAll("li").map(li => li.textContent), urls(3));
+  await button(rows[0], "Approve all 3").click();
+  await flush();
+  assert.deepEqual(posts(calls), [["/api/chats/c1/actions/F1/confirm", { keep: "once", items: 3 }]]);
+  assert.equal(button(rows[1], "Approve all 11"), undefined);
+  assert.equal(button(rows[1], "Approve"), undefined);
+  assert.match(rows[1].querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
+  assert.match(rows[1].textContent, /11 items — every one runs on approve/);
+  assert.ok(button(rows[1], "Deny"));
 });

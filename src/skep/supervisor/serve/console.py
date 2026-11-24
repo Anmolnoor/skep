@@ -227,6 +227,7 @@ def review_queue(
                 tool=card.tool,
                 source=card.source,
                 headline=shown.get("headline"),
+                items=shown.get("items"),  # J2: a fold's every item, as an approve runs them
                 risk=shown.get("risk"),
                 tamper=shown.get("tamper") or _per_run(runs, _tamper_of(store)),
                 warning=_per_run(runs, lambda task_id: landing_warning(store, task_id)),

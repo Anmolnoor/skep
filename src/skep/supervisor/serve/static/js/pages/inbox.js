@@ -106,9 +106,14 @@ function verdicts(item) {
     // H2: the full card keeps its proposed branch; H5: so does the refusal's thread.
     // R3 J1: a card carries G10 / V1 only for runs its execution lands or
     // publishes (land_run, open_pr…) — any of it sends you to the full card.
-    const away = item.high || item.warning || item.tamper || item.web_refusal;
+    // R3 J2: a fold runs every item — each is listed and the approve names
+    // how many it saw (the server refuses a card that holds another set);
+    // past the batch-gate cap it is read in its thread.
+    const count = (item.items || []).length || 1;
+    const away = item.high || item.warning || item.tamper || item.web_refusal || count > INLINE_COMMANDS;
     return {
-      approve: away ? null : [`${base}/confirm`, operator ? undefined : { keep: "once" }],
+      approve: away ? null : [`${base}/confirm`, operator ? undefined : { keep: "once", items: count }],
+      label: count > 1 ? `Approve all ${count}` : "Approve",
       elsewhere: away ? [`#/chat/${item.chat_id}`, "Open the full card in its thread →"] : null,
       deny: [`${base}/deny`, operator ? undefined : {}],
       stream: !operator,
@@ -185,6 +190,7 @@ function reviewRow(item) {
   };
   const mirrored = item.mirrored_by || [];
   const commands = item.commands || [];
+  const folded = item.items || [];
   return el("div", { class: `inbox-item review-row${item.kind === "gate" ? " review-item" : ""}`, "data-kind": item.kind },
     el("span", { class: `thread-dot ${loud ? "bad" : "wait"}`, "aria-hidden": "true" }),
     el("a", { class: "inbox-open inbox-title mono", href: face.href }, face.title),
@@ -199,6 +205,10 @@ function reviewRow(item) {
     commands.length && commands.length <= INLINE_COMMANDS
       ? el("ul", { class: "inbox-commands" }, commands.map(c => el("li", {}, el("code", { class: "inbox-command mono" }, c))))
       : null,
+    folded.length > 1 && folded.length <= INLINE_COMMANDS
+      ? el("ul", { class: "inbox-commands" }, folded.map(line => el("li", {}, el("code", { class: "inbox-command mono" }, line))))
+      : null,
+    folded.length > INLINE_COMMANDS ? el("small", {}, `${folded.length} items — every one runs on approve`) : null,
     mirrored.length
       ? el("small", {}, `also asked in ${mirrored.length} chat card${mirrored.length === 1 ? "" : "s"} — resolved with it: `,
         mirrored.flatMap((m, i) => [i ? ", " : null, el("a", { href: `#/chat/${m.chat_id}` }, m.tool)]))

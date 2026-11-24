@@ -653,3 +653,35 @@ def test_an_abbreviated_land_run_task_id_resolves_before_dedupe_and_evidence(
     assert [m["tool"] for m in gate["mirrored_by"]] == ["land_run"]
     assert row["task_id"] == fine and row["task_ids"] == [fine]
     assert row["warning"] is None and row["tamper"] is None
+
+
+def test_a_folded_card_lists_every_item_and_its_confirm_binds_to_that_count(
+    config: SupervisorConfig,
+) -> None:
+    """R3 J2: a folded card's row lists every item an approve executes, and a
+    confirm that names how many items it showed is refused (nothing runs)
+    when the card holds a different set."""
+    from skep.supervisor import RunStore
+
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        card = store.add_chat_action(chat_id, tool="read_url", args={"url": "https://x.dev/a"})
+        store.fold_into_chat_action(card, args={"url": "https://x.dev/b"}, tool_call_id=None)
+    finally:
+        store.close()
+    (item,) = client.get("/api/review-queue").json()["items"]
+    assert len(item["items"]) == 2
+    assert "https://x.dev/a" in item["items"][0] and "https://x.dev/b" in item["items"][1]
+    refused = client.post(
+        f"/api/chats/{chat_id}/actions/{card}/confirm", json={"keep": "once", "items": 1}
+    )
+    assert refused.status_code == 409
+    assert "2 items" in refused.json()["detail"] and "Nothing ran" in refused.json()["detail"]
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        record = store.get_chat_action(card)
+        assert record is not None and record.status == "proposed"
+    finally:
+        store.close()

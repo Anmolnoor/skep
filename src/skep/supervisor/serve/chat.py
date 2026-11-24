@@ -1775,6 +1775,9 @@ class ActionConfirm(BaseModel):
     else once (P3-4, B32 — an explicit keep the card cannot honour is a 400)."""
 
     keep: str | None = None
+    # R3 J2: how many items the confirmer was shown — a card that holds a
+    # different set (a fold added one since) is refused, nothing runs.
+    items: int | None = None
 
 
 class ChatEngine:
@@ -3275,6 +3278,7 @@ class ChatEngine:
         confirm: bool,
         actor: str = CHAT_ACTOR,
         keep: str | None = None,
+        items: int | None = None,
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
@@ -3287,6 +3291,15 @@ class ChatEngine:
         action = self.store.get_chat_action(action_id)
         if action is None or action.chat_id != chat_id:
             raise HTTPException(status_code=404, detail=f"no action {action_id!r} in this chat")
+        held = len(action.fold_items())
+        if confirm and items is not None and held != items:
+            # R3 J2: the approve binds to the set the confirmer saw; the items
+            # run below are this snapshot's, so a match here is exactly that set.
+            raise HTTPException(
+                status_code=409,
+                detail=f"this card now holds {held} items, not the {items} you were shown. "
+                "Nothing ran. Open it in its thread to read every item",
+            )
         # v112-F1: the keep choice rides the confirm — "once" grants nothing,
         # "session" (bound to this chat) is the default where the card can keep
         # a grant, "always" writes the durable tier.
@@ -4486,13 +4499,16 @@ def add_chat_routes(
     ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         keep = body.keep if body is not None else None
+        shown = body.items if body is not None else None
         return StreamingResponse(
             _as_sse(
                 _mirror_desk_turn(  # v129-F1
                     run_store,
                     home,
                     chat_id,
-                    engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep),
+                    engine.verdict_events(
+                        chat_id, chat, action_id, confirm=True, keep=keep, items=shown
+                    ),
                 )
             ),
             media_type="text/event-stream",
