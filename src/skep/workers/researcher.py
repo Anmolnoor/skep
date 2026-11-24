@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from skep.seeds.tools import doc_extract
 from skep.supervisor.netproxy import domain_allowed
 from skep.worker_contract import (
     CONTRACT_VERSION,
@@ -67,18 +69,24 @@ Fetcher = Callable[[str], str]
 
 
 class NotText(Exception):
-    """v122-F7: the response is not text (a PDF, an image): the source is
-    listed in the report, never pasted into it."""
+    """v122-F7: the response is not text (an image, an unreadable PDF): the
+    source is listed in the report, never pasted into it. 7.3: ``reason``
+    says why a PDF could not be read."""
 
-    def __init__(self, content_type: str) -> None:
+    def __init__(self, content_type: str, reason: str = "") -> None:
         super().__init__(content_type)
         self.content_type = content_type
+        self.reason = reason
+
+
+class FetchError(Exception):
+    """7.3: a source could not be read; the message names the next step (I9)."""
 
 
 BINARY = "(binary: "
 
 
-def _is_text_type(content_type: str) -> bool:
+def is_text_type(content_type: str) -> bool:
     return (
         content_type.startswith("text/")
         or content_type in ("application/json", "application/xml")
@@ -186,12 +194,13 @@ def run_research(
             if _mostly_binary(body):
                 raise NotText("unknown content type")
         except NotText as exc:  # fetched, but there is nothing readable to quote
+            why = f": {exc.reason}" if exc.reason else ""
             evidence.append(
                 SourceEvidence(
                     url,
                     allowed=True,
                     fetched=True,
-                    detail=f"{BINARY}{exc.content_type}, not quoted)",
+                    detail=f"{BINARY}{exc.content_type}, not quoted{why})",
                 )
             )
             continue
@@ -320,15 +329,43 @@ _FETCH_HEADERS = {
 
 def _urllib_fetch(url: str) -> str:
     request = urllib.request.Request(url, method="GET", headers=_FETCH_HEADERS)
-    with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
-        # get_content_type() says text/plain when the header is missing: a
-        # missing type is decided by the bytes alone
-        content_type = (
-            response.headers.get_content_type() if response.headers.get("Content-Type") else ""
-        )
-        if content_type and not _is_text_type(content_type):
-            raise NotText(content_type)
-        body = response.read(_FETCH_MAX_BYTES)
+    host = source_host(url)
+    timed_out = (
+        f"timed out after {_FETCH_TIMEOUT_SECONDS:.0f}s reading {host} — the site is slow "
+        "or unreachable; try again later or use another source"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+            # get_content_type() says text/plain when the header is missing: a
+            # missing type is decided by the bytes alone
+            content_type = (
+                response.headers.get_content_type() if response.headers.get("Content-Type") else ""
+            )
+            maybe_pdf = content_type in ("", "application/pdf")
+            if not maybe_pdf and not is_text_type(content_type):
+                raise NotText(content_type)
+            body = response.read(doc_extract.MAX_BYTES + 1 if maybe_pdf else _FETCH_MAX_BYTES)
+    except urllib.error.HTTPError as exc:
+        raise FetchError(
+            doc_extract.http_error_message(exc.code, exc.reason, exc.headers.get("Retry-After"))
+        ) from exc
+    except TimeoutError as exc:
+        raise FetchError(timed_out) from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise FetchError(timed_out) from exc
+        raise FetchError(
+            f"could not reach {host} ({exc.reason}) — the host may be down, or outside "
+            "this run's network allowlist"
+        ) from exc
+    if body.startswith(b"%PDF-"):
+        if len(body) > doc_extract.MAX_BYTES:
+            raise NotText("application/pdf", "larger than 8 MiB, too big to read here")
+        try:
+            return doc_extract.pdf_to_text(body)
+        except ValueError as exc:
+            raise NotText("application/pdf", str(exc)) from exc
+    body = body[:_FETCH_MAX_BYTES]
     if _binary_bytes(body):
         raise NotText(content_type or "unknown")
     return html_to_text(body.decode("utf-8", errors="replace"))
@@ -453,6 +490,11 @@ def _execute(
     detail = f"fetched {fetched}/{len(research.evidence)} allow-listed source(s)" + (
         f" ({binary} binary, not quoted)" if binary else ""
     )
+    if not research.evidence:  # 7.3 (I9): a missing parameter names what to pass
+        detail = (
+            "no sources to read: the task has no 'Sources:' line and its network "
+            "allowlist names no host — pass source URLs or allow-list the hosts to read"
+        )
     stream.emit(
         EventType.VERIFY_RESULT,
         {"outcome": outcome.value, "details": detail, "commands": []},
