@@ -261,9 +261,11 @@ def test_the_taught_command_never_prints_a_password_in_the_endpoint() -> None:
     text = _fix("ollama", "https://someone:hunter2pw@example.invalid")
     assert "hunter2pw" not in text and "someone" not in text
     assert "--base-url=<" in text and "provider set-key p" in text
-    # R2-1: nor a credential the redactor would mask in the query
-    text = _fix("ollama", "https://example.invalid/v1?password=hunter2pw")
-    assert "hunter2pw" not in text and "--base-url=<" in text
+    # R2-1 / R3-1: nor anything in a query or fragment, however it is spelled
+    # (an encoded name slips past a redactor) — such an endpoint is never echoed
+    for tail in ("?password=hunter2pw", "?%70assword=hunter2pw", "?k=hunter2pw", "#hunter2pw"):
+        text = _fix("ollama", "https://example.invalid/v1" + tail)
+        assert "hunter2pw" not in text and "--base-url=<" in text, tail
 
 
 def test_the_taught_command_is_one_a_shell_and_argparse_accept() -> None:

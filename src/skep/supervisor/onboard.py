@@ -241,14 +241,15 @@ def _key_fix(
         )
     if key_env:
         return f"set {key_env} to a working key (it is unset or holds a refused one), {again}"
-    # a credential in the endpoint (userinfo, or anything the redactor masks)
-    # is never printed back; the rest is quoted so the line is one a shell
-    # and argparse take (an IPv6 host, a spaced model)
+    # an endpoint is printed back only as scheme, host and path: one with
+    # userinfo, a query or a fragment (where a credential can sit, in any
+    # spelling), or anything the redactor masks, is a placeholder. The rest is
+    # quoted so the line is one a shell and argparse take (IPv6, a spaced model)
     url = candidate.base_url
+    parts = urlsplit(url)
+    plain = not ("@" in parts.netloc or parts.query or parts.fragment or redact(url) != url)
     base_url = (
-        "--base-url=<the endpoint URL you gave>"
-        if "@" in urlsplit(url).netloc or redact(url) != url
-        else shlex.quote(f"--base-url={url}")
+        shlex.quote(f"--base-url={url}") if plain else "--base-url=<the endpoint URL you gave>"
     )
     add = (
         f"{skep} provider add {shlex.quote(pid)} --protocol {candidate.protocol} "
