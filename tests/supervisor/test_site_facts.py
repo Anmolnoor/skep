@@ -127,3 +127,17 @@ def test_release_headings_match_the_release_record() -> None:
     assert heading("1.4.1").endswith("(2026-11-16)")
     assert heading("1.1.0").endswith("(2026-10-22)")
     assert heading("1.4.2").endswith("(2026-11-18)")
+
+
+def test_the_sites_slash_deck_is_the_registrys() -> None:
+    """Phase 10: the deck lives in serve/commands.py, which the site build
+    (node, no python) cannot import. The CLI page reads this file instead; it
+    is the registry's web deck and terminal-only names, never typed by hand.
+    Regenerate: uv run python scripts/site-slash-deck.py"""
+    import json
+
+    from skep.cli_chat import CLI_ONLY
+    from skep.supervisor.serve.commands import web_deck
+
+    deck = json.loads((ROOT / "site" / "src" / "lib" / "slash-deck.json").read_text("utf-8"))
+    assert deck == {"web": web_deck()["commands"], "cli_only": sorted(CLI_ONLY)}
