@@ -466,6 +466,7 @@ def test_a_resumed_review_keeps_its_pin_or_starts_fresh_never_mixed(
         git(repo, "commit", "-qam", "push")
         newer = git(repo, "rev-parse", "HEAD").stdout.strip()
         git(repo, "checkout", "-q", "main")
+        git(repo, "update-ref", PR_REF, newer)  # R4 (S4): a refresh publishes ref + pin
         store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
         if tree == "moved":
             git(Path(first.workspace), "commit", "-qm", "moved", "--allow-empty")
@@ -513,6 +514,7 @@ def test_an_unpinned_pr_run_resumed_never_pairs_its_old_tree_with_a_new_pin(
         git(repo, "commit", "-qam", "push")
         newer = git(repo, "rev-parse", "HEAD").stdout.strip()
         git(repo, "checkout", "-q", "main")
+        git(repo, "update-ref", PR_REF, newer)  # R4 (S4): a refresh publishes ref + pin
         store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
     finally:
         store.close()
