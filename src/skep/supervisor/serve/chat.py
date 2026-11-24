@@ -70,6 +70,7 @@ from .llm import (
     _TRANSIENT_STATUSES,
     LLMProtocol,
     OllamaError,
+    _staged_view,
     chat_num_ctx,
     chat_stream,
     llm_config_view,
@@ -2088,7 +2089,9 @@ class ChatEngine:
         tool_surface_chars = len(json.dumps(self._advertised_tools(chat)))
         # R1 (F6): the replay cap the budget uses AND the model's own window —
         # a 262k model replaying 16k is two numbers, never one (I8).
-        window = resolve_context_window(self.store, model=getattr(chat, "model", None))
+        # R3 (Neon R3-1): keyed as Settings reads it on an upgraded home
+        view = _staged_view(self.store, self.home)
+        window = resolve_context_window(view, model=getattr(chat, "model", None))
         floor_chars = len(system) + len(summary) + tool_surface_chars
         window_chars = window.replay_cap * 4
         compacted = dropped > 0 or bool(chat and (chat.compacted_through or 0))

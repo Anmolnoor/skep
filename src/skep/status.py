@@ -1213,7 +1213,7 @@ def _queen_context_check(home: Path) -> dict[str, Any]:
     the store only; the probe runs where the model changes."""
     from dataclasses import asdict
 
-    from .supervisor.serve.llm import assistant_llm, resolve_context_window
+    from .supervisor.serve.llm import _staged_view, assistant_llm, resolve_context_window
     from .supervisor.store import RunStore
 
     db = home / "supervisor" / "supervisor.sqlite3"
@@ -1223,7 +1223,8 @@ def _queen_context_check(home: Path) -> dict[str, Any]:
     try:
         if assistant_llm(store)[1] is None:
             return {}
-        return asdict(resolve_context_window(store))
+        # R3 (Neon R3-1): keyed as Settings reads it on an upgraded home
+        return asdict(resolve_context_window(_staged_view(store, home / "supervisor")))
     finally:
         store.close()
 
