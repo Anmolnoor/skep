@@ -5228,7 +5228,7 @@ async function renderAssistantTab(panel) {
     // v74-F2: only an explicit override fills the field; empty = auto, and
     // the placeholder shows what auto currently resolves to.
     value: llm.num_ctx_source === "override" ? String(llm.num_ctx) : "",
-    placeholder: `auto (${llm.num_ctx}${llm.num_ctx_source === "detected" ? ", detected" : ""})`,
+    placeholder: `auto (${llm.num_ctx}, ${llm.num_ctx_source})`,
   });
   const saveCtx = el("button", { class: "primary" }, "Save context window");
   saveCtx.addEventListener("click", async () => {

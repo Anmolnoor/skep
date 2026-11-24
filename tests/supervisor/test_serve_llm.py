@@ -87,12 +87,13 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
         "vision": False,  # v44-F9: off until the operator says the model can see
         "num_ctx": 16384,  # v56-F1: explicit window, defaulted
         "num_ctx_source": "default",  # v74-F2: which rule set the window
+        "model_window": 16384,  # Phase 06 (6.1): the model's real limit
         "tool_delivery": "indexed",  # v74-F3: index + core + on-demand schemas
     }
 
     # A local fake that takes exactly this key: Phase 05 probes a new key
     # (one 1-token completion) before saving it, and the save-time context
-    # detection (v74-F2) skips a loopback ollama — the suite stays offline.
+    # detection (v74-F2) asks this same local fake — the suite stays offline.
     server = FakeOllama(api_key="sk-sec-1").start()
     try:
         updated = client.put(
@@ -115,6 +116,7 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
         "vision": False,
         "num_ctx": 16384,
         "num_ctx_source": "default",
+        "model_window": 16384,
         "tool_delivery": "indexed",
     }
 
