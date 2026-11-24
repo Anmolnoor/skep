@@ -122,8 +122,11 @@ def store_api_key(home: Path, value: str) -> None:
         path.unlink(missing_ok=True)
         return
     home.mkdir(parents=True, exist_ok=True)
-    path.write_text(value + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    # R8: written whole or not at all — a reader never sees a partial key
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(value + "\n", encoding="utf-8")
+    staged.chmod(0o600)
+    os.replace(staged, path)
 
 
 # v108-F4: per-profile keys. One llm-secret could not serve a multi-provider
@@ -1855,12 +1858,21 @@ def _probe_workers_key(
 
 def _write_legacy(store: RunStore, home: Path, endpoint: str, value: str) -> None:
     """llm-secret := ``value``, owned by ``endpoint``; empty clears the key
-    and its owner marker together (R2, F2: a cleared key left it stale)."""
-    store_api_key(home, value)
+    and its owner marker together (R2, F2: a cleared key left it stale).
+
+    R8 (Sol R8-1): a save probing outside the lock may read this mid-write,
+    so a key is never visible without its real owner — the old key goes
+    first, then the owner moves, then the new key lands (atomically)."""
     if value and endpoint:
-        store.set_setting(LLM_SECRET_ENDPOINT, endpoint)
+        if store.get_setting(LLM_SECRET_ENDPOINT) != endpoint:
+            store_api_key(home, "")  # another owner's key never meets the new owner
+            store.set_setting(LLM_SECRET_ENDPOINT, endpoint)
+        store_api_key(home, value)
     else:
+        store_api_key(home, "")  # the key goes before its owner does
         store.delete_setting(LLM_SECRET_ENDPOINT)
+        if value:  # a key no endpoint owns yet (the first one saved claims it)
+            store_api_key(home, value)
 
 
 def _keep_legacy_owner(store: RunStore, home: Path, endpoint: str) -> bool:

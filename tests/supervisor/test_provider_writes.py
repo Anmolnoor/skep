@@ -1530,3 +1530,46 @@ def test_a_legacy_file_removed_mid_read_is_no_key(
 
     monkeypatch.setattr(Path, "read_text", vanish)
     assert llm._legacy_values(config.home)[1] == (llm.LLM_SECRET_ENDPOINT, None)
+
+
+@pytest.mark.parametrize("before", [None, "ka-old"])
+def test_a_reader_mid_write_never_sees_a_key_without_its_owner(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, before: str | None
+) -> None:
+    """R8 (Sol R8-1): a save probing outside the lock reads the legacy state
+    while another save's commit writes it. llm-secret was written before its
+    owner, so in between it looked unowned — and an unowned key goes to the
+    endpoint being saved. Owner first, key last (atomically): a reader only
+    ever sees a key with its real owner, or no key."""
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    seen: list[str | None] = []
+    with _store(config) as store:
+        if before is not None:  # B's old key, being replaced by A's
+            llm._write_legacy(store, config.home, "https://b.example", before)
+
+        def look() -> None:
+            seen.append(llm.legacy_api_key(config.home, "https://c.example", store, unowned=True))
+            got_b = llm.legacy_api_key(config.home, "https://b.example", store)
+            assert got_b in (None, before), "B must never receive A's key"
+
+        for name in ("set_setting", "delete_setting"):
+            real = getattr(store, name)
+
+            def wrapped(*a: Any, _real: Any = real, **k: Any) -> Any:
+                out = _real(*a, **k)
+                look()
+                return out
+
+            monkeypatch.setattr(store, name, wrapped)
+        real_store = llm.store_api_key
+
+        def store_key(home: Path, value: str) -> None:
+            real_store(home, value)
+            look()
+
+        monkeypatch.setattr(llm, "store_api_key", store_key)
+        llm._write_legacy(store, config.home, "https://a.example", "ka-new")
+        look()
+    assert seen and all(got is None for got in seen)  # C never gets anyone's key
