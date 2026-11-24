@@ -4447,6 +4447,9 @@ function buildPresetPicker(protocol, baseUrl) {
     if (!p) return;
     protocol.value = p.protocol.replace(/_/g, "-");
     baseUrl.value = p.base_url;
+    // Phase 10 R2 I7: a preset is an edit — the staged form's listeners must
+    // see it, or Save stays live for values no probe passed.
+    for (const field of [protocol, baseUrl]) field.dispatchEvent(new Event("change"));
   });
   return picker;
 }

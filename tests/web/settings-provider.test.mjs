@@ -151,3 +151,50 @@ test("the shelf says so when it cannot be read, and the form still stands", asyn
   assert.match(panel.querySelector(".provider-shelf").textContent, /provider shelf could not be read: 502/);
   assert.ok(button("Test connection"));
 });
+
+// Phase 10 R2 I7 (N3, O4): Save stays live only for values a probe passed.
+test("picking a preset after a passing test turns Save off", async () => {
+  const { panel, button } = await models({
+    "GET /api/provider-presets": { presets: [{ preset_id: "zai", label: "Z.ai", protocol: "openai_compat", base_url: "https://api.z.ai/api/paas/v4" }] },
+  });
+  await button("Test connection").click();
+  await flush();
+  assert.equal(button("Save connection").disabled, false);
+  const picker = panel.querySelectorAll("select").find(s => s.children.some(o => o.getAttribute("value") === "zai"));
+  picker.value = "zai";
+  for (const fn of picker.listeners.change) fn({ target: picker });
+  assert.equal(button("Save connection").disabled, true);
+  assert.match(panel.querySelector(".probe-result").textContent, /changed since the test/);
+});
+
+test("an edit made while the probe is in flight never gets a green check", async () => {
+  let release;
+  const pending = new Promise(r => { release = r; });
+  const { panel, button, baseUrl } = await models({ "POST /api/llm/probe": () => pending });
+  const clicked = button("Test connection").click();
+  await edit(baseUrl, "http://typed-meanwhile:11434");
+  release(GOOD);
+  await clicked;
+  await flush();
+  assert.equal(button("Save connection").disabled, true);
+  const result = panel.querySelector(".probe-result").textContent;
+  assert.doesNotMatch(result, /✓/);
+  assert.match(result, /changed while it was being tested/);
+});
+
+test("a probe that names no model says so instead of an empty name", async () => {
+  const { panel, button } = await models({ "POST /api/llm/probe": { ...GOOD, models: 0, model: "" } });
+  await button("Test connection").click();
+  await flush();
+  const result = panel.querySelector(".probe-result").textContent;
+  assert.doesNotMatch(result, /; {2}answered|; answered/);
+  assert.match(result, /no model is named and the endpoint lists none/);
+  assert.equal(button("Save connection").disabled, true);
+});
+
+test("a probed model is the one Save will activate", async () => {
+  const { panel, button } = await models();
+  await button("Test connection").click();
+  await flush();
+  assert.match(panel.querySelector(".probe-result").textContent, /qwen3:14b answered the 1-token probe \(the model Save activates\)/);
+});

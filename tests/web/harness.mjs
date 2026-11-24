@@ -47,6 +47,10 @@ class FakeNode {
   removeAttribute(name) { delete this.attributes[name]; }
   focus() {}
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatchEvent(event) {
+    for (const fn of this.listeners[event.type] || []) fn(event);
+    return true;
+  }
   append(...nodes) {
     this._text = undefined;
     for (const n of nodes) this.children.push(typeof n === "object" ? n : new FakeText(n));
@@ -110,6 +114,7 @@ export function loadApp() {
     history: { replaceState() {} },
     addEventListener() {},
     console, setTimeout, clearTimeout, URL, URLSearchParams,
+    Event: class { constructor(type) { this.type = type; } },
     NodeFilter: { SHOW_TEXT: 4 },
   });
   context.window = context;

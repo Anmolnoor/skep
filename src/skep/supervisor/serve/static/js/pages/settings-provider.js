@@ -60,13 +60,24 @@ export function stagedConnection(fields) {
         show("bad", `✗ ${verdict.detail} — nothing was saved: the connection in use is unchanged.`);
         return;
       }
+      // R2 I7: a value edited while the probe was in flight was never probed.
+      if (JSON.stringify(staged(fields)) !== JSON.stringify(body)) {
+        show("warn", "The values changed while it was being tested: test again before saving.");
+        return;
+      }
+      const reach = `reachable — ${verdict.models} model${verdict.models === 1 ? "" : "s"}`;
+      if (!verdict.model) { // O4: no name to report, and a save would be refused
+        show("warn", `${reach}, but no model is named and the endpoint lists none: `
+          + "nothing would answer as the Queen, so there is nothing to save.");
+        return;
+      }
       const ctx = verdict.context_window || {};
       passed = JSON.stringify(body);
       save.disabled = false;
       show("ok",
-        `✓ reachable — ${verdict.models} model${verdict.models === 1 ? "" : "s"}; `
-        + `${verdict.model} answered the 1-token probe; context window: `
-        + `${Number(ctx.window).toLocaleString("en-US")} tokens, ${WINDOW_SOURCE[ctx.source] || ctx.source}. `
+        `✓ ${reach}; ${verdict.model} answered the 1-token probe (the model Save activates); `
+        + `context window: ${Number(ctx.window).toLocaleString("en-US")} tokens, `
+        + `${WINDOW_SOURCE[ctx.source] || ctx.source}. `
         + "Nothing is saved yet: Save makes it the Queen's connection.");
     } catch (e) {
       show("bad", `✗ ${e.message} — nothing was saved.`);
