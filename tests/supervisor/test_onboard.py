@@ -187,8 +187,10 @@ def test_a_refused_key_on_an_unregistered_provider_teaches_steps_that_work(
             onboard_model(
                 holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
             )
-        # registered now: set-key works for it, so today's hint stands
-        assert "(skep provider set-key ollama, or the env var it names)" in str(refused.value)
+        # registered now: set-key works for it, so today's hint stands — said
+        # for this home (R2-2), and the same command the first refusal printed
+        assert "or the env var it names" in str(refused.value)
+        assert _taught(str(refused.value), "set-key") == set_key
         monkeypatch.setattr("sys.stdin", io.StringIO("ka1\n"))
         assert main(set_key) == 0
         with _holder(home) as (holder, store):
@@ -259,6 +261,9 @@ def test_the_taught_command_never_prints_a_password_in_the_endpoint() -> None:
     text = _fix("ollama", "https://someone:hunter2pw@example.invalid")
     assert "hunter2pw" not in text and "someone" not in text
     assert "--base-url=<" in text and "provider set-key p" in text
+    # R2-1: nor a credential the redactor would mask in the query
+    text = _fix("ollama", "https://example.invalid/v1?password=hunter2pw")
+    assert "hunter2pw" not in text and "--base-url=<" in text
 
 
 def test_the_taught_command_is_one_a_shell_and_argparse_accept() -> None:
@@ -281,6 +286,9 @@ def test_the_taught_commands_carry_a_home_that_is_not_the_default(tmp_path: Path
     assert _taught(text, "add")[:2] == ["--home", str(custom)]
     assert _taught(text, "set-key")[:2] == ["--home", str(custom)]
     assert "skep provider add p" in _fix("ollama", "https://ollama.com")
+    # R2-2: a provider registered in that home is told set-key there too
+    registered = _fix("ollama", "https://ollama.com", home=custom, registered=True)
+    assert _taught(registered, "set-key") == ["--home", str(custom), "provider", "set-key", "p"]
 
 
 def _answers(monkeypatch: pytest.MonkeyPatch, *replies: str | type[BaseException]) -> list[str]:

@@ -213,12 +213,13 @@ def _key_fix(
     candidate: Any, *, key_env: str | None, registered: bool, home: Path | None
 ) -> str | None:
     """The 401/403 fix that is true for this candidate (I9). None keeps the
-    default text: a registered profile that takes a stored key, where
-    `skep provider set-key` works. ``home`` is the skep home when it is not
-    the default one — the commands then carry it."""
+    default text: a registered profile in the default home that takes a
+    stored key, where plain `skep provider set-key` works. ``home`` is the
+    skep home when it is not the default one — the commands then carry it."""
     from urllib.parse import urlsplit
 
     from .codex_login import NO_KEY_REFUSAL, uses_codex_login
+    from .policy_v3 import redact
 
     again = "then run the same skep onboard command again"
     pid = candidate.provider_id
@@ -230,17 +231,24 @@ def _key_fix(
             "(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN if you use "
             f"one) — set working ones, {again}"
         )
-    if registered:
-        return None
+    skep = shlex.join(["skep", *(["--home", str(home)] if home else [])])
+    if registered:  # the default text; with a home of its own, said for it
+        if home is None:
+            return None
+        return (
+            f"give {pid!r} a working key ({skep} provider set-key {shlex.quote(pid)}, "
+            "or the env var it names)"
+        )
     if key_env:
         return f"set {key_env} to a working key (it is unset or holds a refused one), {again}"
-    skep = shlex.join(["skep", *(["--home", str(home)] if home else [])])
-    # a password in the endpoint is never printed back; the rest is quoted so
-    # the line is one a shell and argparse take (an IPv6 host, a spaced model)
+    # a credential in the endpoint (userinfo, or anything the redactor masks)
+    # is never printed back; the rest is quoted so the line is one a shell
+    # and argparse take (an IPv6 host, a spaced model)
+    url = candidate.base_url
     base_url = (
         "--base-url=<the endpoint URL you gave>"
-        if "@" in urlsplit(candidate.base_url).netloc
-        else shlex.quote(f"--base-url={candidate.base_url}")
+        if "@" in urlsplit(url).netloc or redact(url) != url
+        else shlex.quote(f"--base-url={url}")
     )
     add = (
         f"{skep} provider add {shlex.quote(pid)} --protocol {candidate.protocol} "
