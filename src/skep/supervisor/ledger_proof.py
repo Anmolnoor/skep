@@ -105,8 +105,10 @@ class _Walk:
                 if self.head is not None:
                     return {**where, "reason": "an unchained line (v1) inside the chain"}
                 # Review R1 (Q1): only a v1 (or older) row, chain keys and all
-                # absent, is an old row the chain starts after
-                if row.get("v") not in (None, 1) or _CHAIN_KEYS & row.keys():
+                # absent, is an old row the chain starts after. Review R2 (F1):
+                # v1 is a missing "v" or the int 1 — not null, true or 1.0
+                old = row.get("v", 1)
+                if type(old) is not int or old != 1 or _CHAIN_KEYS & row.keys():
                     return {
                         **where,
                         "reason": f"a row with version {row.get('v')!r} and chain keys "
@@ -115,7 +117,8 @@ class _Walk:
                 self.unchained += 1
                 self._count(row)
                 continue
-            if raw != (json.dumps(row) + "\n").encode():
+            # Review R2 (F1): the exact bytes log_decision writes, key order included
+            if raw != (json.dumps(row, sort_keys=True) + "\n").encode():
                 return {**where, "reason": "the line is not the bytes skep wrote"}
             stored, seq = row.pop("hash", None), row.get("seq")
             if type(seq) is not int:
@@ -213,8 +216,9 @@ def verify_ledger(
 ) -> dict[str, Any]:
     """``VALID`` or ``BROKEN`` with the first break's file, line and reason.
 
-    The audit dir's log: the live file is opened, and the generations
-    listed, under a shared flock (released before the walk) — a rotation
+    The audit dir's log: the live file is opened and sized, and the
+    generations listed, under a shared flock (released before the walk;
+    rows appended after it are past the snapshot) — a rotation
     only ever adds a generation, so a rotation mid-walk is never a false
     break. The chain must start at seq 1 from GENESIS (no generation is
     ever deleted), and every ``chain.sqlite3`` checkpoint must match its
@@ -233,10 +237,13 @@ def verify_ledger(
     live = audit_dir / "policy" / "decisions.jsonl"
     checkpoints: dict[int, str] | str = {}
     handle: IO[bytes] | None = None
+    size = 0
     with _shared_lock(live.parent / "decisions.lock"):
         generations = _rotated_generations(live)
         with suppress(FileNotFoundError):
             handle = live.open("rb")
+            # Review R2 (F2): the size in the same snapshot as the checkpoints
+            size = os.fstat(handle.fileno()).st_size
         try:
             checkpoints = _checkpoints(live.parent / CHAIN_DB)
         except sqlite3.DatabaseError as exc:
@@ -246,7 +253,7 @@ def verify_ledger(
             checkpoints if isinstance(checkpoints, dict) else {}, str(live), generations
         )
         if handle is not None and broken is None:
-            broken = walk.file(live, handle, os.fstat(handle.fileno()).st_size)
+            broken = walk.file(live, handle, size)
     finally:
         if handle is not None:
             handle.close()
