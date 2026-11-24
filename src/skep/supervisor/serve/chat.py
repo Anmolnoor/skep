@@ -1531,15 +1531,49 @@ _SECRET_ARG_KEY = re.compile(
 )
 
 
+# Phase 09 R1 (S8, ADR 0042): ALL a scheduled prompt turn may call — store
+# reads, named. Anything else is off its menu: list_prs reads GitHub as you,
+# repo_state/git_* read checkouts, list_mcp_tools starts a server.
+SCHEDULED_TURN_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_runs", "get_run", "await_runs", "list_approvals",
+        "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
+        "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
+        "list_schedules", "list_repos", "list_projects",
+        "describe_tools", CLARIFY_TOOL_NAME,  # turn control: they read nothing
+    }
+)  # fmt: skip
+SCHEDULED_STORE_ONLY_REFUSAL = (
+    "does not run in a scheduled turn — nobody is watching, so it calls store "
+    "reads only (runs, approvals, chats, notes, tasks, memory, schedules). "
+    "Say what you would check; the user can ask for it in a live chat."
+)
+
+
 def off_menu(*, read_only: bool, unattended: bool) -> frozenset[str]:
     """v121-F2: the tools an unattended turn refuses, so it is never offered
     them — by schema or by the system prompt's index. A scheduled turn
-    (``read_only``) is offered no mutation either. Every call it makes off
-    this menu is one it was never offered: the alarm's signal."""
+    (``read_only``) is offered SCHEDULED_TURN_TOOLS and nothing else (S8).
+    Every call it makes off this menu is one it was never offered: the
+    alarm's signal."""
     if not unattended:
         return frozenset()
     blocked = UNATTENDED_BLOCKED_STORE_WRITES | UNATTENDED_BLOCKED_READ_TOOLS
-    return frozenset(blocked | MUTATING_TOOL_NAMES) if read_only else blocked
+    if read_only:
+        return frozenset((READ_TOOL_NAMES | MUTATING_TOOL_NAMES | blocked) - SCHEDULED_TURN_TOOLS)
+    return blocked
+
+
+def _described_on_menu(result: dict[str, Any], hidden: frozenset[str]) -> dict[str, Any]:
+    """S8: describe_tools never hands an unattended turn a schema it may not call."""
+    tools = result.get("tools")
+    if not hidden or not isinstance(tools, list):
+        return result
+    kept = [t for t in tools if not (isinstance(t, dict) and t.get("name") in hidden)]
+    if len(kept) == len(tools):
+        return result
+    dropped = [t["name"] for t in tools if t not in kept]
+    return {**result, "tools": kept, "not_in_this_turn": dropped}
 
 
 def stream_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -2971,8 +3005,11 @@ class ChatEngine:
                     # legitimately block for minutes.
                     yield ("turn_status", {"state": "tool", "tool": name})
                     call_key = (name, json.dumps(args, sort_keys=True, ensure_ascii=True))
-                    blocked = unattended and name in (
-                        UNATTENDED_BLOCKED_READ_TOOLS | UNATTENDED_BLOCKED_STORE_WRITES
+                    off_store = read_only and unattended and name not in SCHEDULED_TURN_TOOLS
+                    blocked = off_store or (
+                        unattended
+                        and name
+                        in (UNATTENDED_BLOCKED_READ_TOOLS | UNATTENDED_BLOCKED_STORE_WRITES)
                     )
                     if blocked:
                         # v121-F2: never offered (_advertised_tools), so a call
@@ -2990,6 +3027,9 @@ class ChatEngine:
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
                         result = {"error": f"{name} {UNATTENDED_WRITE_REFUSAL}"}
+                        previous_read_tool = name
+                    elif off_store:  # S8: a scheduled turn calls its allowlist only
+                        result = {"error": f"{name} {SCHEDULED_STORE_ONLY_REFUSAL}"}
                         previous_read_tool = name
                     elif call_key in nudged_keys:
                         # v79-F5: already nudged this turn — refuse without
@@ -3025,6 +3065,8 @@ class ChatEngine:
                             result = {"error": str(exc.detail)}
                         except (KeyError, ValueError, TypeError) as exc:
                             result = {"error": f"bad arguments: {exc}"}
+                        if name == DESCRIBE_TOOL_NAME and isinstance(result, dict):
+                            result = _described_on_menu(result, hidden)
                         previous_read_tool = name
                         _track_run_artifacts(
                             name, args, result, completed_runs_seen, artifact_contact

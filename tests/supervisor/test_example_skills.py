@@ -57,6 +57,21 @@ def test_the_morning_prompt_step_uses_only_tools_an_unattended_tick_offers() -> 
     assert not set(_tools("morning-ritual")) & off_menu(read_only=True, unattended=True)
 
 
+def test_the_dependabot_nightly_report_calls_only_scheduled_turn_tools() -> None:
+    """S8: the nightly prompt schedule names store reads only — no list_prs."""
+    from skep.supervisor.serve.chat import SCHEDULED_TURN_TOOLS
+
+    text = (SKILLS / "dependabot-maintainer" / "SKILL.md").read_text(encoding="utf-8")
+    nightly = text[text.index("## Nightly report") :]
+    instructions = nightly[
+        nightly.index('instructions="') : nightly.index('"\n', nightly.index('instructions="') + 14)
+    ]
+    named = {w for w in re.findall(r"[a-z_]+", instructions)} & (
+        READ_TOOL_NAMES | MUTATING_TOOL_NAMES
+    )
+    assert named == {"list_runs"} and named <= SCHEDULED_TURN_TOOLS
+
+
 def test_dependabot_merges_only_behind_the_merge_pr_card() -> None:
     assert "merge_pr" in MUTATING_TOOL_NAMES and "merge_pr" in _tools("dependabot-maintainer")
 

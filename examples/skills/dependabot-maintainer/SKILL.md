@@ -73,16 +73,19 @@ receipt, bound to the verified head).
 
 One line per PR: `#<N> <title> — <proposed merge @ <sha12> | not merged: <reason>>`.
 
-## Nightly triage (a prompt schedule)
+## Nightly report (a prompt schedule)
 
-A scheduled prompt turn is read-only and unattended: it can never refresh,
-dispatch or card (ADR 0042, I6), so it cannot do steps 2–3. What it can do
-each night, from the chat that should hear it:
+A scheduled turn reads the store only (ADR 0042, I6). It cannot call
+list_prs (GitHub, as you), refresh, dispatch or card, so the nightly
+schedule cannot see new PRs and never reviews or merges. It reports what
+the last reviews found. From the web chat:
 
-> propose_schedule name=dependabot-triage caste=prompt every=1d
-> instructions="For <repo>: list_prs state=open, keep head branches starting
-> dependabot/. For each, say whether list_runs limit=50 shows a run whose
-> instructions start 'Review Dependabot PR #<N>', and its verification. End with: 'follow the
-> dependabot-maintainer skill on <repo>' if any PR is unreviewed."
+> propose_schedule name=dependabot-report caste=prompt every=1d
+> instructions="list_runs limit=50. Keep the runs on repo <repo> whose ref
+> starts refs/skep/pr/. For each PR number N (from refs/skep/pr/N/head), take
+> the newest run and write one line: #N, its reverification head_commit
+> (12 chars), state, outcome, confirmed, tamper_flags. End with: 'New or
+> moved PRs need the dependabot-maintainer skill, run in the web chat.'"
 
-Then run this skill from the web chat when the triage says so.
+Run the skill from the web chat when the report shows a PR with no
+confirmed run, or when Dependabot opens a new one.
