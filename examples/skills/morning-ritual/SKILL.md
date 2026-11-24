@@ -79,7 +79,11 @@ no note, no card.
   `decisions.jsonl` row (`skep policy decisions --actor queen`), and ONE
   alarm line is pushed naming the tool tried, the layer (the Queen gate,
   layer 2) and the mail senders in the batch (v121-F2).
-- Nothing in this ritual mutates: no card, no note, no task, no memory.
+- The prompt turn mutates nothing: no card, no note, no task, no memory.
+  The script's delivery has one fallback: its output goes to the web chat
+  it was proposed from, and if that chat is gone the scheduler saves the
+  raw output as a note marked `untrusted` and `private` instead (skep
+  writes it, not the turn).
 
 ## Test it (Test 9.2)
 
