@@ -229,11 +229,13 @@ function buildSparkline(values) {
   return svg;
 }
 
+// Phase 05: `missing` is onboard's pending steps — the one setup truth.
 const SETUP_MISSING_LABELS = {
-  llm: "LLM connection",
-  default_model: "default model",
-  workspace_project: "workspace/project",
-  policy: "execution policy",
+  model: "model (provider and key)",
+  workdir: "work folder",
+  sandbox: "sandbox",
+  template: "policy baseline",
+  role: "role",
 };
 
 function setupMissingLabels(setup) {

@@ -189,9 +189,11 @@ def test_set_assistant_model_cards_then_writes_settings(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     client, chat_id = chat_client(config, ollama)
+    # Phase 05 R1: a new endpoint is probed before the switch — a live one
+    anthropic = FakeAnthropic().start()
     ollama.script_tool_call(
         "set_assistant_model",
-        {"model": "claude-sonnet-5", "protocol": "anthropic", "base_url": "https://api.example"},
+        {"model": "claude-sonnet-5", "protocol": "anthropic", "base_url": anthropic.base_url},
     )
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "use sonnet from now on"})
     store = RunStore(config.db_path)
@@ -202,12 +204,15 @@ def test_set_assistant_model_cards_then_writes_settings(
 
     action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
     ollama.script_reply("switched.")
-    client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
+    try:
+        client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
+    finally:
+        anthropic.stop()
     store = RunStore(config.db_path)
     try:
         assert store.get_setting(LLM_DEFAULT_MODEL) == "claude-sonnet-5"
         assert store.get_setting(LLM_PROTOCOL) == "anthropic"
-        assert store.get_setting(LLM_BASE_URL) == "https://api.example"
+        assert store.get_setting(LLM_BASE_URL) == anthropic.base_url
     finally:
         store.close()
     # v19-F9 write-through keeps the CLI's profile.json view in agreement.

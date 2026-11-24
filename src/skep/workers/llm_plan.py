@@ -22,7 +22,6 @@ from skep.supervisor.serve.llm import (
     OllamaError,
     assistant_llm,
     chat_stream,
-    resolve_api_key,
 )
 from skep.supervisor.store import RunStore
 from skep.worker_contract import MemoryContextEntry
@@ -132,6 +131,13 @@ def _relayed_provider() -> WorkerProvider | None:
 
 
 def worker_provider_from_home(home: Path) -> WorkerProvider | None:
+    # Phase 05 R1 (P10): the active registry profile first — the Queen's own
+    # read — so the Queen and workers never diverge. profile.json only when
+    # the registry has no ordinary active profile: none yet, or the Queen on
+    # the ChatGPT plan login, which workers never get (ADR 0063).
+    registry = _registry_provider_from_home(home)
+    if registry is not None:
+        return registry
     if not profile_path(home).is_file():
         return _assistant_provider_from_home(home)
     try:
@@ -194,6 +200,39 @@ def _worker_key(personal_home: Path, endpoint: str) -> str | None:
         store.close()
 
 
+def _registry_provider_from_home(home: Path) -> WorkerProvider | None:
+    from skep.supervisor.codex_login import uses_codex_login
+    from skep.supervisor.serve.llm import REGISTRY_PROTOCOLS, resolve_provider_api_key
+
+    supervisor_home = home / "supervisor"
+    db_path = supervisor_home / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return None
+    store = RunStore(db_path, readonly=True)
+    try:
+        active = store.active_provider_profile()
+        if (
+            active is None
+            or active.protocol not in REGISTRY_PROTOCOLS
+            or uses_codex_login(active.base_url)
+        ):
+            return None
+        # the credential chat and the probe resolve: named env var → own key
+        # file → llm-secret, the last only for the endpoint it was saved for
+        api_key = resolve_provider_api_key(supervisor_home, active, store)
+    finally:
+        store.close()
+    return WorkerProvider(
+        profile=ProviderProfile(
+            name=REGISTRY_PROTOCOLS[active.protocol],
+            model=active.model,
+            endpoint=active.base_url,
+            api_key_env=active.api_key_env,
+        ),
+        api_key=api_key,
+    )
+
+
 def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
     supervisor_home = home / "supervisor"
     db_path = supervisor_home / "supervisor.sqlite3"
@@ -209,12 +248,16 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         if not isinstance(model, str) or not model.strip():
             return None
         _refuse_queen_only(base_url)
-        from skep.supervisor.serve.llm import resolve_provider_api_key, worker_key_profile
+        from skep.supervisor.serve.llm import (
+            legacy_api_key,
+            resolve_provider_api_key,
+            worker_key_profile,
+        )
 
         # v108-F4: the active registry profile's own credential — but only while
         # the saved settings still point at that profile's endpoint (a manual
         # config PUT must not leak another provider's key onto its URL).
-        api_key = resolve_api_key(supervisor_home)
+        api_key = legacy_api_key(supervisor_home, base_url, store)
         active = worker_key_profile(store, base_url)
         if active is not None:
             api_key = resolve_provider_api_key(supervisor_home, active, store)

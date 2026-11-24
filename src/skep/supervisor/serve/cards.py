@@ -282,9 +282,11 @@ def _changes_provider(args: dict[str, Any], store: RunStore | None) -> bool:
         return True
     if args.get("protocol") in (None, ""):
         return False
-    from .llm import LLM_PROTOCOL
+    from .llm import assistant_llm
 
-    return store is None or args["protocol"] != store.get_setting(LLM_PROTOCOL)
+    # Phase 05 R1: the protocol the assistant actually speaks (the active
+    # profile), not the llm_protocol mirror.
+    return store is None or args["protocol"] != assistant_llm(store)[2]
 
 
 def _to_codex_login(tool: str, args: dict[str, Any], store: RunStore | None) -> bool:

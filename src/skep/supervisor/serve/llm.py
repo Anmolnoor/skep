@@ -81,6 +81,11 @@ TOOL_DELIVERIES = ("indexed", "full")
 DEFAULT_LLM_PROTOCOL: LLMProtocol = "ollama"
 SECRET_FILE = "llm-secret"
 SECRET_ENV = "SKEP_LLM_API_KEY"
+# Phase 05 R1: the endpoint llm-secret was saved for, pinned the moment the
+# active endpoint first moves. Since Phase 05 LLM_BASE_URL mirrors the active
+# profile, so "llm-secret belongs to LLM_BASE_URL" (v119-F1) handed the old
+# key to every newly activated host.
+LLM_SECRET_ENDPOINT = "llm_secret_endpoint"
 
 
 class OllamaError(Exception):
@@ -263,6 +268,9 @@ def legacy_key_endpoint(home: Path, store: RunStore | None) -> str:
     the same order. ``home`` is the supervisor home."""
     from ..codex_login import uses_codex_login
 
+    pinned = store.get_setting(LLM_SECRET_ENDPOINT) if store is not None else None
+    if isinstance(pinned, str) and pinned.strip():
+        return pinned.strip().rstrip("/")
     saved = store.get_setting(LLM_BASE_URL) if store is not None else None
     if isinstance(saved, str) and saved.strip() and not uses_codex_login(saved):
         return saved.strip().rstrip("/")
@@ -273,6 +281,17 @@ def legacy_key_endpoint(home: Path, store: RunStore | None) -> str:
         with contextlib.suppress(OSError, ValueError):
             endpoint = load_profile(home.parent).provider.endpoint or ""
     return endpoint.strip().rstrip("/")
+
+
+def pin_legacy_key(store: RunStore, home: Path) -> None:
+    """Phase 05 R1: before the active endpoint moves, record the endpoint
+    llm-secret belongs to, so it never follows the switch. Idempotent; a key
+    saved before any endpoint keeps belonging to the first one saved."""
+    if store.get_setting(LLM_SECRET_ENDPOINT) or not (home / SECRET_FILE).is_file():
+        return
+    owner = legacy_key_endpoint(home, store)
+    if owner:
+        store.set_setting(LLM_SECRET_ENDPOINT, owner)
 
 
 def legacy_api_key(home: Path, endpoint: str, store: RunStore | None = None) -> str | None:
@@ -316,11 +335,32 @@ def resolve_active_api_key(
     if base_url is not None and uses_codex_login(base_url):
         return _codex_login_key(base_url)  # v118-F1: whichever profile is active
     active = store.active_provider_profile()
-    if active is None:
-        return resolve_api_key(home)
-    if base_url is not None and active.base_url.rstrip("/") != base_url.strip().rstrip("/"):
-        return resolve_api_key(home)
-    return resolve_provider_api_key(home, active, store)
+    if base_url is None:
+        return (
+            resolve_api_key(home)
+            if active is None
+            else resolve_provider_api_key(home, active, store)
+        )
+    return saved_key_for(store, home, base_url)
+
+
+def saved_key_for(store: RunStore, home: Path, base_url: str) -> str | None:
+    """Phase 05 R1: the saved credential that belongs to ``base_url`` — the
+    registered profile for that endpoint (the active one first), else
+    llm-secret only if it was saved for it. Anything else gets no key: a key
+    never travels to an endpoint it was not saved for (P2)."""
+    want = base_url.strip().rstrip("/")
+    owner = next(
+        (
+            p
+            for p in sorted(store.list_provider_profiles(), key=lambda p: not p.active)
+            if p.base_url.rstrip("/") == want
+        ),
+        None,
+    )
+    if owner is not None:
+        return resolve_provider_api_key(home, owner, store)
+    return legacy_api_key(home, want, store)
 
 
 def assistant_llm(store: RunStore) -> tuple[str | None, str | None, LLMProtocol]:
@@ -483,7 +523,7 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
         return  # v118-F1: no context endpoint, and llm-secret never goes there
     detected = detect_model_ctx(
         base_url,
-        resolve_api_key(home),
+        resolve_active_api_key(store, home, base_url=base_url),
         model=model,
         protocol=protocol,
     )
@@ -594,9 +634,11 @@ def probe_completion(
     """v115-F5: one authenticated completion — the probe a dead key cannot pass.
 
     A model list is public on ollama.com: the key that 401'd every chat turn
-    passed ``list_models`` and doctor said "provider ready". This reads the
-    first streamed chunk of a one-word prompt and closes the stream (a
-    token's worth), raising OllamaError with the provider's words on refusal.
+    passed ``list_models`` and doctor said "provider ready". This asks a
+    one-word prompt for one output token, reads until the first real answer
+    and closes the stream, raising OllamaError with the provider's words on
+    refusal — and when the stream ends with no completion in it (Phase 05
+    R1: an empty or metadata-only 200 is not a working provider).
     """
     stream = chat_stream(
         base_url,
@@ -605,12 +647,19 @@ def probe_completion(
         messages=[{"role": "user", "content": "ping"}],
         protocol=protocol,
         timeout=timeout,
+        max_tokens=1,
     )
     try:
-        next(stream, None)
+        for chunk in stream:
+            message = chunk.get("message") or {}
+            if any(message.get(k) for k in ("content", "thinking", "tool_calls")):
+                return
+            if chunk.get("done") and chunk.get("done_reason") in ("stop", "length"):
+                return  # ollama's record that the model generated
+        raise OllamaError(f"{base_url} answered the probe with no completion")
     finally:
         # chat_stream is a generator function (typed as its Iterator face):
-        # closing it aborts the HTTP stream after the first chunk.
+        # closing it aborts the HTTP stream after the first answer.
         close = getattr(stream, "close", None)
         if close is not None:
             close()
@@ -626,8 +675,15 @@ def chat_stream(
     protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
     timeout: float = 300.0,
     num_ctx: int | None = None,
+    max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield protocol-normalized chunks for one streamed chat call."""
+    """Yield protocol-normalized chunks for one streamed chat call.
+
+    ``max_tokens`` caps the output where the wire has a portable cap
+    (ollama num_predict, anthropic max_tokens, bedrock maxTokens). The two
+    OpenAI shapes take none: OpenAI's reasoning models refuse ``max_tokens``
+    and spend ``max_completion_tokens``/``max_output_tokens`` on hidden
+    reasoning, so a tiny cap answers a valid key with an empty completion."""
     if protocol == "openai-compat":
         # openai-compat servers size their own context; num_ctx is ollama-only.
         yield from _openai_chat_stream(
@@ -637,7 +693,13 @@ def chat_stream(
     if protocol == "anthropic":
         # anthropic sizes its own context too; num_ctx is ollama-only.
         yield from _anthropic_chat_stream(
-            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+            base_url,
+            api_key,
+            model=model,
+            messages=messages,
+            tools=tools,
+            timeout=timeout,
+            max_tokens=max_tokens,
         )
         return
     if protocol == "openai-responses":
@@ -654,7 +716,13 @@ def chat_stream(
         from .llm_bedrock import bedrock_chat_stream  # local import: llm_bedrock imports us
 
         yield from bedrock_chat_stream(
-            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+            base_url,
+            api_key,
+            model=model,
+            messages=messages,
+            tools=tools,
+            timeout=timeout,
+            max_tokens=max_tokens,
         )
         return
     yield from _ollama_chat_stream(
@@ -665,6 +733,7 @@ def chat_stream(
         tools=tools,
         timeout=timeout,
         num_ctx=num_ctx,
+        max_tokens=max_tokens,
     )
 
 
@@ -745,12 +814,14 @@ def _ollama_chat_stream(
     tools: list[dict[str, Any]] | None,
     timeout: float,
     num_ctx: int | None = None,
+    max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
-    if num_ctx is not None:
-        body["options"] = {"num_ctx": num_ctx}
+    options = {k: v for k, v in (("num_ctx", num_ctx), ("num_predict", max_tokens)) if v}
+    if options:
+        body["options"] = options
     try:
         for line in _open_stream_lines(
             f"{base_url.rstrip('/')}/api/chat",
@@ -1132,8 +1203,11 @@ def _anthropic_chat_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     timeout: float,
+    max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     body = _anthropic_payload(model=model, messages=messages, tools=tools)
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     pending_calls: dict[int, dict[str, str]] = {}
     try:
         for line in _open_stream_lines(
@@ -1231,19 +1305,20 @@ def probe_candidate(
     model: str | None,
     protocol: LLMProtocol,
     api_key: str | None,
+    provider_id: str | None = None,
 ) -> ProviderHealth:
     """Phase 05 (5.1): the staged live probe of a candidate — its model list
     and one 1-token completion with ITS key, before anything is saved
     (``providers.check_provider_health``). With no model named yet, the
-    first one the provider lists takes the token. Returns the ProviderHealth;
-    writes nothing."""
+    first one the provider lists takes the token. Returns the ProviderHealth
+    (its error carries no key: live_probes scrubs it); writes nothing."""
     from datetime import UTC, datetime
 
     from ..providers import ProviderProfile, check_provider_health, live_probes
 
     active = store.active_provider_profile()
     candidate = ProviderProfile(
-        provider_id=active.provider_id if active is not None else "default",
+        provider_id=provider_id or (active.provider_id if active is not None else "default"),
         protocol=_registry_protocol(protocol),
         base_url=base_url,
         model=model or "",
@@ -1263,6 +1338,125 @@ def probe_candidate(
     return check_provider_health(candidate, list_models=_list, probe=_probe, now=now)
 
 
+_UNCHANGED = "nothing changed: the saved provider and key are as they were"
+
+
+def _probe_or_refuse(
+    store: RunStore,
+    home: Path,
+    *,
+    base_url: str,
+    model: str | None,
+    protocol: LLMProtocol,
+    api_key: str | None,
+    provider_id: str | None = None,
+) -> str:
+    """Probe a candidate; raise ProviderError (nothing written yet) when it
+    fails. Returns the model the probe asked — the named one, or the first
+    the endpoint lists."""
+    from ..providers import ProviderError
+
+    health = probe_candidate(
+        store,
+        home,
+        base_url=base_url,
+        model=model,
+        protocol=protocol,
+        api_key=api_key,
+        provider_id=provider_id,
+    )
+    if not health.ok:
+        raise ProviderError(f"{health.error} — {_UNCHANGED}")
+    return model or health.models[0]
+
+
+# What a provider write touches in sqlite besides the registry rows.
+_ROLLBACK_SETTINGS = (
+    LLM_BASE_URL,
+    LLM_DEFAULT_MODEL,
+    LLM_PROTOCOL,
+    LLM_VISION,
+    LLM_NUM_CTX,
+    TOOL_DELIVERY_SETTING,
+    LLM_SECRET_ENDPOINT,
+)
+
+
+@contextlib.contextmanager
+def provider_rollback(store: RunStore, home: Path) -> Iterator[None]:
+    """Phase 05 R1: a provider write lands whole or not at all. The registry
+    rows, the llm_* settings, the key files and profile.json are snapshotted
+    and put back if anything raises — an interrupt included. (L2's onboard
+    rollback, shared by every write.) ``home`` is the supervisor home."""
+    from ..providers import LLM_REGISTRY_CANONICAL
+
+    rows = store.list_provider_profiles()
+    settings = {
+        key: store.get_setting(key) for key in (*_ROLLBACK_SETTINGS, LLM_REGISTRY_CANONICAL)
+    }
+
+    def _files() -> list[Path]:
+        return [
+            home.parent / "profile.json",
+            home / SECRET_FILE,
+            *home.glob(f"{_PROVIDER_SECRET_PREFIX}*"),
+        ]
+
+    saved = {path: path.read_bytes() for path in _files() if path.is_file()}
+    try:
+        yield
+    except BaseException:
+        kept = {row.provider_id for row in rows}
+        for profile in store.list_provider_profiles():
+            if profile.provider_id not in kept:
+                store.delete_provider_profile(profile.provider_id)
+        for row in sorted(rows, key=lambda row: row.active):  # the active one last
+            store.upsert_provider_profile(row)
+        for key, value in settings.items():
+            if value is None:  # absent before: deleted, not a JSON null row
+                store.delete_setting(key)
+            else:
+                store.set_setting(key, value)
+        for path in _files():
+            if path not in saved:
+                path.unlink(missing_ok=True)
+        for path, data in saved.items():
+            path.write_bytes(data)
+            if path.name.startswith(SECRET_FILE):
+                path.chmod(0o600)
+        raise
+
+
+def _endpoint_profile(
+    store: RunStore,
+    base_url: str,
+    protocol: LLMProtocol | None,
+    fallback: LLMProtocol,
+    model: str | None,
+) -> tuple[ProviderProfile, bool]:
+    """(profile, registered) for a new endpoint: the registered one for that
+    endpoint (its credential belongs there; its own protocol unless one is
+    named), else a new keyless one with its own cost class and host list
+    (``providers.endpoint_profile``)."""
+    from ..providers import endpoint_profile
+
+    existing = next(
+        (p for p in store.list_provider_profiles() if p.base_url.rstrip("/") == base_url),
+        None,
+    )
+    if existing is None:
+        fresh = endpoint_profile(
+            store,
+            base_url=base_url,
+            protocol=_registry_protocol(protocol or fallback),
+            model=model or "",
+            source="assistant-settings",
+        )
+        return fresh, False
+    named = _registry_protocol(protocol) if protocol else existing.protocol
+    return dataclasses.replace(existing, model=model or existing.model, protocol=named), True
+
+
 def save_assistant_llm(
     store: RunStore,
     home: Path,
@@ -1270,6 +1464,7 @@ def save_assistant_llm(
     base_url: str | None = None,
     model: str | None = None,
     protocol: LLMProtocol | None = None,
+    api_key: str | None = None,
 ) -> None:
     """Phase 05 (5.1): THE write of the assistant's provider/model — Web
     Settings and the Queen's model dial land here, ``use_provider`` (CLI
@@ -1277,40 +1472,181 @@ def save_assistant_llm(
     profile is written; the llm_* settings and profile.json are mirrored from
     it. With no active profile the settings stage the save, and a complete
     config on an empty registry seeds the ``default`` profile. ``home`` is
-    the supervisor home."""
-    from ..providers import migrate_legacy_provider
+    the supervisor home.
 
+    Phase 05 R1: a credential stays with its endpoint. A new endpoint is
+    its own profile (the registered one for it, or a new keyless one with
+    its own cost class and hosts) — probed, and only then activated; the old
+    profile and its key stay as they were. A non-empty ``api_key`` is probed
+    against the endpoint it is saved for before anything is written (with
+    the Queen on the ChatGPT login, the workers' endpoint), and one with no
+    endpoint is refused. An empty one clears the active profile's key.
+    Raises ProviderError, having written nothing."""
+    from ..codex_login import uses_codex_login
+    from ..providers import ProviderError, migrate_legacy_provider, provider_host
+
+    migrate_legacy_provider(store, home)  # P9: an upgraded home adopts before its first write
+    if base_url and provider_host(base_url) is None:
+        raise ProviderError(f"base_url must be a valid http(s) URL, got {base_url!r}")
     active = store.active_provider_profile()
-    if active is None:
-        for key, value in ((LLM_BASE_URL, base_url), (LLM_DEFAULT_MODEL, model)):
-            if value is not None:
-                store.set_setting(key, value or None)
-        if protocol is not None:
-            store.set_setting(LLM_PROTOCOL, protocol)
-        migrate_legacy_provider(store, home)
-    else:
-        updated = dataclasses.replace(
-            active,
-            base_url=base_url or active.base_url,
-            model=model or active.model,
-            protocol=_registry_protocol(protocol) if protocol else active.protocol,
+    saved_url, saved_model, saved_protocol = assistant_llm(store)
+    target = (base_url or saved_url or "").strip().rstrip("/")
+    wire = protocol or saved_protocol
+    if api_key and not target:
+        raise ProviderError(
+            "save a base URL first — a key is tested against the endpoint it is for, "
+            "and none is configured"
         )
-        if updated != active:
-            store.upsert_provider_profile(updated)
-    _write_through_profile(store, home.parent)
+    moved = active is not None and target != active.base_url.rstrip("/")
+    candidate, registered = (
+        _endpoint_profile(store, target, protocol, wire, model) if moved else (None, False)
+    )
+    codex = uses_codex_login(target)
+    # stage + probe: nothing below this block runs for a refused candidate
+    if candidate is not None:
+        # the credential it will resolve once active: a chatgpt.com profile's
+        # Codex login (never a key, v118-F1); a registered profile's own; a
+        # new one has none — but llm-secret no endpoint owns yet belongs to
+        # the first one saved (pin_legacy_key)
+        owner = legacy_key_endpoint(home, store)
+        try:
+            if codex:
+                own: str | None = _codex_login_key(target)
+            elif registered:
+                own = resolve_provider_api_key(home, candidate, store)
+            else:
+                own = resolve_api_key(home) if owner in ("", target) else None
+        except OllamaError as exc:  # an unusable Codex login, named
+            raise ProviderError(f"{exc} — {_UNCHANGED}") from exc
+        model = _probe_or_refuse(
+            store,
+            home,
+            base_url=target,
+            model=model or candidate.model or None,
+            protocol=REGISTRY_PROTOCOLS[candidate.protocol],
+            api_key=own if codex else (api_key or own),
+            provider_id=candidate.provider_id,
+        )
+    if api_key and codex:
+        _probe_workers_key(store, home, api_key)
+    elif api_key and candidate is None:
+        # P8: the saved model only for the endpoint it was saved with
+        same = target == (saved_url or "").rstrip("/")
+        _probe_or_refuse(
+            store,
+            home,
+            base_url=target,
+            model=model or (saved_model if same else None),
+            protocol=wire,
+            api_key=api_key,
+        )
+    with provider_rollback(store, home):
+        pin_legacy_key(store, home)  # before LLM_BASE_URL follows the switch
+        if candidate is not None:
+            store.upsert_provider_profile(
+                dataclasses.replace(candidate, model=model or candidate.model, active=True)
+            )
+        elif active is None:
+            for key, value in ((LLM_BASE_URL, base_url), (LLM_DEFAULT_MODEL, model)):
+                if value is not None:
+                    store.set_setting(key, value or None)
+            if protocol is not None:
+                store.set_setting(LLM_PROTOCOL, protocol)
+            migrate_legacy_provider(store, home)
+        else:
+            updated = dataclasses.replace(
+                active,
+                model=model or active.model,
+                protocol=_registry_protocol(protocol) if protocol else active.protocol,
+            )
+            if updated != active:
+                store.upsert_provider_profile(updated)
+        if api_key is not None:
+            store_assistant_key(store, home, api_key)
+        _write_through_profile(store, home.parent)
+
+
+def _probe_workers_key(store: RunStore, home: Path, api_key: str) -> None:
+    """P5: with the Queen on the ChatGPT login a saved key is the WORKERS'
+    (ADR 0063) — probed against the provider they keep (profile.json)."""
+    from skep.profile import load_profile, profile_path
+
+    from ..providers import ProviderError
+
+    provider = None
+    if profile_path(home.parent).is_file():
+        with contextlib.suppress(OSError, ValueError):
+            provider = load_profile(home.parent).provider
+    if provider is None or not provider.endpoint or not provider.model:
+        raise ProviderError(
+            "the assistant runs on your ChatGPT plan login, so a key here is the workers' — "
+            "and workers have no provider to test it against: make another provider active "
+            "once (`skep provider use <id>`)"
+        )
+    _probe_or_refuse(
+        store,
+        home,
+        base_url=provider.endpoint,
+        model=provider.model,
+        protocol=_protocol(provider.name),
+        api_key=api_key,
+    )
+
+
+def _save_profile_key(store: RunStore, home: Path, profile: ProviderProfile, value: str) -> None:
+    """``profile``'s own 0600 key file. A non-empty key clears the
+    ``api_key_env`` that would shadow it (P7: the env var is read first, so
+    a revoked one beat the key just tested). For the ACTIVE profile,
+    llm-secret mirrors it — never overwriting a key another endpoint owns
+    unless that key is first kept in its owner's own file (Rule Zero)."""
+    store_provider_api_key(home, profile.provider_id, value)
+    if value and profile.api_key_env:
+        store.upsert_provider_profile(dataclasses.replace(profile, api_key_env=None))
+    if not profile.active:
+        return
+    mine = profile.base_url.rstrip("/")
+    owner = legacy_key_endpoint(home, store)
+    held = (
+        (home / SECRET_FILE).read_text(encoding="utf-8").strip()
+        if (home / SECRET_FILE).is_file()
+        else ""
+    )
+    if held and owner and owner != mine:
+        holder = next(
+            (p for p in store.list_provider_profiles() if p.base_url.rstrip("/") == owner), None
+        )
+        if holder is None:
+            return  # its endpoint has no profile to keep it in: llm-secret stays its own
+        if not provider_secret_path(home, holder.provider_id).is_file():
+            store_provider_api_key(home, holder.provider_id, held)
+    store_api_key(home, value)
+    if value:
+        store.set_setting(LLM_SECRET_ENDPOINT, mine)
+    else:
+        store.delete_setting(LLM_SECRET_ENDPOINT)
 
 
 def store_assistant_key(store: RunStore, home: Path, value: str) -> None:
     """Phase 05 (5.1): a key saved from Settings is the ACTIVE profile's —
     its own 0600 file, which ``resolve_active_api_key`` reads first (a key
     saved only to llm-secret lost to an older per-profile file) — with
-    ``llm-secret`` kept as the legacy mirror. Empty clears both."""
+    ``llm-secret`` kept as the legacy mirror. Empty clears both. With the
+    Queen on the ChatGPT login (or nothing active yet) it is llm-secret,
+    owned by the endpoint it is saved for — the workers' one, and their
+    registered profile's own file too so an older one cannot shadow it."""
     from ..codex_login import uses_codex_login
 
     active = store.active_provider_profile()
     if active is not None and not uses_codex_login(active.base_url):
-        store_provider_api_key(home, active.provider_id, value)
+        _save_profile_key(store, home, active, value)
+        return
+    owner = legacy_key_endpoint(home, store)
+    workers = worker_key_profile(store, owner) if active is not None and owner else None
+    if workers is not None:
+        _save_profile_key(store, home, workers, value)
     store_api_key(home, value)
+    if value and owner:
+        store.set_setting(LLM_SECRET_ENDPOINT, owner)
 
 
 def _write_through_profile(store: RunStore, personal_home: Path) -> None:
@@ -1366,60 +1702,53 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
 
     @app.put("/api/llm/config")
     def put_llm_config(body: LlmConfigUpdate) -> dict[str, Any]:
+        from ..providers import ProviderError, migrate_legacy_provider
+
+        # P9: an upgraded home adopts what the Queen spoke before any mirror write
+        migrate_legacy_provider(run_store, home)
+        # Phase 05 R1 (P6): the whole request is checked before anything is
+        # written, then it lands whole — a failure part-way puts it all back.
+        if body.num_ctx is not None and body.num_ctx != 0 and body.num_ctx < _MIN_NUM_CTX:
+            raise HTTPException(
+                status_code=400, detail=f"num_ctx must be >= {_MIN_NUM_CTX} (0 = auto)"
+            )
         base_url = body.base_url.strip().rstrip("/") if body.base_url is not None else None
         model = body.default_model.strip() if body.default_model is not None else None
         key = body.api_key.strip() if body.api_key is not None else None
-        if key:
-            # Phase 05 (5.1): a new key is tested — with the provider and
-            # model this save would leave — BEFORE anything is written, so a
-            # refused key never replaces a working one (I8).
-            current_url, current_model, current_protocol = assistant_llm(run_store)
-            target = base_url or current_url
-            from ..codex_login import uses_codex_login
-
-            if target and not uses_codex_login(target):
-                health = probe_candidate(
-                    run_store,
-                    home,
-                    base_url=target,
-                    model=model or current_model,
-                    protocol=body.protocol or current_protocol,
-                    api_key=key,
-                )
-                if not health.ok:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{health.error} — nothing changed: the saved provider "
-                        "and key are as they were",
+        provider = (base_url, model, body.protocol, key) != (None, None, None, None)
+        try:
+            with provider_rollback(run_store, home):
+                if provider:
+                    # a new key or endpoint is probed before any write (I8)
+                    save_assistant_llm(
+                        run_store,
+                        home,
+                        base_url=base_url,
+                        model=model,
+                        protocol=body.protocol,
+                        api_key=key,
                     )
-        if (base_url, model, body.protocol) != (None, None, None):
-            save_assistant_llm(
-                run_store, home, base_url=base_url, model=model, protocol=body.protocol
-            )
-        if key is not None:
-            store_assistant_key(run_store, home, key)
-        if body.vision is not None:
-            run_store.set_setting(LLM_VISION, body.vision)
-        if body.num_ctx is not None:
-            if body.num_ctx == 0:
-                # v74-F2: 0 clears the override — back to auto (detected/default).
-                run_store.set_setting(LLM_NUM_CTX, None)
-            elif body.num_ctx < _MIN_NUM_CTX:
-                raise HTTPException(
-                    status_code=400, detail=f"num_ctx must be >= {_MIN_NUM_CTX} (0 = auto)"
-                )
-            else:
-                run_store.set_setting(LLM_NUM_CTX, body.num_ctx)
-        if body.tool_delivery is not None:
-            run_store.set_setting(TOOL_DELIVERY_SETTING, body.tool_delivery)
-        if body.default_model is not None and body.default_model.strip():
+                if body.vision is not None:
+                    run_store.set_setting(LLM_VISION, body.vision)
+                if body.num_ctx is not None:
+                    # v74-F2: 0 clears the override — back to auto (detected/default).
+                    run_store.set_setting(LLM_NUM_CTX, body.num_ctx or None)
+                if body.tool_delivery is not None:
+                    run_store.set_setting(TOOL_DELIVERY_SETTING, body.tool_delivery)
+                # v19-F9: profile.json follows, so `skep doctor` agrees with the daemon
+                _write_through_profile(run_store, home.parent)
+        except ProviderError as exc:  # P9: a bad URL or a refused probe is the caller's
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"the save failed ({exc}) — {_UNCHANGED}"
+            ) from exc
+        if base_url or model:
             # v74-F2: detection runs where the model changes; failure is silent
             # here (never breaks a save) and visible in num_ctx_source (I8).
-            refresh_model_ctx(run_store, home, body.default_model.strip())
-        # v19-F9: write-through to the personal profile.json so the CLI view
-        # (`skep doctor`) agrees with the daemon's sqlite settings. ``home`` is
-        # the supervisor home; the profile lives one level up.
-        _write_through_profile(run_store, home.parent)
+            current = assistant_llm(run_store)[1]
+            if current:
+                refresh_model_ctx(run_store, home, current)
         return llm_config_view(run_store, home)
 
     @app.post("/api/llm/test")
@@ -1430,25 +1759,27 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if not base_url:
             return {"ok": False, "detail": "no base URL configured"}
         protocol = body.protocol or saved_protocol
+        same = base_url.rstrip("/") == (saved_url or "").rstrip("/")
         try:
             from ..codex_login import uses_codex_login
 
             # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
+            # P2: a saved key only for the endpoint it was saved for.
             api_key = (
                 _codex_login_key(base_url)
                 if uses_codex_login(base_url)
-                else (body.api_key or "").strip()
-                or resolve_active_api_key(run_store, home, base_url=base_url)
+                else (body.api_key or "").strip() or saved_key_for(run_store, home, base_url)
             )
         except OllamaError as exc:
             return {"ok": False, "detail": str(exc)}
         # Phase 05 (5.1): the listing AND one 1-token completion — the probe
-        # a dead key cannot pass (ollama.com lists models to anyone).
+        # a dead key cannot pass (ollama.com lists models to anyone). P8: the
+        # saved model only for its own endpoint; another lists its own.
         health = probe_candidate(
             run_store,
             home,
             base_url=base_url,
-            model=(body.default_model or "").strip() or saved_model,
+            model=(body.default_model or "").strip() or (saved_model if same else None),
             protocol=protocol,
             api_key=api_key,
         )

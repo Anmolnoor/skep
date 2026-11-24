@@ -6013,10 +6013,10 @@ def _execute_mutation(
             api_key_env=_opt("api_key_env"),
             cost_class=_opt("cost_class"),
             preset=_opt("preset"),
+            # Phase 05 R1: staged and probed before the row is written
+            home=holder.current.home,
+            activate=bool(args.get("activate")),
         )
-        if bool(args.get("activate")):
-            saved_id = str(result["provider"]["provider_id"])
-            result.update(actions.use_provider(store, holder.current.home, provider_id=saved_id))
         return result
     if name == "use_provider":
         return actions.use_provider(

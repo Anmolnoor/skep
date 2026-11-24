@@ -28,6 +28,10 @@ from .fake_ollama import FakeOllama
 from .test_serve_chat import sse_events
 from .test_serve_chat_tools import chat_client
 
+# Phase 05 R1: activation probes live — these tests are about the faces, so
+# the probe is stubbed (nothing reaches openrouter.ai or z.ai).
+pytestmark = pytest.mark.usefixtures("accept_probes")
+
 
 @pytest.fixture()
 def ollama() -> Iterator[FakeOllama]:
