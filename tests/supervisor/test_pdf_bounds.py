@@ -27,10 +27,10 @@ SECONDS = 5.0  # generous for a loaded CI box; unbounded parsing takes minutes
 
 
 @contextmanager
-def _quick() -> Iterator[None]:
+def _quick(seconds: float = SECONDS) -> Iterator[None]:
     start = time.monotonic()
     yield
-    assert time.monotonic() - start < SECONDS
+    assert time.monotonic() - start < seconds
 
 
 def _page_with(content_ref: str, extra_objects: list[bytes], resources: str = "") -> bytes:
@@ -136,7 +136,10 @@ def test_many_streams_without_endstream_scan_in_linear_time() -> None:
 
 def test_nested_object_headers_cost_bounded_work() -> None:
     nested = b"1 0 obj [" + b"1 0 obj " * 400_000 + b"]"
-    with _quick(), pytest.raises(ValueError, match="too complex"):
+    # 3.2 MB walked linearly takes ~2.5 s on a slow box (more under a loaded
+    # parallel suite); the quadratic scan this pins took hours — 30 s still
+    # tells them apart without flaking on CI
+    with _quick(30.0), pytest.raises(ValueError, match="too complex"):
         pdf_to_text(b"%PDF-1.7\n" + nested)
 
 
