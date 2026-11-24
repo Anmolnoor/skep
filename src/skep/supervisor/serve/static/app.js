@@ -2729,10 +2729,18 @@ async function viewChat(main, chatId) {
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard
       try {
+        // R5-2 (K2): a confirm names how many items this card rendered — the
+        // server refuses (409, nothing ran) a card that now holds another set.
+        const items = (d.card?.items || []).length || 1;
         await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`,
-          verb === "confirm" && keep ? { keep: keep.value } : {});
+          verb === "confirm" ? { ...(keep ? { keep: keep.value } : {}), items } : {});
       }
       catch (e) {
+        if (verb === "confirm" && e.status === 409 && /you were shown/.test(e.message)) {
+          flash("bad", "this card changed — review it again; nothing ran");
+          route(); // the thread redraws the card as it is now
+          return;
+        }
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
         approve.disabled = refuse.disabled = false;

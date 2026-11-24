@@ -25,7 +25,7 @@ class FakeNode {
     this.attributes = {};
     this.listeners = {};
     this.className = "";
-    this.style = {};
+    this.style = { setProperty(name, value) { this[name] = String(value); } };
     this.dataset = {};
     this.hidden = false;
     this.disabled = false;
@@ -53,7 +53,16 @@ class FakeNode {
   }
   append(...nodes) {
     this._text = undefined;
-    for (const n of nodes) this.children.push(typeof n === "object" ? n : new FakeText(n));
+    for (const n of nodes) {
+      const node = typeof n === "object" ? n : new FakeText(n);
+      if (node.parentNode) node.remove?.(); // appending moves a node, as in the DOM
+      node.parentNode = this;
+      this.children.push(node);
+    }
+  }
+  remove() {
+    if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(c => c !== this);
+    this.parentNode = null;
   }
   appendChild(node) { this.append(node); return node; }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
