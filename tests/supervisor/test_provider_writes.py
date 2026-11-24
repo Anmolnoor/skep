@@ -1235,6 +1235,29 @@ def test_a_staged_key_never_takes_over_another_staged_endpoints_key(
 # --- R3 H4 / H5 / H6: workers resolve the credential Settings probed -----------------
 
 
+def test_a_save_refused_mid_write_puts_each_setting_back_with_its_own_timestamp(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback restores an llm_* setting row as it was, updated_at too —
+    even when the clock moved between the write and the refusal (this was a
+    one-second-boundary flake in the test above)."""
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        client.put("/api/llm/config", json={"base_url": a.base_url, "api_key": "ka1"})
+        before = _raw(config.home)
+        monkeypatch.setattr("skep.supervisor.store._now", lambda: "2099-01-01T00:00:00Z")
+        refused = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": "kb1"})
+        monkeypatch.undo()
+        after = _raw(config.home)
+    finally:
+        a.stop()
+        b.stop()
+    assert refused.status_code == 400, refused.text
+    assert after == before
+
+
 def test_a_workers_key_replaces_profile_jsons_env_var(
     installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

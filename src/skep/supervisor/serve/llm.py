@@ -1820,7 +1820,9 @@ def provider_state(store: RunStore, home: Path) -> ProviderState:
     )
 
 
-def _restore(store: RunStore, home: Path, state: ProviderState) -> None:
+def _restore(
+    store: RunStore, home: Path, state: ProviderState, stamps: dict[str, str | None]
+) -> None:
     rows, settings, saved = state
     kept = {row.provider_id for row in rows}
     for profile in store.list_provider_profiles():
@@ -1837,8 +1839,8 @@ def _restore(store: RunStore, home: Path, state: ProviderState) -> None:
             continue
         if value is None:  # absent before: deleted, not a JSON null row
             store.delete_setting(key)
-        else:
-            store.set_setting(key, value)
+        else:  # as it was, updated_at too: a refused save leaves no trace
+            store.set_setting(key, value, updated_at=stamps.get(key))
     for path in _state_files(home):
         if path not in saved:
             path.unlink(missing_ok=True)
@@ -1872,10 +1874,11 @@ def provider_rollback(
                 "the provider settings changed while this save was being tested — nothing "
                 "was saved: reload them and save again"
             )
+        stamps = {key: store.setting_updated_at(key) for key in state[1]}
         try:
             yield
         except BaseException:
-            _restore(store, home, state)
+            _restore(store, home, state, stamps)
             raise
 
 

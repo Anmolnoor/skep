@@ -3178,7 +3178,14 @@ class RunStore:
         return None if row is None else json.loads(row[0])
 
     @_locked
-    def set_setting(self, key: str, value: Any) -> None:
+    def setting_updated_at(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT updated_at FROM settings WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
+    @_locked
+    def set_setting(self, key: str, value: Any, *, updated_at: str | None = None) -> None:
+        """``updated_at``: a rollback putting a row back as it was (see
+        ``setting_updated_at``); every other writer stamps now."""
         encoded = json.dumps(value, ensure_ascii=True)
         if key in _PROVIDER_SETTINGS:
             # ES-F13 (B86): a provider ceiling measured ONE provider+model —
@@ -3193,7 +3200,7 @@ class RunStore:
                 )
         self._conn.execute(
             "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-            (key, encoded, _now()),
+            (key, encoded, updated_at or _now()),
         )
         self._conn.commit()
 
