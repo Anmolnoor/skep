@@ -1144,3 +1144,47 @@ def test_a_rollback_that_cannot_chmod_still_restores_the_previous_venv(
         forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
     monkeypatch.setattr(forge, "_writable", real)
     assert forge.seal_venv(home) == old_seal
+
+
+def test_a_failed_restore_never_deletes_the_only_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5 (Sol S2): when putting the backup back failed, cleanup deleted it —
+    the only copy of the previous venv. It stays where it is."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    old_seal = _tree(home, "#!old")
+    staging = home.parent / ".staging-x"
+    seal = _tree(staging, "#!new")
+    real_seal, real_rename = forge.seal_venv, Path.rename
+    calls: list[Path] = []
+
+    def tampered_after_the_move(root: Path) -> str:
+        calls.append(root)
+        return real_seal(root) if len(calls) == 1 else "0" * 64
+
+    def restore_fails(self: Path, target: Any) -> Any:
+        if self.name == "venv" and self.parent.name.startswith(".previous-"):
+            raise OSError("rename refused")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(forge, "seal_venv", tampered_after_the_move)
+    monkeypatch.setattr(Path, "rename", restore_fails)
+    with pytest.raises(OSError, match="rename refused"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    monkeypatch.setattr(forge, "seal_venv", real_seal)
+    monkeypatch.setattr(Path, "rename", real_rename)
+    kept = [p / "venv" for p in home.parent.glob(".previous-*")]
+    assert kept and forge.seal_venv(kept[0]) == old_seal  # the backup survives
+
+
+def test_replacing_a_dangling_venv_link_leaves_no_backup_behind(tmp_path: Path) -> None:
+    """R5 (Sol R5-1): a dangling venv symlink was moved to .previous-* and,
+    since exists() is False for it, never cleaned up."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    home.parent.mkdir(parents=True, exist_ok=True)
+    home.symlink_to(tmp_path / "gone")
+    staging = home.parent / ".staging-1"
+    seal = _tree(staging, "#!one")
+    forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    assert forge.seal_venv(home) == seal
+    assert sorted(p.name for p in home.parent.iterdir()) == [home.name]

@@ -888,6 +888,7 @@ def commit_locked_venv(
         _require_seal(home, seal)
         return str(final)
     previous: Path | None = None
+    committed = False
     try:
         _require_seal(staging, seal)
         if home.exists() or home.is_symlink():
@@ -919,11 +920,16 @@ def commit_locked_venv(
                     _writable(failed, True)
                 shutil.rmtree(failed, ignore_errors=True)
             raise
+        committed = True
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        if previous is not None and previous.exists():  # committed: the backup goes
-            with contextlib.suppress(OSError):
-                _writable(previous, True)
+        # R5 (Sol): the backup goes only after a successful commit — never when
+        # putting it back failed (it is the only copy) — and whatever it holds,
+        # a dangling link included (exists() is False for one)
+        if committed and previous is not None:
+            if previous.is_dir() and not previous.is_symlink():
+                with contextlib.suppress(OSError):
+                    _writable(previous, True)
             shutil.rmtree(previous.parent, ignore_errors=True)
     return str(final)
 
