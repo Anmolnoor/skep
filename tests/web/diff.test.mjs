@@ -147,3 +147,16 @@ test("R3 J12: an extension named like an Object prototype key is plain text, nev
   const { sections } = app.renderDiff("diff --git a/x.constructor b/x.constructor\n--- a/x.constructor\n+++ b/x.constructor\n@@ -1 +1 @@\n-a\n+b\n");
   assert.equal(sections.length, 1);
 });
+
+// R6-3: a non-UTF-8 patch is displayed with every literal backslash doubled
+// (display_patch), so its "\ No newline" marker arrives as "\\ No newline" —
+// still a marker, never a counted line.
+test("R6-3: a doubled '\\\\ No newline' marker after a hunk is still a marker", () => {
+  const app = loadApp();
+  const text = ["diff --git a/n.txt b/n.txt", "--- a/n.txt", "+++ b/n.txt", "@@ -1 +1 @@",
+    "-caf\\\\xe9", "+caf\\xe9", "\\\\ No newline at end of file", ""].join("\n");
+  const [file] = app.parseDiff(text);
+  assert.equal(file.added, 1);
+  assert.equal(file.removed, 1);
+  assert.deepEqual(plain(file.lines.map(l => l.kind)), ["hunk", "del", "add", "meta"]);
+});

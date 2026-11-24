@@ -3187,6 +3187,16 @@ def require_run(store: RunStore, task_id: str) -> dict[str, Any]:
     return asdict(record)
 
 
+def display_patch(raw: bytes) -> str:
+    """R6-3: a patch as text for a person: valid UTF-8 as it is; otherwise
+    every invalid byte as \\xNN and every literal backslash doubled, so the
+    two never read the same."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+
+
 def patch_path(store: RunStore, task_id: str) -> Path | None:
     artifacts = {kind: path for kind, path, _ in store.artifacts_for(task_id)}
     patch = artifacts.get("patch")
@@ -3211,7 +3221,7 @@ def patch_digest(store: RunStore, task_id: str) -> dict[str, Any] | None:
     if patch is None:
         return None
     try:
-        text = patch.read_text(encoding="utf-8", errors="backslashreplace")  # R5-5
+        text = display_patch(patch.read_bytes())  # R5-5 / R6-3
     except OSError:
         return None
     files: list[dict[str, Any]] = []

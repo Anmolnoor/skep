@@ -1224,3 +1224,18 @@ def test_a_branch_card_naming_another_spelling_of_the_repo_lists_its_landing(
         store.close()
     (action,) = serve_client(config).get(f"/api/chats/{chat.chat_id}").json()["actions"]
     assert [r["task_id"] for r in action["card"]["runs"]] == [task.task_id]
+
+
+def test_display_patch_keeps_utf8_as_is_and_never_lets_a_byte_read_as_text() -> None:
+    """R6-3: valid UTF-8 comes back byte-for-byte; otherwise an invalid byte
+    is \\xNN and a literal backslash is doubled, so the ASCII text `caf\\xe9`
+    and `caf` + byte 0xE9 never display the same; the "\\ No newline"
+    marker still starts with a backslash."""
+    from skep.supervisor.serve.actions import display_patch
+
+    plain = "diff --git a/n b/n\n@@ -1 +1 @@\n-caf\\xe9\n+café\n\\ No newline at end of file\n"
+    assert display_patch(plain.encode()) == plain
+    mixed = b"@@ -1 +1 @@\n-caf\\xe9\n+caf\xe9\n\\ No newline at end of file\n"
+    shown = display_patch(mixed).splitlines()
+    assert shown[1] == "-caf\\\\xe9" and shown[2] == "+caf\\xe9" and shown[1][1:] != shown[2][1:]
+    assert shown[3] == "\\\\ No newline at end of file" and shown[3].startswith("\\")
