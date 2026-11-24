@@ -605,39 +605,25 @@ the launch path `forged_lane` now shares, so the two cannot drift:
 - **Reads:** the strict allowlist (`read_allowlist`), plus the script's
   declared inputs (`scheduler.script_inputs`): each absolute, existing,
   non-link file its command names, as an argument or as a `NAME=value`
-  value. Never a directory. Each is judged by `extra_read_path_problem`
-  first, so one in or over the skep home, at or above `$HOME`, or on `/etc`
+  value. Never a directory. Each is judged by `extra_read_path_problem`,
+  so one in or over the skep home, at or above `$HOME`, or on `/etc`
   refuses the run (`script refused: …`). The wall takes them as single
-  files (`read_files`, Phase 09 R2), never as read roots: one named through
-  a link, or no longer a regular file, refuses; bubblewrap binds a copy
-  taken from the file opened without following links, and Seatbelt grants
-  its `(literal …)` path, so a directory swapped in after the check is
-  never opened up. The secret masks still land last, and an input that is
+  files (`read_files`, Phase 09 R2), never as read roots. Each must be
+  named by an absolute path with no `..` component (judged as written,
+  before anything normalizes it), lie under none of `/proc`, `/sys` and
+  `/dev` (`/proc/<pid>/environ` would hand a script the supervisor's env),
+  be its own real path (no link in any component) and be a regular file
+  (`sandbox.open_read_file`, which opens it without following links and
+  reads no bytes). The secret masks still land last, and an input that is
   a mask or under one (`sandbox.masked_input_problem`, both sides
-  resolved) refuses before anything is copied or granted — at every
-  creation face and again at the run and the wall (Phase 09 R3): a copy
-  would carry the masked file to a path no mask covers.
-  Since Phase 09 R4 an input is an ordinary file the operator owns the
-  meaning of (`sandbox.open_read_file`, at every creation face and again
-  at the wall on both backends): a relative path or one with a `..`
-  component refuses before anything normalizes it; a path under `/proc`,
-  `/sys` or `/dev`, or an opened file on a kernel pseudo filesystem (its
-  `st_dev` is that of `/proc`, `/sys` or `/dev`, or on Linux its statfs
-  magic is procfs, sysfs, devpts, cgroup or a kin), refuses —
-  `/proc/<pid>/environ` would hand a script the supervisor's env; a file
-  with more than one hard link refuses (another name for it could be a
-  masked secret: copy the file and name the copy), and the opened file's
-  identity is compared with each masked file's. A redirect such as
-  `> /dev/null` is not an input (`script_inputs` takes regular files
-  only) and keeps working.
-  On Linux (bubblewrap) a script therefore sees a **snapshot** of each
-  input taken at launch, not live updates: the copies go to a private
-  `0700` temp dir outside the workspace that `wall.walled` removes after
-  the run, each `0600` plus the source's owner-execute bit (never
-  setuid, setgid or sticky), capped at 16 MiB per file and 64 MiB in all
-  (`sandbox.READ_FILE_MAX_BYTES`, `READ_FILES_TOTAL_MAX_BYTES`). An
-  oversize input refuses the run, naming the file and the cap. A run
-  with no inputs stages nothing. Seatbelt reads the live file. A refused
+  resolved) refuses before anything is granted. All of these run at
+  every creation face and again at the run and in `write_profile`
+  (Phase 09 R3, R4). A redirect such as `> /dev/null` is not an input
+  (`script_inputs` takes regular files only) and keeps working.
+  On both backends an input is the **live file, read-only, at its own
+  path**: bubblewrap `--ro-bind`s it in place, after the writable binds
+  and before the masks; Seatbelt grants its `(literal …)` path. A script
+  sees the file as it is while it runs and cannot write it. A refused
   run's reason is the schedule's health state (`script_failed: script
   refused: …`).
   The card shows the command, so the operator sees every input.
@@ -669,3 +655,15 @@ file of its own, outside the skep home, named in its command
 (`SKEP_MAIL_PASSWORD_FILE`). An existing script that read `$HOME` or used
 the network now fails until its command names those files and its schedule
 names those hosts.
+
+Phase 09 R4, scope decision SD-1: staging removed. R2–R4 copied each
+input into a stage the supervisor wrote, and the supervisor reading a file
+on the script's behalf, with its own authority, was the leak (R4 found it
+reading `/proc` for a script); the wall now binds the operator's file
+itself. **Not defended:** (a) a second hard link to a masked file, named
+as an input (the mask covers the masked path, not the inode); (b) a path
+swapped between the check and the bind (bubblewrap binds by path and
+follows a link put there after the check). Both need code already running
+as the operator outside any wall, which can read those files directly; a
+walled worker, script or forged tool cannot see a masked file to link it
+and cannot write the operator's directories.

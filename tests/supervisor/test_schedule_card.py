@@ -57,8 +57,8 @@ def test_a_script_schedule_card_says_what_will_run_and_is_high(
         == (
             "runs as you, on this host, unattended, until disabled, inside the wall: "
             "besides the system and its toolchains it reads only the files its command "
-            "names, and it reaches only its listed hosts (none unless listed); on Linux "
-            "each file it names is a copy taken at launch, 16 MiB each, 64 MiB in all"
+            "names (the live files, read-only), and it reaches only its listed hosts "
+            "(none unless listed)"
         )
     )
     assert facts["env"] == sorted(script_env())

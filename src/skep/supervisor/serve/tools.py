@@ -2064,8 +2064,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "description": (
                     "'note' posts the text each tick; 'script' runs the instructions "
                     "as a shell command in a sandbox wall on the supervisor host and "
-                    "posts its output (it reads only files the command names; on Linux "
-                    "a launch-time copy, 16 MiB each, 64 MiB in all); "
+                    "posts its output (it reads only files the command names, live and "
+                    "read-only); "
                     "'digest' posts a summary of pending approvals/runs/schedules "
                     "(no repo or instructions needed); 'prompt' runs the "
                     "instructions as a read-only Queen turn in this chat; these four "
