@@ -2240,6 +2240,19 @@ def test_a_runner_config_that_becomes_a_submodule_is_a_flag(repo: Path) -> None:
     assert "tamper_check_failed:config_mode:pyproject.toml" in flags
 
 
+def test_a_symlinked_runner_config_under_a_pathspec_looking_dir_is_a_flag(repo: Path) -> None:
+    """R5 (Neon): the mode probe reads the path literally — `:x/tox.ini` is
+    a file in a dir named `:x`, not git's top-magic pathspec for `x/tox.ini`
+    (which is absent, so the symlink read as no change)."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    base = _seed(repo)
+    head = _pr_by_index(repo, ["--add", "--cacheinfo", f"120000,{_blob(repo, '[a]')},:x/tox.ini"])
+
+    flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
+    assert "tamper_check_failed:config_mode::x/tox.ini" in flags
+
+
 def test_skep_pr_list_shows_each_author_and_marks_a_bot(
     repo: Path,
     tmp_path: Path,
