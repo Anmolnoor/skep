@@ -1454,7 +1454,7 @@ def create_app(
             return PlainTextResponse(raw.decode("utf-8", errors="backslashreplace"))
         except OSError as exc:
             raise HTTPException(
-                status_code=500, detail=f"patch unreadable: {exc.strerror or exc}"
+                status_code=409, detail=f"patch unreadable: {exc.strerror or exc}"
             ) from exc
 
     add_registry_routes(app, holder=holder, run_store=run_store)

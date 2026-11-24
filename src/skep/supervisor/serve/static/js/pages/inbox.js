@@ -74,7 +74,7 @@ const FACE = {
 
 function filesLine(item) {
   const files = item.files || [];
-  if (!files.length) return null;
+  if (!files.length) return item.files_note || null; // R5-6: "patch unreadable: …" too
   const each = files.map(f => `${f.path} +${f.added} −${f.removed}`).join(", ");
   return `${files.length} file${files.length === 1 ? "" : "s"} changed: ${each}${item.files_note ? ` (${item.files_note})` : ""}`;
 }

@@ -896,7 +896,8 @@ def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(
         assert rows[locked]["files_note"].startswith("patch unreadable: ")
         assert rows[fine]["files"] == [{"path": "app.py", "added": 1, "removed": 0}]
         diff = client.get(f"/api/runs/{locked}/diff")
-        assert diff.status_code == 500 and "patch unreadable" in diff.json()["detail"]
+        # R5-6: the server is fine; this artifact is not — a 409, never a 500
+        assert diff.status_code == 409 and "patch unreadable" in diff.json()["detail"]
         from skep.supervisor.cli_cmds import _moved_since_shown, _Shown
 
         store = RunStore(config.db_path, readonly=True)
