@@ -318,8 +318,7 @@ class Ticker(threading.Thread):
     def run(self) -> None:
         try:
             # ES B120: a script the last shutdown cut off is recorded, once.
-            home = self._holder.current.home.parent  # the top-level skep home
-            for name in reconcile_interrupted_scripts(self._store, skep_home=home):
+            for name in reconcile_interrupted_scripts(self._store):
                 logger.warning("schedule %r was interrupted mid-script by a restart", name)
         except Exception:
             logger.exception("interrupted-script reconcile failed")
