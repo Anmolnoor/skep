@@ -61,6 +61,7 @@ from .sandbox import (
     STRICT_READS_KEY,
     SandboxUnavailableError,
     read_allowlist_for,
+    resolved_read_allowlist,
     strict_read_roots,
 )
 from .sandbox import availability as sandbox_availability
@@ -1048,7 +1049,9 @@ def _outside_strict_wall(
     Why not, else None. ponytail: the binary itself, not its interpreter."""
     system = _SEATBELT_SYSTEM_ROOTS if backend == "seatbelt" else _SYSTEM_ROOTS
     try:
-        roots = [*map(Path, system), *strict_read_roots(config.home.parent, extra=extra)]
+        # R4-1: the wall dispatch builds — extras that exist, resolved once
+        wall = resolved_read_allowlist(extra, config.home.parent)
+        roots = [*map(Path, system), *strict_read_roots(config.home.parent, extra=wall)]
     except SandboxUnavailableError as exc:
         return str(exc)
     roots += [root.resolve() for root in roots]

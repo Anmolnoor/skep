@@ -1089,6 +1089,27 @@ def test_a_verdict_file_that_cannot_be_written_still_fails_the_run(
     assert "completed" not in states
 
 
+def test_a_success_verdict_that_cannot_be_written_fails_the_run(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R4-2 (G2): a clean session whose success verdict never reached disk
+    leaves restart recovery nothing to accept, so the live run fails too —
+    it never completes into G10 without the verdict recovery requires."""
+    real = Path.write_text
+
+    def full_disk(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name == "supervisor_verdict.json":
+            raise OSError("No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    outcome = _dispatch(config, repo, monkeypatch, tmp_path, [EDIT], unlocked=True)
+    assert outcome.record.state == "failed"
+    transitions = _transitions(config, outcome.record.task_id)
+    assert "completed" not in [state for state, _ in transitions]
+    assert "verdict was not recorded" in str(dict(transitions)["failed"])
+
+
 def test_startup_reverify_skips_a_completed_run_the_supervisor_failed(
     config: SupervisorConfig, tmp_path: Path
 ) -> None:

@@ -1204,8 +1204,11 @@ def run_task(
                     json.dumps(verdict_detail, ensure_ascii=True), encoding="utf-8"
                 )
             except OSError as exc:  # fail closed: a failure's terminal still holds; a
-                # success not on disk leaves a restart nothing to accept (G2)
+                # success not on disk leaves a restart nothing to accept (G2), so
+                # the live run cannot complete into G10 without it either (R4-2)
                 logger.warning("%s not written for %s: %s", SUPERVISOR_VERDICT, task.task_id, exc)
+                if supervisor_failure is None:
+                    supervisor_failure = f"skep acp: the session's verdict was not recorded ({exc})"
 
         outcome = ingest_run(
             store=run_store,

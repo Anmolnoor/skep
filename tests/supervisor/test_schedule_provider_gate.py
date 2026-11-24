@@ -1080,6 +1080,30 @@ def test_the_binary_must_sit_inside_the_strict_walls_roots(
     assert "strict read wall" in result.state and str(elsewhere) in result.state
 
 
+def test_a_missing_extra_read_path_does_not_pause_the_tick(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1 (I12): dispatch drops an extra_read_path that does not exist yet
+    (``resolved_read_allowlist``), so the gate judges that same wall — a
+    configured-but-absent path is no reason to pause the schedule."""
+    import json
+    import os
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "codex").write_text("#!/bin/sh\n")
+    (elsewhere / "codex").chmod(0o755)
+    _bound(store, tmp_path, monkeypatch)
+    absent = tmp_path / "made-later"
+    policy = {**GATES_OPEN, "extra_read_paths": [str(elsewhere), str(absent)]}
+    store._conn.execute("UPDATE project_policies SET policy_json = ?", (json.dumps(policy),))
+    store._conn.commit()
+    monkeypatch.setenv("PATH", f"{elsewhere}{os.pathsep}{os.environ['PATH']}")
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert len(seen) == 1 and _refusals(config) == [], result.state
+
+
 # Phase 04 review R3.
 
 
