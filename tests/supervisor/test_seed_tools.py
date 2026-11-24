@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -24,27 +23,15 @@ from skep.supervisor.forge import (
     seed_tool_source,
     seed_tools_root,
     sync_seed_tools,
-    trial_script,
-    trial_verdict,
 )
 from skep.supervisor.mcp_client import load_mcp_servers, runner_for_config
-from skep.supervisor.serve import tools as tools_module
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
 
 from .card_rig import cards, live_fixture  # noqa: F401  (the `live` fixture)
-
-
-def _run_harness(source: str, workdir: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        [sys.executable, "-c", trial_script(source)],
-        capture_output=True,
-        text=True,
-        cwd=workdir,
-        timeout=120,
-    )
-    return {"state": "completed", "output": proc.stdout, "stderr": proc.stderr}
+from .forge_rig import contract, failing_wall, gate, host_wall, install
 
 
 def _seed_module() -> Any:
@@ -59,12 +46,10 @@ def _seed_module() -> Any:
 def test_yt_transcript_passes_the_real_trial_harness(tmp_path: Path) -> None:
     """The seed is held to the forge contract for real — offline self_test,
     JSON-RPC over stdio, no crash on bad calls."""
-    ok, reason, evidence = trial_verdict(
-        _run_harness(seed_tool_source("yt_transcript.py"), tmp_path)
-    )
+    ok, reason, evidence = contract(seed_tool_source("yt_transcript.py"), tmp_path)
     assert ok, reason
-    assert evidence["tools"] == ["get_transcript", "self_test"]
-    assert "offline" in str(evidence["self_test"])
+    assert evidence["offline"]["tools"] == ["get_transcript", "self_test"]
+    assert "offline" in str(evidence["offline"]["result"])
 
 
 def test_yt_transcript_parsing_and_guards() -> None:
@@ -96,6 +81,7 @@ def test_yt_transcript_parsing_and_guards() -> None:
 # v126-F1: the watch page's own captionTracks URL now carries `exp=xpe` and
 # answers 200 with a 0-byte body; the tool asks the innertube player endpoint
 # (ANDROID client) instead, and each failure says which of three it is.
+_FAKE = "KEY123"  # a placeholder; kept apart from "key=" so no compiled form looks like a key
 _PAGE = '... "INNERTUBE_API_KEY":"KEY123", ...'
 
 
@@ -199,7 +185,7 @@ def test_get_transcript_new_shape_and_distinct_errors(
     assert needle in result["content"]
     if kind == "ok":
         player_url, player_body = calls[1]
-        assert player_url.endswith("key=KEY123")
+        assert player_url.endswith("key=" + _FAKE)
         assert json.loads(player_body)["videoId"] == "dQw4w9WgXcQ"
         assert calls[2][0] == "https://www.youtube.com/api/timedtext?v=x&lang=en"
 
@@ -246,20 +232,8 @@ def test_promote_seed_tool_trials_installs_and_registers(
         runner = cast(Dispatcher, None)
         sync_seed_tools(store)
 
-        def real_trial(
-            store_: Any,
-            holder_: Any,
-            runner_: Any,
-            *,
-            source: str,
-            repo: str,
-            decision: Any,
-            delegation_chain: Any = (),
-        ) -> dict[str, Any]:
-            assert repo.endswith("forge")  # the trial runs in the forge repo
-            return _run_harness(source, tmp_path)
-
-        monkeypatch.setattr(tools_module, "_forge_trial", real_trial)
+        dispatched = gate(monkeypatch)
+        host_wall(monkeypatch)
         promoted = execute_mutation(
             "promote_tool",
             {"plugin_id": "yt-transcript"},
@@ -267,8 +241,10 @@ def test_promote_seed_tool_trials_installs_and_registers(
             holder=holder,
             runner=runner,
             actor="test",
+            card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
         )
         assert promoted["state"] == "active"
+        assert dispatched[0]["repo"].endswith("forge")  # the gate runs in the forge repo
         installed = config.home.parent / "tools" / "yt-transcript.py"
         assert installed.read_text(encoding="utf-8") == seed_tool_source("yt_transcript.py")
         server = load_mcp_servers(store)["forge-yt-transcript"]
@@ -344,10 +320,8 @@ _OLD_COPY = "# the pre-v126 copy the operator's install still runs\n"
 def _seed_in_state(config: SupervisorConfig, store: RunStore, state: str) -> Path:
     import dataclasses
 
-    from skep.supervisor.forge import install_source
-
     sync_seed_tools(store)
-    installed = install_source(config, "yt-transcript", _OLD_COPY)
+    installed = install(config, "yt-transcript", _OLD_COPY)
     record = load_plugins(store)["yt-transcript"]
     save_plugin(store, dataclasses.replace(record, state=state))
     return installed
@@ -361,20 +335,18 @@ def _promote(config: SupervisorConfig, store: RunStore) -> Any:
         holder=ConfigHolder(config, store),
         runner=cast(Dispatcher, None),
         actor="test",
+        card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
     )
 
 
 def _trial(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, passes: bool) -> list[str]:
-    calls: list[str] = []
-
-    def fake_trial(*_a: Any, source: str, **_k: Any) -> dict[str, Any]:
-        calls.append(source)
-        if passes:
-            return _run_harness(source, tmp_path)
-        return {"state": "completed", "output": 'FORGE_TRIAL {"ok": false, "error": "boom"}'}
-
-    monkeypatch.setattr(tools_module, "_forge_trial", fake_trial)
-    return calls
+    """The gate passes; the wall's contract passes for real or fails 'boom'.
+    Returns the sources the wall ran (empty when it failed)."""
+    gate(monkeypatch)
+    if passes:
+        return host_wall(monkeypatch)
+    failing_wall(monkeypatch, "boom")
+    return []
 
 
 def test_an_active_seed_with_changed_source_reinstalls_after_a_passing_trial(
@@ -388,7 +360,8 @@ def test_an_active_seed_with_changed_source_reinstalls_after_a_passing_trial(
         assert seed_tool_updates(store, config) == ["yt-transcript"]
         calls = _trial(monkeypatch, tmp_path, passes=True)
         promoted = _promote(config, store)
-        assert calls == [seed_tool_source("yt_transcript.py")]
+        # the wall's two stages: offline, then pinned to its `# skep-hosts:`
+        assert calls == [seed_tool_source("yt_transcript.py")] * 2
         assert promoted["state"] == "active" and promoted["reinstalled"] is True
         assert installed.read_text(encoding="utf-8") == seed_tool_source("yt_transcript.py")
         assert load_mcp_servers(store)["forge-yt-transcript"].command == (
@@ -423,13 +396,24 @@ def test_a_failing_trial_keeps_the_old_active_copy(
 def test_an_unchanged_active_seed_is_already_active(
     config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from skep.supervisor.forge import install_source
+    import dataclasses
+
+    from skep.supervisor.forge import sha256_text
 
     store = RunStore(config.db_path)
     try:
         _seed_in_state(config, store, "active")
-        install_source(config, "yt-transcript", seed_tool_source("yt_transcript.py"))
+        shipped = seed_tool_source("yt_transcript.py")
+        install(config, "yt-transcript", shipped)
+        # Phase 07 / review R1 (K9): "already active" means bound to the whole
+        # triple it runs — source, lock and hosts.
+        record = load_plugins(store)["yt-transcript"]
+        bound = dataclasses.replace(record, source_sha256=sha256_text(shipped))
+        save_plugin(store, bound)
         calls = _trial(monkeypatch, tmp_path, passes=True)
+        assert "note" not in _promote(config, store)  # hosts unbound: a fresh trial
+        assert calls == [shipped] * 2
+        calls.clear()
         assert _promote(config, store)["note"] == "already active"
         assert calls == []
     finally:
@@ -449,7 +433,7 @@ def test_suspended_to_active_runs_the_trial(
         assert load_plugins(store)["yt-transcript"].state == "suspended"
         calls = _trial(monkeypatch, tmp_path, passes=True)
         assert _promote(config, store)["state"] == "active"
-        assert len(calls) == 1
+        assert len(calls) == 2  # offline, then pinned to its hosts
         assert installed.read_text(encoding="utf-8") == seed_tool_source("yt_transcript.py")
     finally:
         store.close()

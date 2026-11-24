@@ -1,8 +1,9 @@
 """v71-F1: the forge — skep authors its own MCP tools.
 
-Two layers under test. The trial harness layer runs REAL subprocesses: the
-generated harness must hold the reference echo server (and broken variants)
-to the contract with no worker pipeline involved. The lifecycle layer drives
+Two layers under test. The trial contract layer runs REAL subprocesses:
+``wall_trial`` (with the lane's runner on the host, ``forge_rig``) must hold
+the reference echo server (and broken variants) to the contract with no
+worker pipeline involved. The lifecycle layer drives
 forge_tool/promote_tool/suspend_tool through execute_mutation with the
 dispatch seams patched, asserting the v17 plugin lifecycle is actually
 enforced: nothing runs before landing, the trial gates `tested`, the
@@ -12,7 +13,6 @@ suspension IS deregistration.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -23,66 +23,53 @@ from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.forge import (
     ECHO_SERVER_SOURCE,
     ForgedPlugin,
+    gate_verdict,
     load_plugins,
     save_plugin,
-    trial_script,
-    trial_verdict,
 )
 from skep.supervisor.mcp_client import load_mcp_servers
 from skep.supervisor.serve import actions as actions_module
-from skep.supervisor.serve import tools as tools_module
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, execute_read_tool
 
 from .conftest import git
+from .forge_rig import GATE_PASSED, contract, failing_wall, gate, host_wall
 
 
-def _run_harness(source: str, workdir: Path) -> dict[str, Any]:
-    """Run the generated trial harness for real and wrap its stdout the way
-    _script_run_result would."""
-    proc = subprocess.run(
-        [sys.executable, "-c", trial_script(source)],
-        capture_output=True,
-        text=True,
-        cwd=workdir,
-        timeout=120,
-    )
-    return {
-        "task_id": "trial-local",
-        "state": "completed",
-        "exit_code": proc.returncode,
-        "output": proc.stdout,
-        "stderr": proc.stderr,
-    }
-
-
-def test_echo_reference_passes_the_trial_harness(tmp_path: Path) -> None:
-    ok, reason, evidence = trial_verdict(_run_harness(ECHO_SERVER_SOURCE, tmp_path))
+def test_echo_reference_passes_the_trial_contract(tmp_path: Path) -> None:
+    ok, reason, evidence = contract(ECHO_SERVER_SOURCE, tmp_path)
     assert ok, reason
-    assert evidence["tools"] == ["echo", "self_test"]
-    assert "passed" in str(evidence["self_test"])
+    assert evidence["offline"]["tools"] == ["echo", "self_test"]
+    assert "passed" in str(evidence["offline"]["result"])
 
 
 def test_trial_rejects_a_server_without_self_test(tmp_path: Path) -> None:
     source = ECHO_SERVER_SOURCE.replace("self_test", "self_check")
-    ok, reason, evidence = trial_verdict(_run_harness(source, tmp_path))
+    ok, reason, _ = contract(source, tmp_path)
     assert not ok
     assert "self_test" in reason
-    assert evidence["tools"] == ["echo", "self_check"]
 
 
 def test_trial_rejects_a_crashing_server(tmp_path: Path) -> None:
-    ok, reason, _ = trial_verdict(_run_harness("raise SystemExit(1)", tmp_path))
+    ok, reason, _ = contract("raise SystemExit(1)", tmp_path)
     assert not ok
     assert "tools/list" in reason
 
 
-def test_trial_verdict_is_honest_about_non_terminal_and_missing_evidence() -> None:
-    ok, reason, _ = trial_verdict({"state": "failed", "error": "worker died"})
+def test_trial_rejects_a_server_that_is_only_its_self_test(tmp_path: Path) -> None:
+    lone = ECHO_SERVER_SOURCE.replace('"name": "echo"', '"name": "self_test"')
+    ok, reason, _ = contract(lone, tmp_path)
+    assert not ok and "self_test alone" in reason
+
+
+def test_the_gate_verdict_is_honest_about_non_terminal_and_missing_markers() -> None:
+    ok, reason = gate_verdict({"state": "failed", "error": "worker died"})
     assert not ok and "failed" in reason and "worker died" in reason
-    ok, reason, _ = trial_verdict({"state": "completed", "output": "no marker here"})
-    assert not ok and "no evidence" in reason
+    ok, reason = gate_verdict({"state": "completed", "output": "no marker here"})
+    assert not ok and "no marker" in reason
+    assert gate_verdict(GATE_PASSED) == (True, "the role chain admitted the trial")
 
 
 def test_forge_verbs_always_card() -> None:
@@ -99,6 +86,11 @@ def test_forge_verbs_always_card() -> None:
             name, {}, store=cast(Any, _Boom()), holder=cast(Any, _Boom())
         )
         assert decision is None
+
+
+def _card(store: RunStore, plugin_id: str) -> dict[str, Any] | None:
+    """What the chat engine records when the promote_tool card is proposed."""
+    return recorded_card("promote_tool", {"plugin_id": plugin_id}, None, store)
 
 
 def _default_branch(repo: Path) -> str:
@@ -166,6 +158,7 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
         assert load_plugins(store)["word-count"].state == "draft"
 
@@ -176,14 +169,8 @@ def test_forge_lifecycle_end_to_end(
         monkeypatch.setattr(actions_module, "applied_branch_for", lambda s, t: "skep/task-forge-1")
 
         # A failing trial demotes nothing silently: sandboxed + evidence kept.
-        def failing_trial(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            return {
-                "state": "completed",
-                "output": 'FORGE_TRIAL {"ok": false, "tools": ["x", "self_test"], '
-                '"error": "self_test FAILED: boom"}',
-            }
-
-        monkeypatch.setattr(tools_module, "_forge_trial", failing_trial)
+        gate(monkeypatch)
+        failing_wall(monkeypatch, "self_test FAILED: boom")
         with pytest.raises(ValueError, match="self_test FAILED: boom"):
             execute_mutation(
                 "promote_tool",
@@ -192,26 +179,15 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
         record = load_plugins(store)["word-count"]
         assert record.state == "sandboxed"
         assert record.trial is not None and record.trial["ok"] is False
         assert "forge-word-count" not in load_mcp_servers(store)
 
-        # The real trial (actual subprocesses) passes and activation registers.
-        def real_trial(
-            store_: Any,
-            holder_: Any,
-            runner_: Any,
-            *,
-            source: str,
-            repo: str,
-            decision: Any,
-            delegation_chain: Any = (),
-        ) -> dict[str, Any]:
-            return _run_harness(source, tmp_path)
-
-        monkeypatch.setattr(tools_module, "_forge_trial", real_trial)
+        # The real contract (actual subprocesses) passes and activation registers.
+        host_wall(monkeypatch)
         promoted = execute_mutation(
             "promote_tool",
             {"plugin_id": "word-count"},
@@ -219,6 +195,7 @@ def test_forge_lifecycle_end_to_end(
             holder=holder,
             runner=runner,
             actor="test",
+            card=_card(store, "word-count"),
         )
         assert promoted["state"] == "active"
         assert promoted["tools"] == ["echo", "self_test"]
@@ -257,13 +234,7 @@ def test_forge_lifecycle_end_to_end(
         assert "forge-word-count" not in load_mcp_servers(store)
 
         # v126-F1: reactivation writes fresh source, so it re-trials first.
-        retrials: list[str] = []
-
-        def counting_trial(*args: Any, source: str, **kwargs: Any) -> dict[str, Any]:
-            retrials.append(source)
-            return _run_harness(source, tmp_path)
-
-        monkeypatch.setattr(tools_module, "_forge_trial", counting_trial)
+        retrials = host_wall(monkeypatch)
         reactivated = execute_mutation(
             "promote_tool",
             {"plugin_id": "word-count"},
@@ -271,6 +242,7 @@ def test_forge_lifecycle_end_to_end(
             holder=holder,
             runner=runner,
             actor="test",
+            card=_card(store, "word-count"),
         )
         assert reactivated["state"] == "active"
         assert retrials == [ECHO_SERVER_SOURCE]
@@ -295,6 +267,7 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
 
         # After rollback the name is free again — the replacement path exists.

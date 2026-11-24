@@ -44,12 +44,21 @@ READ_URL_MAX_CHARS = 10_000
 # to read, so the per-URL card lane keeps the small caps above.
 GRANTED_READ_MAX_BYTES = 262_144
 GRANTED_READ_MAX_CHARS = 40_000
+# Review R1 (K3): one wall-clock budget for a whole read, redirects included —
+# the per-read timeout alone lets a trickling server run forever. Review R2
+# (L4): it covers resolution, every hop and every body read; the caller waits
+# at most this plus a grace for the reader to report its own error.
+READ_DEADLINE_SECONDS = 30.0
+READ_GRACE_SECONDS = 1.0
 _READ_HEADERS = {
     # Same posture as the researcher (v42-F2): a mainstream UA, honest tag.
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 skep-read"
     ),
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    # Review R2 (L3): httpx inflates a whole raw chunk before any cap applies
+    # (16 KiB of gzip is 16 MiB) — ask for the bytes as stored.
+    "Accept-Encoding": "identity",
 }
 
 
@@ -69,6 +78,11 @@ def _is_ip(host: str) -> bool:
 
 class WebSearchError(Exception):
     """The search backend failed or timed out (distinct from zero hits)."""
+
+
+class WebReadError(Exception):
+    """7.3: read_url reached the site but got no readable page; the message
+    names what to do next (I9). Not a ValueError — those are refusals."""
 
 
 def fetch_url_text(
@@ -98,10 +112,59 @@ def fetch_url_text(
     (web_extract parity); callers pick the caps per lane (granted domains
     read more). A cut is never silent: ``truncated`` rides the result and
     the excerpt ends with a visible marker.
+
+    7.3: a PDF (by type or by its bytes) is read as text; an HTTP error, a
+    timeout, or a non-text type raises WebReadError naming the next step.
+
+    Review R2 (L4): the read runs on a daemon thread, so no lookup, hop or
+    blocked body read holds the caller past the deadline; the reader stops
+    itself at the deadline too (each hop's timeouts are what is left).
     """
+    import threading
+    import time
+
+    deadline = time.monotonic() + READ_DEADLINE_SECONDS
+    outcome: dict[str, Any] = {}
+
+    def read() -> None:
+        try:
+            outcome["read"] = _fetch(
+                url, deadline, redirect_guard, markdown, resolve, max_bytes, max_chars
+            )
+        except BaseException as exc:  # handed to the caller below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=read, name="skep-read-url", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()) + READ_GRACE_SECONDS)
+    if worker.is_alive():  # abandoned: it stops at its own next check
+        raise WebReadError(_too_slow(urllib.parse.urlsplit(url).hostname or url))
+    if "error" in outcome:
+        raise outcome["error"]
+    return dict(outcome["read"])
+
+
+def _too_slow(host: str) -> str:
+    return (
+        f"reading {host} took longer than {READ_DEADLINE_SECONDS:g}s — the site is slow or "
+        "trickling; try again later or read another source"
+    )
+
+
+def _fetch(
+    url: str,
+    deadline: float,
+    redirect_guard: Callable[[str], bool] | None,
+    markdown: bool,
+    resolve: Resolver,
+    max_bytes: int,
+    max_chars: int,
+) -> dict[str, Any]:
     import httpx
 
+    from skep.seeds.tools import doc_extract
     from skep.workers.html_text import html_to_markdown, html_to_text
+    from skep.workers.researcher import binary_bytes, http_error_message, is_text_type
 
     # W6: no env proxy — a proxy would resolve the name itself, out of sight
     # of the resolved-address check below. The operator's CA bundle
@@ -116,8 +179,16 @@ def fetch_url_text(
     ) as client:
         current = url
         for _hop in range(5):
-            response = _pinned_get(client, current, resolve)
+            try:
+                response = _pinned_get(client, current, resolve, deadline)
+            except httpx.TimeoutException as exc:
+                host = urllib.parse.urlsplit(current).hostname
+                raise WebReadError(
+                    f"timed out reading {host} — the site is slow or unreachable; "
+                    "try again later or read another source"
+                ) from exc
             if response.status_code in (301, 302, 303, 307, 308):
+                response.close()  # review R1 (K3): a hop's body is never read
                 target = urllib.parse.urljoin(current, response.headers.get("location", ""))
                 target_host = urllib.parse.urlparse(target).hostname or ""
                 if not target_host or (
@@ -133,15 +204,82 @@ def fetch_url_text(
             break
         else:
             raise ValueError("too many redirects (5) — refusing the chain")
-    response.raise_for_status()
-    body = response.text
-    convert = html_to_markdown if markdown else html_to_text
-    text = convert(body[:max_bytes])
-    truncated = len(body) > max_bytes or len(text) > max_chars
+        try:
+            if response.is_error:  # status and headers only: the body stays unread
+                raise WebReadError(
+                    http_error_message(
+                        response.status_code,
+                        response.reason_phrase,
+                        response.headers.get("retry-after"),
+                    )
+                )
+            kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+            host = urllib.parse.urlsplit(current).hostname or current
+            coding = response.headers.get("content-encoding", "").strip().lower()
+            if coding not in ("", "identity"):  # L3: so iter_bytes inflates nothing
+                raise WebReadError(
+                    f"{host} sent a {coding}-compressed body though read_url asked for none, "
+                    "and skep does not inflate a body it cannot bound — read another source"
+                )
+            chunks = response.iter_bytes()
+            body = _take(chunks, bytearray(), max_bytes + 1, deadline, host)
+            if kind == "application/pdf" or body.startswith(b"%PDF-"):
+                body = _take(chunks, body, doc_extract.MAX_BYTES + 1, deadline, host)
+                if len(body) > doc_extract.MAX_BYTES:
+                    raise WebReadError(
+                        f"the PDF is larger than {doc_extract.MAX_BYTES // (1024 * 1024)} MiB "
+                        "— too big to read here; download it yourself"
+                    )
+                try:
+                    text, cut = doc_extract.pdf_to_text(bytes(body), max_chars=max_chars), False
+                except ValueError as exc:
+                    raise WebReadError(str(exc)) from exc
+            elif kind and not is_text_type(kind) and binary_bytes(bytes(body[:max_bytes])):
+                # K13 (O S7): the bytes are sniffed before a label is refused
+                raise WebReadError(
+                    f"content type {kind} is not a page — read_url reads HTML, text, "
+                    "JSON/XML and PDF; open other files yourself"
+                )
+            else:
+                try:
+                    page = bytes(body[:max_bytes]).decode(
+                        response.charset_encoding or "utf-8", errors="replace"
+                    )
+                except LookupError:  # a charset Python does not know
+                    page = bytes(body[:max_bytes]).decode("utf-8", errors="replace")
+                convert = html_to_markdown if markdown else html_to_text
+                text, cut = convert(page), len(body) > max_bytes
+        finally:
+            response.close()
+    truncated = cut or len(text) > max_chars
     excerpt = text[:max_chars]
     if truncated:
         excerpt += f"\n\n[truncated at {max_chars} chars — the page continues]"
     return {"url": current, "text": excerpt, "truncated": truncated}
+
+
+def _take(chunks: Any, body: bytearray, limit: int, deadline: float, host: str) -> bytearray:
+    """Review R1 (K3): pull from a streamed body until ``limit`` bytes (one
+    chunk over at most, kept: a later pull continues the same body, L4), the
+    end, or the read deadline — never the whole body first."""
+    import time
+
+    import httpx
+
+    while len(body) < limit:
+        if time.monotonic() > deadline:
+            raise WebReadError(_too_slow(host))
+        try:
+            chunk = next(chunks, None)
+        except httpx.TransportError as exc:  # L4: a timeout or a dropped connection
+            raise WebReadError(
+                f"reading {host} failed mid-body ({type(exc).__name__}) — the site is slow or "
+                "dropped the connection; try again later or read another source"
+            ) from exc
+        if chunk is None:
+            break
+        body += chunk
+    return body
 
 
 def _ambiguous_ip(host: str) -> str | None:
@@ -180,10 +318,14 @@ def known_non_public(url: str) -> str | None:
     return None
 
 
-def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
+def _pinned_get(client: Any, url: str, resolve: Resolver, deadline: float) -> Any:
     """W6: GET ``url`` from the address its host resolves to — resolved once
     here and vetted public, then dialled by IP with the name as Host and SNI
-    (so TLS still verifies the name). Every hop of a redirect comes here."""
+    (so TLS still verifies the name). Every hop of a redirect comes here.
+    L4: each request's timeouts are what is left of ``deadline``, and a hop
+    whose lookup used it up is never dialled."""
+    import time
+
     import httpx
 
     parts = urllib.parse.urlsplit(url)
@@ -198,10 +340,16 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
         raise httpx.ConnectError(f"{host!r} does not resolve")
     if not addresses:
         raise ValueError(_non_public(host, why))
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise WebReadError(_too_slow(host))
     userinfo = parts.netloc.rpartition("@")[0]
     named = httpx.URL(url)  # IDNA: Host and SNI carry the ASCII name
     error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")
     for address in addresses:
+        left = deadline - time.monotonic()  # R3: each dial gets only what is left
+        if left <= 0:
+            raise WebReadError(_too_slow(host))
         netloc = f"[{address}]" if ":" in address else address
         if parts.port:
             netloc = f"{netloc}:{parts.port}"
@@ -212,9 +360,10 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
             urllib.parse.urlunsplit(parts._replace(netloc=netloc)),
             headers={**_READ_HEADERS, "Host": named.netloc.decode("ascii")},
             extensions={"sni_hostname": named.raw_host.decode("ascii")},
+            timeout=httpx.Timeout(min(10.0, left), connect=min(5.0, left)),
         )
         try:
-            return client.send(request)
+            return client.send(request, stream=True)  # K3: headers first, body on demand
         except httpx.ConnectError as exc:
             error = exc
     proxy = next((k for k in _PROXY_VARS if os.environ.get(k)), None)
@@ -237,6 +386,8 @@ def _run_ddgs(query: str, limit: int) -> list[dict[str, Any]]:
 
 def search_web(query: str, *, max_results: int = 5, run: Run = _run_ddgs) -> list[dict[str, Any]]:
     """Top search hits as ``{title, url, host, snippet}`` rows (url-deduped)."""
+    if not query.strip():
+        raise WebSearchError("search_web needs a non-empty query — pass the words to search for")
     limit = max(1, min(int(max_results), MAX_RESULTS_CAP))
     # Per-call single-worker pool: a timed-out ddgs call cannot be cancelled
     # and keeps running, so a shared pool would serialise every later search
@@ -252,7 +403,16 @@ def search_web(query: str, *, max_results: int = 5, run: Run = _run_ddgs) -> lis
                 "rate-limiting; try again later"
             ) from None
         except Exception as exc:
-            raise WebSearchError(f"search backend failed: {exc}") from exc
+            from ddgs.exceptions import RatelimitException
+
+            if isinstance(exc, RatelimitException):
+                raise WebSearchError(
+                    "the search engine is rate-limiting skep — wait a minute and search "
+                    "again, or read_url a page you already know"
+                ) from exc
+            raise WebSearchError(
+                f"search backend failed: {exc} — try again in a minute or rephrase the query"
+            ) from exc
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

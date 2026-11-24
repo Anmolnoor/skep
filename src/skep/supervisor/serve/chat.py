@@ -3305,8 +3305,20 @@ class ChatEngine:
                 "CLI: open skep and confirm it there" + (f". {line}" if line else ""),
             )
         if confirm and actor.startswith("channel:"):
-            from .channels import fold_fits_a_messenger
+            from .channels import fold_fits_a_messenger, forge_fits_a_messenger
 
+            forged = (action.card or {}).get("forge")
+            if action.tool == "promote_tool" and not (
+                isinstance(forged, dict) and forge_fits_a_messenger(forged)
+            ):
+                # Review R1 (K6, I6): no press approves a tool binding (digest,
+                # lock, hosts, diff) the messenger could not show whole.
+                raise HTTPException(
+                    status_code=403,
+                    detail="this promote_tool card binds a source digest, lock, hosts and a "
+                    "source diff too long for a messenger to show in full: open the skep web "
+                    "UI or the CLI (skep chat) to read and confirm it",
+                )
             lines = [
                 headline(action.tool, item["args"], limit=None) for item in action.fold_items()
             ]
@@ -3498,6 +3510,7 @@ class ChatEngine:
                 actor=actor,
                 chat_id=chat_id,
                 preanswered=preanswered,
+                card=card,
             )
             if activates_memory(tool, card):  # v128-F10: the card said it activates
                 item = self.store.approve_memory_proposal(result["proposal_id"], actor=actor)

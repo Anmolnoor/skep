@@ -37,6 +37,7 @@ from skep.supervisor.serve.actions import (
     submit_team,
 )
 from skep.supervisor.serve.app import STATIC_DIR, TERMINAL_STATES
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
@@ -743,6 +744,7 @@ def _promote_seed(
             runner=runner,  # type: ignore[arg-type]
             actor="chat-user",
             chat_id=chat_id,
+            card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
         )
     except HTTPException as refused:  # the R2 ⊆ refusal, exactly as run_code's
         assert refused.status_code == 403, refused.detail
@@ -767,6 +769,22 @@ def test_an_assistant_queen_gets_no_script_trial_through_promote_tool(
         "team": None,
     }
     assert _promote_seed(config, None, monkeypatch) == []
+
+
+def test_the_dispatched_trial_is_the_role_gate_and_runs_no_candidate_code(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (K1): the run_code half of a trial kept the R3-F2 chain but
+    executed the candidate — with its wheels — outside forged_lane, under the
+    forge project's own wall. It now runs the gate line only; the candidate
+    runs behind the wall alone (forge.wall_trial)."""
+    from skep.supervisor.forge import GATE_MARKER, seed_tool_source
+
+    (submitted,) = _promote_seed(config, "operator", monkeypatch)
+    assert GATE_MARKER in submitted["instructions"]
+    source = seed_tool_source("yt_transcript.py")
+    assert "get_transcript" in source and "get_transcript" not in submitted["instructions"]
+    assert "base64" not in submitted["instructions"]  # no encoded candidate either
 
 
 # --- T2 audit: every Queen dispatch face carries the chain; every resume keeps it

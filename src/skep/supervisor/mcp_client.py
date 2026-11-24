@@ -294,6 +294,11 @@ class MCPClient:
             schema = entry.get("inputSchema")
             annotations = entry.get("annotations")
             hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else None
+            if self._config.server_id.startswith(FORGED_SERVER_PREFIX):
+                # Phase 07 (I5, I6): a forged tool's readOnlyHint is untrusted
+                # metadata — worker-written code says what it likes about
+                # itself. Policy and operator grants alone make it in-turn.
+                hint = False
             tools.append(
                 MCPTool(
                     server_id=self._config.server_id,
@@ -400,13 +405,30 @@ def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
-def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None) -> MCPRunner:
+def runner_for_config(
+    config: MCPServerConfig, *, skep_home: Path | None = None, store: RunStore | None = None
+) -> MCPRunner:
     """A one-shot JSON-RPC runner per transport (tests monkeypatch this seam).
+
+    A forged server (``forge-*``) runs only from its bound plugin record in
+    ``store`` (Phase 07, ``forge.runtime_launch``), behind ``forged_lane``.
 
     ponytail: one-shot per call (initialize -> request -> done) — a persistent
     session pool is the upgrade path if call volume matters.
     """
     import json
+
+    if config.server_id.startswith(FORGED_SERVER_PREFIX):
+        # Review R1 (K8): the prefix is reserved BEFORE any transport is
+        # chosen — a forge-* id runs only from its bound record behind
+        # forged_lane, whatever transport or command its config names.
+        def run_forged(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            payload = _stdio_payload(method, params)
+            return _stdio_reply(
+                _run_forged_sandboxed(config, payload, skep_home, store).stdout.splitlines()
+            )
+
+        return run_forged
 
     if config.transport == "http":
         # MCP Streamable HTTP (2025-03-26): JSON-RPC POSTs to one endpoint;
@@ -509,47 +531,55 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
         raise MCPError(f"unsupported MCP transport {config.transport!r}")
 
     def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
-        requests = [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "skep", "version": "1"},  # the spec requires it
-                },
-            },
-            {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
-        ]
-        payload = "".join(json.dumps(r) + "\n" for r in requests)
-        if not config.server_id.startswith(FORGED_SERVER_PREFIX):
-            cwd = None
-            if config.scope == "browse":
-                # R6 review: Playwright writes a read's optional `filename`
-                # anywhere under its cwd, and a read takes no card — so a
-                # browse server never runs in serve's folder (the repo or the
-                # operator's home), only in one of its own.
-                if skep_home is None:
-                    raise MCPError(f"browse server {config.server_id!r} needs its skep home")
-                cwd = skep_home / "browser"
-                cwd.mkdir(parents=True, exist_ok=True)
-            lines = _stdio_exchange(list(config.command), payload, cwd=cwd)
-        else:
-            lines = _run_forged_sandboxed(config, payload, skep_home).stdout.splitlines()
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if message.get("id") == 2:
-                return _jsonrpc_result(message)
-        raise MCPError("no JSON-RPC response for the tool request")
+        payload = _stdio_payload(method, params)
+        cwd = None
+        if config.scope == "browse":
+            # R6 review: Playwright writes a read's optional `filename`
+            # anywhere under its cwd, and a read takes no card — so a
+            # browse server never runs in serve's folder (the repo or the
+            # operator's home), only in one of its own.
+            if skep_home is None:
+                raise MCPError(f"browse server {config.server_id!r} needs its skep home")
+            cwd = skep_home / "browser"
+            cwd.mkdir(parents=True, exist_ok=True)
+        return _stdio_reply(_stdio_exchange(list(config.command), payload, cwd=cwd))
 
     return run
+
+
+def _stdio_payload(method: str, params: Mapping[str, object]) -> str:
+    import json
+
+    requests = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "skep", "version": "1"},  # the spec requires it
+            },
+        },
+        {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
+    ]
+    return "".join(json.dumps(r) + "\n" for r in requests)
+
+
+def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
+    import json
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("id") == 2:
+            return _jsonrpc_result(message)
+    raise MCPError("no JSON-RPC response for the tool request")
 
 
 def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -> list[str]:
@@ -618,23 +648,14 @@ FORGED_SERVER_PREFIX = "forge-"
 
 
 def _run_forged_sandboxed(
-    config: MCPServerConfig, payload: str, skep_home: Path | None
+    config: MCPServerConfig, payload: str, skep_home: Path | None, store: RunStore | None
 ) -> subprocess.CompletedProcess[str]:
-    """Run one call of an activated forged tool inside the sandbox its trial
-    used: writes confined to a throwaway workspace, a scrubbed env (serve.env
-    keys never reach it), no backend → refuse (fail closed, I12). Network
-    stays open — an ACTIVE plugin may use it (plugin_can_run); the trial's
-    no-network shape is the gate before activation, not after.
-
-    ponytail: allow-all egress — a per-tool domain allowlist through the
-    FilteringProxy is the upgrade path once tools declare their hosts.
-    """
-    import os
-    import subprocess
-    import tempfile
-    from pathlib import Path
-
-    from . import sandbox
+    """One exchange with an ACTIVE forged tool (ES B115; Phase 07, 7.1): the
+    approved source, interpreter and hosts come from its bound plugin record
+    (``forge.runtime_launch``), re-derived every call — a restart reloads
+    the same binding, never a looser default — and it runs behind
+    ``forged_lane``. No backend, no home, no record → refuse (I12)."""
+    from . import forge, sandbox
 
     probe = sandbox.availability()
     if not probe.usable:
@@ -646,32 +667,163 @@ def _run_forged_sandboxed(
         # The profile hides THIS home's secrets; guessing it is how #58's fast
         # lane leaked (Mac finding A). No home, no run (fail closed, I12).
         raise MCPError(f"forged tool {config.server_id!r} needs its skep home to run sandboxed")
+    if store is None:
+        raise MCPError(
+            f"forged tool {config.server_id!r} runs only from its bound plugin record, and "
+            "no store was given to read it from"
+        )
+    try:
+        launch = forge.runtime_launch(store, skep_home, config.server_id)
+    except ValueError as exc:
+        raise MCPError(str(exc)) from exc
+    return forged_exchange(
+        launch.source, launch.python, payload, skep_home=skep_home, hosts=launch.hosts
+    )
+
+
+def forged_runner(
+    source: str, python: str, *, skep_home: Path, hosts: tuple[str, ...]
+) -> MCPRunner:
+    """An MCPRunner for a forged tool that is not (yet) active — the trial's
+    stages run the staged artifact through the very lane production uses."""
+
+    def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        proc = forged_exchange(
+            source, python, _stdio_payload(method, params), skep_home=skep_home, hosts=hosts
+        )
+        return _stdio_reply(proc.stdout.splitlines())
+
+    return run
+
+
+def forged_exchange(
+    source: str, python: str, payload: str, *, skep_home: Path, hosts: tuple[str, ...]
+) -> subprocess.CompletedProcess[str]:
+    """``source`` written into a throwaway workspace and run there: the
+    sandbox runs exactly the bytes the caller verified, never a host path a
+    swap could change after the check."""
+    import tempfile
+    from pathlib import Path
+
     with tempfile.TemporaryDirectory(prefix="skep-forged-") as tmp:
         workspace = Path(tmp)
-        profile = sandbox.write_profile(
-            workspace / "sandbox.profile",
-            workspace=workspace,
-            network=sandbox.ALLOW_ALL_NETWORK,
-            skep_home=skep_home,
-        )
+        tool = workspace / "tool.py"
+        tool.write_text(source, encoding="utf-8")
+        return forged_lane(
+            [python, str(tool)], skep_home=skep_home, hosts=hosts, workspace=workspace,
+            payload=payload,
+        )  # fmt: skip
+
+
+def forged_lane(
+    argv: list[str],
+    *,
+    skep_home: Path,
+    hosts: tuple[str, ...],
+    workspace: Path,
+    payload: str | None = None,
+    writable: tuple[Path, ...] = (),
+    timeout: float = MCP_CALL_DEADLINE_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    """Phase 07 (7.1): THE forged-tool wall — every runtime call, both trial
+    stages and the dependency install lane run here, so what was trialed is
+    what runs (I2). Reads: the ADR 0068 strict allowlist (system dirs,
+    detected toolchains incl. ``<skep home>/tools/.venvs``, the workspace),
+    never the operator's files. Writes: ``workspace`` (+ ``writable``). Env:
+    scrubbed (serve.env keys never reach it). Egress: deny-all when
+    ``hosts`` is empty, else pinned to them through a FilteringProxy (D1) —
+    never allow-all. No backend → refuse (fail closed, I12)."""
+    import contextlib
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from . import sandbox
+    from .netproxy import FilteringProxy, control_plane_ports
+    from .spawner import proxy_env
+
+    probe = sandbox.availability()
+    if not probe.usable:
+        raise MCPError(f"the forged-tool lane needs a usable sandbox backend ({probe.reason})")
+    with contextlib.ExitStack() as stack:
+        proxy = None
+        if hosts:
+            socket_path = None
+            if probe.backend == "bubblewrap":  # the netns reaches the proxy over a unix socket
+                from .dispatch import proxy_socket_root
+
+                socket_dir = tempfile.mkdtemp(prefix="skep-fx-", dir=proxy_socket_root())
+                stack.callback(shutil.rmtree, socket_dir, ignore_errors=True)
+                socket_path = str(Path(socket_dir) / "p.sock")
+            proxy = FilteringProxy(
+                hosts,
+                unix_socket_path=socket_path,
+                denied_loopback_ports=control_plane_ports(skep_home / "supervisor"),
+            ).start()
+            stack.callback(proxy.stop)
+        try:
+            profile = sandbox.write_profile(
+                workspace / "sandbox.profile",
+                workspace=workspace,
+                extra_writable=writable,
+                network=(
+                    sandbox.NetworkPolicy(allow=tuple(hosts)) if hosts else sandbox.DENY_ALL_NETWORK
+                ),
+                proxy_port=None if proxy is None else proxy.port,
+                unix_socket_path=None if proxy is None else proxy.unix_socket_path,
+                skep_home=skep_home,
+                read_allowlist=(),
+            )
+            wrapped = sandbox.wrap_command(argv, profile)
+        except (sandbox.SandboxUnavailableError, sandbox.SandboxAllowlistUnsupported) as exc:
+            raise MCPError(f"the forged-tool lane could not build its wall: {exc}") from exc
         env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
         env.update(HOME=str(workspace), **sandbox.in_wall_tmp_env(workspace))
-        return subprocess.run(
-            sandbox.wrap_command(list(config.command), profile),
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=workspace,
-            env=env,
-        )
+        if proxy is not None:
+            env.update(proxy_env(proxy.port))
+        try:
+            return subprocess.run(
+                wrapped,
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=workspace,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MCPError(f"the forged tool passed its {timeout:g}s deadline") from exc
 
 
 # ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
 # read uses no extra server process to learn its hint. Registering the id
 # again or removing it drops the entry; a serve restart starts empty; a
-# failed listing is never kept (the next read asks again).
-_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
+# failed listing is never kept (the next read asks again). Review R2 (L11): a
+# forged server's entry also keys on its bound record (``_binding``).
+_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[object, ...], tuple[MCPTool, ...]]] = {}
+
+
+def _binding(store: RunStore, config: MCPServerConfig) -> tuple[object, ...]:
+    """What a forged server's listing ran under — its record's state and
+    bound triple (+ venv seal); () for any other server."""
+    if not config.server_id.startswith(FORGED_SERVER_PREFIX):
+        return ()
+    from . import forge
+
+    record = next(
+        (p for p in forge.load_plugins(store).values() if p.server_id == config.server_id), None
+    )
+    if record is None:
+        return ("unbound",)
+    return (
+        record.state,
+        record.source_sha256,
+        record.lock_sha256,
+        record.approved_hosts,
+        record.venv_sha256,
+    )
 
 
 def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
@@ -683,15 +835,25 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
     """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
     spawns a server (the prompt's MCP index reads this every turn)."""
     hit = _LISTED.get((str(store.db_path), config.server_id))
-    return hit[1] if hit is not None and hit[0] == config else None
+    if hit is None or hit[0] != config or hit[1] != _binding(store, config):
+        return None  # L11: never a listing from another binding
+    return hit[2]
 
 
 def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
     """List ``config``'s tools now and keep them (list_mcp_tools, the startup
     warm). A failed listing raises and keeps nothing."""
-    runner = runner_for_config(config, skep_home=store.db_path.parent.parent)
+    binding = _binding(store, config)
+    runner = runner_for_config(config, skep_home=store.db_path.parent.parent, store=store)
     tools = tuple(MCPClient(config, runner=runner).list_tools())
-    _LISTED[(str(store.db_path), config.server_id)] = (config, tools)
+    if _binding(store, config) != binding:
+        # L11: a promotion (or suspend) published mid-listing — this answer
+        # describes a tool that no longer runs; the refresh after it wins.
+        raise MCPError(
+            f"{config.server_id!r} had its binding changed while it was listed, so that "
+            f"listing was discarded — list_mcp_tools {config.server_id} lists it again"
+        )
+    _LISTED[(str(store.db_path), config.server_id)] = (config, binding, tools)
     return tools
 
 
@@ -703,19 +865,15 @@ MCP_WARM_TIMEOUT_SECONDS = 3.0
 
 def warm_listed_tools(store: RunStore, timeout: float | None = None) -> list[str]:
     """Serve startup: list every registered server so turn 1's index names
-    their tools. Never a forged one (``forge-*``): its runtime egress is still
-    open (``_run_forged_sandboxed``), so it runs only when someone asks.
-    Servers list in parallel; returns once all are done or ``timeout`` has
-    passed (default MCP_WARM_TIMEOUT_SECONDS), with the ids cached by then.
-    A server that fails is left uncached."""
+    their tools — forged ones too since Phase 07 (7.1): their listing runs
+    behind ``forged_lane`` with the egress their card approved, exactly as
+    their calls do. Servers list in parallel; returns once all are done or
+    ``timeout`` has passed (default MCP_WARM_TIMEOUT_SECONDS), with the ids
+    cached by then. A server that fails is left uncached."""
     import threading
     import time
 
-    servers = {
-        server_id: config
-        for server_id, config in load_mcp_servers(store).items()
-        if not server_id.startswith(FORGED_SERVER_PREFIX)
-    }
+    servers = load_mcp_servers(store)
     warmed: set[str] = set()
 
     def warm(config: MCPServerConfig) -> None:

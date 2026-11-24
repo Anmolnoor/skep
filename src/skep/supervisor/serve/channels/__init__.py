@@ -184,6 +184,57 @@ def fold_fits_a_messenger(items: Sequence[str]) -> bool:
     )
 
 
+def forge_lines(forged: Mapping[str, Any]) -> list[str]:
+    """Review R1 (K6, I6, I8): everything a promote_tool confirm binds —
+    the full source and lock digests, the approved hosts, every wheel pin
+    and the source diff — as plain lines."""
+    if "error" in forged:
+        return [f"it cannot be installed as shown: {forged['error']}"]
+    lock, hosts = forged.get("lock_sha256"), forged.get("approved_hosts")
+    lines = [
+        f"source sha256: {forged.get('source_sha256')}",
+        f"lock sha256: {lock}" if lock else "lock: none (stdlib only, no venv)",
+        f"network: {_hosts(hosts) if hosts else 'none (deny-all)'}",
+    ]
+    locked = [str(pin) for pin in forged.get("locked") or ()]
+    if locked:
+        lines.append(f"{len(locked)} hash-pinned wheel(s):")
+        lines.extend(f"- {pin}" for pin in locked)
+    diff = str(forged.get("diff") or "")
+    lines.append("source diff:" if diff else "source diff: none (it installs the copy it runs)")
+    lines.extend(diff.splitlines())
+    return lines
+
+
+_CONTINUED = "(continued)"
+
+
+def forge_items(forged: Mapping[str, Any]) -> list[str] | None:
+    """Review R2 (L7): a promote_tool card's binding as a messenger shows it —
+    its lines whole and in order, packed into at most MESSENGER_FOLD_ITEMS
+    non-blank items of at most MESSENGER_ITEM_CHARS (one per Discord field
+    or Slack block: one per line was past both caps, blank lines empty
+    fields). None when it cannot be shown whole; the confirm check
+    (``chat.verdict_events``) asks this same question."""
+    lines = forge_lines(forged)
+    if sum(len(line) + 1 for line in lines) > MESSENGER_FOLD_CHARS:
+        return None
+    items: list[str] = []
+    for line in lines:
+        if len(line) + len(_CONTINUED) + 1 > MESSENGER_ITEM_CHARS:
+            return None
+        if items and len(items[-1]) + 1 + len(line) <= MESSENGER_ITEM_CHARS:
+            items[-1] += "\n" + line
+        else:  # the first line names the digest; a later item says it goes on
+            items.append(f"{_CONTINUED}\n{line}" if items else line)
+    return items if len(items) <= MESSENGER_FOLD_ITEMS else None
+
+
+def forge_fits_a_messenger(forged: Mapping[str, Any]) -> bool:
+    """Can a messenger show a promote_tool card's whole binding?"""
+    return forge_items(forged) is not None
+
+
 def card_notes(
     card: Mapping[str, Any] | None, *, messenger: bool = True, admin: bool = False
 ) -> tuple[str, ...]:
@@ -191,11 +242,17 @@ def card_notes(
     a HIGH card says it needs the web UI and why, then the taint line; a
     folded card lists every item it would approve — on a messenger only when
     it fits whole (``fold_fits_a_messenger``); the CLI (``messenger`` False)
-    always lists them."""
+    always lists them. Review R1 (K6): the risk line, and a promote_tool
+    card's whole binding (``forge_lines``) — on a messenger only when it
+    fits whole, else a pointer to the web UI or the CLI."""
     if not card:
         return ()
     notes: list[str] = []
-    if card.get("tier") == "high" and admin:  # v130-F5
+    forged = card.get("forge")
+    shown = forge_items(forged) if messenger and isinstance(forged, Mapping) else None
+    # L7: a binding no messenger can show is web-UI-only for the admin too
+    too_long = messenger and isinstance(forged, Mapping) and shown is None
+    if card.get("tier") == "high" and admin and not too_long:  # v130-F5
         notes.append(
             f"HIGH risk: {card.get('high') or 'see the web UI'}. Only this channel's admin "
             "can confirm it here."
@@ -209,6 +266,17 @@ def card_notes(
         notes.append(f"the path is a link: it resolves to {card['resolves_to']}")
     if card.get("taint"):
         notes.append(str(card["taint"]))
+    if card.get("risk"):
+        notes.append(f"risk: {card['risk']}")
+    if isinstance(forged, Mapping):
+        if too_long:
+            notes.append(
+                "this tool's source digest, lock, hosts and source diff are too long to show "
+                "here: open the skep web UI or the CLI (skep chat) to read them whole and "
+                "confirm there."
+            )
+        else:
+            notes.extend(shown if shown is not None else forge_lines(forged))
     manifest = card.get("manifest")
     if isinstance(manifest, Mapping):  # P4-2: what the dispatched run gets
         notes.extend(manifest_lines(manifest))
@@ -350,7 +418,10 @@ def render_confirm_card(
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
-    too_long = len(items) > 1 and not fold_fits_a_messenger(items)
+    forged = (card or {}).get("forge")
+    too_long = (len(items) > 1 and not fold_fits_a_messenger(items)) or (
+        isinstance(forged, Mapping) and not forge_fits_a_messenger(forged)
+    )
     web_ui_only = too_long or (
         not admin and (action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high)
     )

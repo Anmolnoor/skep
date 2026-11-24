@@ -138,8 +138,10 @@ readable. A denylist cannot keep up with every place a person keeps files.
    absolute, never `/`.
 5. **The doctor says which wall is up, and where.** On bubblewrap and
    Seatbelt the sandbox line reads `read confinement: strict-allowlist
-   available; N of M sandboxed projects strict; forged tools, MCP servers,
-   the fast lane and diagnose re-runs stay denylist-only`
+   available; N of M sandboxed projects strict; forged tools always strict;
+   the fast lane and diagnose re-runs stay denylist-only; MCP servers you
+   register run on the host, unsandboxed` (Phase 07 wording; see "Forged
+   tools join the wall")
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
    that cannot enforce it, `read confinement: denylist-only (reads stay
    open but the secret floor)`.
@@ -349,10 +351,12 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   not `unavailable`, as it does for a secret-floor file deleted in that
   window.
 
-- Forged tools (`mcp_client.py`), the fast lane (`serve/fastlane.py`), the
-  `diagnose` re-run (`serve/actions.py`) and MCP servers still get
-  denylist-only profiles. None of them is a project run with a policy to
-  read; each needs its own call on what it must read.
+- The fast lane (`serve/fastlane.py`) and the `diagnose` re-run
+  (`serve/actions.py`) still get denylist-only profiles. Neither is a
+  project run with a policy to read; each needs its own call on what it
+  must read. Forged tools moved to the strict wall in Phase 07 (below).
+  MCP servers the operator registers were never in a sandbox at all: they
+  run on the host as the operator, by design (I5 decides their calls).
 - The worker's prompt teaches the write and network walls, not the read
   wall. A read outside the wall fails as "No such file or directory", which
   the worker sees as a plain missing file (an I12 follow-up).
@@ -502,3 +506,88 @@ test (the same test runs under Seatbelt on a Mac) and `test_g10_never_reads_an_e
 - On Macs, new sandboxed projects read strictly from 2026-11-23. Existing
   ones keep denylist-only reads until the operator runs the doctor's
   command, the same rule as on Linux.
+
+## Forged tools join the wall (Phase 07, 2026-11-23)
+
+Work item 7.1 closed the deferral above for forged tools. Every exchange
+with a forged or seed tool — discovery (`tools/list`, the serve-start warm
+included) and each `tools/call` — and both stages of its promotion trial and
+its dependency install lane now run through one launch path,
+`mcp_client.forged_lane`, with `read_allowlist=()`: the system dirs, the
+detected toolchains (which include `<skep home>/tools/.venvs`, where a
+locked tool's venv lives, read-only) and the lane's own throwaway
+workspace. The tool's approved source is copied into that workspace, so not
+even its installed copy under `<skep home>/tools` is read in place. Egress
+replaced `ALLOW_ALL_NETWORK`: deny-all unless the tool's promotion card
+approved hosts (`ForgedPlugin.approved_hosts`), then pinned to those hosts
+through a FilteringProxy.
+
+What did not move, and why:
+
+- **The fast lane and `diagnose` re-runs** use their own launch paths
+  (`fastlane.py`, `actions.diagnose`), not the forged-tool lane. `diagnose`
+  re-runs a kept worktree and should take the run's recorded wall, as G10
+  does; the fast lane runs a throwaway script. Each is its own change.
+- **Operator-registered MCP servers** (`register_mcp_server`, `/browser`)
+  run on the host, unsandboxed, as the operator. Putting them in a wall is
+  a product decision (Playwright needs its browser, a mail server its
+  credentials), not a profile flag.
+- **The dispatched half of the trial** keeps the Queen's role chain (R3-F2)
+  and nothing else: since the Phase 07 review (R1) it runs a one-line gate
+  script, never the candidate. Every execution of a forged tool — its two
+  trial stages, its install lane, discovery and every call — runs behind
+  `forged_lane`, so "forged tools always strict" (the doctor line) holds
+  with no exception.
+
+The same review closed the gaps around that lane: a `forge-*` server id is
+reserved before any transport is chosen (an `http` config with that prefix
+runs the bound record through the lane, never a host-side request, and
+`register_mcp_server` refuses the prefix); a locked tool's venv is sealed
+(`forge.seal_venv`: every path, file digest and link target, with only
+`bin/python*` allowed to link out of the tree) when its hashed install
+finishes, the seal is recorded with the approval (`venv_sha256`) and
+checked before every reuse and every launch; and the promotion publishes
+its binding atomically — conditional on the plugin record it read before
+the trial, with the previous tool's bytes restored if the publish fails.
+
+### Review round R2 (Phase 07, 2026-11-23)
+
+- **The venv that launches is the venv that was sealed, as far as skep can
+  make it.** A promotion checks the staged venv against its seal *before*
+  it replaces anything, keeps the previous venv until the moved tree still
+  matches (and puts it back if it does not), and never leaves a staging
+  tree behind a failure. The committed tree is read-only (every write bit
+  off; the seal covers paths, bytes, exec bits and link targets, not write
+  bits, so this does not change it), and the forged-tool wall binds
+  `<skep home>/tools/.venvs` read-only on both backends (only the install
+  lane gets its own staging dir writable).
+- **The residual, stated (I8).** The seal is checked on the live tree and
+  the interpreter is then launched by path: a check-then-exec gap remains.
+  Closing it would mean copying the venv into each call's throwaway
+  workspace. Whoever can win that race can already write the skep home
+  (the tree is owned by the operator and read-only), and that writer can
+  also rewrite the plugin record, so the gap gives an attacker nothing
+  they did not already have. The read-only bits stop accidents and other
+  processes, not the home's owner.
+  ponytail: the seal is re-hashed on every launch; cache it per
+  (inode, mtime, size) if call volume on a large venv ever matters.
+- **Promotion and every record write share one lock.** `promote_tool`
+  reads the record it publishes against, and writes `draft → sandboxed`,
+  under `PROMOTION_LOCK`; `save_plugin` takes the same (reentrant) lock, so
+  a whole-list rewrite (a `forge_tool` record, say) never drops a publish
+  or a rollback, and a rollback confirmed before the promotion took the
+  lock wins.
+- **A forged registration leaves only through its lifecycle.**
+  `unregister_mcp_server` refuses a `forge-*` id (pointing to
+  `suspend_tool`), and `promote_tool` answers "already active" only while
+  the tool is registered.
+- **Discovery is keyed by the binding.** A forged server's cached
+  `tools/list` records the state, bound triple and venv seal it ran under;
+  a listing whose binding changed mid-listing is discarded, and a cached one
+  is served only while its binding still holds.
+- **The trial needs a real tool.** `self_test` and `smoke_test` are probes;
+  a server exposing only those fails the trial.
+- **A declared dependency is one exact pin.** `name==version`, no range
+  or marker. Every lock line for that project must pin that version with no
+  marker, so the card's pin is what installs. A resolver (`packaging`) is
+  not a skep dependency.

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>read_url drops the issue body · Issue #123 · example/project</title>
+<script>window.__app = {"bundle": "x"}</script></head>
+<body>
+<div class="cookie-consent-banner"><p>We use optional cookies to improve your experience. Manage cookies</p></div>
+<div class="js-header-wrapper">
+<header class="AppHeader" role="banner">
+  <a href="/" aria-label="Homepage">GitHub</a>
+  <nav aria-label="Global"><a href="/features">Product</a> <a href="/solutions">Solutions</a>
+  <a href="/pricing">Pricing</a> <a href="/login">Sign in</a> <a href="/signup">Sign up</a></nav>
+</header>
+</div>
+<main id="js-repo-pjax-container">
+  <div class="repo-header">
+    <strong><a href="/example/project">example/project</a></strong> Public
+    <nav aria-label="Repository"><a href="/example/project">Code</a> <a href="/example/project/issues">Issues 42</a>
+    <a href="/example/project/pulls">Pull requests 7</a> <a href="/example/project/actions">Actions</a>
+    <a href="/example/project/security">Security</a> <a href="/example/project/pulse">Insights</a></nav>
+  </div>
+  <div id="partial-discussion-header" class="gh-header">
+    <h1 class="gh-header-title"><bdi class="js-issue-title">read_url drops the issue body</bdi> <span>#123</span></h1>
+    <span class="State">Open</span> opened this issue on Nov 20, 2026 · 2 comments
+  </div>
+  <div class="js-discussion">
+    <div class="timeline-comment">
+      <h3 class="timeline-comment-header">octo-dev commented</h3>
+      <table><tr><td class="comment-body">
+        <p>When I read an issue page the excerpt is all menus and the body is cut off.</p>
+        <p>Steps to reproduce: call read_url on any issue URL.</p>
+      </td></tr></table>
+    </div>
+    <div class="timeline-comment">
+      <h3 class="timeline-comment-header">maintainer commented</h3>
+      <table><tr><td class="comment-body"><p>Confirmed. The fix should strip the global navigation.</p></td></tr></table>
+    </div>
+  </div>
+  <div class="Layout-sidebar"><h3>Labels</h3><span>bug</span></div>
+</main>
+<footer class="footer" role="contentinfo">
+  <p>Copyright 2026 GitHub, Inc.</p> <a href="/site/terms">Terms</a> <a href="/site/privacy">Privacy</a>
+  <a href="https://www.githubstatus.com/">Status</a> <a href="/contact">Contact</a>
+</footer>
+</body>
+</html>

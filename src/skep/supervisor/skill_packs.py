@@ -19,7 +19,7 @@ no runnable surface at all until activation writes the registry template, so
 the pre-active states are structurally inert — stronger than sandboxed.
 
 Activation snapshots the pack into ``<skep home>/skills/<pack_id>/`` (the
-forge ``install_source`` precedent: the source of truth stops being a
+forge ``publish_source`` precedent: the source of truth stops being a
 mutable external directory) and writes the template with the operator's
 typed grants (provenance ``"pack"``). Suspension removes the template:
 registered ⟺ active, no half-states (I8).

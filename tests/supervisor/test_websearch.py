@@ -709,3 +709,426 @@ def test_l22_a_non_public_read_url_is_refused_at_proposal_with_no_card(
         assert public is None or public.verdict != "deny"
     finally:
         store.close()
+
+
+# --- Phase 07 / 7.3: PDFs read as text; failures say what to do next ------------------------
+
+
+class _TypedWeb:
+    """Like _FakeWeb, but answers raw bytes with headers (content types, Retry-After)."""
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pages: dict[str, tuple[int, dict[str, str], bytes]],
+    ) -> None:
+        import httpx
+
+        def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+            status, headers, body = pages[request.url.raw_path.decode()]
+            return httpx.Response(status, headers=headers, content=body, request=request)
+
+        monkeypatch.setattr(httpx.Client, "send", send)
+
+
+def _read(path: str, **kwargs: Any) -> dict[str, Any]:
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    resolve = _resolver({"site.example": _PUBLIC_IP})
+    return fetch_url_text(f"https://site.example{path}", resolve=resolve, **kwargs)
+
+
+def test_read_url_reads_a_pdf_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from .pdf_builder import simple_pdf
+
+    pdf = simple_pdf(b"BT /F1 12 Tf 72 720 Td (Results) Tj 0 -14 Td (" + b"word " * 30 + b") Tj ET")
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/paper.pdf": (200, {"content-type": "application/pdf"}, pdf),
+            "/download": (200, {"content-type": "application/octet-stream"}, pdf),
+        },
+    )
+    read = _read("/paper.pdf", markdown=True)
+    assert read["text"].startswith("Results\nword word") and read["truncated"] is False
+    assert _read("/download")["text"].startswith("Results")  # the bytes say PDF
+    cut = _read("/paper.pdf", max_chars=20)
+    assert cut["truncated"] is True and "the page continues" in cut["text"]
+
+
+def test_read_url_errors_name_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve.websearch import WebReadError
+
+    from .pdf_builder import build
+
+    locked = build(
+        [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [] /Count 0 >>", b"<< >>"],
+        trailer_extra="/Encrypt 3 0 R ",
+    )
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/gone": (404, {}, b"not here"),
+            "/busy": (429, {"retry-after": "30"}, b""),
+            "/logo.png": (200, {"content-type": "image/png"}, b"\x89PNG\r\n"),
+            "/locked.pdf": (200, {"content-type": "application/pdf"}, locked),
+            "/huge.pdf": (200, {"content-type": "application/pdf"}, b"%PDF-1.7\n" + b"0" * 64),
+        },
+    )
+    for path, wanted in (
+        ("/gone", "HTTP 404 Not Found — nothing at this URL"),
+        ("/busy", "wait 30s before trying again"),
+        ("/logo.png", "content type image/png is not a page"),
+        ("/locked.pdf", "this PDF is encrypted"),
+    ):
+        with pytest.raises(WebReadError, match=wanted):
+            _read(path)
+    monkeypatch.setattr("skep.seeds.tools.doc_extract.MAX_BYTES", 32)
+    with pytest.raises(WebReadError, match="too big to read here"):
+        _read("/huge.pdf")
+    # not a ValueError: tools.py re-raises those as refusals; a failed read is a tool error
+    assert not issubclass(WebReadError, ValueError)
+
+
+def test_read_url_timeout_says_what_to_do(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    def slow(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", slow)
+    with pytest.raises(WebReadError, match=r"timed out reading site\.example"):
+        _read("/slow")
+
+
+def test_read_url_failure_reaches_the_queen_as_an_actionable_tool_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """tools.py formats the message unchanged: the hint survives the hop."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve import websearch
+    from skep.supervisor.serve.tools import execute_mutation
+
+    def gone(url: str, **_kw: object) -> dict[str, Any]:
+        raise websearch.WebReadError("HTTP 404 Not Found — nothing at this URL; check it")
+
+    monkeypatch.setattr(websearch, "fetch_url_text", gone)
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
+    try:
+        result = execute_mutation(
+            "read_url",
+            {"url": "https://docs.example/gone"},
+            store=store,
+            holder=_holder(tmp_path, store),
+            runner=cast(Any, None),
+            actor="tester",
+        )
+    finally:
+        store.close()
+    assert result["error"] == "read_url failed: HTTP 404 Not Found — nothing at this URL; check it"
+
+
+def test_search_web_missing_query_and_rate_limit_say_what_next() -> None:
+    from ddgs.exceptions import RatelimitException
+
+    with pytest.raises(WebSearchError, match="needs a non-empty query"):
+        search_web("   ", run=lambda query, limit: [])
+
+    def limited(query: str, limit: int) -> list[dict[str, Any]]:
+        raise RatelimitException("202 Ratelimit")
+
+    with pytest.raises(WebSearchError, match="rate-limiting skep — wait a minute"):
+        search_web("q", run=limited)
+    with pytest.raises(WebSearchError, match="try again in a minute"):
+        search_web("q", run=lambda query, limit: (_ for _ in ()).throw(RuntimeError("boom")))
+
+
+# --- review R1 (K3): the body is streamed, capped and deadlined ------------
+
+
+class _Endless:
+    """A response body that never ends; counts what was pulled from it."""
+
+    def __init__(self, chunk: bytes = b"x" * 65536, delay: float = 0.0) -> None:
+        self.chunk, self.delay, self.pulled, self.closed = chunk, delay, 0, False
+
+    def __iter__(self) -> Any:
+        import time
+
+        while True:
+            if self.pulled > 64 << 20:  # a buffering reader would hang here
+                raise AssertionError("read far past every cap")
+            if self.delay:
+                time.sleep(self.delay)
+            self.pulled += len(self.chunk)
+            yield self.chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _streamed(monkeypatch: pytest.MonkeyPatch, pages: dict[str, Any]) -> list[bool]:
+    """Pages answer (status, headers, body stream); records each send's stream flag."""
+    import httpx
+
+    flags: list[bool] = []
+
+    class Body(httpx.SyncByteStream):
+        def __init__(self, inner: _Endless) -> None:
+            self.inner = inner
+
+        def __iter__(self) -> Any:
+            return iter(self.inner)
+
+        def close(self) -> None:
+            self.inner.close()
+
+    def send(_client: object, request: httpx.Request, **kw: Any) -> httpx.Response:
+        flags.append(bool(kw.get("stream")))
+        status, headers, body = pages[request.url.raw_path.decode()]
+        return httpx.Response(status, headers=headers, stream=Body(body), request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    return flags
+
+
+def test_a_huge_body_is_read_only_to_its_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.seeds.tools import doc_extract
+    from skep.supervisor.serve.websearch import WebReadError
+
+    page, pdf = _Endless(b"<p>" + b"a" * 65533), _Endless(b"%PDF-1.7\n" + b"0" * 65527)
+    flags = _streamed(
+        monkeypatch,
+        {
+            "/page": (200, {"content-type": "text/html"}, page),
+            "/doc.pdf": (200, {"content-type": "application/pdf"}, pdf),
+        },
+    )
+    read = _read("/page", max_bytes=1000)
+    assert read["truncated"] is True and page.pulled <= 1000 + 65536 and page.closed
+    with pytest.raises(WebReadError, match="too big to read here"):
+        _read("/doc.pdf")
+    assert pdf.pulled <= doc_extract.MAX_BYTES + 2 * 65536 and pdf.closed
+    assert flags and all(flags)  # every send streamed: nothing was buffered first
+
+
+def test_redirect_and_error_bodies_are_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve.websearch import WebReadError
+
+    hop, failing, final = _Endless(), _Endless(), _Endless(b"<p>done</p>")
+    _streamed(
+        monkeypatch,
+        {
+            "/moved": (302, {"location": "/final"}, hop),
+            "/final": (200, {"content-type": "text/html"}, final),
+            "/broken": (500, {}, failing),
+        },
+    )
+    assert _read("/moved", max_bytes=100)["truncated"] is True
+    assert hop.pulled == 0 and hop.closed
+    with pytest.raises(WebReadError, match="HTTP 500"):
+        _read("/broken")
+    assert failing.pulled == 0 and failing.closed
+
+
+def test_a_trickling_body_stops_at_the_read_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    slow = _Endless(b"a", delay=0.05)
+    _streamed(monkeypatch, {"/slow": (200, {"content-type": "text/plain"}, slow)})
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        _read("/slow")
+    assert slow.closed
+
+
+def test_a_text_body_under_a_wrong_type_is_still_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K13 (O S7): javascript, yaml and octet-stream text read before 7.3;
+    the bytes are sniffed before a type is refused."""
+    from skep.supervisor.serve.websearch import WebReadError
+
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/app.js": (200, {"content-type": "application/javascript"}, b"let x = 1;"),
+            "/conf.yaml": (200, {"content-type": "application/yaml"}, b"key: value\n"),
+            "/notes": (200, {"content-type": "application/octet-stream"}, b"plain notes"),
+            "/logo.png": (200, {"content-type": "image/png"}, b"\x89PNG\r\n\x1a\n\x00\x00"),
+        },
+    )
+    assert _read("/app.js")["text"] == "let x = 1;"
+    assert _read("/conf.yaml")["text"] == "key: value"
+    assert _read("/notes")["text"] == "plain notes"
+    with pytest.raises(WebReadError, match="image/png is not a page"):
+        _read("/logo.png")
+
+
+# --- review R2 (L3, L4): bounded decode, one deadline, the PDF tail kept ----
+
+
+class _Chunks:
+    """A finite body served in fixed-size chunks; records whether it closed."""
+
+    def __init__(self, data: bytes, size: int) -> None:
+        self.data, self.size, self.closed = data, size, False
+
+    def __iter__(self) -> Any:
+        for start in range(0, len(self.data), self.size):
+            yield self.data[start : start + self.size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_gzip_body_is_never_inflated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L3: httpx inflated each raw chunk whole before the cap — one 64 KiB
+    gzip chunk became 64 MiB. read_url asks for identity and refuses a
+    compressed body instead of inflating it."""
+    import gzip
+
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    bomb = _Chunks(gzip.compress(b"\0" * (64 << 20)), 1 << 20)
+    seen: list[str] = []
+    _streamed(
+        monkeypatch,
+        {"/bomb": (200, {"content-type": "text/html", "content-encoding": "gzip"}, bomb)},
+    )
+    patched = httpx.Client.send
+
+    def spy(client: Any, request: httpx.Request, **kw: Any) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding", ""))
+        return patched(client, request, **kw)
+
+    monkeypatch.setattr(httpx.Client, "send", spy)
+    with pytest.raises(WebReadError, match="gzip-compressed body"):
+        _read("/bomb")
+    assert seen == ["identity"] and bomb.closed
+
+
+def test_one_deadline_covers_a_slow_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: the deadline was checked only between body chunks — a slow DNS
+    answer held read_url far past it."""
+    import socket
+    import time
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    _FakeWeb(monkeypatch, {})
+
+    def slow(host: str, port: int, **_kw: object) -> list[Any]:
+        time.sleep(3)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]  # never dialled
+
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        websearch.fetch_url_text("https://slow.example/", resolve=slow)
+    assert time.monotonic() - start < 2.5
+
+
+def test_one_deadline_covers_every_redirect_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: each hop got its own connect and read timeouts — five slow hops
+    could run five times the budget."""
+    import time
+
+    import httpx
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.5)
+    timeouts: list[float] = []
+
+    def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        time.sleep(0.2)
+        return httpx.Response(302, headers={"location": "/again"}, request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.5s"):
+        _read("/start")
+    assert time.monotonic() - start < 1.6
+    assert len(timeouts) <= 3 and all(t <= 0.5 for t in timeouts)
+    assert timeouts == sorted(timeouts, reverse=True)  # each hop gets what is left
+
+
+def test_a_blocked_body_read_cannot_hold_read_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: a next(chunks) that blocks was outside every check."""
+    import time
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    stuck = _Endless(b"a", delay=3.0)
+    _streamed(monkeypatch, {"/stuck": (200, {"content-type": "text/plain"}, stuck)})
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        _read("/stuck")
+    assert time.monotonic() - start < 2.5
+
+
+def test_a_transport_error_mid_body_names_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: httpx.ReadTimeout or a dropped connection mid-body escaped raw."""
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    class Broken(_Endless):
+        def __iter__(self) -> Any:
+            yield b"<p>start"
+            raise httpx.ReadTimeout("timed out")
+
+    _streamed(monkeypatch, {"/broken": (200, {"content-type": "text/html"}, Broken())})
+    with pytest.raises(WebReadError, match=r"site\.example failed mid-body \(ReadTimeout\)"):
+        _read("/broken")
+
+
+def test_a_pdf_read_past_the_page_cap_keeps_every_byte(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: the PDF continuation dropped the first chunk's bytes beyond
+    max_bytes + 1 — a valid PDF arrived with a hole in it."""
+    from .pdf_builder import simple_pdf
+
+    pdf = simple_pdf(*[b"BT /F1 12 Tf 72 720 Td (page %d) Tj ET" % n for n in range(40)])
+    assert len(pdf) > 3 * 1000
+    body = _Chunks(pdf, 1500)
+    _streamed(monkeypatch, {"/doc.pdf": (200, {"content-type": "application/pdf"}, body)})
+    text = _read("/doc.pdf", max_bytes=1000)["text"]
+    assert text == "\n\n".join(f"page {n}" for n in range(40))
+
+
+def test_no_address_is_dialled_after_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 (Sol R3-2, Opus R3-2): the per-address timeout came from the hop's
+    first reading of the clock — a slow dead first address let the second be
+    dialled after the caller had already been told the read timed out."""
+    import socket
+    import time
+
+    import httpx
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+
+    def two(host: str, port: int, **_kw: object) -> list[Any]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
+            for ip in (_PUBLIC_IP, "93.184.216.35")
+        ]
+
+    sent: list[str] = []
+
+    def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        sent.append(str(request.url))
+        time.sleep(0.4)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    with pytest.raises((websearch.WebReadError, httpx.ConnectError)):
+        websearch.fetch_url_text("https://two.example/", resolve=two)
+    time.sleep(0.6)  # the abandoned reader has had time to try the next address
+    assert len(sent) == 1

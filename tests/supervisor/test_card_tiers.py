@@ -706,3 +706,97 @@ def test_an_unknown_tilde_user_does_not_crash_the_floor() -> None:
 
     assert shell_secret_floor_reason("cat ~nosuchuser0/x; cd ~nosuchuser0", cwd="/tmp") is None
     assert high_tier("run_shell", {"command": "ls ~nosuchuser0", "cwd": "/tmp"}) is None
+
+
+def test_no_channel_press_confirms_a_tool_binding_it_could_not_show(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (K6, I6): even the channel's admin — who may confirm HIGH
+    cards — cannot confirm a promote_tool card whose binding (digest, lock,
+    hosts, diff) a messenger could not show whole; one that fits, they can."""
+    from skep.supervisor.serve import channels
+
+    ran: list[str] = []
+    monkeypatch.setattr(chat_module, "execute_mutation", lambda name, *_, **__: ran.append(name))
+    monkeypatch.setattr(channels, "channel_admin_actor", lambda *_: True)
+    chat_id = rig.store.create_chat(title="t", model=None).chat_id
+    forged = {"source_sha256": "a" * 64, "lock_sha256": "", "approved_hosts": [], "locked": []}
+    high = {"tier": "high", "high": "it installs a forged tool"}
+    long_card = {**high, "forge": {**forged, "diff": "+x = 1\n" * 600}}
+    action_id = rig.store.add_chat_action(
+        chat_id, tool="promote_tool", args={"plugin_id": "p"}, card=long_card
+    )
+    with pytest.raises(HTTPException) as refused:
+        _confirm(rig, chat_id, action_id, actor="channel:telegram:1:admin:1")
+    assert refused.value.status_code == 403 and "web UI or the CLI" in str(refused.value.detail)
+    assert ran == []
+    short_card = {**high, "forge": {**forged, "diff": "+x = 1\n"}}
+    fits = rig.store.add_chat_action(
+        chat_id, tool="promote_tool", args={"plugin_id": "p"}, card=short_card
+    )
+    rig.ollama.script_reply("done")
+    _confirm(rig, chat_id, fits, actor="channel:telegram:1:admin:1")
+    assert ran == ["promote_tool"]
+
+
+# --- review R2 (L7): a promote_tool card within each messenger's limits ------
+
+_FORGED: dict[str, Any] = {
+    "source_sha256": "a" * 64,
+    "lock_sha256": "",
+    "approved_hosts": [],
+    "locked": [],
+}
+# 40 diff lines, blank ones among them: one field per line was 46 Discord
+# fields (cap 25), empty values, and more than 50 Slack blocks.
+_DIFF = "".join(f"+line {n}\n" + ("\n" if n % 5 == 0 else "") for n in range(40))
+_PROMOTE: dict[str, Any] = {
+    "tier": "high",
+    "high": "it installs a forged tool",
+    "risk": "runs code",
+    "forge": {**_FORGED, "diff": _DIFF},
+}
+_ADMIN = ChannelConfig(
+    channel="x", enabled=True, channel_can_confirm=True, allowed_users=("u",), admin_users=("u",)
+)
+
+
+def test_a_promote_tool_card_fits_discord_whole() -> None:
+    from skep.supervisor.serve.channels import forge_fits_a_messenger
+
+    assert forge_fits_a_messenger(_PROMOTE["forge"])  # it fits — so it must render within limits
+    embed = discord_adapter.confirmation_embed("plugin", (), _ADMIN, "http://ui/", _PROMOTE)
+    fields = embed["embeds"][0]["fields"]  # type: ignore[index]
+    assert len(fields) <= 25
+    assert all(0 < len(field["value"].strip()) <= 1024 for field in fields)
+    shown = "\n".join(field["value"] for field in fields)
+    assert all(f"+line {n}" in shown for n in range(40)) and "a" * 64 in shown
+
+
+def test_a_promote_tool_card_fits_slack_whole() -> None:
+    blocks = slack_adapter.confirmation_blocks("plugin", (), _ADMIN, _PROMOTE)
+    texts = [block["text"]["text"] for block in blocks if "text" in block]  # type: ignore[index]
+    assert len(blocks) <= 50
+    assert all(0 < len(text.strip()) <= 3000 for text in texts)
+    assert all(f"+line {n}" in "\n".join(texts) for n in range(40))
+
+
+def test_a_promote_tool_card_fits_telegram_whole() -> None:
+    text, _keyboard = telegram_adapter.confirmation_card(
+        "plugin", (), _ADMIN, "http://ui/", _PROMOTE
+    )
+    assert len(text) <= 4096 and all(f"+line {n}" in text for n in range(40))
+
+
+def test_a_binding_too_long_for_a_messenger_never_says_the_admin_can_confirm_it() -> None:
+    """L7: a too-long card is web-UI-only for everyone, so the admin line lied."""
+    from skep.supervisor.serve.channels import forge_fits_a_messenger
+
+    long_card = {**_PROMOTE, "forge": {**_FORGED, "diff": "+x = 1\n" * 600}}
+    assert not forge_fits_a_messenger(long_card["forge"])
+    view = render_confirm_card("plugin", (), long_card, admin=True)
+    assert view.web_ui_only and view.too_long
+    assert not any("admin can confirm" in note for note in view.notes)
+    assert any("web UI or the CLI" in note for note in view.notes)
+    one_line = {**_FORGED, "diff": "+" + "x" * 1500 + "\n"}  # one line past a Discord field
+    assert not forge_fits_a_messenger(one_line)

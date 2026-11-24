@@ -4,8 +4,9 @@
 now renders the ES-F160 discovery cache (`mcp_client._LISTED`): tool names,
 '*' on each call that is not a read. Rendering never spawns a server (zero
 per-turn subprocesses); only list_mcp_tools and the startup warm fill the
-cache, and the warm never touches a forged server (`forge-*`) — those stay
-cache-only until Phase 07.1 closes their egress (I9).
+cache. Phase 06 kept forged servers (`forge-*`) out of the warm while their
+runtime egress was open; Phase 07.1 walled every forged exchange, so the
+warm lists them too (test_forge_runtime_confinement).
 """
 
 from __future__ import annotations
@@ -107,7 +108,7 @@ def test_register_change_and_unregister_invalidate_and_list_refreshes(
         store.close()
 
 
-def test_the_startup_warm_lists_plain_servers_and_never_a_forged_one(
+def test_the_startup_warm_lists_plain_and_forged_servers(
     config: SupervisorConfig, spawned: list[str]
 ) -> None:
     forged = f"{FORGED_SERVER_PREFIX}weather"
@@ -117,21 +118,23 @@ def test_the_startup_warm_lists_plain_servers_and_never_a_forged_one(
         save_mcp_server(
             store, MCPServerConfig(server_id=forged, transport="stdio", command=("python3", "t.py"))
         )
-        assert warm_listed_tools(store) == ["mail"]
-        assert spawned == ["mail"]
+        assert warm_listed_tools(store) == ["mail", forged]
+        assert spawned == ["mail", forged]
         lines = mcp_index_block(store).splitlines()
         assert "- mail (stdio): list_messages, read_message, search_mail, send_mail*" in lines
-        assert f"- {forged} (stdio)" in lines  # cache-only: listed once someone asks
+        # Phase 07: a forged tool's readOnlyHint is untrusted — every call asks.
+        assert f"- {forged} (stdio): list_messages*, read_message*, search_mail*, send_mail*" in (
+            lines
+        )
     finally:
         store.close()
 
 
-def test_serve_startup_warms_in_the_background_and_skips_forged(
+def test_serve_startup_warms_in_the_background_forged_included(
     config: SupervisorConfig, spawned: list[str]
 ) -> None:
     store = RunStore(config.db_path)
     try:
-        # Forged first: a warm that spawned it would record it before mail.
         save_mcp_server(
             store,
             MCPServerConfig(
@@ -143,9 +146,9 @@ def test_serve_startup_warms_in_the_background_and_skips_forged(
         store.close()
     with TestClient(create_app(config, start_ticker=False)):
         deadline = time.monotonic() + 10
-        while not spawned and time.monotonic() < deadline:
+        while len(spawned) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
-    assert spawned == ["mail"]
+    assert sorted(spawned) == [f"{FORGED_SERVER_PREFIX}x", "mail"]  # listed in parallel
 
 
 def test_a_failing_server_is_skipped_by_the_warm(
