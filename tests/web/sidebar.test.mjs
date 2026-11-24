@@ -153,18 +153,19 @@ test("an open Inbox redraws when what it counts changes, and only then", async (
   assert.equal(routed, 1);
 });
 
-test("Inbox view: each item links to where it is resolved, and carries no buttons", async () => {
+test("Inbox view: the review queue comes first, each gate opening its review; cards link to their thread", async () => {
   const { app } = withSidebar("#/inbox");
   app.header = () => {};
-  app.api = async () => fullInbox;
+  // Phase 10 10.1: gates come from /api/approvals (the full record, mirrored ones too).
+  app.api = async (method, path) => (path === "/api/approvals" ? { approvals: fullInbox.approvals } : fullInbox);
   const main = app.el("main");
   await app.viewInbox(main);
   const items = main.querySelectorAll(".inbox-item");
-  assert.deepEqual(items.map(i => i.getAttribute("href")), ["#/chat/c1", "#/approvals"]);
-  assert.deepEqual(texts(main, "inbox-title"), ["dispatch_run", "apply_patch · run abcdef12"]);
-  assert.match(items[0].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
-  assert.match(items[1].querySelector("small").textContent, /^land it · /);
-  assert.equal(main.querySelectorAll("button").length, 0); // read-only (I6)
+  assert.deepEqual(items.map(i => i.getAttribute("href")), ["#/review/r1", "#/chat/c1"]);
+  assert.deepEqual(texts(main, "inbox-title"), ["apply_patch · run abcdef12", "dispatch_run"]);
+  assert.match(items[0].querySelector("small").textContent, /^land it · /);
+  assert.match(items[1].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
+  assert.equal(main.querySelectorAll("button").length, 0); // read-only (I6): the verdict is on the review page
 });
 
 test("Inbox view: an untitled thread reads as the sidebar names it", async () => {

@@ -5,7 +5,7 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
    its functions runs, app.js has finished evaluating. */
-import { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, shortTitle } from "./app.js";
+import { api, chatTitle, el, iconButton, route, shortTitle } from "./app.js";
 
 // v44-F3: channel groups the operator opened; survives re-renders.
 // ponytail: in-memory; localStorage if reload-reset annoys
@@ -176,31 +176,6 @@ export async function refreshSidebar() {
   const key = JSON.stringify(inbox);
   if (lastInbox !== null && key !== lastInbox && location.hash === "#/inbox") route();
   lastInbox = key;
-}
-
-// ---------- the Inbox (H1, hive-rooms C9) ----------
-// Read-only by construction: every item links to where it is resolved — a
-// card in its thread, a gate on the Approvals page. No verb lives here (I6).
-
-const SOURCE_TEXT = { assistant: "proposed by the Queen", operator: "your command", gate: "a run's gate" };
-
-const inboxItem = (href, title, detail) => el("a", { class: "inbox-item searchable", href },
-  el("span", { class: "thread-dot wait", "aria-hidden": "true" }),
-  el("span", { class: "inbox-title mono" }, title),
-  el("small", {}, detail));
-
-export async function viewInbox(main) {
-  header(main, "Inbox", "Everything waiting on you, across threads. Each one is resolved where it lives.");
-  const { cards, approvals } = await api("GET", "/api/inbox");
-  if (!cards.length && !approvals.length) {
-    main.append(el("p", { class: "note" }, "Nothing is waiting on you."));
-    return;
-  }
-  main.append(el("div", { class: "inbox-list" },
-    cards.map(card => inboxItem(`#/chat/${card.chat_id}`, card.tool,
-      `${shortTitle(chatTitle({ title: card.chat_title }))} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
-    approvals.map(gate => inboxItem("#/approvals", `${gate.action} · run ${shortTaskId(gate.task_id)}`,
-      `${gate.reason || "approval"} · ${relativeTime(gate.requested_at)}`))));
 }
 
 export function installSidebar() {

@@ -4,7 +4,8 @@
 // plain function/const declarations plus three listener registrations.
 // H1: the modules app.js imports (sidebar.js, room.js) load into the same
 // context with their import/export lines blanked, so both sides of the import
-// cycle resolve to the one set of globals a test can stub.
+// cycle resolve to the one set of globals a test can stub. Phase 10 10.1: and
+// what those import in turn (js/, js/pages/) — every module once, deps first.
 // ponytail: the fake DOM covers what app.js's render paths touch (el(),
 // append, textContent, listeners, a class/tag querySelectorAll); grow it when
 // a test reaches for more.
@@ -14,6 +15,7 @@ import vm from "node:vm";
 const STATIC = new URL("../../src/skep/supervisor/serve/static/", import.meta.url);
 // Blank, never delete, so line numbers in a stack trace stay true.
 const unmodule = text => text.replace(/^import .*$/gm, "").replace(/^export /gm, "");
+const IMPORT = /^import .* from "(\.{1,2}\/[\w./-]+\.js)";$/gm;
 
 class FakeNode {
   constructor(tag) {
@@ -113,11 +115,19 @@ export function loadApp() {
   context.window = context;
   // Imported modules first, as the browser evaluates them: app.js's top level
   // (the routes table) names their functions; they name app.js's only in calls.
-  for (const [, name] of source.matchAll(/^import .* from "\.\/([\w-]+\.js)";$/gm)) {
-    vm.runInContext(unmodule(readFileSync(new URL(name, STATIC), "utf8")), context, { filename: name });
-  }
+  // A module importing app.js back (the cycle) stops there — app.js runs last.
+  const loaded = new Set([new URL("app.js", STATIC).href]);
+  const load = (url) => {
+    if (loaded.has(url.href)) return;
+    loaded.add(url.href);
+    const text = readFileSync(url, "utf8");
+    for (const [, spec] of text.matchAll(IMPORT)) load(new URL(spec, url));
+    vm.runInContext(unmodule(text), context, { filename: url.href.slice(STATIC.href.length) });
+  };
+  for (const [, spec] of source.matchAll(IMPORT)) load(new URL(spec, STATIC));
   vm.runInContext(unmodule(source.slice(0, cut)), context, { filename: "app.js" });
   // Every network call fails loudly unless a test stubs the route it expects.
+  context.apiImpl = context.api; // the real fetch path (js/api.js), for tests that drive it
   context.api = async (method, path) => { throw new Error(`unstubbed api ${method} ${path}`); };
   context.flashes = [];
   context.flash = (kind, text) => context.flashes.push([kind, text]);

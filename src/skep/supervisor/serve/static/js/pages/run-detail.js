@@ -1,0 +1,207 @@
+/* Phase 10 10.1: the review flow and the forensics panel.
+   #/review/<review_id> walks one pending gate: what it asks → the run's diff,
+   file by file → its forensics (G10 + V1 verdict, the ledger, the policy
+   trail) → the verdict. The verdict is the same approve/deny the Approvals
+   page and run detail give (no new verb); keys only move focus, so no single
+   keypress lands a patch (I7: the operator's explicit press is the decision).
+
+   Run detail itself still lives in app.js (other suites pin its text there);
+   it embeds forensicsSection() from here.
+
+   app.js boots on load, so its helpers come in through the import cycle —
+   safe because this module only declares at top level. */
+import { api } from "../api.js";
+import { el, notFound } from "../dom.js";
+import { renderDiff } from "../diff.js";
+import { reviewQueue } from "./inbox.js";
+import { copyText, flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
+
+const COMMANDS_SOURCE = {
+  project: "the project's pinned verify_command",
+  worker: "the worker's own verify step (no project pin)",
+};
+
+const countsLine = c => (c
+  ? `${c.total_executed} executed (${c.passed} passed, ${c.failed} failed, ${c.errors} errors)`
+  : "not readable");
+
+// The G10 box: what the supervisor re-ran, whose command it was (I2), what
+// it returned, and V1's verdict on the test counts.
+function g10Box(g10) {
+  if (!g10) return el("p", { class: "note" }, "G10: no re-verification recorded for this run.");
+  const tampered = String(g10.v1 || "").startsWith("tampered");
+  const rows = [
+    ["re-verify (G10)", `${g10.outcome} — ${g10.confirmed ? "confirmed" : "NOT CONFIRMED, do not trust"}`],
+    ["ran", (g10.commands || []).join(" && ") || "-"],
+    ["command from", COMMANDS_SOURCE[g10.commands_source] || g10.commands_source],
+    ["exit codes", (g10.exit_codes || []).join(", ") || "-"],
+  ];
+  const counts = g10.test_counts;
+  if (counts?.baseline || counts?.patched) {
+    rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
+  }
+  rows.push(["V1 (test tamper)", g10.v1]);
+  if (g10.detail) rows.push(["detail", g10.detail]);
+  return el("div", {},
+    tampered ? el("p", { class: "banner bad", role: "alert" },
+      `V1 TEST TAMPER — ${g10.v1}. The patch changed what the tests count; read the diff before landing.`) : null,
+    el("dl", { class: "kv" }, rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, String(v))])));
+}
+
+function ledgerLine(ledger) {
+  if (!ledger) return null;
+  if (ledger.break) {
+    return el("p", { class: "banner bad", role: "alert" },
+      `Ledger BROKEN at ${ledger.break.file}:${ledger.break.line} — ${ledger.break.reason}`);
+  }
+  const head = ledger.head_hash
+    ? `chain head seq ${ledger.head_seq}, sha256 ${String(ledger.head_hash).slice(0, 16)}… — valid`
+    : "no chained rows yet — valid";
+  return el("p", { class: "note mono" }, `Ledger: ${head}`,
+    ledger.unchained_rows ? ` · ${ledger.unchained_rows} older rows are not covered by the chain` : "");
+}
+
+// The whole report, as read-only panels. report = GET /api/runs/<id>/forensics.
+export function forensicsPanel(report) {
+  const { identity = {}, outcome = {} } = report;
+  const taint = identity.taint && identity.taint !== "unknown"; // forensics' "none recorded"
+  const trail = report.policy_trail || [];
+  const log = report.worker?.log_tail || [];
+  return el("div", { class: "forensics" },
+    taint ? el("p", { class: "banner warn", role: "alert" },
+      `TAINTED — this run's chat carried tainted content (${identity.taint}).`) : null,
+    (outcome.alarms || []).map(alarm => el("p", { class: "banner bad", role: "alert" }, `ALARM ${alarm}`)),
+    el("h3", {}, "G10 & V1"),
+    g10Box(outcome.g10),
+    el("h3", {}, "Ledger"),
+    ledgerLine(report.ledger),
+    el("h3", {}, "Identity"),
+    el("dl", { class: "kv" }, Object.entries(identity).flatMap(([k, v]) =>
+      [el("dt", {}, k.replace(/_/g, " ")), el("dd", { class: "mono" }, String(v))])),
+    el("details", {},
+      el("summary", {}, `Policy trail (blame) · ${trail.length} decisions · chain ${(report.resume_chain || []).map(shortTaskId).join(" → ")}`),
+      trail.length
+        ? el("pre", { class: "log" }, trail.map(row => el("div", { class: "event" },
+          `${row.at || "?"}  ${row.actor || "?"}  `,
+          el("span", { class: "etype" }, row.verdict || row.source || "?"),
+          `  ${row.scope || "?"}.${row.action || "?"} ${row.value ?? ""}  decided_by=${row.decided_by || "?"}`)))
+        : el("p", { class: "note" }, "No policy decisions recorded.")),
+    el("details", {},
+      el("summary", {}, `Worker log tail · ${log.length} lines`),
+      log.length ? el("pre", { class: "log" }, log.join("\n")) : el("p", { class: "note" }, "No worker log.")),
+    el("p", { class: "actions" },
+      el("button", {
+        type: "button", class: "ghost",
+        onclick: () => { copyText(`skep proof export ${report.task_id}`); flash("ok", "receipt command copied"); },
+      }, "Copy receipt command"),
+      el("span", { class: "note mono" }, ` skep proof export ${report.task_id}`)));
+}
+
+// Run detail's panel: fetched the first time it is opened — verifying the
+// ledger reads the whole decision log, so it is not paid on every page view.
+export function forensicsSection(taskId) {
+  const body = el("div", {}, el("p", { class: "note" }, "Loading…"));
+  let loaded = false;
+  return el("details", {
+    class: "card forensics-section",
+    ontoggle: async (event) => {
+      if (!event.target.open || loaded) return;
+      loaded = true;
+      try { body.replaceChildren(forensicsPanel(await api("GET", `/api/runs/${taskId}/forensics`))); }
+      catch (e) { body.replaceChildren(el("p", { class: "error" }, `forensics unavailable: ${e.message}`)); }
+    },
+  }, el("summary", {}, "Forensics & blame"), body);
+}
+
+// The keys the review page answers. They move focus; Enter/Space presses.
+const REVIEW_KEYS = "j / k next / previous file · f forensics · a approve · d deny · i back to the Inbox";
+
+export async function viewReview(main, reviewId) {
+  const { approvals } = await api("GET", "/api/approvals");
+  const queue = reviewQueue(approvals);
+  const at = queue.findIndex(gate => gate.review_id === reviewId);
+  if (at < 0) {
+    header(main, "Not found");
+    main.append(notFound(`No pending approval ${reviewId} — it may already have been resolved.`));
+    return;
+  }
+  const gate = queue[at];
+  const next = queue[at + 1] || queue[at - 1] || null;
+  const taskId = gate.task_id;
+  header(main, `Review · run ${shortTaskId(taskId)}`, gate.reason || gate.action);
+  // A missing run is the page's 404; forensics or a diff that fails is said in place.
+  const [detail, report] = await Promise.all([
+    api("GET", `/api/runs/${taskId}`),
+    api("GET", `/api/runs/${taskId}/forensics`).catch(e => ({ error: e.message })),
+  ]);
+  let diff = null;
+  let diffError = null;
+  if ((detail.artifacts || []).some(a => a.kind === "patch")) {
+    try { diff = renderDiff(await api("GET", `/api/runs/${taskId}/diff`)); }
+    catch (e) { diffError = `the patch could not be read: ${e.message}`; }
+  }
+
+  const root = el("div", { class: "review", tabindex: "-1", "aria-label": "review this approval" });
+  const commands = Array.isArray(gate.commands) ? gate.commands : [];
+  root.append(el("section", { class: "card review-summary", "aria-labelledby": "review-ask" },
+    el("h2", { id: "review-ask" }, `${gate.action}${gate.boundary ? ` · ${gate.boundary}` : ""}`),
+    el("p", {}, gate.reason || "-"),
+    el("p", { class: "note" }, stateChip(detail.run.state), ` ${(detail.run.instructions || "").slice(0, 200)}`),
+    el("p", { class: "note" }, `waiting ${relativeTime(gate.requested_at).replace(" ago", "")} · `,
+      el("a", { href: `#/runs/${taskId}` }, `run ${taskId}`), ` · ${at + 1} of ${queue.length} in the queue`),
+    gate.reverification_warning ? el("p", { class: "banner bad", role: "alert" }, `⚠ ${gate.reverification_warning}`) : null,
+    gate.stale_base ? el("p", { class: "banner warn" }, "⚠ the base branch moved since this run started — landing re-checks it") : null,
+    gate.remediation ? el("p", { class: "note mono" }, gate.remediation) : null,
+    commands.length ? el("ul", { class: "command-list mono" }, commands.map(cmd =>
+      el("li", {}, el("code", {}, Array.isArray(cmd) ? cmd.join(" ") : String(cmd))))) : null));
+
+  const diffSection = el("section", { class: "review-step", "aria-labelledby": "review-diff" },
+    el("h2", { id: "review-diff" }, "1 · Diff"),
+    diff ? diff.node
+      : el("p", { class: diffError ? "error" : "note" }, diffError || `No patch — this gate asks for ${gate.action}, not a landing.`));
+  const forensics = el("section", { class: "review-step", tabindex: "-1", "aria-labelledby": "review-forensics" },
+    el("h2", { id: "review-forensics" }, "2 · Forensics"),
+    report.error ? el("p", { class: "error" }, `forensics unavailable: ${report.error}`) : forensicsPanel(report));
+  const outcome = el("div", { role: "status", "aria-live": "polite" });
+  const verdict = (label, cls, path, body, done) => el("button", {
+    type: "button", class: cls,
+    onclick: async () => {
+      const buttons = bar.querySelectorAll("button");
+      for (const b of buttons) b.disabled = true;
+      try {
+        const result = await api("POST", `/api/approvals/${reviewId}/${path}`, body);
+        if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
+        outcome.replaceChildren(el("p", { class: "flash ok" }, done(result)),
+          el("a", { class: "home-link", href: next ? `#/review/${next.review_id}` : "#/inbox" },
+            next ? "Next in the queue →" : "Back to the Inbox →"));
+        outcome.querySelector("a").focus();
+      } catch (e) {
+        flash("bad", e.message);
+        for (const b of buttons) b.disabled = false;
+      }
+    },
+  }, label);
+  const approveLabel = commands.length > 1 ? `Approve all ${commands.length} commands` : "Approve";
+  const bar = el("section", { class: "review-verdict actions", "aria-labelledby": "review-verdict" },
+    el("h2", { id: "review-verdict" }, "3 · Verdict"),
+    verdict(approveLabel, "primary", "approve", {}, r => (r.branch ? `Approved — patch applied on ${r.branch}.` : "Approved.")),
+    verdict("Deny", "danger", "deny", { note: "denied from UI review" }, () => "Denied."),
+    /^(shell\.run|network\.(fetch|read))$/.test(gate.action) && offersRemember(gate)
+      ? el("a", { class: "home-link", href: "#/approvals" }, "Allow & remember: on the Approvals page") : null);
+  root.append(diffSection, forensics, bar, outcome, el("p", { class: "note keys" }, REVIEW_KEYS));
+
+  const files = diff ? diff.sections : [];
+  let file = -1;
+  root.addEventListener("keydown", (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
+    const focus = node => { event.preventDefault(); node?.focus(); };
+    if (event.key === "j" && files.length) { file = Math.min(file + 1, files.length - 1); focus(files[file]); }
+    else if (event.key === "k" && files.length) { file = Math.max(file - 1, 0); focus(files[file]); }
+    else if (event.key === "f") focus(forensics);
+    else if (event.key === "a") focus(bar.querySelector(".primary"));
+    else if (event.key === "d") focus(bar.querySelector(".danger"));
+    else if (event.key === "i") { event.preventDefault(); location.hash = "#/inbox"; }
+  });
+  main.append(root);
+  root.focus();
+}
