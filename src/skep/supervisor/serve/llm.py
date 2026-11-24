@@ -1459,6 +1459,7 @@ _ROLLBACK_SETTINGS = (
     LLM_NUM_CTX,
     TOOL_DELIVERY_SETTING,
     LLM_SECRET_ENDPOINT,
+    LLM_ENV_KEY_ENDPOINT,  # R4 (Sol R4-2): pin_legacy_key writes it too
 )
 # Phase 05 R2 (F5): provider commits are serialized; a save stages and probes
 # outside this lock. ponytail: one in-process lock — the CLI committing beside
@@ -1624,14 +1625,25 @@ def _committed_key(
         return _codex_login_key(target)  # v118-F1: the Codex login, never a key
     if api_key:
         return wire_key(target, api_key)  # the replacement — the old one is never resolved
-    if api_key == "":  # this save clears the key: only the env var it names is left
+    if api_key == "":  # this save clears the key: only the env vars are left —
+        # the one the profile names, else SKEP_LLM_API_KEY if pinned here (R4, R2-6)
         env = profile.api_key_env if profile is not None else None
-        return wire_key(target, os.environ.get(env, "").strip() or None) if env else None
+        named = os.environ.get(env, "").strip() if env else ""
+        return wire_key(target, named or _env_key_for(home, target, store))
     if registered and profile is not None:
         return resolve_provider_api_key(home, profile, store)
     # a new endpoint has no key — but a legacy key no endpoint owns yet
     # belongs to the first one saved (pin_legacy_key)
-    return legacy_api_key(home, target, store, unowned=True)
+    # R4 (Sol R4-1): as the wire takes it (a Copilot GitHub token exchanged)
+    return wire_key(target, legacy_api_key(home, target, store, unowned=True))
+
+
+def _env_key_for(home: Path, target: str, store: RunStore) -> str | None:
+    """SKEP_LLM_API_KEY when ``target`` owns it — clearing a saved key never
+    clears the environment's."""
+    marker, key = _legacy_values(home)[0]
+    owner = legacy_key_endpoint(home, store, marker)
+    return key if key and owner == target.strip().rstrip("/") else None
 
 
 def save_assistant_llm(

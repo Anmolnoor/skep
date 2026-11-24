@@ -1359,3 +1359,87 @@ def test_api_key_set_under_the_chatgpt_login_is_the_workers_endpoints(
         b.stop()
     assert cleared.status_code == 200 and cleared.json()["api_key_set"] is False
     assert saved.status_code == 200 and saved.json()["api_key_set"] is True
+
+
+# --- R4 (Sol): last credential edges --------------------------------------------------
+
+
+def test_a_refused_save_rolls_back_the_env_key_owner(config: SupervisorConfig) -> None:
+    """R4-2: pin_legacy_key writes llm_env_key_endpoint, so the rollback
+    snapshot must cover it — a refused save leaves no owner behind."""
+    from skep.supervisor.serve.llm import LLM_ENV_KEY_ENDPOINT, provider_rollback
+
+    with _store(config) as store:
+        with pytest.raises(RuntimeError), provider_rollback(store, config.home):
+            store.set_setting(LLM_ENV_KEY_ENDPOINT, "https://a.example")
+            raise RuntimeError("probe refused")
+        assert store.get_setting(LLM_ENV_KEY_ENDPOINT) is None
+
+
+def test_the_committed_key_for_copilot_is_the_exchanged_bearer(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1: a legacy GitHub token no endpoint owns yet is exchanged before
+    the probe sends it to Copilot — never the raw token."""
+    from skep.supervisor.serve import llm, llm_copilot
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", lambda token, **_: ("bearer-c", 9e9))
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "ghu_raw1")
+    with _store(config) as store:
+        got = llm._committed_key(
+            store, config.home, "https://api.githubcopilot.com", None, False, None
+        )
+    assert got == "bearer-c"
+
+
+def test_clearing_a_key_probes_with_the_endpoints_own_env_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-6: switching back to A and clearing its saved key — A's pinned
+    SKEP_LLM_API_KEY is still what A resolves after the save, so the probe
+    sends it (not nothing)."""
+    from skep.supervisor.serve import llm
+    from skep.supervisor.serve.llm import LLM_ENV_KEY_ENDPOINT
+
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-a1")
+    with _store(config) as store:
+        store.set_setting(LLM_ENV_KEY_ENDPOINT, "https://a.example")
+        profile = ProviderProfile("a", "openai_compat", "https://a.example", "m")
+        got = llm._committed_key(store, config.home, "https://a.example", profile, True, "")
+    assert got == "env-a1"
+
+
+def test_a_profile_named_env_key_wins_before_a_stale_legacy_token(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-3: an unregistered Copilot worker whose profile names an env var is
+    never stopped by a refused exchange of a stale legacy token."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor.serve import llm_copilot
+    from skep.workers.llm_plan import worker_provider_from_home
+
+    config = installed
+    copilot = "https://api.githubcopilot.com"
+
+    def refuse(token: str, **_: Any) -> tuple[str, float]:
+        raise OllamaError("copilot token exchange failed: 401", status=401)
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", refuse)
+    monkeypatch.setenv("COP_TOKEN", "ghu_ok1")
+    a = FakeOllama(models=["m1"]).start()
+    personal = config.home.parent
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        _codex_queen(config)
+        run_personal_setup(
+            personal, provider="openai-compat", model="gpt-5-mini", endpoint=copilot,
+            api_key_env="COP_TOKEN",
+        )  # fmt: skip
+        (config.home / "llm-secret").write_text("ghu_old\n")
+        with _store(config) as store:
+            store.set_setting("llm_secret_endpoint", copilot)
+        worker = worker_provider_from_home(personal)
+    finally:
+        a.stop()
+    assert worker is not None and worker.profile.api_key_env == "COP_TOKEN"

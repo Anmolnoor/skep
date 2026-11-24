@@ -168,7 +168,9 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     # not an env var profile.json still names after the key replaced it.
     # R3 (H5): and its own env var, so a missing one is a config error, never
     # a keyless call.
-    row, api_key = _worker_key(home, provider.endpoint or "")
+    # R4 (Sol R4-3): a profile-named env var is the credential when no registry
+    # row is — a stale legacy token is never resolved (or exchanged) first
+    row, api_key = _worker_key(home, provider.endpoint or "", legacy=not provider.api_key_env)
     if row is not None:
         provider = replace(provider, api_key_env=row.api_key_env)
     elif provider.api_key_env:
@@ -192,7 +194,9 @@ def _refuse_queen_only(endpoint: str) -> None:
         )
 
 
-def _worker_key(personal_home: Path, endpoint: str) -> tuple[Any, str | None]:
+def _worker_key(
+    personal_home: Path, endpoint: str, *, legacy: bool = True
+) -> tuple[Any, str | None]:
     """(registry row, key). v108-F4: the active registry profile's per-profile
     credential — only while the profile's endpoint matches the one this
     worker will dial (a diverged config must not leak another provider's key
@@ -203,12 +207,12 @@ def _worker_key(personal_home: Path, endpoint: str) -> tuple[Any, str | None]:
     supervisor_home = personal_home / "supervisor"
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
-        return None, _legacy_key(supervisor_home, endpoint)
+        return None, _legacy_key(supervisor_home, endpoint) if legacy else None
     store = RunStore(db_path, readonly=True)
     try:
         active = worker_key_profile(store, endpoint)
         if active is None:
-            return None, _legacy_key(supervisor_home, endpoint, store)
+            return None, _legacy_key(supervisor_home, endpoint, store) if legacy else None
         return active, _profile_key(supervisor_home, active, store)
     finally:
         store.close()
