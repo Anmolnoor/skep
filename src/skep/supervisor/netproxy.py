@@ -117,16 +117,31 @@ def _plain_loopback(host: str) -> bool:
         return False
 
 
-# One concrete host pattern: ``api.example.com``, ``*.example.com`` (the
-# domain) or ``host:8443``. Never ``*`` alone, a URL or a blank: the forged
-# tools' ``# skep-hosts:`` and every wall's hosts (Phase 09 R2, N1) use it.
+# One concrete host: ``api.example.com`` or ``host:8443``. Never a wildcard
+# (``*``, ``*.example.com``), a URL or a blank: a script schedule's hosts
+# and every wall's hosts use it (Phase 09 R2 N1, R3 S15).
 _LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-HOST_ENTRY = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
+HOST_ENTRY = re.compile(rf"{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
+# Forge-only (``# skep-hosts:``): a concrete host or ``*.example.com``, the
+# domain; still never ``*`` alone. Only ``forged_lane`` takes these into
+# the wall (``walled(domain_patterns=True)``).
+FORGE_HOST_ENTRY = re.compile(rf"(?:\*\.)?{HOST_ENTRY.pattern}")
 
 
 def host_entry_problem(raw: str) -> str | None:
-    """Why ``raw`` is not one concrete host pattern (``HOST_ENTRY``), or None."""
+    """Why ``raw`` is not one concrete host (``HOST_ENTRY``), or None."""
     if HOST_ENTRY.fullmatch(raw.lower()):
+        return None
+    return (
+        f"{raw!r} is not a host name — list concrete hosts like `api.example.com` or "
+        "`host:8443`; no wildcard (`*`, `*.example.com`) is granted"
+    )
+
+
+def forge_host_entry_problem(raw: str) -> str | None:
+    """Why ``raw`` is not a forged tool's host pattern (``FORGE_HOST_ENTRY``),
+    or None."""
+    if FORGE_HOST_ENTRY.fullmatch(raw.lower()):
         return None
     return (
         f"{raw!r} is not a host name — list hosts like `api.example.com`, "

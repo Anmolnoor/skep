@@ -38,7 +38,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .netproxy import host_entry_problem
+from .netproxy import forge_host_entry_problem
 from .store import RunStore
 
 PLUGINS_SETTINGS_KEY = "plugins"
@@ -542,7 +542,7 @@ def declared_hosts(source: str) -> tuple[str, ...]:
         for raw in re.split(r"[,\s]+", line.group("hosts").strip()):
             if not raw:
                 continue
-            if host_entry_problem(raw) is not None:
+            if forge_host_entry_problem(raw) is not None:
                 raise ValueError(
                     f"`# skep-hosts:` entry {raw!r} is not a host name — list hosts like "
                     "`api.example.com`, `*.example.com` or `host:8443`; `*` (every host) is "

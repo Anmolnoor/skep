@@ -2079,7 +2079,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "items": {"type": "string"},
                 "description": "hosts a worker schedule may reach; this chat's role "
                 "drops any it does not allow. Also a script schedule's only reachable "
-                "hosts inside its wall (none by default; named hosts, never `*`)",
+                "hosts inside its wall (none by default; concrete hosts, no wildcard)",
             },
             "once": {
                 "type": "boolean",

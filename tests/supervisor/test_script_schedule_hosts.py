@@ -25,12 +25,52 @@ from skep.supervisor.wall import walled
 
 from .conftest import serve_client
 
-BAD = [("*",), ("*", "api.example.com"), ("http://x.example.com",), ("a b",), ("",)]
+# R3 (S15): `*.example.com` is a wildcard too — a script names concrete hosts
+BAD = [
+    ("*",), ("*", "api.example.com"), ("*.example.com",), ("http://x.example.com",),
+    ("a b",), ("",),
+]  # fmt: skip
 
 
-@pytest.mark.parametrize("entry", ["api.example.com", "*.example.com", "host:8443", "10.0.0.1"])
+@pytest.mark.parametrize("entry", ["api.example.com", "host:8443", "10.0.0.1"])
 def test_concrete_hosts_pass(entry: str) -> None:
     assert host_entry_problem(entry) is None
+
+
+def test_a_wildcard_domain_is_refused_and_the_refusal_teaches() -> None:
+    problem = host_entry_problem("*.example.com")
+    assert problem is not None and "not a host name" in problem
+    assert "api.example.com" in problem and "*.example.com" in problem  # names the fix
+
+
+def test_forged_tools_keep_their_domain_patterns() -> None:
+    """A forged tool's `# skep-hosts:` may name `*.example.com` (a separate,
+    forge-only check); `*` alone never passes either."""
+    from skep.supervisor.netproxy import forge_host_entry_problem
+
+    assert forge_host_entry_problem("*.example.com") is None
+    assert forge_host_entry_problem("api.example.com") is None
+    assert forge_host_entry_problem("*") is not None
+
+
+def test_only_the_forged_lane_takes_a_domain_pattern_into_the_wall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unusable = sandbox.SandboxAvailability(False, reason="none here")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: unusable)
+    hosts = ("*.example.com",)
+    with (
+        pytest.raises(sandbox.SandboxUnavailableError, match="no usable sandbox backend"),
+        walled(["true"], skep_home=tmp_path / "skep", hosts=hosts, workspace=tmp_path,
+               domain_patterns=True),
+    ):  # fmt: skip
+        pass  # pragma: no cover - never entered
+    with (
+        pytest.raises(sandbox.SandboxUnavailableError, match="not a host name"),
+        walled(["true"], skep_home=tmp_path / "skep", hosts=("*",), workspace=tmp_path,
+               domain_patterns=True),
+    ):  # fmt: skip
+        pass  # pragma: no cover - never entered
 
 
 @pytest.mark.parametrize("hosts", BAD)

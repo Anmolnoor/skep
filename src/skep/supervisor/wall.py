@@ -25,6 +25,7 @@ def walled(
     writable: tuple[Path, ...] = (),
     read_allowlist: tuple[Path, ...] = (),
     read_files: tuple[Path, ...] = (),
+    domain_patterns: bool = False,
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """``argv`` wrapped in the wall, and the env it runs with, for the life
     of the block. Reads: the ADR 0068 strict allowlist (system dirs,
@@ -37,14 +38,24 @@ def walled(
     ``writable``). Env: PATH and LANG, HOME and TMPDIR in the workspace.
     Egress: deny-all when ``hosts`` is empty, else pinned to them through a
     FilteringProxy (D1) — never allow-all: an entry that is not a concrete
-    host (``*``) refuses. No backend, or a wall that cannot be built, raises
-    ``sandbox.SandboxUnavailableError`` (fail closed, I12)."""
+    host (``*``, ``*.example.com``) refuses; ``domain_patterns`` (the forged
+    lane only, R3) admits ``*.example.com``. No backend, or a wall that
+    cannot be built, raises ``sandbox.SandboxUnavailableError`` (fail
+    closed, I12)."""
     from . import sandbox
-    from .netproxy import FilteringProxy, control_plane_ports, host_entry_problem
+    from .netproxy import (
+        FilteringProxy,
+        control_plane_ports,
+        forge_host_entry_problem,
+        host_entry_problem,
+    )
     from .spawner import proxy_env
 
-    for host in hosts:  # R2 (N1): `*` would make the wall allow-all, past the proxy
-        if (problem := host_entry_problem(host)) is not None:
+    # R2 (N1): `*` would make the wall allow-all, past the proxy. R3 (S15):
+    # concrete hosts only; the forged lane alone opts into `*.domain`.
+    check = forge_host_entry_problem if domain_patterns else host_entry_problem
+    for host in hosts:
+        if (problem := check(host)) is not None:
             raise sandbox.SandboxUnavailableError(f"the wall's hosts: {problem}")
     probe = sandbox.availability()
     if not probe.usable:

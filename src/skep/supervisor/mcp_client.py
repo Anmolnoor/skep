@@ -746,7 +746,7 @@ def forged_lane(
         try:
             wrapped, env = stack.enter_context(
                 walled(argv, skep_home=skep_home, hosts=hosts, workspace=workspace,
-                       writable=writable)
+                       writable=writable, domain_patterns=True)  # forge's `*.domain` (R3)
             )  # fmt: skip
         except sandbox.SandboxUnavailableError as exc:
             raise MCPError(f"the forged-tool lane could not build its wall: {exc}") from exc

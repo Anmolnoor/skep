@@ -634,9 +634,13 @@ the launch path `forged_lane` now shares, so the two cannot drift:
   by default. The REST face, `propose_schedule` and `skep schedule add
   NAME "<command>" --caste script --network HOST` (repo-less since Phase 09
   R2, like the other two) set it. Each
-  entry is one concrete host (`api.example.com`, `*.example.com`,
-  `host:8443`); `*` alone would make the wall allow-all, past the proxy, so
-  every creation face and `wall.walled` itself refuse it (Phase 09 R2).
+  entry is one concrete host (`api.example.com`, `host:8443`); `*` alone
+  would make the wall allow-all, past the proxy, so every creation face and
+  `wall.walled` itself refuse it (Phase 09 R2), and since Phase 09 R3 a
+  wildcard domain (`*.example.com`) refuses too (`netproxy.host_entry_problem`).
+  Only a forged tool's `# skep-hosts:` may name `*.example.com`
+  (`forge_host_entry_problem`), and only `forged_lane` takes it into the
+  wall (`walled(domain_patterns=True)`).
   IMAP has no proxy support, so `skep.mcp_servers.mail`'s digest tunnels
   through the proxy with one CONNECT (`HTTPS_PROXY`); TLS still runs end to
   end with the mail host.
