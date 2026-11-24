@@ -342,8 +342,15 @@ def legacy_api_key(
     the first one saved's (pin_legacy_key)."""
     want = endpoint.strip().rstrip("/")
     owners = (want, "") if unowned else (want,)
-    for marker, key in _legacy_values(home):
-        if key and legacy_key_endpoint(home, store, marker) in owners:
+    for marker in (LLM_ENV_KEY_ENDPOINT, LLM_SECRET_ENDPOINT):
+        # R9: owner, key, owner — a write landing between the reads (key
+        # moved to another owner) is no key, never the old key for the new
+        # owner (_write_legacy drops the key before it moves the owner)
+        owner = legacy_key_endpoint(home, store, marker)
+        if owner not in owners:
+            continue
+        key = dict(_legacy_values(home))[marker]
+        if key and legacy_key_endpoint(home, store, marker) == owner:
             return key
     return None
 

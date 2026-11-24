@@ -1573,3 +1573,29 @@ def test_a_reader_mid_write_never_sees_a_key_without_its_owner(
         llm._write_legacy(store, config.home, "https://a.example", "ka-new")
         look()
     assert seen and all(got is None for got in seen)  # C never gets anyone's key
+
+
+def test_a_write_landing_between_the_key_read_and_the_owner_read_is_no_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9: the reader read B's old key, a whole write moved llm-secret to A
+    (owner A, A's key), then the reader read owner A — and handed B's key to
+    A. The owner is read before AND after the key; a change means no key."""
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    with _store(config) as store:
+        llm._write_legacy(store, config.home, "https://b.example", "kb-old")
+        real_read = llm._read_secret
+        fired: list[bool] = []
+
+        def read_then_writer_lands(home: Path) -> str:
+            got = real_read(home)
+            if not fired:  # the writer's whole commit lands right after the key read
+                fired.append(True)
+                llm._write_legacy(store, config.home, "https://a.example", "ka-new")
+            return got
+
+        monkeypatch.setattr(llm, "_read_secret", read_then_writer_lands)
+        got = llm.legacy_api_key(config.home, "https://a.example", store)
+    assert got != "kb-old"  # never B's key for A (None, or A's on a re-read)
