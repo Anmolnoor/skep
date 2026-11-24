@@ -43,6 +43,7 @@ TESTS = (
     "def test_value():\n    assert value() == 1\n\n\n"
     "def test_other():\n    assert 2 == 2\n"
 )
+SKIPPED = "import pytest\n\npytestmark = pytest.mark.skip\n" + TESTS
 
 
 def _seed(repo: Path) -> str:
@@ -442,6 +443,79 @@ def test_v1_catches_test_tampering_inside_the_pr_itself(
     assert outcome.outcome == "tampered", outcome.detail
     assert flag in record.tamper_flags
     assert record.confirmed is False and record.head_commit == head
+
+
+def _pr_by_index(repo: Path, *updates: list[str]) -> str:
+    """A PR whose head changes the INDEX directly (``git update-index``
+    argument lists): symlinks, gitlinks and modes no text edit can make."""
+    base = git(repo, "rev-parse", "main").stdout.strip()
+    git(repo, "checkout", "-qb", "index-pr")
+    for update in updates:
+        git(repo, "update-index", *update)
+    git(repo, "commit", "-qm", "index pr")
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-qf", "main")
+    git(repo, "update-ref", PR_REF, head)
+    git(repo, "update-ref", "refs/skep/pr/7/base", base)
+    return head
+
+
+def _blob(repo: Path, text: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=text, capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("change", "flag"),
+    [
+        ("symlink", "test_file_uninspectable:tests/test_app.py"),
+        ("submodule", "test_file_uninspectable:tests/vendored"),
+        ("mode", "test_mode_changed:tests/test_app.py"),
+    ],
+)
+def test_v1_flags_a_test_path_it_cannot_read_as_text(
+    repo: Path, config: SupervisorConfig, change: str, flag: str
+) -> None:
+    """R1 (S12): a test turned into a symlink or a submodule, or made
+    executable (some runners skip those), is flagged — never silently clean
+    because the diff showed no lines. diff.ignoreSubmodules cannot hide it."""
+    seed = _seed(repo)
+    git(repo, "config", "diff.ignoreSubmodules", "all")
+    updates = {
+        "symlink": ["--cacheinfo", f"120000,{_blob(repo, '../app.py')},tests/test_app.py"],
+        "submodule": ["--add", "--cacheinfo", f"160000,{seed},tests/vendored"],
+        "mode": ["--chmod=+x", "tests/test_app.py"],
+    }
+    head = _pr_by_index(repo, updates[change])
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")
+
+    assert outcome.outcome == "tampered", outcome.detail
+    assert flag in record.tamper_flags and record.confirmed is False
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        {".gitattributes": "*.py -diff\n", "tests/test_app.py": SKIPPED},
+        {"tests/test_app.py": "# \x00 binary to git\n" + SKIPPED},
+    ],
+    ids=["diff-attribute", "nul-byte"],
+)
+def test_v1_reads_a_diff_git_would_call_binary(
+    repo: Path, config: SupervisorConfig, edit: dict[str, str | None]
+) -> None:
+    """R1 (S12): a `-diff` attribute the PR itself adds, or a NUL byte,
+    makes git print "Binary files differ" — the skip marker is read anyway."""
+    _seed(repo)
+    _base, head = _pr(repo, edit)
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")
+
+    assert outcome.outcome == "tampered", outcome.detail
+    assert "skip_marker_added:tests/test_app.py" in record.tamper_flags
 
 
 def test_a_breaking_pr_fails_g10(repo: Path, config: SupervisorConfig) -> None:

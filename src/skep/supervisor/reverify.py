@@ -62,9 +62,10 @@ _REVERIFY_TIMEOUT_SECONDS = 300.0
 
 # V1 (phase-01 1.3): what the guard can and cannot see, said on every verdict.
 V1_SCOPE = (
-    "V1 detects deleted or emptied test files, added skip/xfail markers, test-config "
-    "edits and drops in the executed test count; it cannot prove an edited assertion "
-    "is still strong"
+    "V1 detects deleted or emptied test files, test paths it cannot read as text "
+    "(a symlink or submodule) or whose mode changed, added skip/xfail markers, "
+    "test-config edits and drops in the executed test count; it cannot prove an "
+    "edited assertion is still strong"
 )
 
 
@@ -208,6 +209,7 @@ _SKIP_MARKER = re.compile(
     r"|#\[ignore\]|\bt\.Skip\("
 )
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
+_REGULAR_MODES = ("100644", "100755")  # a blob V1 can read; 120000/160000 it cannot
 
 
 def _is_test_file(path: str) -> bool:
@@ -261,25 +263,43 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
                 f"test_config_changed:{p}"
                 for p in test_config_changes(repo, patch_path, base, changed)
             ]
-        fields = git("diff", "--cached", "--no-renames", "--name-status", "-z", base).stdout
-        names = [f.decode("utf-8", "surrogateescape") for f in fields.split(b"\0") if f]
+        # R1 (S12): raw records carry both modes — ":<old> <new> <oid> <oid> <code>",
+        # then the path; a submodule is listed whatever diff.ignoreSubmodules says.
+        raw = git(
+            "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev",
+            "--ignore-submodules=none", base,
+        ).stdout.split(b"\0")  # fmt: skip
+        changes: list[tuple[str, str, str, str]] = []  # old mode, new mode, code, path
+        for header, name in zip(raw[0::2], raw[1::2], strict=False):  # raw ends in b""
+            old_mode, new_mode, *_oids, code = header.decode()[1:].split()
+            changes.append((old_mode, new_mode, code[0], name.decode("utf-8", "surrogateescape")))
         # Review R3 (H3): the config scan reads these unquoted names too — a
         # git-quoted `.github/workflows/é.yml` matched no prefix.
         flags = [
             f"test_config_changed:{path}"
-            for path in test_config_changes(repo, patch_path, base, tuple(names[1::2]))
+            for path in test_config_changes(repo, patch_path, base, tuple(c[3] for c in changes))
         ]
-        for code, path in zip(names[::2], names[1::2], strict=True):
+        for old_mode, new_mode, code, path in changes:
+            readable = new_mode in _REGULAR_MODES
             if _is_test_file(path):
                 if code == "D":
                     flags.append(f"test_file_deleted:{path}")
-                elif code == "M" and not git("show", f":{path}").stdout.strip():
-                    flags.append(f"test_file_emptied:{path}")
-            if code == "D" or path.endswith(_DOC_SUFFIXES):
+                elif not readable:  # R1 (S12): a symlink or submodule is never "clean"
+                    flags.append(f"test_file_uninspectable:{path}")
+                else:
+                    if old_mode in _REGULAR_MODES and old_mode != new_mode:
+                        flags.append(f"test_mode_changed:{path}")  # runners may skip +x files
+                    if code == "M" and not git("show", f":{path}").stdout.strip():
+                        flags.append(f"test_file_emptied:{path}")
+            if code == "D" or not readable or path.endswith(_DOC_SUFFIXES):
                 continue
+            # R1 (S12): --text, so a NUL byte or a `-diff` attribute (the patch
+            # may add its own .gitattributes) never reduces the hunks to
+            # "Binary files differ".
             diff = git(
-                "diff", "--cached", "--no-color", "--no-ext-diff", "-U0", base, "--", path
-            ).stdout.decode("utf-8", "replace")
+                "diff", "--cached", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
+                "-U0", base, "--", path,
+            ).stdout.decode("utf-8", "replace")  # fmt: skip
             hunks = diff.split("\n@@", 1)[1:]  # the header is git's, not the patch's
             if hunks and any(
                 line.startswith("+") and _SKIP_MARKER.search(line) for line in hunks[0].splitlines()
