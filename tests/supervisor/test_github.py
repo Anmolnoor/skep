@@ -112,51 +112,69 @@ def test_pr_body_and_title_carry_evidence() -> None:
     assert default_pr_title("bumped requests", "abc123def").startswith("bumped requests")
 
 
+def _github_repo(tmp_path: Path) -> Path:
+    """Phase 09 R1 (D1): a repo whose origin names a GitHub repo — what gh's
+    ``--repo`` is read from. Nothing ever fetches from it."""
+    repo = tmp_path / "gh-repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:me/repo.git"],
+        check=True,
+    )
+    return repo
+
+
+def _gh_fake(
+    code: int, out: str = "", err: str = "", calls: list[list[str]] | None = None
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """gh answers ``code``; git (the origin lookup) runs for real."""
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[0] != "gh":
+            return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
+        if calls is not None:
+            calls.append(list(args))
+        return _cp(args, code, out, err)
+
+    return run
+
+
 def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
     """v47-F5: the only base-branch advance — gh pr merge, honest on failure."""
     from skep.supervisor.github import merge_pull_request
 
+    repo = _github_repo(tmp_path)
     calls: list[list[str]] = []
+    ok = _gh_fake(0, "merged", calls=calls)
 
-    def ok(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(args))
-        return _cp(args, 0, "merged")
-
-    result = merge_pull_request(repo=tmp_path, pr="7", strategy="squash", runner=ok)
+    result = merge_pull_request(repo=repo, pr="7", strategy="squash", runner=ok)
     assert result.merged and "7" in result.detail
-    assert calls == [["gh", "pr", "merge", "7", "--squash"]]
+    assert calls == [["gh", "pr", "merge", "--repo", "me/repo", "--squash", "--", "7"]]
 
-    def broken(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return _cp(args, 1, "", "not mergeable")
-
-    failed = merge_pull_request(repo=tmp_path, pr="7", runner=broken)
+    broken = _gh_fake(1, "", "not mergeable")
+    failed = merge_pull_request(repo=repo, pr="7", runner=broken)
     assert not failed.merged and "not mergeable" in failed.detail
     # An unknown strategy never reaches gh.
-    assert not merge_pull_request(repo=tmp_path, pr="7", strategy="yolo", runner=broken).merged
+    assert not merge_pull_request(repo=repo, pr="7", strategy="yolo", runner=broken).merged
 
 
 def test_close_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
     """v58-F1: close without merging — reversible, honest on failure."""
     from skep.supervisor.github import close_pull_request
 
+    repo = _github_repo(tmp_path)
     calls: list[list[str]] = []
+    ok = _gh_fake(0, "closed", calls=calls)
 
-    def ok(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(args))
-        return _cp(args, 0, "closed")
-
-    result = close_pull_request(repo=tmp_path, pr="7", runner=ok)
+    result = close_pull_request(repo=repo, pr="7", runner=ok)
     assert result.closed and "7" in result.detail
-    assert calls == [["gh", "pr", "close", "7"]]
+    assert calls == [["gh", "pr", "close", "--repo", "me/repo", "--", "7"]]
 
-    swept = close_pull_request(repo=tmp_path, pr="7", delete_branch=True, runner=ok)
+    swept = close_pull_request(repo=repo, pr="7", delete_branch=True, runner=ok)
     assert swept.closed and "branch" in swept.detail
-    assert calls[-1] == ["gh", "pr", "close", "7", "--delete-branch"]
+    assert calls[-1] == ["gh", "pr", "close", "--repo", "me/repo", "--delete-branch", "--", "7"]
 
-    def broken(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return _cp(args, 1, "", "no pull requests found")
-
-    failed = close_pull_request(repo=tmp_path, pr="7", runner=broken)
+    failed = close_pull_request(repo=repo, pr="7", runner=_gh_fake(1, "", "no pull requests found"))
     assert not failed.closed and "no pull requests found" in failed.detail
 
 

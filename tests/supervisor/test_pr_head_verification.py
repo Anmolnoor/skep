@@ -28,6 +28,15 @@ from .conftest import git
 
 PIN = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider"
 PR_REF = "refs/skep/pr/7/head"
+ORIGIN = "acme/widget"
+ORIGIN_URL = f"https://github.com/{ORIGIN}.git"
+
+
+def _github_origin(repo: Path, url: str = ORIGIN_URL) -> None:
+    """``repo``'s origin names a GitHub repo (no fetch ever reaches it)."""
+    git(repo, "remote", "add", "origin", url)
+
+
 SOURCE = "def value():\n    return 1\n"
 TESTS = (
     "from app import value\n\n\n"
@@ -95,6 +104,131 @@ def _g10(repo: Path, config: SupervisorConfig, head: str, pin: str = PIN) -> tup
         store.close()
 
 
+# --- 0. a PR is (origin owner/name, number), parsed strictly (D1) --------------
+
+
+@pytest.mark.parametrize(
+    ("selector", "number"),
+    [
+        ("7", 7),
+        ("#7", 7),
+        ("07", 7),
+        (7, 7),
+        ("https://github.com/acme/widget/pull/7", 7),
+        ("https://github.com/Acme/Widget/pull/7/files", 7),
+        ("https://github.com/acme/widget/pull/7?w=1", 7),
+        ("https://github.com/acme/widget/pull/7#discussion_r1", 7),
+        ("https://github.com/acme/widget/pull/7/", 7),
+    ],
+)
+def test_a_pr_selector_names_the_origin_repo_and_a_number(
+    repo: Path, selector: object, number: int
+) -> None:
+    _github_origin(repo)
+
+    assert github.resolve_pr(repo, selector) == github.PrId(ORIGIN, number)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:Acme/Widget.git",
+        "ssh://git@github.com/acme/widget",
+        "https://github.com/acme/widget",
+        "https://github.com/acme/widget/",
+    ],
+)
+def test_every_github_origin_form_names_the_same_repo(repo: Path, url: str) -> None:
+    _github_origin(repo, url)
+
+    assert github.resolve_pr(repo, "7") == github.PrId(ORIGIN, 7)
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "--admin",
+        "--repo=evil/x",
+        "-7",
+        " 7",
+        "7 ",
+        "7\n",
+        "0",
+        "#",
+        "",
+        "7a",
+        "١٢",
+        "main",
+        "dependabot/pip/requests-2.32.3",
+        "https://github.com/evil/widget/pull/7",
+        "https://github.com/acme/widget/pull/7extra",
+        "https://github.com/acme/widget/issues/7",
+        "http://github.com/acme/widget/pull/7",
+        "https://github.com.evil.example/acme/widget/pull/7",
+    ],
+)
+def test_anything_but_a_number_or_this_repos_pr_url_is_refused(repo: Path, selector: str) -> None:
+    _github_origin(repo)
+
+    with pytest.raises(github.PrSelectorError) as refused:
+        github.resolve_pr(repo, selector)
+    assert "#7" in str(refused.value) or "evil/widget" in str(refused.value)
+
+
+def test_a_repo_whose_origin_is_not_github_has_no_prs(repo: Path) -> None:
+    git(repo, "remote", "add", "origin", "https://x-access-token:SECRET@gitlab.com/acme/widget")
+
+    with pytest.raises(github.PrSelectorError, match=r"github\.com") as refused:
+        github.resolve_pr(repo, "7")
+    assert "SECRET" not in str(refused.value)  # the URL is never echoed
+
+
+def _gh_only(calls: list[list[str]], out: str = "") -> github.Runner:
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] != "gh":
+            return subprocess.run(args, **kwargs)
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    return run
+
+
+@pytest.mark.parametrize(
+    "selector", ["--admin", "--repo=evil/x", "https://github.com/evil/x/pull/7"]
+)
+def test_a_flag_or_foreign_selector_never_reaches_gh(repo: Path, selector: str) -> None:
+    _github_origin(repo)
+    calls: list[list[str]] = []
+
+    fetched = github.fetch_pr_head(repo=repo, pr=selector, runner=_gh_only(calls))
+    merged = github.merge_pull_request(
+        repo=repo, pr=selector, expected_head_sha="a" * 40, runner=_gh_only(calls)
+    )
+    closed = github.close_pull_request(repo=repo, pr=selector, runner=_gh_only(calls))
+
+    assert not fetched.ok and not merged.merged and not closed.closed
+    assert calls == []
+
+
+def test_every_gh_call_names_the_repo_and_ends_with_the_bare_number(repo: Path) -> None:
+    _github_origin(repo)
+    calls: list[list[str]] = []
+    sha = "a" * 40
+
+    github.fetch_pr_head(repo=repo, pr="#07", runner=_gh_only(calls, "{}"))
+    github.merge_pull_request(
+        repo=repo, pr="07", expected_head_sha=sha, runner=_gh_only(calls, sha)
+    )
+    github.close_pull_request(repo=repo, pr="#7", delete_branch=True, runner=_gh_only(calls))
+
+    assert calls, "gh was never asked"
+    for call in calls:
+        assert call[3:5] == ["--repo", ORIGIN] and call[-2:] == ["--", "7"], call
+    merge = ["gh", "pr", "merge", "--repo", ORIGIN, "--merge", "--match-head-commit", sha]
+    assert [*merge, "--", "7"] in calls
+    assert ["gh", "pr", "close", "--repo", ORIGIN, "--delete-branch", "--", "7"] in calls
+
+
 # --- 1. the supervisor fetches; workers never do -------------------------------
 
 
@@ -106,6 +240,9 @@ def _origin_with_pr(repo: Path, tmp_path: Path) -> tuple[Path, str, str]:
     git(repo, "update-ref", "refs/pull/7/head", head)
     clone = tmp_path / "clone"
     git(tmp_path, "clone", "-q", str(repo), str(clone))
+    # The clone's origin names GitHub; git rewrites it to the local "GitHub".
+    git(clone, "remote", "set-url", "origin", ORIGIN_URL)
+    git(clone, "config", f"url.{repo}.insteadOf", ORIGIN_URL)
     return clone, base, head
 
 
@@ -135,7 +272,7 @@ def test_fetch_pr_head_lands_head_and_base_in_skeps_own_refs(repo: Path, tmp_pat
     assert git(clone, "rev-parse", "refs/skep/pr/7/base").stdout.strip() == base
     # I1: the operator's branches and remote-tracking refs never move.
     assert git(clone, "for-each-ref", "refs/heads", "refs/remotes").stdout == branches
-    assert calls[0][:4] == ["gh", "pr", "view", "7"]
+    assert calls[0][:5] == ["gh", "pr", "view", "--repo", ORIGIN]
 
 
 def test_fetch_pr_head_refuses_a_head_that_moved_mid_fetch(repo: Path, tmp_path: Path) -> None:
@@ -319,6 +456,7 @@ def test_the_merge_card_carries_the_verified_head_through_to_github(
     repo: Path, config: SupervisorConfig
 ) -> None:
     _seed(repo)
+    _github_origin(repo)
     base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
     _outcome, _record, task_id = _g10(repo, config, head)
     args = {"repo": str(repo), "pr": "7"}
@@ -365,7 +503,8 @@ def test_a_newer_verdict_after_the_card_does_not_change_what_merges(
 def test_a_card_without_a_verdict_says_it_is_not_pinned(
     repo: Path, config: SupervisorConfig
 ) -> None:
-    args = {"repo": str(repo), "pr": "https://github.com/o/r/pull/7"}
+    _github_origin(repo)
+    args = {"repo": str(repo), "pr": "https://github.com/acme/widget/pull/7"}
     store = RunStore(config.db_path)
     try:
         card = recorded_card("merge_pr", args, None, store) or {}
@@ -383,6 +522,7 @@ def test_a_card_proposed_without_the_record_pins_live(repo: Path, config: Superv
     """An operator-command card records no merge block; the confirm looks
     the verdict up the same way the card summary did."""
     _seed(repo)
+    _github_origin(repo)
     _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
     store = RunStore(config.db_path)
     try:
@@ -401,13 +541,58 @@ def test_a_card_proposed_without_the_record_pins_live(repo: Path, config: Superv
     assert merges[0]["expected_head_sha"] == head
 
 
+@pytest.mark.parametrize(
+    ("selector", "pinned"),
+    [("07", True), ("https://github.com/ACME/widget/pull/7/files", True), ("7 ", False)],
+)
+def test_the_card_pins_the_canonical_pr_never_the_typed_text(
+    repo: Path, config: SupervisorConfig, selector: str, pinned: bool
+) -> None:
+    """R1 (S2/N2, D1): "07" and a /files URL are PR 7; "7 " is refused."""
+    _seed(repo)
+    _github_origin(repo)
+    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    _g10(repo, config, head)
+
+    store = RunStore(config.db_path)
+    try:
+        card = recorded_card("merge_pr", {"repo": str(repo), "pr": selector}, None, store) or {}
+    finally:
+        store.close()
+
+    assert (card["merge"].get("expected_head_sha") == head) is pinned
+    assert ("error" in card["merge"]) is not pinned
+
+
+def test_a_foreign_pr_url_never_pins_this_repos_verdict(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    _seed(repo)
+    _github_origin(repo)
+    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    _g10(repo, config, head)
+    args = {"repo": str(repo), "pr": "https://github.com/evil/fork/pull/7"}
+
+    store = RunStore(config.db_path)
+    try:
+        card = recorded_card("merge_pr", args, None, store) or {}
+    finally:
+        store.close()
+
+    assert "evil/fork" in card["merge"]["error"] and ORIGIN in card["merge"]["error"]
+    with pytest.raises(ValueError, match="cannot be pinned"):
+        _confirm_merge(config, args, card)
+
+
 def test_an_unresolvable_pin_refuses_the_merge(config: SupervisorConfig) -> None:
     with pytest.raises(ValueError, match="cannot be pinned"):
         _confirm_merge(config, {"repo": "x", "pr": "7"}, {"merge": {"error": "two repos"}})
 
 
 def _merge_gh(head: str, calls: list[list[str]]) -> github.Runner:
-    def run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] != "gh":
+            return subprocess.run(args, **kwargs)
         calls.append(list(args))
         out = f"{head}\n" if args[:3] == ["gh", "pr", "view"] else "merged"
         return subprocess.CompletedProcess(args, 0, out, "")
@@ -415,24 +600,28 @@ def _merge_gh(head: str, calls: list[list[str]]) -> github.Runner:
     return run
 
 
-def test_merge_pull_request_pins_the_expected_head(tmp_path: Path) -> None:
+def test_merge_pull_request_pins_the_expected_head(repo: Path) -> None:
+    _github_origin(repo)
     calls: list[list[str]] = []
     sha = "a" * 40
 
     result = github.merge_pull_request(
-        repo=tmp_path, pr="7", expected_head_sha=sha, runner=_merge_gh(sha, calls)
+        repo=repo, pr="7", expected_head_sha=sha, runner=_merge_gh(sha, calls)
     )
 
     assert result.merged, result.detail
-    assert calls[-1] == ["gh", "pr", "merge", "7", "--merge", "--match-head-commit", sha]
+    assert calls[-1] == [
+        "gh", "pr", "merge", "--repo", ORIGIN, "--merge", "--match-head-commit", sha, "--", "7",
+    ]  # fmt: skip
 
 
-def test_merge_pull_request_refuses_a_head_that_moved(tmp_path: Path) -> None:
+def test_merge_pull_request_refuses_a_head_that_moved(repo: Path) -> None:
+    _github_origin(repo)
     calls: list[list[str]] = []
     sha, moved = "a" * 40, "c" * 40
 
     result = github.merge_pull_request(
-        repo=tmp_path, pr="7", expected_head_sha=sha, runner=_merge_gh(moved, calls)
+        repo=repo, pr="7", expected_head_sha=sha, runner=_merge_gh(moved, calls)
     )
 
     assert not result.merged
@@ -441,13 +630,15 @@ def test_merge_pull_request_refuses_a_head_that_moved(tmp_path: Path) -> None:
     assert not [c for c in calls if c[:3] == ["gh", "pr", "merge"]]  # nothing merged
 
 
-def test_merge_pull_request_refuses_when_the_head_cannot_be_read(tmp_path: Path) -> None:
-    def broken(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+def test_merge_pull_request_refuses_when_the_head_cannot_be_read(repo: Path) -> None:
+    _github_origin(repo)
+
+    def broken(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] != "gh":
+            return subprocess.run(args, **kwargs)
         return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
 
-    result = github.merge_pull_request(
-        repo=tmp_path, pr="7", expected_head_sha="a" * 40, runner=broken
-    )
+    result = github.merge_pull_request(repo=repo, pr="7", expected_head_sha="a" * 40, runner=broken)
 
     assert not result.merged and "HTTP 502" in result.detail and "nothing merged" in result.detail
 
@@ -519,6 +710,7 @@ def test_the_cli_fetches_a_pr_and_merges_it_pinned(
 
     home = tmp_path / "home"
     clone = _registered_clone(home, repo)
+    git(clone, "remote", "set-url", "origin", ORIGIN_URL)
     fetches: list[dict[str, Any]] = []
     monkeypatch.setattr(github, "fetch_pr_head", _fake_fetch(fetches))
     assert main(["--home", str(home), "repo", "refresh", "fixture", "--pr", "7"]) == 0

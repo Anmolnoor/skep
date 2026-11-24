@@ -2533,6 +2533,7 @@ def test_merge_pr_tool_is_web_ui_only_hitl(
         return github.MergeResult(True, "merged 7 (merge)")
 
     monkeypatch.setattr(github, "merge_pull_request", fake_merge)
+    git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git")  # D1
     store = RunStore(config.db_path)
     try:
         result = execute_mutation(

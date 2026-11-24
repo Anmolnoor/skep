@@ -525,6 +525,7 @@ def test_the_dependabot_chain_end_to_end(
     git(repo, "commit", "-qm", "Bump requests from 2.32.2 to 2.32.3")
     bump = git(repo, "rev-parse", "HEAD").stdout.strip()
     git(repo, "checkout", "-q", "main")
+    git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git")  # D1: gh's --repo
     merges: list[dict[str, Any]] = []
 
     def merge_pull_request(**kwargs: Any) -> MergeResult:

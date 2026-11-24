@@ -15,6 +15,7 @@ hermetically; the CLI checks for ``gh`` and degrades honestly when it is absent.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,12 +45,29 @@ class CloseResult:
 
 
 @dataclass(frozen=True)
+class PrId:
+    """Phase 09 R1 (D1): a PR's canonical identity — the GitHub repo the
+    project's origin names (``owner/name``, lowercased: GitHub names are
+    case-blind) and the PR number. Every gh call and every verdict lookup
+    keys on this, never on the text a model or an operator typed."""
+
+    repo: str
+    number: int
+
+
+class PrSelectorError(ValueError):
+    """A PR selector skep will not hand to gh (D1, I9): the message names
+    the shapes it takes."""
+
+
+@dataclass(frozen=True)
 class PrHead:
     ok: bool
     detail: str
     ref: str = ""
     base_sha: str = ""
     head_sha: str = ""
+    pr: PrId | None = None
 
 
 def pr_ref(number: int | str, side: str = "head") -> str:
@@ -102,15 +120,79 @@ def _run(
     return runner(args, cwd=where, capture_output=True, text=True, check=False)
 
 
+# D1: the origin forms GitHub hands out (an https URL may carry a token as
+# userinfo — never echoed), and the two selector shapes skep accepts. ASCII
+# digits only: ``int()`` would read other scripts' digits too.
+_GITHUB_ORIGIN = re.compile(
+    r"(?:https://(?:[^@/]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+?)(?:\.git)?/?"
+)
+_PR_NUMBER = re.compile(r"#?([0-9]+)")
+_PR_URL = re.compile(
+    r"https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)/pull/([0-9]+)"
+    r"(?:[/?#].*)?",
+    re.DOTALL,
+)
+
+
+def origin_repo(repo: Path, runner: Runner = subprocess.run) -> str | None:
+    """The ``owner/name`` the project's origin remote names on GitHub, or
+    None when origin is not a github.com repository. The configured URL is
+    read as written (``remote get-url`` would apply ``insteadOf``)."""
+    url = _run(runner, ["git", "-C", str(repo), "config", "--get", "remote.origin.url"])
+    found = _GITHUB_ORIGIN.fullmatch(url.stdout.strip())
+    return None if found is None else f"{found[1]}/{found[2]}".lower()
+
+
+def resolve_pr(repo: Path, selector: object, runner: Runner = subprocess.run) -> PrId:
+    """Phase 09 R1 (D1, I9): ``selector`` as a PR of ``repo``'s origin — a
+    number (``7``, ``#7``; ``07`` is 7) or that repo's PR URL, with nothing
+    after it but a ``/…``, ``?…`` or ``#…`` tail. A branch name, a flag,
+    whitespace or another repo's URL raises ``PrSelectorError``; nothing
+    else ever reaches gh."""
+    text = str(selector)
+    shown = text if len(text) <= 80 else f"{text[:77]}..."
+    origin = origin_repo(repo, runner)
+    if origin is None:
+        raise PrSelectorError(
+            f"{repo}'s origin remote is not a github.com repository, so it has no PR "
+            "skep can name to gh — point origin at the GitHub repo "
+            "(git remote set-url origin https://github.com/<owner>/<name>)"
+        )
+    number = _PR_NUMBER.fullmatch(text)
+    url = None if number else _PR_URL.fullmatch(text)
+    if url is not None and f"{url[1]}/{url[2]}".lower() != origin:
+        raise PrSelectorError(
+            f"{shown!r} is a PR of {url[1]}/{url[2]}, not of {origin} ({repo}'s origin) — "
+            f"name a PR of {origin}: its number (#7) or https://github.com/{origin}/pull/7"
+        )
+    found = number[1] if number else url[3] if url else ""
+    if not found or int(found) == 0:
+        raise PrSelectorError(
+            f"{shown!r} is not a PR of {origin}: give its number (7 or #7) or its URL "
+            f"(https://github.com/{origin}/pull/7) — a branch name, a flag or anything "
+            "else is never passed to gh"
+        )
+    return PrId(origin, int(found))
+
+
+def _gh_pr(verb: str, pr: PrId, *flags: str) -> list[str]:
+    """D1: ``gh pr <verb>`` on exactly ``pr`` — the repo named, the bare
+    number last, after ``--`` (no selector text is ever a flag)."""
+    return ["gh", "pr", verb, "--repo", pr.repo, *flags, "--", str(pr.number)]
+
+
 def fetch_pr_head(*, repo: Path, pr: str, runner: Runner = subprocess.run) -> PrHead:
     """Phase 09 (9.0, I4): fetch PR ``pr``'s head and its base branch from
     origin into ``pr_ref(N)`` — supervisor-side, on the operator's own
     credentials, which never enter a sandbox. Workers still never fetch
     (v19-F3/F5); a review run starts from the fetched head (dispatch_run
     ref=…), and G10 verifies base...head. Honest failure, never raises."""
-    view = _run(
-        runner, ["gh", "pr", "view", pr, "--json", "number,baseRefName,headRefOid"], cwd=repo
-    )
+    try:
+        pid = resolve_pr(repo, pr, runner)
+    except PrSelectorError as exc:
+        return PrHead(False, str(exc))
+    view = _run(runner, _gh_pr("view", pid, "--json", "number,baseRefName,headRefOid"), cwd=repo)
     if view.returncode != 0:
         return PrHead(False, f"gh pr view failed: {(view.stderr or view.stdout).strip()}")
     try:
@@ -118,6 +200,8 @@ def fetch_pr_head(*, repo: Path, pr: str, runner: Runner = subprocess.run) -> Pr
         number, base, expected = int(info["number"]), str(info["baseRefName"]), info["headRefOid"]
     except (ValueError, KeyError, TypeError):
         return PrHead(False, "gh pr view returned unparseable output")
+    if number != pid.number:
+        return PrHead(False, f"gh answered PR #{number} when asked for {pid.repo}#{pid.number}")
     head_ref, base_ref = pr_ref(number), pr_ref(number, "base")
     fetched = _run(
         runner,
@@ -139,6 +223,7 @@ def fetch_pr_head(*, repo: Path, pr: str, runner: Runner = subprocess.run) -> Pr
         head_ref,
         shas[1],
         shas[0],
+        pid,
     )
 
 
@@ -210,34 +295,36 @@ def merge_pull_request(
     flag = _MERGE_FLAGS.get(strategy)
     if flag is None:
         return MergeResult(False, f"unknown merge strategy {strategy!r}")
-    args = ["gh", "pr", "merge", pr, flag]
+    try:
+        pid = resolve_pr(repo, pr, runner)
+    except PrSelectorError as exc:
+        return MergeResult(False, f"{exc}; nothing merged")
+    flags = [flag]
     if expected_head_sha:
         view = _run(
-            runner,
-            ["gh", "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid"],
-            cwd=repo,
+            runner, _gh_pr("view", pid, "--json", "headRefOid", "--jq", ".headRefOid"), cwd=repo
         )
         head = view.stdout.strip()
         if view.returncode != 0:
             why = (view.stderr or view.stdout).strip()
             return MergeResult(
                 False,
-                f"gh pr view failed: {why} — PR {pr}'s head could not be checked against "
-                f"the verified {expected_head_sha}; nothing merged",
+                f"gh pr view failed: {why} — PR #{pid.number}'s head could not be checked "
+                f"against the verified {expected_head_sha}; nothing merged",
             )
         if head != expected_head_sha:
             return MergeResult(
                 False,
-                f"refused: PR {pr}'s head is now {head}, not {expected_head_sha}, the head "
-                f"G10 verified — it was pushed to after verification; nothing merged. "
-                f"refresh_repo pr={pr}, review the new head, then propose merge_pr again",
+                f"refused: PR #{pid.number}'s head is now {head}, not {expected_head_sha}, "
+                "the head G10 verified — it was pushed to after verification; nothing merged. "
+                f"refresh_repo pr={pid.number}, review the new head, then propose merge_pr again",
             )
-        args += ["--match-head-commit", expected_head_sha]
-    merged = _run(runner, args, cwd=repo)
+        flags += ["--match-head-commit", expected_head_sha]
+    merged = _run(runner, _gh_pr("merge", pid, *flags), cwd=repo)
     if merged.returncode != 0:
         why = (merged.stderr or merged.stdout).strip()
         return MergeResult(False, f"gh pr merge failed: {why}")
-    return MergeResult(True, f"merged {pr} ({strategy})")
+    return MergeResult(True, f"merged {pid.repo}#{pid.number} ({strategy})")
 
 
 def close_pull_request(
@@ -253,14 +340,16 @@ def close_pull_request(
     can be reopened on GitHub. ``delete_branch=True`` asks gh to also delete
     the PR's branch after closing — the same reversibility tier as
     delete_branch (the commits stay reachable via the PR)."""
-    args = ["gh", "pr", "close", pr]
-    if delete_branch:
-        args.append("--delete-branch")
-    closed = _run(runner, args, cwd=repo)
+    try:
+        pid = resolve_pr(repo, pr, runner)
+    except PrSelectorError as exc:
+        return CloseResult(False, f"{exc}; nothing closed")
+    flags = ["--delete-branch"] if delete_branch else []
+    closed = _run(runner, _gh_pr("close", pid, *flags), cwd=repo)
     if closed.returncode != 0:
         why = (closed.stderr or closed.stdout).strip()
         return CloseResult(False, f"gh pr close failed: {why}")
-    detail = f"closed {pr} without merging"
+    detail = f"closed {pid.repo}#{pid.number} without merging"
     if delete_branch:
         detail += " and deleted its branch"
     return CloseResult(True, detail)

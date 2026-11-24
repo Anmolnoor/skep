@@ -723,16 +723,18 @@ def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
 
     from fastapi import HTTPException
 
-    from ..github import pr_ref
+    from ..github import PrSelectorError, pr_ref, resolve_pr
     from .registry import resolve_repo_arg
 
-    number = re.search(r"(\d+)/*$", str(args.get("pr") or "").strip())
     try:
         root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
         repo = resolve_repo_arg(str(args.get("repo") or ""), root, store)
+        pid = resolve_pr(repo, args.get("pr", ""))  # R1 (D1): never the typed text
     except HTTPException as exc:
         return {"error": str(exc.detail)}
-    verdict = store.pr_head_verdict(str(repo), pr_ref(number.group(1))) if number else None
+    except PrSelectorError as exc:
+        return {"error": str(exc)}
+    verdict = store.pr_head_verdict(str(repo), pr_ref(pid.number))
     if verdict is None:
         return {}
     return {

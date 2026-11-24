@@ -1568,7 +1568,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE merging an open GitHub PR (requires user confirmation in the web "
         "UI; messenger channels can never confirm it). The ONLY way a base branch "
         "like main advances — runs gh on the operator's own credentials. `pr` is "
-        "a PR number or URL. Pinned to the head G10 last verified for it, if any: "
+        "the PR number or its URL on the repo's origin, never a branch. Pinned to "
+        "the head G10 last verified for it, if any: "
         "a later push makes GitHub refuse it.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
@@ -1583,7 +1584,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation). Nothing is destroyed: the branch and its commits stay, "
         "and a closed PR can be reopened on GitHub. delete_branch=true also "
         "deletes the PR's branch after closing. Runs gh on the operator's own "
-        "credentials, like merge_pr. `pr` is a PR number or URL.",
+        "credentials, like merge_pr. `pr` is the PR number or its URL on the "
+        "repo's origin, never a branch.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "pr": {"type": "string"},
