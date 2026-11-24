@@ -2520,6 +2520,8 @@ class ChatEngine:
                     break
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
+                if name == "capture_skill" and not args.get("source"):
+                    args = {**args, "source": chat_id}  # Phase 08 (8.2): this chat, pinned
                 shown_args = stream_args(args)
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.

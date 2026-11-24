@@ -321,6 +321,14 @@ class WorkonRequest(BaseModel):
     phase: str = "build"
 
 
+class SkillCaptureRequest(BaseModel):
+    """Body of ``POST /api/skills/capture`` (Phase 08, 8.2): a task_id or a
+    chat_id, and the draft's name."""
+
+    source: str
+    name: str
+
+
 class RememberRequest(BaseModel):
     """Body of ``POST /api/ledger/remember`` (v109-F8).
 
@@ -839,6 +847,22 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/skills/capture", status_code=201)
+    def capture_skill_route(body: SkillCaptureRequest, request: Request) -> dict[str, Any]:
+        """Phase 08 (8.2): `skep skill capture` — an inactive, zero-grant
+        SKILL.md draft on the v4 ladder; approve is its gate."""
+        from ..skill_cmds import SkillError, capture_skill
+        from .registry import _candidate_view
+
+        try:
+            candidate, text = capture_skill(
+                run_store, holder.current.audit_dir, body.source, name=body.name,
+                actor=principal(request),
+            )  # fmt: skip
+        except SkillError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"candidate": _candidate_view(candidate), "skill_md": text}
 
     # first-run R1 (ADR 0055 D3): the new-chat picker's choices and default.
     @app.get("/api/roles")

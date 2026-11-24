@@ -1372,7 +1372,7 @@ class RunStore:
         )
         if self._conn.execute(f"SELECT EXISTS (SELECT 1 FROM memory_items{legacy})").fetchone()[0]:
             self._conn.execute(f"UPDATE memory_items SET provenance = 'worker:legacy'{legacy}")
-        for table in ("notes", "tasks", "memory_proposals"):
+        for table in ("notes", "tasks", "memory_proposals", "skill_candidates"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
                 # W21: the bits of the chat that wrote the row (a JSON list,
@@ -2871,7 +2871,7 @@ class RunStore:
     _CANDIDATE_COLS = (
         "name, signature, status, template_json, source_task_ids_json, occurrences,"
         " test_task_id, test_outcome, decided_by, decided_at, decision_note,"
-        " registry_name, created_at"
+        " registry_name, created_at, taint"
     )
 
     @staticmethod
@@ -2890,6 +2890,7 @@ class RunStore:
             decision_note=None if row[10] is None else str(row[10]),
             registry_name=None if row[11] is None else str(row[11]),
             created_at=str(row[12]),
+            taint=tuple(sorted(_taint_bits(row[13]))),  # Phase 08 (8.2)
         )
 
     @_locked
@@ -2902,7 +2903,7 @@ class RunStore:
         """
         self._conn.execute(
             f"INSERT OR REPLACE INTO skill_candidates ({self._CANDIDATE_COLS})"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 candidate.name,
                 candidate.signature,
@@ -2917,6 +2918,7 @@ class RunStore:
                 candidate.decision_note,
                 candidate.registry_name,
                 candidate.created_at or _now(),
+                _taint_json(candidate.taint),
             ),
         )
         self._conn.commit()

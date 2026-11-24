@@ -180,6 +180,16 @@ TWO_FACE_READS: dict[str, str] = {
 }
 THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
 
+# Phase 08 (8.2, ADR 0050): skill capture has all three faces, and the CLI one
+# lives in the skill group's own module — `skep skill capture`, `POST
+# /api/skills/capture` and the chat capture_skill card each CALL the one verb
+# (a `def` is not a face).
+SKILL_FACE_VERBS: dict[str, str] = {
+    "capture_skill": "`skep skill capture`, POST /api/skills/capture and the chat "
+    "capture_skill card draft an inactive, zero-grant SKILL.md (Phase 08 8.2)",
+}
+SKILL_FACES: tuple[Path, ...] = (SUPERVISOR / "skill_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
+
 # first-run O3 (ADR 0056 D7, ADR 0050): `skep onboard`'s step functions. Two
 # faces, not three: onboarding writes the model, the work directory, the
 # sandbox and the locked baseline the Queen itself runs under, so the model is
@@ -438,3 +448,14 @@ def test_operator_only_verbs_have_operator_faces_and_no_model_face() -> None:
     assert not {name for name in MUTATING_TOOL_NAMES if "trust" in name}
     app_js = (SUPERVISOR / "serve/static/app.js").read_text()
     assert "/trust`" in app_js and "/api/chats/${activeChatId}/trust" in app_js
+
+
+def test_skill_capture_is_called_from_cli_rest_and_chat() -> None:
+    """Phase 08 (8.2): a face that drops the call fails here naming it."""
+    for function, why in SKILL_FACE_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        call = re.compile(rf"(?<![\w])(?<!def ){re.escape(function)}\s*\(")
+        for face in SKILL_FACES:
+            assert call.search(face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )

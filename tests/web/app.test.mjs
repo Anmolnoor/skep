@@ -295,6 +295,13 @@ test("forgeNode: a promotion card shows the bound triple, the wheels and the dif
   }
 });
 
+test("skillNode: a capture card shows the full SKILL.md, verbatim", () => {
+  const app = loadApp();
+  assert.equal(app.skillNode({ headline: "x" }), null);
+  const md = "---\nname: rc\ntaint: untrusted\n---\n\n# rc\n\n## Steps\n1. run_shell — make lint\n";
+  assert.equal(app.skillNode({ skill_md: md }).textContent, md);
+});
+
 test("manifestNode: the dispatch card lists what the run gets and the asks it approves", () => {
   const app = loadApp();
   assert.equal(app.manifestNode({ headline: "x" }), null);

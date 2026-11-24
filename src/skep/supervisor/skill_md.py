@@ -153,3 +153,10 @@ def template_from_skill_md(
     )
     validate_template(template)
     return template
+
+
+def render_skill_md(front: dict[str, str], body: str) -> str:
+    """Phase 08 (8.2): the inverse of ``parse_skill_md`` for one-line
+    frontmatter values — what ``skep skill capture`` drafts."""
+    head = "".join(f"{key}: {' '.join(value.split())}\n" for key, value in front.items() if value)
+    return f"---\n{head}---\n\n{body.strip()}\n"

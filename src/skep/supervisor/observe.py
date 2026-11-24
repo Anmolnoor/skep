@@ -195,7 +195,10 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
         ),
         None,
     )
-    if last_user is None:
+    taint = store.get_chat_taint(chat_id)
+    if last_user is None or taint.untrusted is not None:
+        # Phase 08 (8.2): never an automatic capture of a turn outside
+        # content may have steered — `skep skill capture` drafts it, marked
         return None
     turn = messages[last_user:]
     tools = [m.tool_name for m in turn if m.role == "tool" and m.tool_name]
@@ -233,6 +236,7 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
             template=template,
             source_task_ids=(f"chat:{chat_id}",),
             occurrences=1,
+            taint=tuple(taint.bits()),
         )
     )
     return name

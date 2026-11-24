@@ -163,7 +163,8 @@ _BOUNDARY_GROUPS: dict[str, tuple[str, ...]] = {
         "set_project_phase", "propose_schedule", "delete_schedule", "set_schedule_enabled",
         "run_schedule_now", "delete_note", "delete_task", "set_task_due", "forget_memory",
         "approve_memory_proposal", "reject_memory_proposal", "remember", "add_note",
-        "add_task", "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
+        "add_task", "create_skill", "patch_skill", "delete_skill", "capture_skill",
+        "set_skill_observer",
         "suspend_skill_pack", "suspend_tool", "unregister_mcp_server", "remove_provider",
         "set_persona", "set_personality", "set_run_completion_notify", "delegate_analysis",
     ),
@@ -706,7 +707,30 @@ def recorded_card(
             record["schedule"] = facts
     if tool == "promote_tool":
         record["forge"] = promotion_card(store, args)
+    if tool == "capture_skill":
+        record["capture"] = capture_card(store, args)
     return record or None
+
+
+def capture_card(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
+    """Phase 08 (8.2, I8): the SKILL.md a capture_skill card shows, drafted
+    when it is proposed — the confirm saves exactly this or nothing."""
+    from pathlib import Path
+
+    from ..skill_cmds import SkillError, draft_capture, taint_line
+
+    try:
+        candidate, text = draft_capture(
+            store, Path(store.db_path).parent / "audit", str(args.get("source") or ""),
+            name=str(args.get("name") or ""),
+        )  # fmt: skip
+    except SkillError as exc:
+        return {"error": str(exc)}
+    return {
+        "skill_md": text,
+        "source": candidate.source_task_ids[0],
+        "taint_line": taint_line(candidate),
+    }
 
 
 def promotion_card(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
@@ -838,7 +862,7 @@ def card_summary(
         danger = f"{push} — {danger}"
     if tool == "approve_memory_proposal" and store is not None:
         # v126-F6: the approver sees what the filing chat (or note) had read
-        from ..memory import taint_phrase
+        from ..memory import taint_phrase, taint_words
 
         proposal = store.get_memory_proposal(str(safe_args.get("proposal_id") or ""))
         filed = taint_phrase(proposal.taint) if proposal is not None else None
@@ -848,6 +872,17 @@ def card_summary(
             summary["headline"] = f"{tool} — {content}"
         if filed:
             danger = filed if danger is None else f"{danger}; {filed}"
+        if proposal is not None and proposal.taint:
+            # Phase 08 (8.2): the badge names the note or task it came from
+            origin = ", ".join(
+                f"{s.kind} {s.source_id[:8]}"
+                for s in proposal.sources
+                if s.kind in ("note", "task")
+            )
+            badge = f"⚠ tainted — {origin or 'the chat that filed it'} carries: "
+            taint_line = f"{badge}{taint_words(proposal.taint)}" + (
+                f"; {taint_line}" if taint_line else ""
+            )
     label, remedy = boundary(
         tool, safe_args, taint=taint, store=store, manifest=(recorded or {}).get("manifest")
     )
@@ -875,6 +910,20 @@ def card_summary(
         summary["forge"] = forged
         line = _promotion_line(forged)
         danger = line if danger is None else f"{danger} — {line}"
+    captured = (recorded or {}).get("capture")
+    if tool == "capture_skill" and isinstance(captured, dict):
+        name = safe_args.get("name")
+        danger = (
+            f"it cannot be drafted as shown: {captured['error']}"
+            if "error" in captured
+            else f"drafts skill {name!r} from {captured['source']} — inactive until you "
+            f"approve it (skep skill approve {name})"
+        )
+        if captured.get("skill_md"):
+            summary["skill_md"] = captured["skill_md"]
+        if captured.get("taint_line"):
+            badge = captured["taint_line"]
+            taint_line = badge if not taint_line else f"{badge}; {taint_line}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:
