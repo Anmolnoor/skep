@@ -1232,7 +1232,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "(tampered or unbound) or whose source, lock or hosts changed take "
         "the same card and trial. Fails honestly if the authoring run has "
         "not landed or the trial fails: a new plugin stays demoted, a failed "
-        "UPDATE leaves the active copy running unchanged.",
+        "UPDATE leaves the active copy as it was.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),

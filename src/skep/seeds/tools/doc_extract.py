@@ -489,7 +489,9 @@ def _cmap(data: bytes, budget: _Budget) -> tuple[dict[int, str], int]:
                 continue
             base = bytes.fromhex(target[1:-1].decode()) or b"\0\0"
             start = int.from_bytes(base[-2:], "big")
-            for offset in range(min(last - first, 65535) + 1):
+            count = min(max(last - first, 0), 65535) + 1
+            budget.parse(len(base) * count)  # R3: what the range expands to, before it does
+            for offset in range(count):
                 unit = ((start + offset) & 0xFFFF).to_bytes(2, "big")
                 mapping[first + offset] = (base[:-2] + unit).decode("utf-16-be", errors="replace")
     return mapping, width
@@ -637,6 +639,12 @@ class _Text:
                     self.unmapped += not text
                     pieces.append(text)
                     advance += self.font.widths.get(code, self.font.default) / 1000 * self.size
+                    room = self.max_chars - self.chars - sum(map(len, pieces))
+                    if room < 0:  # R3: the cap holds glyph by glyph, never after
+                        pieces[-1] = text[: len(text) + room + 1]
+                        self.out.extend(pieces)
+                        self.chars = self.max_chars + 1
+                        raise _Full
             elif (shift := _number(item)) is not None:
                 if -shift / 1000 > 0.2:
                     pieces.append(" ")
@@ -751,6 +759,7 @@ def pdf_to_text(data: bytes, *, max_chars: int = MAX_TEXT_CHARS) -> str:
             # K11: a reference may name an ARRAY of streams — read in order
             target = pdf.get(contents)
             refs = target if isinstance(target, list) else [contents]
+            pdf.budget.tick(len(refs))  # R3: each ref's lookup is work, stream or not
             streams = [s for s in map(pdf.stream, refs) if s is not None]
             # L1: every use is charged, before the join allocates it — one
             # cached stream named N times costs N times

@@ -334,3 +334,64 @@ def test_fonts_sharing_one_big_array_cost_bounded_work(key: str) -> None:
             pdf_to_text(build(objects))
         except ValueError as exc:
             assert "too complex" in str(exc)
+
+
+# --- review R3: CMap range expansion, the text cap per glyph, page refs ------------
+
+
+def test_a_cmap_range_is_charged_for_what_it_expands_to() -> None:
+    """R3 (Sol/Terra/Neon): one bfrange entry multiplied a long destination
+    65,536 times while only its input bytes were charged (776 B → 264 MiB)."""
+    budget = doc_extract._Budget()
+    target = b"00" * 8192
+    cmap = b"beginbfrange <0000> <FFFF> <" + target + b"> endbfrange"
+    began = time.monotonic()
+    with pytest.raises(ValueError):
+        doc_extract._cmap(cmap, budget)
+    assert time.monotonic() - began < 1.0
+
+
+def test_the_text_cap_holds_inside_one_shown_string() -> None:
+    """R3 (Neon R3-2): every glyph's text was buffered before the cap was
+    checked — a 200K-char mapping shown 2,000 times allocated ~760 MiB at a
+    10K cap. The cap holds glyph by glyph."""
+
+    class _Big:
+        default = 500.0
+
+        def __init__(self) -> None:
+            self.widths: dict[int, float] = {}
+
+        def codes(self, data: bytes) -> list[int]:
+            return list(data)
+
+        def text(self, _code: int) -> str:
+            return "x" * 200_000
+
+    state = doc_extract._Text(max_chars=10_000)
+    state.font = _Big()  # type: ignore[assignment]
+    with pytest.raises(doc_extract._Full):
+        state.show([b"\x01" * 2000])
+    assert sum(map(len, state.out)) <= 10_001
+
+
+def test_every_page_ref_ticks_the_work_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 (Neon R3-3): a /Contents array of non-stream refs ran uncharged
+    stream lookups per page."""
+    ticks: list[int] = []
+    real = doc_extract._Budget.tick
+
+    def spy(self: doc_extract._Budget, n: int = 1) -> None:
+        ticks.append(n)
+        real(self, n)
+
+    monkeypatch.setattr(doc_extract._Budget, "tick", spy)
+    refs = " ".join(["99 0 R"] * 37)  # 37 refs to nothing: lookups, no streams
+    pdf = build([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /Contents [{refs}] >>".encode(),
+    ])  # fmt: skip
+    with pytest.raises(ValueError):  # no text layer — but every ref was counted
+        pdf_to_text(pdf)
+    assert 37 in ticks

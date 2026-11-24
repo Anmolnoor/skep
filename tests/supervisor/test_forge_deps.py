@@ -1094,3 +1094,29 @@ def test_a_failed_venv_commit_discards_the_staged_tree(
         assert list(venvs.iterdir()) == []
     finally:
         store.close()
+
+
+def test_a_failed_read_only_step_keeps_the_previous_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (Sol S2): making the new tree read-only ran after the commit's
+    rollback scope — a chmod failure failed the promotion AND deleted the
+    previous venv. It is part of the step that rolls back."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    old_seal = _tree(home, "#!old")
+    staging = home.parent / ".staging-x"
+    seal = _tree(staging, "#!new")
+    real = forge._writable
+    failed: list[bool] = []
+
+    def refuse_lock_once(root: Path, writable: bool) -> None:
+        if not writable and root == home and not failed:
+            failed.append(True)
+            raise OSError("chmod refused")
+        real(root, writable)
+
+    monkeypatch.setattr(forge, "_writable", refuse_lock_once)
+    with pytest.raises(OSError, match="chmod refused"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    monkeypatch.setattr(forge, "_writable", real)
+    assert forge.seal_venv(home) == old_seal  # the previous venv is back

@@ -347,6 +347,9 @@ def _pinned_get(client: Any, url: str, resolve: Resolver, deadline: float) -> An
     named = httpx.URL(url)  # IDNA: Host and SNI carry the ASCII name
     error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")
     for address in addresses:
+        left = deadline - time.monotonic()  # R3: each dial gets only what is left
+        if left <= 0:
+            raise WebReadError(_too_slow(host))
         netloc = f"[{address}]" if ":" in address else address
         if parts.port:
             netloc = f"{netloc}:{parts.port}"

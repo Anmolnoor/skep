@@ -1099,3 +1099,36 @@ def test_a_pdf_read_past_the_page_cap_keeps_every_byte(monkeypatch: pytest.Monke
     _streamed(monkeypatch, {"/doc.pdf": (200, {"content-type": "application/pdf"}, body)})
     text = _read("/doc.pdf", max_bytes=1000)["text"]
     assert text == "\n\n".join(f"page {n}" for n in range(40))
+
+
+def test_no_address_is_dialled_after_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 (Sol R3-2, Opus R3-2): the per-address timeout came from the hop's
+    first reading of the clock — a slow dead first address let the second be
+    dialled after the caller had already been told the read timed out."""
+    import socket
+    import time
+
+    import httpx
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+
+    def two(host: str, port: int, **_kw: object) -> list[Any]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
+            for ip in (_PUBLIC_IP, "93.184.216.35")
+        ]
+
+    sent: list[str] = []
+
+    def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        sent.append(str(request.url))
+        time.sleep(0.4)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    with pytest.raises((websearch.WebReadError, httpx.ConnectError)):
+        websearch.fetch_url_text("https://two.example/", resolve=two)
+    time.sleep(0.6)  # the abandoned reader has had time to try the next address
+    assert len(sent) == 1

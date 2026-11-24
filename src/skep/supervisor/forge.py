@@ -25,6 +25,7 @@ record (``runtime_launch``).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -636,8 +637,9 @@ def _require_locked_as_declared(dep: str, locked: tuple[str, ...]) -> None:
             )
         if requirement.partition("==")[2].lower() != version:
             raise ValueError(
-                f"the tool declares {dep} but its lock pins {requirement} — regenerate "
-                "<tool>.lock.txt from the tool's dependencies so the card's pin is what installs"
+                f"the tool declares {dep} but its lock pins {requirement} — declare the exact "
+                f"version the lock pins ({requirement}) in the tool's `# /// script` block, or "
+                "regenerate <tool>.lock.txt for the declared version"
             )
 
 
@@ -897,15 +899,16 @@ def commit_locked_venv(
             staging.rename(home)
             moved = True
             _require_seal(home, seal)
+            _writable(home, False)  # R3: inside the rollback — a failure restores the old
         except BaseException:
             if moved:
                 _writable(home, True)
                 shutil.rmtree(home, ignore_errors=True)
             if previous is not None:
                 previous.rename(home)
-                _writable(home, False)
+                with contextlib.suppress(OSError):  # the old tree is back either way
+                    _writable(home, False)
             raise
-        _writable(home, False)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
         if previous is not None:
