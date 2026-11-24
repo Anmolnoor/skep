@@ -338,7 +338,8 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
                     blob = git(f"show:{path}", "show", f"{at}{path}")
                     if code == "M" and not blob.strip():
                         flags.append(f"test_file_emptied:{path}")
-                    if PurePosixPath(path).suffix in _SOURCE_SUFFIXES and not _is_text(blob):
+                    code_file = PurePosixPath(path).suffix.lower() in _SOURCE_SUFFIXES  # R3 N6
+                    if code_file and not _is_text(blob):
                         # R2 (S5): test code V1 cannot read as text is never clean
                         flags.append(f"test_file_uninspectable:{path}")
             if code == "D" or not readable or path.endswith(_DOC_SUFFIXES):

@@ -644,6 +644,19 @@ def test_v1_flags_a_binary_test_blob_without_a_skip_marker(
     assert record.tamper_flags == ("test_file_uninspectable:tests/test_app.py",)
 
 
+def test_v1_reads_a_test_suffix_case_blind(repo: Path) -> None:
+    """R3 (N6): `tests/helper.PY` is test code too — a binary blob there is
+    uninspectable, whatever the suffix's case."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    _seed(repo)
+    base, head = _pr(repo, {"tests/helper.PY": "\x00\x01" + TESTS})
+
+    flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
+
+    assert "test_file_uninspectable:tests/helper.PY" in flags
+
+
 def test_a_git_read_v1_needs_that_fails_is_a_flag_never_clean(repo: Path) -> None:
     """R2 (S5, N2): every git read V1 depends on checks its exit status."""
     from skep.supervisor.reverify import static_tamper_flags
