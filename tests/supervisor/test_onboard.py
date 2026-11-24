@@ -147,6 +147,78 @@ def test_the_model_step_makes_a_test_call_and_says_where_prompts_go(tmp_path: Pa
         fake.stop()
 
 
+def test_a_refused_key_on_an_unregistered_provider_teaches_steps_that_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I9: the live 2.0.0 smoke taught `skep provider set-key ollama` for a
+    candidate onboarding never registered (I8) — set-key answered 'unknown
+    provider'. The refusal now names the sequence, and that sequence works."""
+    import io
+
+    fake = FakeOllama(api_key="ka1", public_listing=True, models=["llama3.2"]).start()
+    home = tmp_path / "home"
+    add = [
+        "provider", "add", "ollama", "--protocol", "ollama",
+        "--base-url", fake.base_url, "--model", "llama3.2",
+    ]  # fmt: skip
+    try:
+        with _holder(home) as (holder, store), pytest.raises(ValueError) as refused:
+            onboard_model(
+                holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
+            )
+        message = str(refused.value)
+        assert "or the env var it names" not in message
+        assert "'ollama' is not registered yet" in message
+        taught = message.index("skep " + " ".join(add))
+        assert taught < message.index("skep provider set-key ollama")
+        assert message.endswith("nothing changed: no provider was active before and none is now")
+        # do what it says, through the CLI faces it names
+        assert main(["--home", str(home), *add]) == 0
+        with _holder(home) as (holder, store), pytest.raises(ValueError) as refused:
+            onboard_model(
+                holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
+            )
+        # registered now: set-key works for it, so today's hint stands
+        assert "(skep provider set-key ollama, or the env var it names)" in str(refused.value)
+        monkeypatch.setattr("sys.stdin", io.StringIO("ka1\n"))
+        assert main(["--home", str(home), "provider", "set-key", "ollama"]) == 0
+        with _holder(home) as (holder, store):
+            record = onboard_model(
+                holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
+            )
+            active = store.active_provider_profile()
+            assert active is not None and active.provider_id == "ollama"
+        assert record["test"].startswith("provider ready")
+    finally:
+        fake.stop()
+
+
+def test_a_refused_key_from_a_named_env_var_says_to_fix_that_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SKEP_FAKE_ONBOARD_KEY", raising=False)
+    fake = FakeOllama(api_key="ka1", public_listing=True, models=["llama3.2"]).start()
+    kwargs: dict[str, Any] = {
+        "provider": "ollama",
+        "model": "llama3.2",
+        "endpoint": fake.base_url,
+        "api_key_env": "SKEP_FAKE_ONBOARD_KEY",
+    }
+    try:
+        with _holder(tmp_path / "home") as (holder, store):
+            with pytest.raises(ValueError) as refused:
+                onboard_model(holder, store, **kwargs)
+            message = str(refused.value)
+            assert "set SKEP_FAKE_ONBOARD_KEY to a working key" in message
+            assert "skep onboard" in message
+            assert "skep provider set-key" not in message
+            assert "nothing changed" in message
+            monkeypatch.setenv("SKEP_FAKE_ONBOARD_KEY", "ka1")
+            assert onboard_model(holder, store, **kwargs)["test"].startswith("provider ready")
+    finally:
+        fake.stop()
+
+
 def _answers(monkeypatch: pytest.MonkeyPatch, *replies: str | type[BaseException]) -> list[str]:
     """Script ``input()``; an exception class in the list is raised there."""
     prompts: list[str] = []

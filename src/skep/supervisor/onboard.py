@@ -282,8 +282,24 @@ def onboard_model(
             cost_class=preset.cost_class,
         )
     )
+    # I9: an unregistered candidate has no stored key for set-key to replace
+    key_fix = None
+    if store.get_provider_profile(pid) is None:
+        key_fix = (
+            f"set {key_env} to a working key (it is unset or holds a refused one) "
+            "and run skep onboard again"
+            if key_env
+            else f"{pid!r} is not registered yet, so there is no stored key to replace: run "
+            f"skep provider add {pid} --protocol {candidate.protocol} "
+            f"--base-url {candidate.base_url} --model {model}, then skep provider set-key "
+            f"{pid}, then skep onboard again (or pass --api-key-env NAME for a variable "
+            "that holds the key)"
+        )
     health = check_provider_health(
-        candidate, now=_now(), **live_probes(holder.current.home, store, timeout=15.0)
+        candidate,
+        now=_now(),
+        key_fix=key_fix,
+        **live_probes(holder.current.home, store, timeout=15.0),
     )
     if not health.ok:
         previous = store.active_provider_profile()

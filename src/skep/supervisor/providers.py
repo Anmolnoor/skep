@@ -95,16 +95,20 @@ class ProviderHealth:
         return self.completion_ok if self.completion_ok is not None else self.model_found
 
 
-def _refusal(exc: Exception, profile: ProviderProfile, what: str) -> tuple[str, int | None]:
+def _refusal(
+    exc: Exception, profile: ProviderProfile, what: str, key_fix: str | None = None
+) -> tuple[str, int | None]:
     """The I9 detail for a failed probe: the provider's words, plus the fix
-    when the status says the key was refused."""
+    when the status says the key was refused — ``key_fix`` when the caller
+    knows a truer one (an unregistered candidate has no key to set)."""
     from .policy_v3 import redact
 
     status = getattr(exc, "status", None)
     detail = f"{what}: {redact(str(exc) or exc.__class__.__name__)}"
     if status in (401, 403):
-        detail += (
-            f" — the key was refused; give {profile.provider_id!r} a working key "
+        detail += " — the key was refused; " + (
+            key_fix
+            or f"give {profile.provider_id!r} a working key "
             f"(skep provider set-key {profile.provider_id}, or the env var it names)"
         )
     return detail, status if isinstance(status, int) else None
@@ -122,6 +126,7 @@ def check_provider_health(
     list_models: Callable[[ProviderProfile], list[str]],
     now: str,
     probe: Callable[[ProviderProfile], None] | None = None,
+    key_fix: str | None = None,
 ) -> ProviderHealth:
     """Probe a provider: is the endpoint reachable, does its model list contain
     the configured model, and how long did it take. ``list_models`` is injected
@@ -132,12 +137,13 @@ def check_provider_health(
     model list is public on ollama.com, so a dead key passed the listing.
     ``live_probes`` builds both callables for production, with the profile's
     own credential or a candidate's. It reads ``profile`` and never writes
-    anything: a candidate is tested before it is saved (I8)."""
+    anything: a candidate is tested before it is saved (I8). ``key_fix``
+    replaces the 401/403 fix text for such a candidate."""
     start = time.monotonic()
     try:
         models = tuple(list_models(profile))
     except Exception as exc:  # any client/transport error is an unreachable provider
-        refusal, refused = _refusal(exc, profile, "the model list failed")
+        refusal, refused = _refusal(exc, profile, "the model list failed", key_fix)
         return ProviderHealth(
             provider_id=profile.provider_id,
             reachable=False,
@@ -159,7 +165,7 @@ def check_provider_health(
         except Exception as exc:  # the provider's refusal, in its words
             completion_ok = False
             error, status = _refusal(
-                exc, profile, "the provider lists models but a completion failed"
+                exc, profile, "the provider lists models but a completion failed", key_fix
             )
     return ProviderHealth(
         provider_id=profile.provider_id,
