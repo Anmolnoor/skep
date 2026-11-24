@@ -95,8 +95,12 @@ def queen_filesystem_decision(
             ),
             decided_by="default/root-boundary",
         )
+    expanded = Path(path).expanduser()
     try:  # W7: only an absolute path gets this far — nothing resolves a name against the cwd
-        target = Path(path).expanduser().resolve()
+        # strict: from Python 3.13 a plain resolve() returns a symlink loop unresolved
+        target = expanded.resolve(strict=True)
+    except FileNotFoundError:  # not there (yet): resolved as far as it exists
+        target = expanded.resolve()
     except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop (Python < 3.13)
         return AutonomyDecision(
             verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"

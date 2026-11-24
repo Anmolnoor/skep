@@ -29,7 +29,11 @@ from typing import Any
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig, sandbox
-from skep.supervisor.worktree import git_metadata_readable_roots, git_metadata_writable_roots
+from skep.supervisor.worktree import (
+    git_metadata_masked,
+    git_metadata_readable_roots,
+    git_metadata_writable_roots,
+)
 
 from .conftest import git
 
@@ -162,8 +166,9 @@ def _g10_wall(config: SupervisorConfig, repo: Path, task_id: str, monkeypatch: A
 @pytest.mark.parametrize(
     ("policy", "wall"),
     [
-        ({"strict_read_confinement": True, "extra_read_paths": ["/srv/data"]},
-         (Path("/srv/data"),)),
+        # an existing dir: a missing one is never in the wall (3I)
+        ({"strict_read_confinement": True, "extra_read_paths": ["/usr/share"]},
+         (Path("/usr/share").resolve(),)),
         ({"strict_read_confinement": False}, None),
     ],
 )  # fmt: skip
@@ -413,8 +418,10 @@ def _repo_with_private_state(base: Path) -> tuple[Path, Path, Path]:
     (repo / "b.txt").write_text("staged secret\n", encoding="utf-8")
     git(repo, "add", "b.txt")
     common = repo / ".git"
-    for name in ("MERGE_MSG", "ORIG_HEAD"):
-        (common / name).write_text("CANARY\n", encoding="utf-8")
+    (common / "MERGE_MSG").write_text("CANARY\n", encoding="utf-8")
+    # R4: ORIG_HEAD is visible (unmasked); a real ref keeps in-wall fsck clean
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (common / "ORIG_HEAD").write_text(head + "\n", encoding="utf-8")
     private = base / "private"
     private.mkdir()
     (private / "canary.txt").write_text("CANARY private\n", encoding="utf-8")
@@ -424,18 +431,17 @@ def _repo_with_private_state(base: Path) -> tuple[Path, Path, Path]:
     return repo, common.resolve(), worktree
 
 
-def test_the_common_dir_loses_symlinks_and_the_main_checkout_s_private_state(
+def test_the_common_dir_is_bound_whole_and_the_main_checkout_s_private_state_masked(
     tmp_path: Path,
 ) -> None:
     _repo, common, worktree = _repo_with_private_state(tmp_path)
-    roots = git_metadata_readable_roots(worktree)
-    for never in ("leak", "index", "COMMIT_EDITMSG", "MERGE_MSG", "ORIG_HEAD", "refs/stash",
-                  "logs/refs/stash", "worktrees", "objects"):  # fmt: skip
-        assert not any(root == common / never for root in roots), never
-        assert not any(root.is_relative_to(common / never) for root in roots), never
-    assert common / "config" in roots and common / "HEAD" in roots
-    assert common / "refs" / "heads" in roots
-    assert all(root.is_relative_to(common) for root in roots)
+    # 3I: the dir itself, so a rename git makes in it (index, packed-refs,
+    # HEAD) stays live; a symlinked entry ("leak") resolves inside the wall
+    assert git_metadata_readable_roots(worktree) == (common,)
+    # R4 (Neon): ORIG_HEAD is not masked (a /dev/null there breaks git fsck)
+    assert git_metadata_masked(worktree) == tuple(
+        common / name for name in ("COMMIT_EDITMSG", "MERGE_MSG")
+    )
 
 
 @needs_bwrap
@@ -454,7 +460,9 @@ def test_git_status_and_diff_still_work_inside_the_narrowed_metadata(
     )
     proc = subprocess.run(
         sandbox.wrap_command(
-            ["/bin/sh", "-c", "git status --short && git diff --stat && git log --oneline -1"],
+            ["/bin/sh", "-c",
+             "git status --short && git diff --stat && git log --oneline -1"
+             " && git fsck --no-progress --no-dangling"],
             profile,
         ),
         cwd=worktree, capture_output=True, text=True, check=False, timeout=60,
@@ -462,8 +470,7 @@ def test_git_status_and_diff_still_work_inside_the_narrowed_metadata(
     )  # fmt: skip
     assert proc.returncode == 0, proc.stderr
     assert "a.txt" in proc.stdout and "1 file changed" in proc.stdout
-    private = [common / "index", common / "refs" / "stash", common / "logs" / "refs" / "stash",
-               common / "MERGE_MSG", common / "ORIG_HEAD", common / "COMMIT_EDITMSG",
+    private = [common / "MERGE_MSG", common / "COMMIT_EDITMSG",
                common / "leak" / "canary.txt", tmp_path / "private" / "canary.txt"]  # fmt: skip
     seen = _probe(profile, private, cwd=worktree)
     assert "read" not in seen.values(), seen

@@ -2,10 +2,14 @@
 
 **Status:** accepted (Phase 03, Work Item 3.2). Linux bubblewrap, the G10
 re-verify and the Queen's file reads are done. The macOS Seatbelt half was
-added on 2026-11-23 (see "The Seatbelt half").
+added on 2026-11-23 (see "The Seatbelt half"). The git metadata a strict run
+reads was widened again the same day, so git in the wall cannot prune other
+checkouts' objects (see "Data safety over hidden pointers"), and is now the
+common dir itself, bound live (see "Live git metadata, the worker's own
+wall", review round 3, 3I).
 **Related:** ADR 0066 (new projects sandboxed by default; this ADR copies its
 rollout rule), ADR 0047 (external engines: the sandbox is their only wall),
-ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I12.
+ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I11, I12.
 
 ## Context
 
@@ -64,18 +68,24 @@ readable. A denylist cannot keep up with every place a person keeps files.
      `~/.local/bin` linked to `~/Downloads`) is dropped too, with a warning in
      the serve log, and the operator follows such a link on purpose by naming
      it in `extra_read_paths`. An extra path at or above `$HOME` (so `/`,
-     `/home`, `/var/home`), in or over the skep home, or on `/etc` or its
-     hidden entries refuses the run (`sandbox.extra_read_path_problem`); setup
-     refuses the same paths first, naming a subdirectory to use. A written
+     `/home`, `/var/home`), in or over the skep home, on `/etc`, a dir that
+     holds it (`/private` on macOS) or its hidden entries, or in Homebrew's
+     `var/` (masked on macOS) refuses the run
+     (`sandbox.extra_read_path_problem`); setup refuses the same paths first,
+     naming a subdirectory to use. A written
      root that is a symlink (uv's `cpython-3.12-…` minor-version link, which a
      venv's python points through) is recreated as a link to its resolved
      root.
-   - the run's git metadata: the common dir's entries, without `worktrees/`
-     (the sibling runs' HEAD and index), `objects/` (already writable), any
-     symlinked entry (bound by its own name, its target would be readable),
-     and the main checkout's own state a linked worktree's git never reads:
-     `index`, `COMMIT_EDITMSG`, `MERGE_MSG`, `ORIG_HEAD`, `refs/stash` and
-     `logs/refs/stash`. `git status`, `git diff` and `git log` still run.
+   - the run's git metadata: the common dir itself, read-only and live (a
+     file the operator's git replaces by rename stays current, 3I below),
+     with `objects/` and the run's own git dir bound writable on top. Inside
+     it, the main checkout's own state no git command in the run reads,
+     `COMMIT_EDITMSG`, `MERGE_MSG` and `ORIG_HEAD`, is masked. `refs/`,
+     `logs/` (the stash and its reflog included), `packed-refs`, the main
+     `index` and `worktrees/` (the sibling runs' HEAD, index and reflogs)
+     are readable, because git's reachability walk reads them (2026-11-23,
+     below); one of those that is a link out of the common dir refuses a
+     strict run. `git status`, `git diff` and `git log` still run.
    - the run's writable roots, as before: worktree, results dir, run-private
      caches.
    - the secret masks, **last**, so no `extra_read_paths` entry or detected
@@ -88,7 +98,8 @@ readable. A denylist cannot keep up with every place a person keeps files.
    first, so a project bound by template name alone counts), and records it
    on the run's `dispatched` line as `read_allowlist`: the extra paths'
    resolved targets, each judged by `extra_read_path_problem` first (a link
-   that now points at the home refuses the run as `sandbox_unavailable`).
+   that now points at the home refuses the run as `sandbox_unavailable`),
+   and only those that exist, as the worker's profile binds them (3I).
    The key is absent for a denylist-only run. A worker that had no wall
    (workspace mode, or the sandbox off) records the same list as
    `g10_read_allowlist` instead, so its record never claims a wall its
@@ -97,7 +108,9 @@ readable. A denylist cannot keep up with every place a person keeps files.
    or after a restart, reads that record and never the policy again, and
    binds exactly those targets: one that is now a link, or no longer
    resolves to itself (a parent swapped for a link), makes G10
-   `unavailable`, naming the path and where it leads, and nothing runs. So
+   `unavailable`, naming the path and where it leads, and nothing runs. A
+   recorded wall with the sandbox off makes G10 `unavailable` too (3I): it
+   never runs on the host. So
    neither a policy edit nor a retargeted link between the worker and its
    re-verify widens G10's reads. The baseline prime, the patched prime and
    the verify command all get the strict profile. A patch is never
@@ -153,12 +166,20 @@ readable. A denylist cannot keep up with every place a person keeps files.
   and nvm's per-version global npmrc (`$NVM_DIR/versions/node/*/etc/npmrc`),
   which npm reads the way it reads `~/.npmrc`
   (`sandbox.SANDBOX_READABLE_SECRETS`).
-- The repo's shared git metadata: `config`, which git cannot run without and
-  which can carry credentials (an `http.extraheader`, a token in a remote
-  URL); refs but the stash, `packed-refs`, branch reflogs, `hooks/`, `info/`.
-  `objects/` is shared too: every object in it is readable by hash,
-  including blobs only a sibling run, the operator's staged index or a
-  stash ever referenced.
+- The repo's shared git metadata, the common dir whole: `config`, which git
+  cannot run without and which can carry credentials (an
+  `http.extraheader`, a token in a remote URL); every ref and reflog, the
+  stash's included, `packed-refs`, `hooks/`, `info/`; the operator's
+  staging `index` (which paths they staged); the main checkout's
+  `MERGE_HEAD` and `AUTO_MERGE` (commit ids); and the sibling runs' git
+  dirs under `worktrees/` (their HEAD, index, reflogs and in-progress
+  messages), never their checkouts. It is live, so a file made there during
+  the run shows too. `COMMIT_EDITMSG`, `MERGE_MSG` and `ORIG_HEAD` are
+  masked: on bubblewrap only those present when the wall starts, so one the
+  operator's git creates later, or an `ORIG_HEAD` it replaces by rename,
+  shows through; Seatbelt denies the three by name. `objects/` is shared
+  too: every object in it is readable by hash, including blobs only a
+  sibling run, the operator's staged index or a stash ever referenced.
 - With a dev checkout's serve, skep's own interpreter and package roots are
   that checkout's `.venv` and `src/`, so a strict run reads that much of the
   operator's checkout.
@@ -168,8 +189,8 @@ readable. A denylist cannot keep up with every place a person keeps files.
   up as an unreadable placeholder and `~/.ssh` as an empty dir.
 
 Not readable: the rest of `$HOME`, other users' homes, `/var`, `/mnt`,
-`/media`, `/srv`, `/root`, `/boot`, `/etc/pve`, sibling worktrees and their
-git metadata, other runs' results and audit trails, other managed repos, the
+`/media`, `/srv`, `/root`, `/boot`, `/etc/pve`, sibling runs' worktrees (the
+checkouts), other runs' results and audit trails, other managed repos, the
 operator's own checkout of the repo, the skep home's other files, and host
 `/tmp` and `/run`.
 
@@ -183,15 +204,44 @@ matching rule wins):
 
 ```
 (allow default)
+(deny lsopen) (deny job-creation) (deny appleevent-send) (deny mach-lookup <mds>)
 ...network and write rules, unchanged...
 (deny file-read* file-test-existence (with errno ENOENT))
 (allow file-read* file-test-existence (literal "/"))
 (allow file-read-metadata file-test-existence <every ancestor, literal>)
 (allow file-read-metadata file-test-existence (subpath "/etc") (subpath "/var/select") ...)
 (allow file-read* file-test-existence (subpath "/usr") (subpath "/System") ... <the run's roots>)
+(deny file-read* file-test-existence (subpath "/System/Volumes") (with errno ENOENT))
 (deny file-read* <the secret floor>) ... (deny file-read* (literal "/private/etc/sudoers")) ...
+(deny file-read* (subpath "/opt/homebrew/var")) ...
 (allow file-read* (literal <this run's own unmasked file>))
 ```
+
+- **Nothing starts outside the wall (review round 2, M9).** Every Seatbelt
+  profile, strict or not, denies `lsopen`: on macOS 27, `open` handed
+  LaunchServices an app (or a `.command`) that ran unsandboxed and copied a
+  fake-HOME canary into the worktree, under both profiles. `appleevent-send`
+  closes the same door through another app (`tell application "Terminal"
+  to do script`), `job-creation` a launchd job (launchd already refuses a
+  sandboxed `launchctl submit`, `bootstrap` and `load` on macOS 27; the
+  deny does not rely on that), and `com.apple.metadata.mds` Spotlight, an
+  index of the whole disk (macOS 27 filters its answers by the caller's
+  reads; the deny does not rely on that either). A lookup deny on
+  `com.apple.coreservices.launchservicesd` was tried and dropped: it did
+  not stop `open`, and LaunchServices also answers ordinary bundle lookups.
+- **`/System/Volumes` closed again (M4).** `/System` is reopened whole, and
+  that reached `/System/Volumes`: `Preboot`, `VM`, `Update` and the data
+  volume's own entries no firmlink maps back to the root (`mnt`, `sw`,
+  `.PreviousSystemInformation`). A firmlinked path is matched by its root
+  spelling, so `/Users/...` is never under it; dyld, Python, git, uv and
+  node still run.
+- **The shared `refs/` is listed (M3).** The git roots are `refs/`'s
+  entries, never the dir, so Seatbelt left it metadata-only and `git
+  for-each-ref` and `git branch` found nothing and exited 0. It was then
+  listed (names only), with `refs/stash` left unreadable, so git called the
+  stash a broken ref and `git log --all` and `git prune` stopped on it.
+  Since 2026-11-23 `refs/` is bound whole (below), stash included, and the
+  listing rule is gone with the reason for it.
 
 - **One global deny.** Not `(allow default)` with a narrow `/Users` deny,
   which would leave host `/tmp`, `/private/tmp` and `/var` readable. It
@@ -223,13 +273,21 @@ matching rule wins):
   `/var` is `/private/var`. Seatbelt matches the vnode's path, so the
   firmlink spelling `/System/Volumes/Data/Users/...` and
   `/Volumes/Macintosh HD/Users/...` reach the same denial. The tests probe
-  both.
+  both. Seatbelt also matches without case on APFS: an extra path
+  `/USERS/<me>` passed the check and reopened the home (review round 2,
+  M1). The checks on `extra_read_paths` and the detected roots now compare
+  `secret_floor.alias_key` spellings (case folded, data-volume prefix
+  dropped) against the home, the skep home and `/etc` resolved
+  (`/private/etc`), with both OSes' hidden entries.
 
 ### What a strict run reads on macOS (I8, stated plainly)
 
-- `/usr` (with `/usr/local`, so Intel Homebrew), `/System`, `/bin`,
-  `/sbin`, `/dev` (device nodes keep their Unix permissions; the raw disks
-  are root/operator only) and `/opt/homebrew`.
+- `/usr` (with `/usr/local`, so Intel Homebrew), `/System` but
+  `/System/Volumes`, `/bin`, `/sbin`, `/dev` (device nodes keep their Unix
+  permissions; the raw disks are root/operator only) and `/opt/homebrew`.
+  Homebrew's `var/` (`/opt/homebrew/var`, `/usr/local/var`: postgres,
+  mysql and redis data dirs) is masked last; its `etc/` stays readable
+  (below).
 - All of `/Library`. That includes `/Library/Keychains/System.keychain`
   (encrypted; its key is root-only), system-wide preferences and
   `/Library/Application Support`, and the CommandLineTools. It holds no
@@ -238,7 +296,7 @@ matching rule wins):
 - `/private/etc`, minus the auth entries above.
 - Three spots in `/private/var`: `select/` (the links `/bin/sh` and
   xcode-select read), `db/timezone/` (where `/etc/localtime` points) and
-  `run/resolv.conf`.
+  `run/resolv.conf`; and the `db/xcode_select_link` link itself.
 - The active developer dir. `/usr/bin/git` is xcrun's shim and runs git from
   it. When that dir is Xcode, the whole `Xcode.app` is read, because xcrun
   stats its `Info.plist` and loads its `SharedFrameworks`.
@@ -266,6 +324,31 @@ in the worker wall. The same tests run on Linux against bubblewrap.
 
 ## Not covered yet
 
+- Homebrew's `etc/` (`/opt/homebrew/etc`, `/usr/local/etc`) stays readable
+  on a Mac: its service configs can hold a password (`redis.conf`
+  `requirepass`, a `my.cnf`), but Homebrew's OpenSSL reads its CA bundle
+  from there (`etc/openssl@3/cert.pem`), so masking it would break TLS for
+  Homebrew's Python and curl. A project that needs it closed names
+  narrower paths itself, or runs denylist-only.
+- `objects/` is still writable, so a worker that deletes object files by
+  hand (`rm`, not git) still destroys other checkouts' data. Git in the wall
+  no longer does it by accident, with one race left: an ordinary `git
+  prune` (its default expiry is now) in one run can delete a blob or tree a
+  sibling run, or the operator, has just written, before that sibling's
+  `git add` or `git commit` saves the index or HEAD that points to it. A
+  store the worker cannot delete from, a per-run object dir with the shared
+  one as a read-only alternate, closes both.
+- A unix socket made in the common dir during a run (git's fsmonitor daemon,
+  started after the wall) is not masked: the masks are laid when the wall
+  starts. Landlock's unix-socket scoping still refuses a connect outside the
+  writable roots where the kernel offers it (R5b).
+- On bubblewrap, a masked `MERGE_MSG` that the operator's git deletes
+  between the profile write and the wall's start (their merge completes)
+  stops bwrap from starting: it cannot make the mountpoint in the read-only
+  common dir. The run fails closed, but G10 then reports a failed command,
+  not `unavailable`, as it does for a secret-floor file deleted in that
+  window.
+
 - Forged tools (`mcp_client.py`), the fast lane (`serve/fastlane.py`), the
   `diagnose` re-run (`serve/actions.py`) and MCP servers still get
   denylist-only profiles. None of them is a project run with a policy to
@@ -288,6 +371,125 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   NixOS the profile under `/run/current-system` is gone with host `/run`.
   Such a host needs `extra_read_paths` (e.g. `/var/opt`) or denylist-only
   reads.
+
+## Data safety over hidden pointers (2026-11-23, review round 3)
+
+The narrowed git metadata (review round 1, W4, and the `worktrees/`
+exclusion) left `objects/`, which every checkout of the repo shares,
+writable. So the walk git uses to decide what is garbage ran on a partial
+view. In a strict run, on real bubblewrap, `git prune` in the run's worktree
+deleted both of the operator's stashes (`stash@{1}` lives only in the
+stash's reflog), a blob the operator had staged and not committed, a sibling
+run's staged blob, and the commit at that sibling's HEAD.
+`git repack -a -d` deleted the same five after they were packed. Before
+Phase 03, `--ro-bind / /` showed git all of it, so this was a regression.
+`git gc` itself dies first, on `gc.pid.lock` in the read-only common dir.
+
+Git's walk reads every ref (`refs/stash` included), every reflog (the
+stash's included), the index of every worktree (the main checkout's and each
+sibling's), and each sibling worktree's HEAD and reflogs from
+`worktrees/<id>/` (it finds them through `worktrees/<id>/gitdir`). It does
+not read `ORIG_HEAD`, `MERGE_HEAD` or `AUTO_MERGE`: host git prunes an
+object only they name, so `ORIG_HEAD` stays hidden, with the in-progress
+messages. (`MERGE_HEAD` and `AUTO_MERGE` were bound all along, as entries
+no rule skipped; 3I says so in the readable list.)
+
+So `refs/`, `logs/`, the main `index` and `worktrees/` are bound whole and
+read-only again, on every backend, from the one list in
+`worktree.git_metadata_readable_roots`. The run's own git dir is a writable
+root bound on top. `worktrees/` is bound as a directory, not entry by entry,
+so a run started after this one is in the walk too. A symlink inside these
+dirs resolves inside the wall, where the host's files are absent, so W4's
+rule (never bind a symlinked entry by name) still holds for the entries
+themselves. On Seatbelt, `refs/` is now read whole, so the M3 listing rule
+went away.
+
+What the run can now read that it could not: the operator's stash commits
+and the paths in their index, and the sibling runs' HEAD commits, staged
+paths and commit messages. Hiding them protected little. The objects they
+point to were already readable by hash (`git fsck --unreachable` in the
+wall listed them), while hiding the pointers let any `git prune` delete
+other people's work. Writes are still refused: a sibling's `HEAD`, the
+operator's `index` and `refs/stash` are read-only in the wall, and `git
+worktree prune` there sees the siblings as prunable (their checkouts are
+outside the wall) but fails to remove them. A config that refuses pruning
+was rejected: `git prune` ignores `gc.pruneExpire`, `git repack -a -d`
+ignores both gc keys, and a worker controls its own environment.
+Invariants: I8 (the readable list above is updated), I11 (the operator's
+data), I12.
+
+Proven by `tests/supervisor/test_sandbox_read_wall_r3.py` against real
+bubblewrap (the same test runs under Seatbelt on a Mac): `git prune` and
+`git repack -a -d` in the wall, then the stashes, the staged blobs and the
+sibling's HEAD are still there on the host.
+
+## Live git metadata, the worker's own wall (2026-11-23, review round 3, 3I)
+
+- **The common dir is bound as a directory.** 3H bound `index` and
+  `packed-refs` (and `HEAD`) as files. git replaces each by rename, so a
+  file bind kept the dispatch-time inode, and a `packed-refs` made after
+  dispatch (`git pack-refs --all`, gc, a fetch) was not bound at all. On
+  real bubblewrap, after the operator's `git add` or `git pack-refs --all`
+  during a run, `git prune` in that run's wall deleted the new blob, or the
+  commit only the packed tag named, from the shared `objects/`
+  (`tests/supervisor/test_sandbox_read_wall_r3.py`, the running-wall test;
+  host `git fsck` then failed). `git_metadata_readable_roots` now returns
+  the common dir itself; bubblewrap binds it read-only, then `objects/` and
+  the run's own git dir writable on top, then the masks
+  (`worktree.git_metadata_masked`) last. Seatbelt matches by path, so a
+  replaced `index` was live there already, but a `packed-refs` made after
+  the profile was written had no allow rule and read as missing; it now
+  allows the dir as one subpath and denies the three masked names. A symlinked entry is no longer dropped by name: it
+  stays a link inside the bind and resolves inside the wall, where its
+  target is absent unless bound (W4 still holds).
+- **A linked walk entry refuses a strict run.** `refs`, `logs`, `index` or
+  `packed-refs` that is a link out of the common dir resolves to nothing in
+  the wall, so `git prune` there would walk without it. `write_profile`
+  raises `SandboxUnavailableError` naming the link and its target
+  (dispatch records `sandbox_unavailable`, G10 `unavailable`). A link that
+  stays inside the common dir is bound with it and runs. A linked
+  `worktrees/` already stops git itself: the run's gitfile no longer finds
+  its common dir.
+- **G10 replays the worker's effective extra roots.** Dispatch recorded
+  every judged extra path, including one that did not exist, while the
+  worker's profile skips a missing one. Made before G10, G10 bound it, so
+  G10 read wider than the worker (real bubblewrap: the late canary was
+  read). Dispatch now records only the targets that exist.
+- **A recorded wall never runs on the host.** With the sandbox off, G10
+  ignored both recorded fields and ran the patch's verify unconfined.
+  `reverify_run` now reads the record before anything else, and a recorded
+  `read_allowlist` or `g10_read_allowlist` with the sandbox off makes G10
+  `unavailable`, saying how to fix it. A backend that cannot hold the wall
+  already did the same.
+- **Extra paths Seatbelt cannot honour are refused.** One in Homebrew's
+  `var/` was accepted, then masked last on a Mac (ENOENT). `/private` (or
+  `/PRIVATE`, or its data-volume spelling) passed the `/etc` check, which
+  compared equality only, and would have reopened host `/tmp`, `/private/var`
+  and `/private/etc`. A dir that holds `/etc` is now refused, on both OSes'
+  checks, as are the detected roots.
+
+Invariants: I2 (G10 never trusts a worker-era record it cannot enforce),
+I8 (the readable list above is updated), I9 (each refusal names the path
+and the fix), I11 (the operator's staged and packed data), I12 (unavailable,
+never a quiet host run). Proven against real bubblewrap by the running-wall
+test (the same test runs under Seatbelt on a Mac) and `test_g10_never_reads_an_extra_root_made_after_dispatch` in
+`test_sandbox_read_wall_r2.py`.
+
+## Review round 4 (2026-11-23)
+
+- `ORIG_HEAD` is no longer masked: a `/dev/null` over it made in-wall
+  `git fsck` exit 8 (`badRefFiletype`), and the commit it names is already
+  reachable through `objects/` and `logs/`. Only `COMMIT_EDITMSG` and
+  `MERGE_MSG` stay masked (where they exist as regular files at start; a
+  symlinked one is skipped, since bwrap cannot mount over a link). Earlier
+  sections that list `ORIG_HEAD` among the masked files describe round 3.
+- `HEAD` joins the entries whose link out of the common dir refuses a strict
+  run, beside `refs`, `logs`, `worktrees`, `index` and `packed-refs`.
+- A recorded extra read root that vanished between dispatch and profile time
+  refuses the wall (`sandbox_unavailable` for the worker, `unavailable` for
+  G10) rather than quietly building a narrower wall than the run recorded.
+- The Homebrew `var/` refusal for extra paths applies on macOS only;
+  bubblewrap honours those paths.
 
 ## Consequences
 

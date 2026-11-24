@@ -1173,6 +1173,11 @@ def reverify_run(
         )
         return outcome
 
+    # ADR 0068 (W1): the wall the worker ran in, as its dispatched line
+    # recorded it — never re-resolved, so a policy edit since (or a project
+    # the repo lookup cannot find) never widens G10's reads past the worker's.
+    # 3I: read before anything decides how G10 runs.
+    read_allowlist = _recorded_read_wall(store, task_id)
     profile_path: Path | None = None
     if config.sandbox:
         if not sandbox.available():
@@ -1184,16 +1189,21 @@ def reverify_run(
                 "(`skep doctor`) and re-verify"
             )
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
+    elif read_allowlist is not None:
+        # 3I (I2, I12): a recorded strict wall with nothing to enforce it.
+        return unavailable(
+            "the run recorded a strict read wall (ADR 0068), but this supervisor runs with "
+            "the sandbox off, so nothing here can hold it: the patch's verify command was "
+            "not run on the host. Turn the sandbox on and re-verify, or turn strict reads "
+            "off for the project (`skep project setup <repo> --no-strict-reads`) and "
+            "re-dispatch"
+        )
 
     # v109-F4: prime against a per-project cache, so the resolve work one
     # re-verify pays for, the next one keeps. (Runtime import: the resolver
     # pulls in the serve tree — the same cycle dispatch dodges.)
     from .policy_resolver import project_cache_root
 
-    # ADR 0068 (W1): the wall the worker ran in, as its dispatched line
-    # recorded it — never re-resolved, so a policy edit since (or a project
-    # the repo lookup cannot find) never widens G10's reads past the worker's.
-    read_allowlist = _recorded_read_wall(store, task_id) if profile_path is not None else None
     if moved := _moved_read_roots(read_allowlist or ()):
         # G1 (I12): G10 binds exactly the targets dispatch resolved, or nothing.
         return unavailable(
