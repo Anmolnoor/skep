@@ -7,6 +7,7 @@ scans tests)."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -267,7 +268,6 @@ def test_a_key_with_nowhere_to_go_is_refused(config: SupervisorConfig) -> None:
 def test_the_workers_key_is_probed_while_the_queen_is_on_the_chatgpt_login(
     config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
 
     from .test_codex_login import write_fake_login
     from .test_codex_queen_provider import _codex_profile
@@ -608,7 +608,6 @@ def installed(config: SupervisorConfig, tmp_path: Path) -> SupervisorConfig:
 
 
 def _codex_queen(config: SupervisorConfig) -> None:
-    import os
 
     from .test_codex_login import write_fake_login
     from .test_codex_queen_provider import _codex_profile
@@ -1627,3 +1626,28 @@ def test_a_commit_in_another_process_holds_off_the_legacy_read(config: Superviso
         assert time.monotonic() - began >= 0.5  # it waited for the other process
     finally:
         holder.wait(10)
+
+
+def test_a_legacy_read_takes_the_file_lock_even_before_any_commit(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R11 (Sol R11-1): on an upgraded home with no lock file yet, the
+    shared read went unlocked and a first cross-process commit raced it. A
+    supervisor process's read creates the lock file and holds it shared."""
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-r11")
+    held: list[bool] = []
+    real = llm._legacy_values
+
+    def spy(home: Path) -> Any:
+        held.append(llm._HELD["fd"] is not None)
+        return real(home)
+
+    monkeypatch.setattr(llm, "_legacy_values", spy)
+    with _store(config) as store:
+        store.set_setting(llm.LLM_ENV_KEY_ENDPOINT, "https://a.example")
+        assert not (config.home / llm.PROVIDER_LOCK_FILE).exists()
+        assert llm.legacy_api_key(config.home, "https://a.example", store) == "env-r11"
+    assert (config.home / llm.PROVIDER_LOCK_FILE).exists() and held == [True]

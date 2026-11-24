@@ -1487,32 +1487,38 @@ _HELD: dict[str, Any] = {"fd": None}
 
 
 @contextlib.contextmanager
-def provider_lock(home: Path | None, *, shared: bool = False) -> Iterator[None]:
+def provider_lock(home: Path | None, *, shared: bool = False) -> Iterator[bool]:
     """THE provider-writes lock: this process's reentrant lock, plus a flock
     on ``<home>/.provider-writes.lock`` taken by the outermost holder that
     names ``home`` (the supervisor home) — so ``skep provider set-key`` in
     its own process and serve never interleave a legacy-key commit with a
-    read. A commit takes it exclusive (creating the file); a ``shared`` read
-    only joins one that exists and is openable (a sandboxed worker, whose
-    home is read-only, reads under the in-process lock alone). ``home``
-    None: the in-process lock only."""
+    read. Yields whether this process holds the file lock. A commit takes
+    it exclusive and creates the file; a ``shared`` read creates it too
+    wherever the home is writable — every supervisor process: serve, the CLI
+    (R11: an upgraded home had none, and a read before the first commit went
+    unlocked) — else joins it read-only. Only a sandboxed worker, reading its
+    read-only snapshot of the home once, can find neither and reads under
+    the in-process lock (it still needs its own key when the relay is off).
+    ``home`` None: the in-process lock only."""
     with _PROVIDER_WRITES:
         took = False
         if _HELD["fd"] is None and home is not None:
+            path = home / PROVIDER_LOCK_FILE
             try:
-                if shared:
-                    fd = os.open(home / PROVIDER_LOCK_FILE, os.O_RDONLY)
-                else:
-                    home.mkdir(parents=True, exist_ok=True)
-                    fd = os.open(home / PROVIDER_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+                home.mkdir(parents=True, exist_ok=True)
+                fd: int | None = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
             except OSError:
                 if not shared:
                     raise
-            else:
+                try:
+                    fd = os.open(path, os.O_RDONLY)
+                except OSError:
+                    fd = None
+            if fd is not None:
                 fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
                 _HELD["fd"], took = fd, True
         try:
-            yield
+            yield _HELD["fd"] is not None
         finally:
             if took:
                 fcntl.flock(_HELD["fd"], fcntl.LOCK_UN)
