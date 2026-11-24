@@ -99,7 +99,9 @@ def _branch_repo(store: RunStore, args: dict[str, Any]) -> Path | None:
     try:
         root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
         return resolve_repo_arg(str(args["repo"]), root, store)
-    except (HTTPException, OSError, ValueError):  # R6-1: evidence never raises
+    # R6-1 / R7: evidence never raises — a NUL (ValueError) or a `~user` with
+    # no home (RuntimeError) is everything pathlib raises beyond OSError
+    except (HTTPException, OSError, ValueError, RuntimeError):
         return None
 
 

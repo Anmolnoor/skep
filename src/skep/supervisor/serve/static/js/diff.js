@@ -184,8 +184,11 @@ export function renderDiff(text) {
       el("span", { class: "diff-stat" }, el("span", { class: "add" }, `+${file.added}`), " ",
         el("span", { class: "del" }, `−${file.removed}`))))));
   const total = files.reduce((sum, f) => [sum[0] + f.added, sum[1] + f.removed], [0, 0]);
+  // R7: the server's first line when it escaped a non-UTF-8 patch (display_patch)
+  const lead = String(text || "").split("\n", 1)[0];
   return {
     node: el("div", { class: "diff-view" },
+      lead.startsWith("# ") ? el("p", { class: "note diff-escaped" }, lead.slice(2)) : null,
       el("p", { class: "note" }, `${files.length} file${files.length === 1 ? "" : "s"} changed, +${total[0]} −${total[1]}`),
       el("nav", { "aria-label": "Changed files" }, list),
       sections,

@@ -160,3 +160,16 @@ test("R6-3: a doubled '\\\\ No newline' marker after a hunk is still a marker", 
   assert.equal(file.removed, 1);
   assert.deepEqual(plain(file.lines.map(l => l.kind)), ["hunk", "del", "add", "meta"]);
 });
+
+// R7: the server opens a non-UTF-8 patch's display with one "# …" line saying
+// its bytes are escaped; the diff view says it above the files, so `caf\xe9`
+// there is never read as the four characters.
+test("R7: a patch's leading '# …' note is shown above the files", () => {
+  const app = loadApp();
+  const body = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -0,0 +1 @@\n+caf\\xe9\n";
+  const noted = app.renderDiff("# not valid UTF-8: bytes are escaped\n" + body);
+  assert.equal(noted.sections.length, 1);
+  assert.ok(noted.node.textContent.includes("not valid UTF-8: bytes are escaped"));
+  assert.equal(noted.node.querySelectorAll(".diff-escaped").length, 1);
+  assert.equal(app.renderDiff(body).node.querySelectorAll(".diff-escaped").length, 0);
+});

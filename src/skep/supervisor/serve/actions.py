@@ -3208,14 +3208,21 @@ def require_run(store: RunStore, task_id: str) -> dict[str, Any]:
     return asdict(record)
 
 
+ESCAPED_NOTE = (
+    "# not valid UTF-8: every invalid byte is shown as \\xNN and every literal backslash is doubled"
+)
+
+
 def display_patch(raw: bytes) -> str:
     """R6-3: a patch as text for a person: valid UTF-8 as it is; otherwise
-    every invalid byte as \\xNN and every literal backslash doubled, so the
-    two never read the same."""
+    every invalid byte as \\xNN and every literal backslash doubled, under a
+    first line that says so (R7) — without that line `caf` + byte 0xE9 read
+    the same as a valid patch spelling `caf\\xe9`."""
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+        escaped = raw.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+        return f"{ESCAPED_NOTE}\n{escaped}"
 
 
 def patch_path(store: RunStore, task_id: str) -> Path | None:

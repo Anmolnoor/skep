@@ -1165,12 +1165,14 @@ def test_an_open_pr_that_opened_nothing_is_a_failed_card_with_its_reason(
         store.close()
 
 
+@pytest.mark.parametrize("repo", ["bad\x00path", "~skep-fixture-no-such-user/worktree"])
 def test_a_branch_card_with_an_unresolvable_repo_lists_no_runs_and_stays_deniable(
-    config: SupervisorConfig, ollama: FakeOllama
+    config: SupervisorConfig, ollama: FakeOllama, repo: str
 ) -> None:
-    """R6-1: a Queen-proposed open_pr whose repo holds a NUL byte never breaks
-    the evidence lookup — the queue, the badge and the chat page answer, the
-    card is there with no runs, and it can still be denied."""
+    """R6-1: a Queen-proposed open_pr whose repo holds a NUL byte, or names a
+    user with no home (R7), never breaks the evidence lookup — the queue, the
+    badge and the chat page answer, the card is there with no runs, and it
+    can still be denied."""
     from skep.supervisor import RunStore
 
     client = serve_client(config)
@@ -1182,7 +1184,7 @@ def test_a_branch_card_with_an_unresolvable_repo_lists_no_runs_and_stays_deniabl
     store = RunStore(config.db_path)
     try:
         card = store.add_chat_action(
-            chat_id, tool="open_pr", args={"branch": "skep/maintain", "repo": "bad\x00path"}
+            chat_id, tool="open_pr", args={"branch": "skep/maintain", "repo": repo}
         )
     finally:
         store.close()
@@ -1233,11 +1235,25 @@ def test_display_patch_keeps_utf8_as_is_and_never_lets_a_byte_read_as_text() -> 
     is \\xNN and a literal backslash is doubled, so the ASCII text `caf\\xe9`
     and `caf` + byte 0xE9 never display the same; the "\\ No newline"
     marker still starts with a backslash."""
-    from skep.supervisor.serve.actions import display_patch
+    from skep.supervisor.serve.actions import ESCAPED_NOTE, display_patch
 
     plain = "diff --git a/n b/n\n@@ -1 +1 @@\n-caf\\xe9\n+café\n\\ No newline at end of file\n"
     assert display_patch(plain.encode()) == plain
     mixed = b"@@ -1 +1 @@\n-caf\\xe9\n+caf\xe9\n\\ No newline at end of file\n"
     shown = display_patch(mixed).splitlines()
-    assert shown[1] == "-caf\\\\xe9" and shown[2] == "+caf\\xe9" and shown[1][1:] != shown[2][1:]
-    assert shown[3] == "\\\\ No newline at end of file" and shown[3].startswith("\\")
+    assert shown[0] == ESCAPED_NOTE
+    assert shown[2] == "-caf\\\\xe9" and shown[3] == "+caf\\xe9" and shown[2][1:] != shown[3][1:]
+    assert shown[4] == "\\\\ No newline at end of file" and shown[4].startswith("\\")
+
+
+def test_a_patch_adding_a_byte_never_displays_as_one_adding_its_spelling() -> None:
+    """R7: two patches that differ only in `caf` + the four characters \\xe9
+    versus `caf` + byte 0xE9 never display the same — the escaped one opens
+    with a line saying its bytes are escaped, the plain one has no such line."""
+    from skep.supervisor.serve.actions import ESCAPED_NOTE, display_patch
+
+    head = b"diff --git a/n b/n\n--- a/n\n+++ b/n\n@@ -0,0 +1 @@\n+caf"
+    spelled, byte = display_patch(head + b"\\xe9\n"), display_patch(head + b"\xe9\n")
+    assert spelled != byte
+    assert spelled == (head + b"\\xe9\n").decode() and ESCAPED_NOTE not in spelled
+    assert byte == ESCAPED_NOTE + "\n" + spelled
