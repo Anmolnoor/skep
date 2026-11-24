@@ -1302,6 +1302,52 @@ def test_the_cli_fetches_a_pr_and_merges_it_pinned(
     assert f"merges only {ORIGIN}#7 at head {'a' * 12}" in capsys.readouterr().out
 
 
+def test_skep_pr_merge_records_the_decision_before_gh_and_the_outcome_after(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (S8, I8): the CLI merge writes the same durable row a confirmed
+    merge_pr card does — the operator's decision and the exact pinned tuple,
+    already claimed ('executing') when gh is called — then the outcome."""
+    import getpass
+
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+
+    from .test_cli import _registered_clone
+
+    home = tmp_path / "home"
+    clone = _registered_clone(home, repo)
+    git(clone, "remote", "set-url", "origin", ORIGIN_URL)
+    config = build_config(home, None)
+    _verdict(config, clone)
+    seen: list[Any] = []
+
+    def fake_merge(**kwargs: Any) -> github.MergeResult:
+        store = RunStore(config.db_path)  # another connection: it is on disk
+        try:
+            seen.extend(a for c in store.list_chats() for a in store.chat_actions(c.chat_id))
+        finally:
+            store.close()
+        return github.MergeResult(True, "merged acme/widget#7", "b" * 40)
+
+    monkeypatch.setattr(github, "merge_pull_request", fake_merge)
+    assert main(["--home", str(home), "pr", "merge", "fixture", "7"]) == 0
+
+    (before,) = seen
+    assert before.tool == "merge_pr" and before.status == "executing"
+    assert before.source == "operator" and before.decided_by == getpass.getuser()
+    assert before.card is not None and before.card["merge"]["head_commit"] == "a" * 40
+    assert before.card["merge"]["base_commit"] == "b" * 40
+    store = RunStore(config.db_path)
+    try:
+        after = store.get_chat_action(before.action_id)
+    finally:
+        store.close()
+    assert after is not None and after.status == "confirmed"
+    assert after.result is not None and after.result["merged"] is True
+    assert after.result["landed_base"] == "b" * 40
+
+
 # --- 4. the PR tuple rides every face that reads the run (N6, S14/N7) ----------
 
 

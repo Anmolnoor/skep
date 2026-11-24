@@ -3119,6 +3119,7 @@ def _pr_repo(args: argparse.Namespace) -> Path | int:
 
 def cmd_pr_merge(args: argparse.Namespace) -> int:
     from . import github
+    from .roles import ROLE_LESS_CHAT_ROLE
     from .serve.cards import merge_line, merge_pin
 
     repo = _pr_repo(args)
@@ -3129,12 +3130,46 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
     store = RunStore(build_config(args.home, None).db_path)
     try:
         pin = merge_pin(store, {"repo": str(repo), "pr": args.number})
+        if "error" in pin:
+            return _err(f"merge refused: {pin['error']}")
+        print(f"  pin: {merge_line(pin)}")
+        # R2 (S8, I8): the operator's decision and the exact tuple are on
+        # record — the same merge_pr row a confirmed card leaves, claimed —
+        # BEFORE gh runs; a crash mid-merge leaves it 'executing', which the
+        # next serve start marks interrupted (outcome unknown), never lost.
+        actor = getpass.getuser()
+        chat = store.create_chat(
+            title=f"skep pr merge {pin['repo']}#{pin['number']}",
+            model=None,
+            source="cli",
+            role=ROLE_LESS_CHAT_ROLE,
+        )
+        action_id = store.add_chat_action(
+            chat.chat_id,
+            tool="merge_pr",
+            args={"repo": str(repo), "pr": str(pin["number"]), "strategy": args.method},
+            source="operator",
+            decided_by=actor,
+            card={"merge": pin},
+        )
+        store.claim_chat_action(action_id)
+        result = github.merge_pull_request(repo=repo, pin=pin, strategy=args.method)
+        store.resolve_chat_action(
+            action_id,
+            status="confirmed" if result.merged else "failed",
+            result={
+                "ok": result.merged,
+                "merged": result.merged,
+                "detail": result.detail,
+                "head_commit": pin["head_commit"],
+                "base_commit": pin["base_commit"],
+                "landed_base": result.landed_base,
+                "actor": actor,
+            },
+            claimed=True,
+        )
     finally:
         store.close()
-    if "error" in pin:
-        return _err(f"merge refused: {pin['error']}")
-    print(f"  pin: {merge_line(pin)}")
-    result = github.merge_pull_request(repo=repo, pin=pin, strategy=args.method)
     # gh failures come back as ok=False with the reason rather than raising, so
     # the exit code has to be derived — a merge that did not happen must not
     # report success (I8).
