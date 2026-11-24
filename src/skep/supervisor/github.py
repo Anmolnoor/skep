@@ -142,6 +142,8 @@ _GITHUB_ORIGIN = re.compile(
     r"([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+?)(?:\.git)?/?"
 )
 _PR_NUMBER = re.compile(r"#?([0-9]+)")
+_PR_NUMBER_MAX = 2147483647  # R2 (S14): GitHub's PR numbers are 32-bit signed
+_SELECTOR_MAX = 512
 _PR_URL = re.compile(
     r"https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)/pull/([0-9]+)"
     r"(?:[/?#].*)?",
@@ -172,24 +174,28 @@ def resolve_pr(repo: Path, selector: object, runner: Runner = subprocess.run) ->
     number (``7``, ``#7``; ``07`` is 7) or that repo's PR URL, with nothing
     after it but a ``/…``, ``?…`` or ``#…`` tail. A branch name, a flag,
     whitespace or another repo's URL raises ``PrSelectorError``; nothing
-    else ever reaches gh."""
+    else ever reaches gh. R2 (S14): leading zeros are dropped; a number past
+    2147483647 or a selector over 512 characters is refused before int()."""
     text = str(selector)
     shown = text if len(text) <= 80 else f"{text[:77]}..."
     origin = origin_repo(repo, runner)
     if origin is None:
         raise PrSelectorError(_NOT_GITHUB.format(repo=repo))
-    number = _PR_NUMBER.fullmatch(text)
-    url = None if number else _PR_URL.fullmatch(text)
+    # R2 (S14): bounded before any regex or int() — an overlong selector is
+    # refused, never converted (int() raises on ~4300+ digits).
+    number = None if len(text) > _SELECTOR_MAX else _PR_NUMBER.fullmatch(text)
+    url = None if number or len(text) > _SELECTOR_MAX else _PR_URL.fullmatch(text)
     if url is not None and f"{url[1]}/{url[2]}".lower() != origin:
         raise PrSelectorError(
             f"{shown!r} is a PR of {url[1]}/{url[2]}, not of {origin} ({repo}'s origin) — "
             f"name a PR of {origin}: its number (#7) or https://github.com/{origin}/pull/7"
         )
-    found = number[1] if number else url[3] if url else ""
-    if not found or int(found) == 0:
+    found = (number[1] if number else url[3] if url else "").lstrip("0")
+    if not found or len(found) > 10 or int(found) > _PR_NUMBER_MAX:
         raise PrSelectorError(
-            f"{shown!r} is not a PR of {origin}: give its number (7 or #7) or its URL "
-            f"(https://github.com/{origin}/pull/7) — a branch name, a flag or anything "
+            f"{shown!r} is not a PR of {origin}: give its number (7 or #7, at most "
+            f"2147483647) or its URL (https://github.com/{origin}/pull/7) — a branch "
+            "name, a flag or anything "
             "else is never passed to gh"
         )
     return PrId(origin, int(found))

@@ -140,6 +140,9 @@ def _g10(repo: Path, config: SupervisorConfig, head: str, pin: str = PIN) -> tup
         ("https://github.com/acme/widget/pull/7?w=1", 7),
         ("https://github.com/acme/widget/pull/7#discussion_r1", 7),
         ("https://github.com/acme/widget/pull/7/", 7),
+        ("0007", 7),  # R2 (S14): leading zeros are int()'s, not part of the number
+        ("2147483647", 2147483647),
+        ("https://github.com/acme/widget/pull/0007", 7),
     ],
 )
 def test_a_pr_selector_names_the_origin_repo_and_a_number(
@@ -186,6 +189,13 @@ def test_every_github_origin_form_names_the_same_repo(repo: Path, url: str) -> N
         "https://github.com/acme/widget/issues/7",
         "http://github.com/acme/widget/pull/7",
         "https://github.com.evil.example/acme/widget/pull/7",
+        "2147483648",  # R2 (S14): past GitHub's PR number range
+        # int() itself would raise on 5000 digits (and say nothing useful)
+        pytest.param("9" * 5000, id="5000-digits"),
+        pytest.param("0" * 5000 + "7", id="5000-leading-zeros"),
+        "https://github.com/acme/widget/pull/2147483648",
+        pytest.param("https://github.com/acme/widget/pull/" + "9" * 5000, id="url-5000-digits"),
+        pytest.param("https://github.com/acme/widget/pull/7?" + "x" * 5000, id="url-overlong"),
     ],
 )
 def test_anything_but_a_number_or_this_repos_pr_url_is_refused(repo: Path, selector: str) -> None:
