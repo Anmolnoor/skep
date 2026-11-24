@@ -408,14 +408,20 @@ def _call_args(call: dict[str, Any] | None) -> dict[str, Any]:
 
 def _refused(content: str) -> bool:
     """A refused step — or, Review R1 (Q14), one whose command failed inside
-    a tool that answered (``{"ok": true, "result": {"exit_code": 2}}``)."""
+    a tool that answered (``{"ok": true, "result": {"exit_code": 2}}``), or,
+    Review R2 (F5), one the engine skipped (``{"refused": ...}``)."""
     try:
         result = json.loads(content)
     except ValueError:
         return False
     return any(
         isinstance(each, dict)
-        and ("error" in each or each.get("ok") is False or each.get("exit_code") not in (None, 0))
+        and (
+            "error" in each
+            or "refused" in each
+            or each.get("ok") is False
+            or each.get("exit_code") not in (None, 0)
+        )
         for each in (result, result.get("result") if isinstance(result, dict) else None)
     )
 
@@ -508,10 +514,12 @@ def draft_capture(
         raise SkillError(f"no run or chat {source!r}")
     if not steps:
         raise SkillError(f"{label} ran no command that succeeded — nothing to capture")
-    # Review R1 (Q3): a SKILL.md is written to be shared — no credential, no URL userinfo
-    ask, steps, paths = (
+    # Review R1 (Q3): a SKILL.md is written to be shared — no credential, no URL
+    # userinfo; Review R2 (F3): the declared hosts too
+    ask, steps, hosts, paths = (
         redact_export(ask),
         [redact_export(x) for x in steps],
+        [redact_export(x) for x in hosts],
         [redact_export(x) for x in paths],
     )
     description = f"captured procedure: {' '.join(ask.split())[:80]}"

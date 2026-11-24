@@ -95,6 +95,7 @@ def _completed_run(
     ),
     chat_taint: list[str] | None = None,
     resume_of: str | None = None,
+    network: tuple[str, ...] = ("pypi.org",),
 ) -> str:  # fmt: skip
     repo.mkdir(parents=True, exist_ok=True)
     decision = None
@@ -107,7 +108,7 @@ def _completed_run(
         workspace=repo,
         instructions="Run the test suite and fix what fails.",
         permissions=Permissions(
-            read=[str(repo)], write=[str(repo)], network=["pypi.org"], env_allowlist=[]
+            read=[str(repo)], write=[str(repo)], network=list(network), env_allowlist=[]
         ),
         budget=DEFAULT_BUDGET,
         dispatch_decision=decision,
@@ -477,12 +478,8 @@ def test_review_r1_a_turn_from_before_trust_keeps_its_taint(
     assert candidate.taint == ()
 
 
-def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
-    tmp_path: Path,
-) -> None:
-    """Review R1 (Q10): drafts the old observer made (it drafted from
-    untrusted chats too) carry no taint record; the upgrade marks them
-    unknown — both bits — so approving one names it."""
+def _legacy_drafts(tmp_path: Path) -> Path:
+    """A store from before skill_candidates.taint, with one open draft of each provenance."""
     db = tmp_path / "supervisor.sqlite3"
     store = RunStore(db)
     for name, provenance in (("conv-x", "conversation"), ("learned-x", "learned")):
@@ -499,6 +496,10 @@ def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
     with closing(sqlite3.connect(db)) as conn:
         conn.execute("ALTER TABLE skill_candidates DROP COLUMN taint")
         conn.commit()
+    return db
+
+
+def _drafts_need_acknowledgment(db: Path) -> None:
     store = RunStore(db)
     try:
         assert store.get_candidate("conv-x").taint == ("private", "untrusted")  # type: ignore[union-attr]
@@ -508,6 +509,41 @@ def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
         approve(store, "conv-x", actor="op", accept_taint=True)
     finally:
         store.close()
+
+
+def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
+    tmp_path: Path,
+) -> None:
+    """Review R1 (Q10): drafts the old observer made (it drafted from
+    untrusted chats too) carry no taint record; the upgrade marks them
+    unknown — both bits — so approving one names it."""
+    _drafts_need_acknowledgment(_legacy_drafts(tmp_path))
+
+
+class _KilledAfterTheAlter(sqlite3.Connection):
+    """The process dies once the taint column is added, before its backfill."""
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        if sql.startswith("UPDATE skill_candidates SET taint"):
+            raise RuntimeError("killed between the ALTER and the backfill")
+        return super().execute(sql, parameters)
+
+
+def test_review_r2_an_upgrade_cut_after_the_taint_column_still_marks_old_drafts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F4): the column and its backfill commit together — an
+    upgrade killed between them leaves neither, so the reopen marks the
+    conversation draft with both bits and approving it still names them."""
+    db = _legacy_drafts(tmp_path)
+    connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: connect(*a, factory=_KilledAfterTheAlter, **kw)
+    )
+    with pytest.raises(RuntimeError, match="killed"):
+        RunStore(db)
+    monkeypatch.undo()
+    _drafts_need_acknowledgment(db)
 
 
 def test_review_r1_a_channel_chat_turn_is_outside_content(store: RunStore, tmp_path: Path) -> None:
@@ -650,3 +686,132 @@ def test_review_r1_skill_show_names_the_approve_that_will_work(
     ):
         assert _cli(home, "skill", "show", name) == 0
         assert hint in capsys.readouterr().out, name
+
+
+# -- review round 2 ------------------------------------------------------------
+
+
+def test_review_r2_a_run_capture_strips_userinfo_from_its_declared_hosts(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """Review R2 (F3): the declared hosts pass the export redactor like the
+    ask, steps and paths — user:password and a username-only token alike."""
+    audit = tmp_path / "audit"
+    hosts = (f"https://{USER}:{WORD}@git.example", f"https://{TOKEN}@api.example")
+    run = _completed_run(store, audit, tmp_path / "repo", network=hosts)
+    candidate, text = capture_skill(store, audit, run, name="hosts", actor="op")
+    for each in (text, candidate.template.instructions):
+        _no_secret(each)
+    assert "https://***@git.example, https://***@api.example" in text
+
+
+def test_review_r2_a_refused_tool_call_is_not_a_step(store: RunStore, tmp_path: Path) -> None:
+    """Review R2 (F5): the engine skipped a repeated call (``{"refused":
+    "asked_and_answered"}``) — it never ran, so it is not a step."""
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="lint and read")
+    url = {"url": "https://x.example"}
+    store.add_chat_message(chat, role="assistant", content="", tool_calls=[
+        {"id": "a", "function": {"name": "run_shell", "arguments": {"command": "make lint"}}},
+        {"id": "b", "function": {"name": "read_url", "arguments": url}},
+        {"id": "c", "function": {"name": "read_url", "arguments": url}},
+    ])  # fmt: skip
+    skipped = {"refused": "asked_and_answered", "nudge": "this exact call already ran"}
+    for call_id, name, result in (
+        ("a", "run_shell", {"ok": True}),
+        ("b", "read_url", skipped),
+        ("c", "read_url", {"refused": True}),
+    ):
+        store.add_chat_message(chat, role="tool", content=json.dumps(result), tool_name=name,
+                               tool_call_id=call_id)  # fmt: skip
+    store.add_chat_message(chat, role="assistant", content="done")
+    with pytest.raises(SkillError, match="no finished multi-step turn"):
+        capture_skill(store, tmp_path, chat, name="lint", actor="op")
+
+
+def test_review_r2_a_trust_after_the_observer_read_the_turn_never_drafts_it_clean(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F6): /trust lands after the observer read the transcript —
+    the turn it read is from before the trust (both bits, so no automatic
+    draft), exactly as a capture would mark it. A turn after it drafts clean."""
+    store.set_setting("conversation_skill_observer", True)
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="deploy now", provenance="webhook:ci")
+    _turn(store, chat)  # the procedure, steered by outside content
+    read = store.chat_messages
+
+    def then_trust(chat_id: str) -> Any:
+        rows = read(chat_id)
+        monkeypatch.setattr(store, "chat_messages", read)
+        trust_chat(store, tmp_path, chat_id, [], actor="op")
+        return rows
+
+    monkeypatch.setattr(store, "chat_messages", then_trust)
+    assert _draft_from_last_turn(store, chat) is None
+    assert store.get_chat_taint(chat).bits() == [] and store.list_candidates() == []
+    _turn(store, chat, "run it again")
+    assert _draft_from_last_turn(store, chat) == "conv-run-it-again"
+    assert store.get_candidate("conv-run-it-again").taint == ()  # type: ignore[union-attr]
+
+
+def test_review_r2_the_observer_never_replaces_a_draft_captured_under_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F7): a capture reserves the name after the observer's
+    checks — the observer's write refuses a held name and skips quietly; the
+    captured draft (and its audit row) is what approval targets."""
+    observer, operator = RunStore(tmp_path / "s.sqlite3"), RunStore(tmp_path / "s.sqlite3")
+    try:
+        chat = _chat(observer)
+        scan = observer.list_candidates
+
+        def capture_lands(*args: Any) -> Any:
+            monkeypatch.setattr(observer, "list_candidates", scan)
+            capture_skill(operator, tmp_path, chat, name="conv-run-the-release-check", actor="op")
+            return scan(*args)
+
+        monkeypatch.setattr(observer, "list_candidates", capture_lands)
+        assert _draft_from_last_turn(observer, chat) is None
+        (kept,) = operator.list_candidates()
+        assert (kept.name, kept.template.provenance) == ("conv-run-the-release-check", CAPTURED)
+    finally:
+        observer.close()
+        operator.close()
+
+
+def test_review_r3_an_observed_draft_carries_no_secret_from_the_ask(store: RunStore) -> None:
+    """Review R3 (R3-1): the observer's draft is shared like a capture — the
+    ask passes the export redactor before it names, describes or instructs
+    the draft, and before the ``observed`` audit row records it."""
+    store.set_setting("conversation_skill_observer", True)
+    chat = _chat(store, ask=f"clone https://{USER}:{WORD}@git.example/r and https://{TOKEN}@x.io")
+    name = _draft_from_last_turn(store, chat)
+    assert name is not None
+    candidate = store.get_candidate(name)
+    assert candidate is not None
+    template = candidate.template
+    for text in (name, template.description, template.instructions):
+        _no_secret(text)
+    (event,) = [e for e in store.note_task_events() if e.action == "observed"]
+    _no_secret(repr(event))
+
+
+def test_review_r3_two_opens_of_a_legacy_store_both_migrate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3 (R3-2): two opens of a pre-taint store both saw the column
+    missing; the one that took the write lock second failed with
+    ``duplicate column name``. The column is re-checked under the lock."""
+    db = _legacy_drafts(tmp_path)
+    begin = RunStore._begin_immediate
+
+    def the_other_open_migrates_first(self: RunStore) -> None:
+        monkeypatch.setattr(RunStore, "_begin_immediate", begin)
+        RunStore(db).close()  # it won the write lock and finished
+        begin(self)
+
+    monkeypatch.setattr(RunStore, "_begin_immediate", the_other_open_migrates_first)
+    RunStore(db).close()
+    monkeypatch.undo()
+    _drafts_need_acknowledgment(db)
