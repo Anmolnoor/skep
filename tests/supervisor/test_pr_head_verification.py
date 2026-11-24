@@ -1116,6 +1116,58 @@ def test_a_verdict_from_another_github_repo_never_pins_this_one(
     assert refused is not None and "no G10 verdict" in refused
 
 
+def test_a_merge_card_is_the_same_question_only_for_the_same_pinned_tuple(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R2 (S13): merge_pr cards de-duplicate on the (repo, PR, head, base)
+    they would pin, never the typed args — "7" after a new verdict is a new
+    question that supersedes the old card; "07" for the same verdict is the
+    pending card."""
+    from skep.supervisor.serve.chat import pending_duplicate_action
+
+    _github_origin(repo)
+    _verdict(config, repo)
+    args = {"repo": str(repo), "pr": "7"}
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        card = recorded_card("merge_pr", args, None, store)
+        pending = store.add_chat_action(chat_id, tool="merge_pr", args=args, card=card)
+        same = pending_duplicate_action(store, chat_id, "merge_pr", {**args, "pr": "07"})
+    finally:
+        store.close()
+    _verdict(config, repo, head="f" * 40)
+    store = RunStore(config.db_path)
+    try:
+        newer = pending_duplicate_action(store, chat_id, "merge_pr", args)
+    finally:
+        store.close()
+
+    assert same is not None and same[0].action_id == pending and same[1] is True
+    assert newer is not None and newer[0].action_id == pending and newer[1] is False
+
+
+def test_a_saved_merge_card_without_a_pin_shows_the_refusal(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R2 (N5): only an unsaved preview computes a live pin; a persisted
+    card that recorded none says so — its confirm refuses — instead of
+    showing a pin it does not hold."""
+    _github_origin(repo)
+    _verdict(config, repo)
+    args = {"repo": str(repo), "pr": "7"}
+    store = RunStore(config.db_path)
+    try:
+        preview = card_summary("merge_pr", args, store=store)
+        saved = card_summary("merge_pr", args, store=store, recorded={})
+    finally:
+        store.close()
+
+    assert "merges only" in preview["risk"]
+    assert "merges only" not in saved["risk"]
+    assert "no pin was recorded when this was proposed — propose merge_pr again" in saved["risk"]
+
+
 PIN_7 = {**_pair("b" * 40, "a" * 40), "merge_base": "b" * 40, "task_id": "t"}
 
 

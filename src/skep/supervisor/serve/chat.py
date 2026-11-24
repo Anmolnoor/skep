@@ -61,6 +61,7 @@ from .cards import (
     fold_subject,
     headline,
     high_tier,
+    merge_pin,
     recorded_card,
     unreadable_under_deny,
 )
@@ -390,6 +391,13 @@ def _proposal_subject(tool: str, args: dict[str, Any]) -> str | None:
     return json.dumps([tool, values], ensure_ascii=True)
 
 
+def _merge_key(pin: Any) -> tuple[str, int, str, str] | None:
+    """A merge_pr card's identity (R2, S13): the tuple it pins, or None."""
+    if not isinstance(pin, dict) or "error" in pin:
+        return None
+    return (str(pin["repo"]), int(pin["number"]), str(pin["head_commit"]), str(pin["base_commit"]))
+
+
 def _canonical_args(args: dict[str, Any]) -> str:
     return json.dumps(args, sort_keys=True, ensure_ascii=True)
 
@@ -402,8 +410,19 @@ def pending_duplicate_action(
     verdict, and re-proposing after one is a new question for the human."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
+    proposed = _merge_key(merge_pin(store, args)) if tool == "merge_pr" else None
     for record in store.pending_chat_actions(chat_id):
         if record.tool != tool:
+            continue
+        held = _merge_key((record.card or {}).get("merge"))
+        if proposed is not None and held is not None:
+            # Phase 09 R2 (S13): a merge card IS its pinned (repo, PR, head,
+            # base) — the same tuple is the pending card whatever was typed;
+            # a new tuple for that PR (a newer verdict) supersedes it.
+            if held == proposed:
+                return record, True
+            if held[:2] == proposed[:2]:
+                return record, False
             continue
         if _canonical_args(record.args) == args_key:
             return record, True

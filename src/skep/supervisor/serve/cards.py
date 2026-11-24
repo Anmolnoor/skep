@@ -786,7 +786,7 @@ def merge_line(pin: dict[str, Any]) -> str:
         f"merges only {pin['repo']}#{pin['number']} at head {pin['head_commit'][:12]} — "
         f"G10 confirmed that exact tree and V1 found nothing (run {pin['task_id'][:8]}) — "
         f"onto {branch} {pin['base_commit'][:12]}; a push to the PR or to {branch} after "
-        "this card refuses the merge"
+        "this card refuses the merge (one landing while GitHub merges is reported)"
     )
 
 
@@ -989,8 +989,14 @@ def card_summary(
         line = _promotion_line(forged)
         danger = line if danger is None else f"{danger} — {line}"
     pinned = (recorded or {}).get("merge")
-    if tool == "merge_pr" and pinned is None and store is not None and live_tier:
-        pinned = merge_pin(store, safe_args)  # a card proposed without the record
+    if tool == "merge_pr" and pinned is None:
+        # R2 (N5): only an unsaved preview reads a live pin; a saved card
+        # shows the pin it holds — or that it holds none (the confirm refuses).
+        pinned = (
+            merge_pin(store, safe_args)
+            if recorded is None and store is not None and live_tier
+            else {"error": "no pin was recorded when this was proposed — propose merge_pr again"}
+        )
     if tool == "merge_pr" and isinstance(pinned, dict):
         summary["merge"] = pinned
         danger = f"{merge_line(pinned)} — {danger}"
