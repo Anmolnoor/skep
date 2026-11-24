@@ -277,6 +277,24 @@ test("scheduleNode: a script schedule shows the server's facts and the sentence"
   }
 });
 
+test("forgeNode: a promotion card shows the bound triple, the wheels and the diff", () => {
+  const app = loadApp();
+  assert.equal(app.forgeNode({ headline: "x" }), null);
+  assert.ok(app.forgeNode({ forge: { error: "no lock landed" } }).textContent.includes("no lock landed"));
+  const text = app.forgeNode({ forge: {
+    source_sha256: "s".repeat(64), lock_sha256: "", approved_hosts: [], locked: [],
+    diff: "+print('hi')\n" } }).textContent;
+  for (const part of ["s".repeat(64), "none (stdlib only)", "none (deny-all)", "+print('hi')"]) {
+    assert.ok(text.includes(part), part);
+  }
+  const locked = app.forgeNode({ forge: {
+    source_sha256: "s", lock_sha256: "l".repeat(64), approved_hosts: ["api.example.org"],
+    locked: ["pypdf==5.1.0 sha256:" + "a".repeat(64)], diff: "" } }).textContent;
+  for (const part of ["l".repeat(64), "api.example.org", "pypdf==5.1.0"]) {
+    assert.ok(locked.includes(part), part);
+  }
+});
+
 test("manifestNode: the dispatch card lists what the run gets and the asks it approves", () => {
   const app = loadApp();
   assert.equal(app.manifestNode({ headline: "x" }), null);

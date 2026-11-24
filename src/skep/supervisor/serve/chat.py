@@ -3461,6 +3461,7 @@ class ChatEngine:
                 actor=actor,
                 chat_id=chat_id,
                 preanswered=preanswered,
+                card=card,
             )
             if activates_memory(tool, card):  # v128-F10: the card said it activates
                 item = self.store.approve_memory_proposal(result["proposal_id"], actor=actor)

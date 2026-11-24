@@ -411,8 +411,8 @@ def create_app(
         threading.Thread(target=startup_reverify, name="skep-startup-reverify", daemon=True).start()
 
         # Phase 06 (6.2): list each MCP server's tools once, so turn 1's index
-        # names them (the prompt reads only this cache). Forged servers are
-        # skipped — cache-only until their runtime egress closes (Phase 07.1).
+        # names them (the prompt reads only this cache). Forged servers too
+        # since Phase 07.1: their listing runs behind the same wall as a call.
         def warm_mcp() -> None:
             from ..mcp_client import warm_listed_tools
 

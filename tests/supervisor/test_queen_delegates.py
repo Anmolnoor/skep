@@ -37,6 +37,7 @@ from skep.supervisor.serve.actions import (
     submit_team,
 )
 from skep.supervisor.serve.app import STATIC_DIR, TERMINAL_STATES
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
@@ -743,6 +744,7 @@ def _promote_seed(
             runner=runner,  # type: ignore[arg-type]
             actor="chat-user",
             chat_id=chat_id,
+            card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
         )
     except HTTPException as refused:  # the R2 ⊆ refusal, exactly as run_code's
         assert refused.status_code == 403, refused.detail

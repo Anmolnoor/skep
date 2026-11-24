@@ -10,6 +10,9 @@ endpoint; no captions, an empty (blocked) caption body and page drift
 are three different errors.
 """
 
+# Phase 07: the hosts its promotion card approves; it reaches nothing else.
+# skep-hosts: *.youtube.com
+
 import html
 import json
 import re

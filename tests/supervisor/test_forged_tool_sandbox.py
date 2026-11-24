@@ -3,11 +3,13 @@ host stdio MCP server — unsandboxed, as the operator, with serve's whole env.
 Only the trial was sandboxed, so a tool that behaved only under the trial
 passed. Activated forged tools now run inside the sandbox on every call
 (writes confined to a throwaway workspace, a scrubbed env), and refuse to
-run at all when no sandbox backend is usable (fail closed).
+run at all when no sandbox backend is usable (fail closed). Since Phase 07
+they run from their bound plugin record (test_forge_runtime_confinement).
 """
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from skep.supervisor import sandbox
+from skep.supervisor import RunStore, sandbox
+from skep.supervisor.forge import ForgedPlugin, save_plugin
 from skep.supervisor.mcp_client import MCPError, MCPServerConfig, runner_for_config
 
 _TOOL = """
@@ -38,6 +41,23 @@ def _forged(tmp_path: Path, target: Path) -> MCPServerConfig:
     return MCPServerConfig("forge-probe", "stdio", command=(sys.executable, str(script)))
 
 
+def _bound_store(home: Path, target: Path) -> RunStore:
+    """The probe active and bound, as promote_tool leaves it."""
+    source = _TOOL.format(target=str(target))
+    (home / "tools").mkdir(parents=True)
+    (home / "tools" / "probe.py").write_text(source, encoding="utf-8")
+    (home / "supervisor").mkdir()
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    save_plugin(
+        store,
+        ForgedPlugin(
+            "probe", "probe", "p", "active", "", "probe.py", "", "forge-probe",
+            source_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        ),
+    )  # fmt: skip
+    return store
+
+
 def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -54,12 +74,17 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
     monkeypatch.setattr(
         sandbox, "wrap_command", lambda argv, profile, backend=None: ["SANDBOX", *argv]
     )
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **_: path)
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("SKEP_FAKE_SECRET", "CANARY")
     config = _forged(tmp_path, tmp_path / "x")
-    assert runner_for_config(config, skep_home=tmp_path / "home")("tools/call", {"name": "t"}) == {
-        "content": "ok"
-    }
+    home = tmp_path / "home"
+    store = _bound_store(home, tmp_path / "x")
+    try:
+        run = runner_for_config(config, skep_home=home, store=store)
+        assert run("tools/call", {"name": "t"}) == {"content": "ok"}
+    finally:
+        store.close()
     assert seen["argv"][0] == "SANDBOX"
     assert "SKEP_FAKE_SECRET" not in seen["env"]
 
@@ -91,9 +116,13 @@ def test_forged_tool_refuses_to_run_without_a_sandbox(
 @pytest.mark.skipif(not sandbox.available(), reason="needs a usable native sandbox backend")
 def test_forged_tool_cannot_write_outside_its_workspace(tmp_path: Path) -> None:
     target = tmp_path / "escape.txt"
-    result = runner_for_config(_forged(tmp_path, target), skep_home=tmp_path / "home")(
-        "tools/call", {"name": "t"}
-    )
+    store = _bound_store(tmp_path / "home", target)
+    try:
+        result = runner_for_config(
+            _forged(tmp_path, target), skep_home=tmp_path / "home", store=store
+        )("tools/call", {"name": "t"})
+    finally:
+        store.close()
     assert result == {"content": "blocked"}
     assert not target.exists()
 

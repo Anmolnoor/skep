@@ -29,6 +29,7 @@ from skep.supervisor.forge import (
 )
 from skep.supervisor.mcp_client import load_mcp_servers, runner_for_config
 from skep.supervisor.serve import tools as tools_module
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
@@ -255,6 +256,7 @@ def test_promote_seed_tool_trials_installs_and_registers(
             repo: str,
             decision: Any,
             delegation_chain: Any = (),
+            python: Any = None,
         ) -> dict[str, Any]:
             assert repo.endswith("forge")  # the trial runs in the forge repo
             return _run_harness(source, tmp_path)
@@ -267,6 +269,7 @@ def test_promote_seed_tool_trials_installs_and_registers(
             holder=holder,
             runner=runner,
             actor="test",
+            card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
         )
         assert promoted["state"] == "active"
         installed = config.home.parent / "tools" / "yt-transcript.py"
@@ -361,6 +364,7 @@ def _promote(config: SupervisorConfig, store: RunStore) -> Any:
         holder=ConfigHolder(config, store),
         runner=cast(Dispatcher, None),
         actor="test",
+        card=recorded_card("promote_tool", {"plugin_id": "yt-transcript"}, None, store),
     )
 
 
@@ -423,12 +427,18 @@ def test_a_failing_trial_keeps_the_old_active_copy(
 def test_an_unchanged_active_seed_is_already_active(
     config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from skep.supervisor.forge import install_source
+    import dataclasses
+
+    from skep.supervisor.forge import install_source, sha256_text
 
     store = RunStore(config.db_path)
     try:
         _seed_in_state(config, store, "active")
-        install_source(config, "yt-transcript", seed_tool_source("yt_transcript.py"))
+        shipped = seed_tool_source("yt_transcript.py")
+        install_source(config, "yt-transcript", shipped)
+        # Phase 07: "already active" means bound to the source it runs.
+        record = load_plugins(store)["yt-transcript"]
+        save_plugin(store, dataclasses.replace(record, source_sha256=sha256_text(shipped)))
         calls = _trial(monkeypatch, tmp_path, passes=True)
         assert _promote(config, store)["note"] == "already active"
         assert calls == []

@@ -47,7 +47,10 @@ research from the web.
 From a **web** chat, ask:
 
 - `promote_tool yt-transcript`, then confirm the card on the web. This installs
-  the shipped seed whose tool is `get_transcript`.
+  the shipped seed whose tool is `get_transcript`. The card shows the source
+  digest and the one host the tool may reach (`*.youtube.com`); it reaches
+  nothing else. An install from before Phase 07 stops running until you
+  promote it again this way.
 - `allow_mcp_tool server_id=forge-yt-transcript tool=get_transcript`, then
   confirm on the web. Every role asks on MCP calls (`mcp-gated`). Without this
   rule each transcript from the phone becomes a card.

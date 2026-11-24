@@ -704,7 +704,44 @@ def recorded_card(
         facts = schedule_facts(args, store, schedule_role, schedule_role_name)
         if facts is not None:
             record["schedule"] = facts
+    if tool == "promote_tool":
+        record["forge"] = promotion_card(store, args)
     return record or None
+
+
+def promotion_card(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
+    """Phase 07 (7.2, I6): what a promote_tool card binds, recorded when it
+    is proposed — ``(source_sha256, lock_sha256, approved_hosts)``, the
+    locked wheel pins and the full source diff. The confirm installs only
+    this triple (``forge.require_card_binding``); a tool that cannot be
+    bound records why, and its confirm refuses the same way."""
+    from pathlib import Path
+
+    from .. import forge
+    from .actions import applied_branch_for
+
+    plugin_id = str(args.get("plugin_id") or "")
+    record = forge.load_plugins(store).get(plugin_id)
+    if record is None:
+        return {"error": f"no forged plugin {plugin_id!r} — list_plugins shows them"}
+    branch = None if record.provenance == "seed" else applied_branch_for(store, record.task_id)
+    try:
+        return forge.promotion_view(Path(store.db_path).parent.parent, record, branch)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+def _promotion_line(forged: dict[str, Any]) -> str:
+    if "error" in forged:
+        return f"it cannot be installed as shown: {forged['error']}"
+    hosts = ", ".join(forged.get("approved_hosts") or ()) or "none (deny-all)"
+    lock = (
+        f"lock sha256 {forged['lock_sha256'][:12]}… ({len(forged.get('locked') or ())} "
+        "hash-pinned wheels)"
+        if forged.get("lock_sha256")
+        else "stdlib only, no lock"
+    )
+    return f"source sha256 {str(forged.get('source_sha256'))[:12]}…, {lock}, network: {hosts}"
 
 
 def fold_subject(tool: str, args: Any, decided_by: str | None) -> str | None:
@@ -831,6 +868,13 @@ def card_summary(
         if banner is not None:
             summary["tamper"] = banner
             danger = banner if danger is None else f"{banner} — {danger}"
+    forged = (recorded or {}).get("forge")
+    if tool == "promote_tool" and isinstance(forged, dict):
+        # Phase 07 (7.2): the bound triple leads the risk line; the block
+        # (with the full diff) rides the card for the UI to unfold.
+        summary["forge"] = forged
+        line = _promotion_line(forged)
+        danger = line if danger is None else f"{danger} — {line}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:

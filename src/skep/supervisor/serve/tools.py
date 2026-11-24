@@ -151,6 +151,21 @@ def _script_run_result(
     return result
 
 
+def _read_next_step(target: Path) -> str:
+    """I9: what a failed read_file should try next, by what is at the path."""
+    if target.is_dir():
+        return (
+            f"{target} is a directory — read_file reads one file; search_files "
+            f"path={target} target=files lists what is inside"
+        )
+    if not target.exists():
+        return (
+            f"nothing exists at {target} — search_files with a name pattern under "
+            f"{target.parent} finds the right path"
+        )
+    return "the file exists but could not be read — check its permissions, or read a smaller range"
+
+
 def _forge_trial(
     store: RunStore,
     holder: ConfigHolder,
@@ -160,6 +175,7 @@ def _forge_trial(
     repo: str,
     decision: AutonomyDecision | None,
     delegation_chain: Sequence[str] = (),
+    python: str | None = None,
 ) -> dict[str, Any]:
     """v71-F1: the forged tool's sandboxed trial — exactly the run_code lane
     (script caste, sandbox, deny-all egress), so plugin_can_run's
@@ -167,17 +183,22 @@ def _forge_trial(
     seam instead of standing up the dispatch pipeline.
 
     R3-F2: the Queen's chain rides it like run_code's, so a role that may not
-    run a script gets no trial through a promote_tool card either (R2 ⊆)."""
+    run a script gets no trial through a promote_tool card either (R2 ⊆).
+    Phase 07: ``python`` is a locked tool's staged venv (skep's own
+    interpreter, the harness's default, for a stdlib-only tool)."""
+    import sys
+
     from skep.workers.script_worker import script_instructions
 
     from ..forge import trial_script
 
+    locked = None if python in (None, sys.executable) else python
     task_id = actions.submit_run(
         holder,
         runner,
         store,
         repo=repo,
-        instructions=script_instructions("python", trial_script(source)),
+        instructions=script_instructions("python", trial_script(source, locked)),
         caste="script",
         execution_mode="sandbox",
         network=[],
@@ -4598,13 +4619,16 @@ def execute_mutation(
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
     preanswered: dict[str, Any] | None = None,
+    card: dict[str, Any] | None = None,
 ) -> Any:
     """Run one confirmed mutation through the shared supervisor verbs.
 
     ``chat_id`` is the chat the mutation was confirmed in, when there is one —
     note schedules bind to it so their ticks deliver into that chat (v43-F6).
     ``preanswered`` (P4-2): the manifest the operator approved on a
-    dispatch card — only ``chat.verdict_events`` passes it.
+    dispatch card — only ``chat.verdict_events`` passes it. ``card``: what
+    the server recorded when the confirmed card was proposed (a
+    promote_tool installs only the binding it shows, Phase 07).
     """
     result = _execute_mutation(
         name,
@@ -4616,6 +4640,7 @@ def execute_mutation(
         decision=decision,
         chat_id=chat_id,
         preanswered=preanswered,
+        card=card,
     )
     if chat_id is not None:
         _bind_chat_project(store, holder, chat_id, name, args, result)
@@ -4633,6 +4658,7 @@ def _execute_mutation(
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
     preanswered: dict[str, Any] | None = None,
+    card: dict[str, Any] | None = None,
 ) -> Any:
     if name == actions.ACP_PERMISSION_TOOL:
         # ADR 0058 D3: nothing runs here — the waiting ACP engine reads the
@@ -5135,16 +5161,16 @@ def _execute_mutation(
         if name == "read_file":
             # v79-F3: ref-aware — the guard above already decided the PATH;
             # a git-show read of that same path stays inside the boundary (I5).
-            return {
-                **read_file_branch_aware(
-                    store,
-                    str(args["path"]),
-                    ref=None if args.get("ref") is None else str(args["ref"]),
-                    offset=_optional_int(args, "offset"),
-                    limit=_optional_int(args, "limit"),
-                ),
-                "decided_by": last_guard.decided_by,
-            }
+            read = read_file_branch_aware(
+                store,
+                str(args["path"]),
+                ref=None if args.get("ref") is None else str(args["ref"]),
+                offset=_optional_int(args, "offset"),
+                limit=_optional_int(args, "limit"),
+            )
+            if "error" in read and "next_step" not in read:
+                read["next_step"] = _read_next_step(Path(str(args["path"])).expanduser())
+            return {**read, "decided_by": last_guard.decided_by}
         return {
             **search_files_result(
                 str(args["pattern"]),
@@ -5236,13 +5262,13 @@ def _execute_mutation(
         # v71-F1: the lifecycle ladder, driven for real — every transition goes
         # through require_transition, so the v17 gates (G10-verified trial for
         # `tested`, a human action for `approved`) are enforced by shape, not
-        # by this branch remembering to check.
+        # by this branch remembering to check. Phase 07 (7.2): the confirm
+        # installs only the (source, lock, hosts) triple its card showed.
         import dataclasses
-        import sys as _sys
-        from pathlib import Path
+        import shutil
 
         from .. import forge
-        from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
+        from ..mcp_client import MCPError, MCPServerConfig, refresh_listed_tools, save_mcp_server
         from ..plugin_lifecycle import require_transition
 
         plugin_id = str(args["plugin_id"])
@@ -5252,9 +5278,11 @@ def _execute_mutation(
             known = ", ".join(sorted(plugins)) or "none yet — forge_tool creates one"
             raise ValueError(f"no forged plugin {plugin_id!r}; known: {known}")
         # v126-F1: an ACTIVE seed whose installed copy differs from the
-        # shipped source takes the update through the same trial + card.
-        reinstall = record.state == "active" and plugin_id in forge.seed_tool_updates(
-            store, holder.current
+        # shipped source takes the update through the same trial + card;
+        # Phase 07: so does an active tool bound to no digest (it no longer
+        # runs until it is re-promoted).
+        reinstall = record.state == "active" and (
+            not record.source_sha256 or plugin_id in forge.seed_tool_updates(store, holder.current)
         )
         if record.state == "active" and not reinstall:
             return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
@@ -5264,51 +5292,72 @@ def _execute_mutation(
             )
         trial_repo = record.repo
         branch: str | None = None
+        if record.provenance != "seed":
+            branch = actions.applied_branch_for(store, record.task_id)
+        # v83-F14: a shipped seed's source of truth is the versioned package
+        # file; a forged tool's is its landed branch. The SAME trial and card
+        # gate both.
+        source, lock = forge.read_candidate(record, branch)
+        binding = forge.promotion_binding(source, lock)
+        forge.require_card_binding(card, binding)
         if record.provenance == "seed":
-            # v83-F14: a shipped seed tool has no authoring run — its source
-            # of truth is the versioned package file. The SAME sandboxed
-            # trial and the SAME confirmed card gate it below; only the
-            # source location differs. The trial runs in the forge repo
-            # (prepared exactly like forge_tool prepares it).
-            source = forge.seed_tool_source(record.rel_path)
+            # The trial runs in the forge repo (prepared exactly like
+            # forge_tool prepares it).
             forge_repo = forge.forge_root(holder.current)
             forge_repo.mkdir(parents=True, exist_ok=True)
             forge.ensure_forge_seed(forge_repo)
             actions.workon(holder, store, path=str(forge_repo))
             trial_repo = str(forge_repo)
-        else:
-            branch = actions.applied_branch_for(store, record.task_id)
-            if branch is None:
-                raise ValueError(
-                    f"the authoring run {record.task_id} has not landed — review and "
-                    "approve its patch first (approve_review) so there is approved "
-                    "source to promote"
-                )
-            source = forge.landed_source(Path(record.repo), branch, record.rel_path)
         if record.state == "draft":
             require_transition("draft", "sandboxed")
             record = dataclasses.replace(record, state="sandboxed")
             forge.save_plugin(store, record)
-        # v126-F1: every install is trialed — reactivation and a seed update
-        # write fresh source too, so they pass the same sandboxed trial.
-        trial_result = _forge_trial(
-            store,
-            holder,
-            runner,
-            source=source,
-            repo=trial_repo,
-            decision=decision,
-            delegation_chain=_queen_chain(store, holder, chat_id, actor),
-        )
-        ok, reason, evidence = forge.trial_verdict(trial_result)
+        skep_home = holder.current.home.parent
+        hosts = tuple(binding["approved_hosts"])
+        if record.state != "active":
+            kept = f"the plugin stays {record.state!r}"
+        elif record.source_sha256:
+            kept = "the active copy keeps running unchanged"
+        else:  # unbound: refused at runtime until a promotion passes
+            kept = "the old copy stays installed, and refused, until a promotion passes"
+        # Build + trial in staging: until the record flips below, the active
+        # tool (if any) keeps its own source, venv and hosts.
+        try:
+            python, staging = forge.stage_locked_python(
+                skep_home, plugin_id, lock, binding["lock_sha256"]
+            )
+        except ValueError as exc:
+            raise ValueError(f"{exc} — {kept}") from exc
+        try:
+            # v126-F1: every install is trialed — reactivation and a seed
+            # update write fresh source too. Stage 1 runs twice over: the
+            # run_code lane (the Queen's role chain, R3-F2), then — with
+            # stage 2 when hosts are approved — behind the runtime wall.
+            trial_result = _forge_trial(
+                store,
+                holder,
+                runner,
+                source=source,
+                repo=trial_repo,
+                decision=decision,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                python=python,
+            )
+            ok, reason, evidence = forge.trial_verdict(trial_result)
+            if ok:
+                ok, reason, wall = forge.wall_trial(
+                    skep_home, record.server_id, source, python, hosts
+                )
+                evidence = {**evidence, "wall": wall}
+        except BaseException:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
         record = dataclasses.replace(record, trial=evidence)
         forge.save_plugin(store, record)
         if not ok:
-            kept = (
-                "the installed copy keeps running unchanged"
-                if reinstall
-                else f"the plugin stays {record.state!r}"
-            )
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
             raise ValueError(
                 f"the sandboxed trial did not pass: {reason} — {kept}. Fix the tool "
                 "in the forge repo (forge_tool again re-briefs a worker), land the "
@@ -5324,19 +5373,22 @@ def _execute_mutation(
             # — asked once, never re-asked).
             require_transition("reviewed", "approved", human_action=True)
             require_transition("approved", "active")
+        python = forge.commit_locked_venv(skep_home, plugin_id, binding["lock_sha256"], staging)
         installed = forge.install_source(holder.current, plugin_id, source)
+        server = MCPServerConfig(
+            server_id=record.server_id, transport="stdio", command=(python, str(installed))
+        )
         try:
-            save_mcp_server(
-                store,
-                MCPServerConfig(
-                    server_id=record.server_id,
-                    transport="stdio",
-                    command=(_sys.executable, str(installed)),
-                ),
-            )
+            save_mcp_server(store, server)
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
-        record = dataclasses.replace(record, state="active")
+        record = dataclasses.replace(
+            record,
+            state="active",
+            approved_hosts=hosts,
+            source_sha256=binding["source_sha256"],
+            lock_sha256=binding["lock_sha256"],
+        )
         forge.save_plugin(store, record)
         if reinstall:
             store.record_registry_event(
@@ -5344,8 +5396,13 @@ def _execute_mutation(
                 item_id=plugin_id,
                 action="reinstalled",
                 actor=actor,
-                detail={"provenance": "seed", "why": "the shipped source changed"},
+                detail={"provenance": record.provenance, "why": "a new source or binding"},
             )
+        try:
+            # Phase 06 (6.2): the Queen's next turn names its tools.
+            discovered: Any = [tool.name for tool in refresh_listed_tools(store, server)]
+        except MCPError as exc:
+            discovered = f"not listed yet ({exc}); list_mcp_tools {record.server_id} retries"
         return {
             "plugin_id": plugin_id,
             "state": "active",
@@ -5353,8 +5410,12 @@ def _execute_mutation(
             "server_id": record.server_id,
             "landed_branch": branch,
             "installed": str(installed),
+            "source_sha256": record.source_sha256,
+            "lock_sha256": record.lock_sha256 or None,
+            "approved_hosts": list(hosts),
             "tools": None if record.trial is None else record.trial.get("tools"),
             "self_test": None if record.trial is None else record.trial.get("self_test"),
+            "discovered": discovered,
         }
     if name == "suspend_tool":
         # v71-F1: suspension IS deregistration — registered ⟺ active, so a
@@ -5466,13 +5527,30 @@ def _execute_mutation(
         try:
             client = MCPClient(
                 server_config,
-                runner=runner_for_config(server_config, skep_home=holder.current.home.parent),
+                runner=runner_for_config(
+                    server_config, skep_home=holder.current.home.parent, store=store
+                ),
             )
             call = client.call_tool(tool_name, _object_arg(args, "arguments"))
         except MCPError as exc:
-            raise ValueError(str(exc)) from exc
+            # I9: the failure says which call, what broke and where to look next.
+            raise ValueError(
+                f"MCP call {server_id}:{tool_name} failed: {exc}. Next: list_mcp_tools "
+                f"server_id={server_id} shows whether the server starts and which tools and "
+                "arguments it offers"
+            ) from exc
         if not call.ok:
-            return {"server_id": server_id, "tool": tool_name, "ok": False, "error": call.error}
+            return {
+                "server_id": server_id,
+                "tool": tool_name,
+                "ok": False,
+                "error": call.error,
+                # One call result carries both a tool's own error reply and
+                # a server that never answered, so the step names both.
+                "next_step": f"if the tool replied, check the arguments against "
+                f"{tool_name}'s inputSchema and call again; if the server did not start or "
+                f"answered nothing, list_mcp_tools server_id={server_id} shows why",
+            }
         return {"server_id": server_id, "tool": tool_name, "ok": True, "content": call.content}
     if name in ("allow_fetch_domain", "allow_mcp_tool"):
         # v90-F3: one shared writer; P3-5: it runs the write-time check first.

@@ -31,6 +31,7 @@ from skep.supervisor.forge import (
 from skep.supervisor.mcp_client import load_mcp_servers
 from skep.supervisor.serve import actions as actions_module
 from skep.supervisor.serve import tools as tools_module
+from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, execute_read_tool
@@ -101,6 +102,11 @@ def test_forge_verbs_always_card() -> None:
         assert decision is None
 
 
+def _card(store: RunStore, plugin_id: str) -> dict[str, Any] | None:
+    """What the chat engine records when the promote_tool card is proposed."""
+    return recorded_card("promote_tool", {"plugin_id": plugin_id}, None, store)
+
+
 def _default_branch(repo: Path) -> str:
     return git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
@@ -166,6 +172,7 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
         assert load_plugins(store)["word-count"].state == "draft"
 
@@ -192,6 +199,7 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
         record = load_plugins(store)["word-count"]
         assert record.state == "sandboxed"
@@ -208,6 +216,7 @@ def test_forge_lifecycle_end_to_end(
             repo: str,
             decision: Any,
             delegation_chain: Any = (),
+            python: Any = None,
         ) -> dict[str, Any]:
             return _run_harness(source, tmp_path)
 
@@ -219,6 +228,7 @@ def test_forge_lifecycle_end_to_end(
             holder=holder,
             runner=runner,
             actor="test",
+            card=_card(store, "word-count"),
         )
         assert promoted["state"] == "active"
         assert promoted["tools"] == ["echo", "self_test"]
@@ -271,6 +281,7 @@ def test_forge_lifecycle_end_to_end(
             holder=holder,
             runner=runner,
             actor="test",
+            card=_card(store, "word-count"),
         )
         assert reactivated["state"] == "active"
         assert retrials == [ECHO_SERVER_SOURCE]
@@ -295,6 +306,7 @@ def test_forge_lifecycle_end_to_end(
                 holder=holder,
                 runner=runner,
                 actor="test",
+                card=_card(store, "word-count"),
             )
 
         # After rollback the name is free again — the replacement path exists.
