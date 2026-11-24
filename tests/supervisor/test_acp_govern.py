@@ -111,8 +111,10 @@ def _replay(fixture: Path, tmp_path: Path) -> dict[str, Any]:
     assert to_client.getvalue() == b"".join(
         raw for d, raw in frames if d == "a2c" and json.loads(raw).get("id") not in answered
     )
-    # The envelope (time, row version — test_decision_log pins ``v``) is not the decision.
-    rows = [{k: v for k, v in row.items() if k not in ("at", "v")} for row in _ledger(home)]
+    # The envelope (time, row version and chain — test_decision_log and
+    # test_ledger_chain pin those) is not the decision.
+    envelope = ("at", "v", "seq", "prev_hash", "hash")
+    rows = [{k: v for k, v in row.items() if k not in envelope} for row in _ledger(home)]
     golden = {"to_agent": written, "ledger": rows}
     scrubbed: dict[str, Any] = json.loads(json.dumps(golden).replace(str(repo), "$REPO"))
     return scrubbed

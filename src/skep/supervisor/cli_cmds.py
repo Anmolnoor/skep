@@ -771,6 +771,68 @@ def cmd_run_forensics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ledger_verify(args: argparse.Namespace) -> int:
+    """Phase 08 8.1: ``skep ledger verify [--path FILE]`` — walk every
+    generation of the decision log (or one offline copy) and name the first
+    break. Exit 0 VALID, 1 BROKEN, 2 when ``--path`` is not a file. Read-only."""
+    from .ledger_proof import verify_ledger
+
+    try:
+        if args.path is not None:
+            result = verify_ledger(path=args.path)
+        else:
+            result = verify_ledger(build_config(args.home, None).audit_dir)
+    except OSError as exc:
+        return _err(f"cannot read {exc.filename}: {exc.strerror}")
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["status"] == "VALID" else 1
+    head = result["head"]
+    summary = (
+        f"{result['chained']} chained rows, head seq {head['seq']} sha256 {head['hash']}"
+        if head
+        else "no chained rows"
+    )
+    if result["starts_at"] not in (None, 1):
+        summary += (
+            f" (starts at seq {result['starts_at']}: the rows before it are not in this file)"
+        )
+    summary += (
+        f"; {result['unchained']} older v1 rows unchained; {result['checkpoints']} checkpoints"
+    )
+    if result["break"]:
+        where = result["break"]
+        print(f"BROKEN {where['file'] or '-'}:{where['line'] or '-'}: {where['reason']}")
+        print(f"  verified before the break: {summary}")
+    else:
+        print(f"VALID: {summary}")
+    return 0 if result["status"] == "VALID" else 1
+
+
+def cmd_proof_export(args: argparse.Namespace) -> int:
+    """Phase 08 8.1: ``skep proof export <task_id> [--format md|json]`` — one
+    run's verifiable local receipt. Read-only, like forensics: the store opens
+    strict and nothing is written."""
+    from fastapi import HTTPException
+
+    from .ledger_proof import build_receipt, render_receipt
+    from .store import StoreNeedsMigration
+
+    config = build_config(args.home, None)
+    try:
+        store = RunStore(config.db_path, strict=True)
+    except StoreNeedsMigration as exc:
+        return _err(str(exc))
+    try:
+        receipt = build_receipt(store, config.home, config.audit_dir, args.task_id)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep status --personal  # list recent task ids")
+    finally:
+        store.close()
+    print(render_receipt(receipt, args.format))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     held: list[dict[str, Any]] = []  # 2.1: --role/--delegated-by dispatch rows
     try:
@@ -4504,6 +4566,28 @@ def register_supervisor_commands(
         "--base", default=None, help="branch to create (default: the repo's default branch)"
     )
     repo_baseline.set_defaults(func=cmd_repo_push_baseline)
+
+    # Phase 08 8.1: the chained decision log, verified, and one run's local receipt.
+    ledger = subcommands.add_parser("ledger", help="the hash-chained decision log")
+    ledger.set_defaults(func=_group_usage(ledger))
+    ledger_sub = ledger.add_subparsers(dest="ledger_command")
+    ledger_verify = ledger_sub.add_parser(
+        "verify", help="check every row's hash and link; exit 1 naming the first break"
+    )
+    ledger_verify.add_argument(
+        "--path", type=Path, default=None, help="verify one offline copy of decisions.jsonl"
+    )
+    ledger_verify.add_argument("--json", action="store_true", help="the result as JSON")
+    ledger_verify.set_defaults(func=cmd_ledger_verify)
+    proof = subcommands.add_parser("proof", help="verifiable local receipts")
+    proof.set_defaults(func=_group_usage(proof))
+    proof_sub = proof.add_subparsers(dest="proof_command")
+    proof_export = proof_sub.add_parser(
+        "export", help="one run's local receipt: posture, G10/V1, ledger head"
+    )
+    proof_export.add_argument("task_id")
+    proof_export.add_argument("--format", choices=["md", "json"], default="md")
+    proof_export.set_defaults(func=cmd_proof_export)
 
     # v4: the learned-skill lifecycle. Imported here (not at module top) so the skill
     # commands can reuse build_config/_err/_parse_params from this module without a

@@ -36,12 +36,17 @@ from __future__ import annotations
 import dataclasses
 import fcntl
 import glob
+import hashlib
 import json
 import logging
+import os
 import re
 import shlex
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from urllib.parse import urlsplit
@@ -1153,19 +1158,77 @@ def decision_log_paths(audit_dir: Path) -> list[Path]:
     return [*_rotated_generations(live)[-1:], live]
 
 
+# Phase 08 8.1: every CHECKPOINT_EVERY-th chained row's (seq, hash) is also
+# kept in ``policy/chain.sqlite3`` — a second record a truncation or a full
+# rewrite must edit in step (``ledger_proof.verify_ledger`` checks it).
+GENESIS = "GENESIS"
+CHECKPOINT_EVERY = 100
+CHAIN_DB = "chain.sqlite3"
+
+
+def chain_hash(body: Mapping[str, Any]) -> str:
+    """sha256 of a row's canonical JSON (sorted keys, no spaces), ``hash`` left out."""
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _last_line(path: Path) -> bytes:
+    """The file's last non-empty line (b"" when there is none), read back
+    from EOF in 64 KB steps."""
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return b""
+    with handle:
+        pos = handle.seek(0, os.SEEK_END)
+        tail = b""
+        while pos > 0 and b"\n" not in tail.rstrip(b"\n"):
+            step = min(65536, pos)
+            pos -= step
+            handle.seek(pos)
+            tail = handle.read(step) + tail
+    return tail.rstrip(b"\n").rsplit(b"\n", 1)[-1]
+
+
+def _chain_tail(live: Path) -> tuple[int, str]:
+    """(seq, hash) of the newest row — the live file's, or after a rotation
+    the newest generation's. A ``"v": 1`` (or unreadable) tail starts the
+    chain over at GENESIS; ``verify_ledger`` names that spot as a break
+    unless no chained row came before it (the v1 → v2 migration)."""
+    line = _last_line(live)
+    if not line and (older := _rotated_generations(live)):
+        line = _last_line(older[-1])
+    try:
+        row = json.loads(line) if line else None
+    except ValueError:
+        row = None
+    if isinstance(row, dict) and row.get("v") == 2:
+        seq, digest = row.get("seq"), row.get("hash")
+        if type(seq) is int and isinstance(digest, str):
+            return seq, digest
+    return 0, GENESIS
+
+
 def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
-    """Append one row (with ``"v": 1``) to ``<audit>/policy/decisions.jsonl``
-    (I8, I13) with its ``value`` redacted. v121-F4: a file past 10 MB first
-    becomes ``decisions.jsonl.<N>`` (N = highest + 1) — no generation is ever
-    deleted — and size check, rotation and append run under one flock on
-    ``policy/decisions.lock``, so serve, the CLI and hooks lose no row."""
+    """Append one row to ``<audit>/policy/decisions.jsonl`` (I8, I13) with its
+    ``value`` redacted. v121-F4: a file past 10 MB first becomes
+    ``decisions.jsonl.<N>`` (N = highest + 1) — no generation is ever deleted
+    — and size check, rotation and append run under one flock on
+    ``policy/decisions.lock``, so serve, the CLI and hooks lose no row.
+    Phase 08 8.1: the row is ``"v": 2`` and chained — ``seq``, the previous
+    row's hash as ``prev_hash`` (``GENESIS`` first) and its own ``hash`` —
+    read and written under that same flock, so concurrent writers never fork
+    the chain, and a rotation carries it on into the next file."""
     path = audit_dir / "policy" / "decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(row.get("value"), str):
         row = {**row, "value": redact(row["value"])}
-    line = json.dumps({**row, "v": 1}) + "\n"
     with (path.parent / "decisions.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        seq, prev = _chain_tail(path)
+        body = {**row, "v": 2, "seq": seq + 1, "prev_hash": prev}
+        body.pop("hash", None)
+        digest = chain_hash(body)
         try:
             if path.stat().st_size >= DECISION_LOG_MAX_BYTES:
                 generations = _rotated_generations(path)
@@ -1174,4 +1237,15 @@ def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass  # no log yet
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
+            handle.write(json.dumps({**body, "hash": digest}) + "\n")
+        if (seq + 1) % CHECKPOINT_EVERY == 0:
+            with closing(sqlite3.connect(path.parent / CHAIN_DB)) as db, db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS checkpoints"
+                    " (seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, at TEXT NOT NULL)"
+                )
+                # OR IGNORE: a restarted chain never overwrites the first anchor
+                db.execute(
+                    "INSERT OR IGNORE INTO checkpoints VALUES (?, ?, ?)",
+                    (seq + 1, digest, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
+                )

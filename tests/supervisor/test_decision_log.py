@@ -21,6 +21,11 @@ def _rows(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def _unchained(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Phase 08 8.1: a row without its chain fields (test_ledger_chain pins those)."""
+    return [{k: v for k, v in row.items() if k not in ("seq", "prev_hash", "hash")} for row in rows]
+
+
 def _generations(audit: Path) -> list[str]:
     return sorted(p.name for p in (audit / "policy").glob("decisions.jsonl*"))
 
@@ -34,10 +39,10 @@ def test_rotations_keep_every_generation_and_every_row(
     policy = tmp_path / "policy"
     # Each append found the live file past the cap and rotated it first: the
     # first row lives in .1 (the oldest), the last one in the live file.
-    assert [_rows(policy / f"decisions.jsonl.{g}") for g in range(1, 5)] == [
-        [{"n": g - 1, "v": 1}] for g in range(1, 5)
+    assert [_unchained(_rows(policy / f"decisions.jsonl.{g}")) for g in range(1, 5)] == [
+        [{"n": g - 1, "v": 2}] for g in range(1, 5)
     ]
-    assert _rows(policy / "decisions.jsonl") == [{"n": 4, "v": 1}]
+    assert _unchained(_rows(policy / "decisions.jsonl")) == [{"n": 4, "v": 2}]
 
 
 def test_generation_ten_follows_nine_numerically(
@@ -84,7 +89,7 @@ def test_concurrent_writers_lose_no_row_and_tear_no_line(
 def test_every_row_carries_the_version(tmp_path: Path) -> None:
     log_decision(tmp_path, {"value": "ls"})
     log_decision(tmp_path, {"value": "pwd", "v": 7})
-    assert [row["v"] for row in _rows(tmp_path / "policy" / "decisions.jsonl")] == [1, 1]
+    assert [row["v"] for row in _rows(tmp_path / "policy" / "decisions.jsonl")] == [2, 2]
 
 
 def test_no_log_yet_reads_as_empty(tmp_path: Path) -> None:
