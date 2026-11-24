@@ -702,6 +702,8 @@ def recorded_card(
     manifest: dict[str, Any] | None = None,
     schedule_role: str | None = None,
     schedule_role_name: str | None = None,
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """What the server records on a card when it is proposed (P4-2): its
     HIGH tier, a dispatch's manifest, and for a schedule the facts the card
@@ -721,9 +723,36 @@ def recorded_card(
         record["forge"] = promotion_card(store, args)
     if tool == "capture_skill":
         record["capture"] = capture_card(store, args)
-    if tool == "merge_pr":
-        record["merge"] = merge_pin(store, args)
+    if tool == "merge_pr":  # R3 (S6): the pin the proposal already validated
+        record["merge"] = merge_pin(store, args) if merge is None else merge
     return record or None
+
+
+def _merge_target(store: RunStore, args: dict[str, Any]) -> Any:
+    """The canonical PR a merge_pr call names (R1 D1: never the typed
+    text) — a ``PrId`` — or ``{"error": why}``."""
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from ..github import PrSelectorError, resolve_pr
+    from .registry import resolve_repo_arg
+
+    try:
+        root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
+        repo = resolve_repo_arg(str(args.get("repo") or ""), root, store)
+        return resolve_pr(repo, args.get("pr", ""))
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}
+    except PrSelectorError as exc:
+        return {"error": str(exc)}
+
+
+def merge_target(store: RunStore, args: dict[str, Any]) -> tuple[str, int] | None:
+    """R3 (S7): the (repo, PR) a merge_pr card names, or None — how a card
+    that recorded no pin is matched to a new proposal for the same PR."""
+    pid = _merge_target(store, args)
+    return None if isinstance(pid, dict) else (pid.repo, pid.number)
 
 
 def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
@@ -731,22 +760,14 @@ def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
     it is proposed — the newest G10 verdict on the PR's canonical identity
     (origin owner/name, number). Only a clean, confirmed verdict pins:
     ``{repo, number, base_branch, base_commit, head_commit, merge_base,
-    task_id}``. Anything else is ``{"error": why}`` and nothing merges."""
-    from pathlib import Path
+    task_id}``. Anything else is ``{"error": why}`` and nothing merges.
+    R3 (S6): a proposal calls this once and hands that pin to the
+    propose-time check, the de-duplication and the saved card."""
+    from ..github import pr_ref
 
-    from fastapi import HTTPException
-
-    from ..github import PrSelectorError, pr_ref, resolve_pr
-    from .registry import resolve_repo_arg
-
-    try:
-        root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
-        repo = resolve_repo_arg(str(args.get("repo") or ""), root, store)
-        pid = resolve_pr(repo, args.get("pr", ""))  # R1 (D1): never the typed text
-    except HTTPException as exc:
-        return {"error": str(exc.detail)}
-    except PrSelectorError as exc:
-        return {"error": str(exc)}
+    pid = _merge_target(store, args)
+    if isinstance(pid, dict):
+        return pid
     verdict = store.pr_head_verdict(pid.repo, pid.number)
     again = (
         f"refresh_repo pr={pid.number}, dispatch_run ref={pr_ref(pid.number)}, "

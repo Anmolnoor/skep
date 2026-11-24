@@ -1158,6 +1158,93 @@ def test_a_merge_card_is_the_same_question_only_for_the_same_pinned_tuple(
     assert newer is not None and newer[0].action_id == pending and newer[1] is False
 
 
+def test_a_merge_card_key_covers_branch_and_strategy_and_a_pinless_card_gives_way(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R3 (S7/N4): the key is (repo, PR, head, base SHA, base branch,
+    effective strategy) — another strategy or base branch is a new question
+    that supersedes; a pending card with NO recorded pin for the same PR
+    gives way to a valid proposal."""
+    from skep.supervisor.serve.chat import pending_duplicate_action
+
+    _github_origin(repo)
+    _verdict(config, repo)
+    args = {"repo": str(repo), "pr": "7"}
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        card = recorded_card("merge_pr", args, None, store)
+        pending = store.add_chat_action(chat_id, tool="merge_pr", args=args, card=card)
+        squash = pending_duplicate_action(
+            store, chat_id, "merge_pr", {**args, "strategy": "squash"}
+        )
+        spelled = pending_duplicate_action(
+            store, chat_id, "merge_pr", {**args, "strategy": "merge"}
+        )
+        other = store.create_chat(title="d", model=None).chat_id
+        pinless = store.add_chat_action(
+            other, tool="merge_pr", args={**args, "pr": "#7"}, card={"merge": {"error": "x"}}
+        )
+        superseded = pending_duplicate_action(store, other, "merge_pr", args)
+    finally:
+        store.close()
+    retarget = {**_pair("b" * 40, "a" * 40), "base_branch": "release", "merge_base": "b" * 40}
+    _verdict(config, repo, pr=retarget)
+    store = RunStore(config.db_path)
+    try:
+        branch = pending_duplicate_action(store, chat_id, "merge_pr", args)
+    finally:
+        store.close()
+
+    assert squash is not None and squash[0].action_id == pending and squash[1] is False
+    assert spelled is not None and spelled[1] is True  # omitted strategy is "merge"
+    assert superseded is not None and superseded[0].action_id == pinless
+    assert superseded[1] is False
+    assert branch is not None and branch[0].action_id == pending and branch[1] is False
+
+
+def test_a_merge_proposal_reads_one_pin_and_carries_it_through(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S6): a chat merge_pr proposal resolves ONE pin — validated, then
+    the very same pin de-duplicated and saved on the card. A verdict that
+    lands between those steps never slips onto the card unvalidated."""
+    from .fake_ollama import FakeOllama
+    from .test_serve_chat_tools import chat_client
+
+    _github_origin(repo)
+    _verdict(config, repo)
+    reads: list[int] = []
+    real = RunStore.pr_head_verdict
+
+    def counted(self: RunStore, repo_name: str, number: int) -> Any:
+        reads.append(number)
+        verdict = real(self, repo_name, number)
+        if len(reads) > 1 and verdict is not None:  # a newer, unvalidated verdict
+            return replace(
+                verdict, head_commit="f" * 40, pr={**(verdict.pr or {}), "head_commit": "f" * 40}
+            )
+        return verdict
+
+    monkeypatch.setattr(RunStore, "pr_head_verdict", counted)
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client, chat_id = chat_client(config, ollama)
+        ollama.script_tool_call("merge_pr", {"repo": str(repo), "pr": "7"})
+        ollama.script_reply("card up")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "merge 7"})
+    finally:
+        ollama.stop()
+    store = RunStore(config.db_path)
+    try:
+        (action,) = store.chat_actions(chat_id)
+    finally:
+        store.close()
+
+    assert action.card is not None and action.card["merge"]["head_commit"] == "a" * 40
+    assert reads == [7]
+
+
 def test_a_saved_merge_card_without_a_pin_shows_the_refusal(
     repo: Path, config: SupervisorConfig
 ) -> None:
