@@ -71,6 +71,11 @@ class WebSearchError(Exception):
     """The search backend failed or timed out (distinct from zero hits)."""
 
 
+class WebReadError(Exception):
+    """7.3: read_url reached the site but got no readable page; the message
+    names what to do next (I9). Not a ValueError — those are refusals."""
+
+
 def fetch_url_text(
     url: str,
     *,
@@ -98,10 +103,15 @@ def fetch_url_text(
     (web_extract parity); callers pick the caps per lane (granted domains
     read more). A cut is never silent: ``truncated`` rides the result and
     the excerpt ends with a visible marker.
+
+    7.3: a PDF (by type or by its bytes) is read as text; an HTTP error, a
+    timeout, or a non-text type raises WebReadError naming the next step.
     """
     import httpx
 
+    from skep.seeds.tools import doc_extract
     from skep.workers.html_text import html_to_markdown, html_to_text
+    from skep.workers.researcher import is_text_type
 
     # W6: no env proxy — a proxy would resolve the name itself, out of sight
     # of the resolved-address check below. The operator's CA bundle
@@ -116,7 +126,14 @@ def fetch_url_text(
     ) as client:
         current = url
         for _hop in range(5):
-            response = _pinned_get(client, current, resolve)
+            try:
+                response = _pinned_get(client, current, resolve)
+            except httpx.TimeoutException as exc:
+                host = urllib.parse.urlsplit(current).hostname
+                raise WebReadError(
+                    f"timed out reading {host} — the site is slow or unreachable; "
+                    "try again later or read another source"
+                ) from exc
             if response.status_code in (301, 302, 303, 307, 308):
                 target = urllib.parse.urljoin(current, response.headers.get("location", ""))
                 target_host = urllib.parse.urlparse(target).hostname or ""
@@ -133,11 +150,33 @@ def fetch_url_text(
             break
         else:
             raise ValueError("too many redirects (5) — refusing the chain")
-    response.raise_for_status()
-    body = response.text
-    convert = html_to_markdown if markdown else html_to_text
-    text = convert(body[:max_bytes])
-    truncated = len(body) > max_bytes or len(text) > max_chars
+    if response.is_error:
+        raise WebReadError(
+            doc_extract.http_error_message(
+                response.status_code, response.reason_phrase, response.headers.get("retry-after")
+            )
+        )
+    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind == "application/pdf" or response.content.startswith(b"%PDF-"):
+        if len(response.content) > doc_extract.MAX_BYTES:
+            raise WebReadError(
+                f"the PDF is larger than {doc_extract.MAX_BYTES // (1024 * 1024)} MiB — "
+                "too big to read here; download it yourself"
+            )
+        try:
+            text, cut = doc_extract.pdf_to_text(response.content), False
+        except ValueError as exc:
+            raise WebReadError(str(exc)) from exc
+    elif kind and not is_text_type(kind):
+        raise WebReadError(
+            f"content type {kind} is not a page — read_url reads HTML, text, JSON/XML "
+            "and PDF; open other files yourself"
+        )
+    else:
+        body = response.text
+        convert = html_to_markdown if markdown else html_to_text
+        text, cut = convert(body[:max_bytes]), len(body) > max_bytes
+    truncated = cut or len(text) > max_chars
     excerpt = text[:max_chars]
     if truncated:
         excerpt += f"\n\n[truncated at {max_chars} chars — the page continues]"
@@ -237,6 +276,8 @@ def _run_ddgs(query: str, limit: int) -> list[dict[str, Any]]:
 
 def search_web(query: str, *, max_results: int = 5, run: Run = _run_ddgs) -> list[dict[str, Any]]:
     """Top search hits as ``{title, url, host, snippet}`` rows (url-deduped)."""
+    if not query.strip():
+        raise WebSearchError("search_web needs a non-empty query — pass the words to search for")
     limit = max(1, min(int(max_results), MAX_RESULTS_CAP))
     # Per-call single-worker pool: a timed-out ddgs call cannot be cancelled
     # and keeps running, so a shared pool would serialise every later search
@@ -252,7 +293,16 @@ def search_web(query: str, *, max_results: int = 5, run: Run = _run_ddgs) -> lis
                 "rate-limiting; try again later"
             ) from None
         except Exception as exc:
-            raise WebSearchError(f"search backend failed: {exc}") from exc
+            from ddgs.exceptions import RatelimitException
+
+            if isinstance(exc, RatelimitException):
+                raise WebSearchError(
+                    "the search engine is rate-limiting skep — wait a minute and search "
+                    "again, or read_url a page you already know"
+                ) from exc
+            raise WebSearchError(
+                f"search backend failed: {exc} — try again in a minute or rephrase the query"
+            ) from exc
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

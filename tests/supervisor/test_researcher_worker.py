@@ -365,7 +365,10 @@ def test_a_non_text_content_type_is_named_in_sources(monkeypatch: Any) -> None:
         allowlist=["arxiv.org", "api.github.com", "docs.vllm.ai"],
         fetch=researcher._urllib_fetch,
     )
-    assert "https://arxiv.org/pdf/1: (binary: application/pdf, not quoted)" in result.report_md
+    # 7.3: a PDF is now read; this one is not a real PDF, so it is listed with why
+    assert "https://arxiv.org/pdf/1: (binary: application/pdf, not quoted: found no pages" in (
+        result.report_md
+    )
     assert "%PDF" not in result.report_md
     assert '{"stars": 5}' in result.report_md and "vLLM" in result.report_md
 

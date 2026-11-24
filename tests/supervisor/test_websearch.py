@@ -709,3 +709,137 @@ def test_l22_a_non_public_read_url_is_refused_at_proposal_with_no_card(
         assert public is None or public.verdict != "deny"
     finally:
         store.close()
+
+
+# --- Phase 07 / 7.3: PDFs read as text; failures say what to do next ------------------------
+
+
+class _TypedWeb:
+    """Like _FakeWeb, but answers raw bytes with headers (content types, Retry-After)."""
+
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        pages: dict[str, tuple[int, dict[str, str], bytes]],
+    ) -> None:
+        import httpx
+
+        def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+            status, headers, body = pages[request.url.raw_path.decode()]
+            return httpx.Response(status, headers=headers, content=body, request=request)
+
+        monkeypatch.setattr(httpx.Client, "send", send)
+
+
+def _read(path: str, **kwargs: Any) -> dict[str, Any]:
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    resolve = _resolver({"site.example": _PUBLIC_IP})
+    return fetch_url_text(f"https://site.example{path}", resolve=resolve, **kwargs)
+
+
+def test_read_url_reads_a_pdf_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from .pdf_builder import simple_pdf
+
+    pdf = simple_pdf(b"BT /F1 12 Tf 72 720 Td (Results) Tj 0 -14 Td (" + b"word " * 30 + b") Tj ET")
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/paper.pdf": (200, {"content-type": "application/pdf"}, pdf),
+            "/download": (200, {"content-type": "application/octet-stream"}, pdf),
+        },
+    )
+    read = _read("/paper.pdf", markdown=True)
+    assert read["text"].startswith("Results\nword word") and read["truncated"] is False
+    assert _read("/download")["text"].startswith("Results")  # the bytes say PDF
+    cut = _read("/paper.pdf", max_chars=20)
+    assert cut["truncated"] is True and "the page continues" in cut["text"]
+
+
+def test_read_url_errors_name_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve.websearch import WebReadError
+
+    from .pdf_builder import build
+
+    locked = build(
+        [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [] /Count 0 >>", b"<< >>"],
+        trailer_extra="/Encrypt 3 0 R ",
+    )
+    _TypedWeb(
+        monkeypatch,
+        {
+            "/gone": (404, {}, b"not here"),
+            "/busy": (429, {"retry-after": "30"}, b""),
+            "/logo.png": (200, {"content-type": "image/png"}, b"\x89PNG\r\n"),
+            "/locked.pdf": (200, {"content-type": "application/pdf"}, locked),
+            "/huge.pdf": (200, {"content-type": "application/pdf"}, b"%PDF-1.7\n" + b"0" * 64),
+        },
+    )
+    for path, wanted in (
+        ("/gone", "HTTP 404 Not Found — nothing at this URL"),
+        ("/busy", "wait 30s before trying again"),
+        ("/logo.png", "content type image/png is not a page"),
+        ("/locked.pdf", "this PDF is encrypted"),
+    ):
+        with pytest.raises(WebReadError, match=wanted):
+            _read(path)
+    monkeypatch.setattr("skep.seeds.tools.doc_extract.MAX_BYTES", 32)
+    with pytest.raises(WebReadError, match="too big to read here"):
+        _read("/huge.pdf")
+    # not a ValueError: tools.py re-raises those as refusals; a failed read is a tool error
+    assert not issubclass(WebReadError, ValueError)
+
+
+def test_read_url_timeout_says_what_to_do(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    def slow(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", slow)
+    with pytest.raises(WebReadError, match=r"timed out reading site\.example"):
+        _read("/slow")
+
+
+def test_read_url_failure_reaches_the_queen_as_an_actionable_tool_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """tools.py formats the message unchanged: the hint survives the hop."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve import websearch
+    from skep.supervisor.serve.tools import execute_mutation
+
+    def gone(url: str, **_kw: object) -> dict[str, Any]:
+        raise websearch.WebReadError("HTTP 404 Not Found — nothing at this URL; check it")
+
+    monkeypatch.setattr(websearch, "fetch_url_text", gone)
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
+    try:
+        result = execute_mutation(
+            "read_url",
+            {"url": "https://docs.example/gone"},
+            store=store,
+            holder=_holder(tmp_path, store),
+            runner=cast(Any, None),
+            actor="tester",
+        )
+    finally:
+        store.close()
+    assert result["error"] == "read_url failed: HTTP 404 Not Found — nothing at this URL; check it"
+
+
+def test_search_web_missing_query_and_rate_limit_say_what_next() -> None:
+    from ddgs.exceptions import RatelimitException
+
+    with pytest.raises(WebSearchError, match="needs a non-empty query"):
+        search_web("   ", run=lambda query, limit: [])
+
+    def limited(query: str, limit: int) -> list[dict[str, Any]]:
+        raise RatelimitException("202 Ratelimit")
+
+    with pytest.raises(WebSearchError, match="rate-limiting skep — wait a minute"):
+        search_web("q", run=limited)
+    with pytest.raises(WebSearchError, match="try again in a minute"):
+        search_web("q", run=lambda query, limit: (_ for _ in ()).throw(RuntimeError("boom")))
