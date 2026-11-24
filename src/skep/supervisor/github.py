@@ -357,7 +357,14 @@ def open_pull_request(
     body: str,
     runner: Runner = subprocess.run,
 ) -> PullRequestResult:
-    """Push ``branch`` and open a PR against ``base``. Honest failure, never raises."""
+    """Push ``branch`` and open a PR against ``base``. Honest failure, never raises.
+
+    Phase 09 R3 (S16): gh is told the repo — origin's, as HOST/OWNER/REPO,
+    so GH_HOST never redirects it — and the head as OWNER:BRANCH, the branch
+    just pushed to that same repo; a non-GitHub origin is refused first."""
+    origin = origin_repo(repo, runner)
+    if origin is None:
+        return PullRequestResult(False, None, _NOT_GITHUB.format(repo=repo))
     # v60-F2: probe the base BEFORE any side effect. An empty GitHub repo has
     # no base branch and gh answers that with GraphQL soup ("Head sha can't
     # be blank … Base ref must be a branch"); skep rightly never pushes a
@@ -381,9 +388,10 @@ def open_pull_request(
         return PullRequestResult(False, None, f"git push failed: {why}")
     created = _run(
         runner,
-        ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],
+        ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
+         "--head", f"{origin.split('/')[0]}:{branch}", "--title", title, "--body", body],
         cwd=repo,
-    )
+    )  # fmt: skip
     if created.returncode != 0:
         why = (created.stderr or created.stdout).strip()
         return PullRequestResult(False, None, f"gh pr create failed: {why}")

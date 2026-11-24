@@ -26,11 +26,14 @@ def _make_runner(
     pr_code: int = 0,
     pr_url: str = "https://github.com/me/repo/pull/7",
     base_missing: bool = False,
+    origin: str = "git@github.com:Me/repo.git",
 ) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[list[str]]]:
     calls: list[list[str]] = []
 
     def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
+        if args[0] == "git" and "remote.origin.url" in args:
+            return _cp(args, 0 if origin else 1, f"{origin}\n" if origin else "")
         if args[0] == "git" and "ls-remote" in args:
             # v60-F2 base probe: a present base answers with a sha line.
             out = "" if base_missing else "abc123\trefs/heads/main\n"
@@ -53,13 +56,28 @@ def test_open_pull_request_success(tmp_path: Path) -> None:
     assert result.url == "https://github.com/me/repo/pull/7"
     # The PR targets the skep branch as head and never pushes to the base directly.
     gh_call = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
-    assert "--head" in gh_call and "skep/abc" in gh_call
-    assert "--base" in gh_call and "main" in gh_call
+    # R3 (S16): the repo named as HOST/OWNER/REPO, the head as OWNER:BRANCH.
+    assert gh_call[3:5] == ["--repo", "github.com/me/repo"]
+    assert gh_call[gh_call.index("--head") + 1] == "me:skep/abc"
+    assert gh_call[gh_call.index("--base") + 1] == "main"
     # v60-F2: the base probe runs before any side effect.
     probe_call = next(c for c in calls if "ls-remote" in c)
     assert probe_call[-2:] == ["origin", "main"]
     push_call = next(c for c in calls if "push" in c)
     assert push_call[-2:] == ["origin", "skep/abc"]  # pushes the branch, not main
+
+
+def test_open_pull_request_on_an_origin_that_is_not_github_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """R3 (S16): no github.com origin, no repo to name to gh — refused
+    before anything is pushed."""
+    run, calls = _make_runner(origin="https://gitlab.com/me/repo.git")
+    result = open_pull_request(
+        repo=tmp_path, branch="skep/abc", base="main", title="t", body="b", runner=run
+    )
+    assert not result.opened and "not a github.com repository" in result.detail
+    assert [c for c in calls if "push" in c or c[0] == "gh"] == []
 
 
 def test_open_pull_request_teaches_when_remote_base_is_missing(tmp_path: Path) -> None:
