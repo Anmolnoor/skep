@@ -96,6 +96,9 @@ class SkillCandidate:
     created_at: str = ""
     # The registry name the approved skill landed under (defaults to ``name``).
     registry_name: str | None = None
+    # Phase 08 (8.2): the taint bits of what it was drafted from (W21) —
+    # approving a tainted candidate must acknowledge them.
+    taint: tuple[str, ...] = ()
 
 
 def candidate_signature(template: WorkflowTemplate) -> str:
@@ -306,7 +309,9 @@ def promote_to_template(
     hand-authored: ``learned`` for worker-run extraction, ``conversation``
     (v53-F1) preserved for observer drafts.
     """
-    provenance = "conversation" if candidate.template.provenance == "conversation" else "learned"
+    provenance = candidate.template.provenance
+    if provenance not in ("conversation", "captured"):  # Phase 08 (8.2): captured too
+        provenance = "learned"
     return dataclasses.replace(
         candidate.template,
         name=name or candidate.template.name,

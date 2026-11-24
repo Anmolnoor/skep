@@ -183,6 +183,10 @@ def cmd_memory_propose(args: argparse.Namespace) -> int:
     if store is None:
         return _err("no store yet — add a note or task first.")
     try:
+        # Phase 08 (8.2): the bits before the text, so a row deleted between
+        # the reads still files its taint (W21)
+        kind, item_id = ("note", args.from_note) if args.from_note else ("task", args.from_task)
+        taint = store.content_taint(kind, [item_id])
         if args.from_note:
             note = store.get_note(args.from_note)
             if note is None:
@@ -204,6 +208,7 @@ def cmd_memory_propose(args: argparse.Namespace) -> int:
                 rationale=args.rationale,
                 project_id=args.project,
                 sources=(source,),
+                taint=sorted(taint),
             )
         except MemoryError as exc:
             return _err(str(exc))

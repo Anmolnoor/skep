@@ -780,6 +780,10 @@ HIDDEN_YET_CARDS = {
                  "dispatch_run@role-assistant", "quick_edit", "run_code"},
     "assistant": {"dispatch_run@gated"},
 }  # fmt: skip
+# A tool added after the freeze has no pre-P3-6 answer; each is held to its
+# nearest sibling instead, cell for cell — offered where it is, deciding as it
+# does (so never looser than a tool the table does freeze).
+POST_FREEZE_TOOLS = {"capture_skill": "create_skill"}  # Phase 08 (8.2)
 SURFACE_FLIPS = {
     "web:assistant": {"hidden": 6, "b22:card->deny": 2},
     "web:builder": {"b22:role=": 1},
@@ -825,6 +829,9 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     new = dict(surface_rows(tmp_path / home, home))
+    for key in [k for k in new if k.split("|")[3] in POST_FREEZE_TOOLS]:
+        _home, kind, what, probe = key.split("|")
+        assert new.pop(key) == new[f"{home}|{kind}|{what}|{POST_FREEZE_TOOLS[probe]}"], key
     assert set(new) == {k for k in SURFACE_FROZEN if k.startswith(f"{home}|")}
     flips: dict[str, Counter[str]] = {}
     for key, shown in new.items():

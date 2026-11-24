@@ -1094,6 +1094,18 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["name", "old_string", "new_string"],
     ),
     _tool(
+        "capture_skill",
+        "PROPOSE drafting a skill (SKILL.md) from a completed run (source=task_id) "
+        "or this chat's last multi-step turn (omit source). The card shows the "
+        "full SKILL.md, its source and taint. Zero grants; the draft stays "
+        "inactive until the user approves it (skep skill approve).",
+        {
+            "name": {"type": "string", "description": "lowercase slug"},
+            "source": {"type": "string", "description": "a task_id; omit for this chat"},
+        },
+        ["name"],
+    ),
+    _tool(
         "delete_skill",
         "PROPOSE deleting one skill/template from the registry (requires "
         "user confirmation — deletes destroy data). Refused while a schedule "
@@ -2386,6 +2398,7 @@ _ALWAYS_CARD_GROUPS: dict[str, tuple[str, ...]] = {
     "it changes what the Queen can run or load": (
         "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
         "promote_skill_pack", "suspend_skill_pack", "promote_tool", "suspend_tool",
+        "capture_skill",
     ),
     "it changes which servers the Queen reaches": (
         "register_mcp_server", "unregister_mcp_server", "setup_browser",
@@ -2705,6 +2718,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "create_skill",
         "patch_skill",
         "delete_skill",
+        "capture_skill",
         "set_skill_observer",
         "promote_skill_pack",
         "suspend_skill_pack",
@@ -5060,6 +5074,26 @@ def _execute_mutation(
             )
         store.add_template(template, actor=actor)
         return {"created": skill_name, "provenance": "chat"}
+    if name == "capture_skill":
+        # Phase 08 (8.2): drafts exactly the SKILL.md the card showed (I8);
+        # the draft is inert — `skep skill approve` is its gate (I6).
+        from ..skill_cmds import SkillError, capture_skill
+
+        shown = ((card or {}).get("capture") or {}).get("skill_md")
+        if shown is None:
+            raise ValueError("this card recorded no SKILL.md; propose capture_skill again")
+        try:
+            captured, _text = capture_skill(
+                store, holder.current.audit_dir, str(args.get("source") or chat_id or ""),
+                name=str(args["name"]), actor=actor, expect=str(shown),
+            )  # fmt: skip
+        except SkillError as exc:
+            raise ValueError(str(exc)) from exc
+        return {
+            "drafted": captured.name,
+            "taint": list(captured.taint),
+            "note": "inactive until the user approves it (skep skill approve)",
+        }
     if name == "patch_skill":
         import dataclasses
 

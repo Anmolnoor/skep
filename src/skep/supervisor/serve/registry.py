@@ -176,6 +176,7 @@ class SkillDecision(BaseModel):
     actor: str | None = None  # ES-F1: a claim, annotation only
     note: str | None = None
     as_name: str | None = None
+    accept_taint: bool = False  # Phase 08 (8.2): a tainted candidate needs it
 
 
 class ProviderSettings(BaseModel):
@@ -2146,6 +2147,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 actor=principal(request),
                 note=annotate_claim(body.note, body.actor),
                 registry_name=body.as_name,
+                accept_taint=body.accept_taint,
             )
         except SkillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
