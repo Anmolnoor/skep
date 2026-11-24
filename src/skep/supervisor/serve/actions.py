@@ -1365,12 +1365,21 @@ def add_provider(
     allowed_network_hosts: tuple[str, ...] = (),
     source: str = "manual",
     preset: str | None = None,
+    home: Path | None = None,
+    activate: bool = False,
 ) -> dict[str, Any]:
     """Register (or update) a provider profile. Raises ``ProviderError``.
 
     v108-F3: ``preset`` names a catalog row (provider_presets.py) that fills
-    protocol/base_url/model/key-env; explicit arguments override it."""
-    from ..providers import ProviderError, ProviderProfile
+    protocol/base_url/model/key-env; explicit arguments override it.
+
+    Phase 05 R1: ``activate`` (with the supervisor ``home``) stages the
+    profile and probes it with the credential it will use BEFORE the row is
+    written; a refused one raises and writes nothing. Registering alone
+    sends nothing anywhere, so it is not probed. R2 (F3): an existing id
+    keeps its endpoint — its key belongs there — so another base_url under
+    it is refused."""
+    from ..providers import ProviderError, ProviderProfile, validate_provider_profile
 
     if preset:
         from ..provider_presets import profile_from_preset
@@ -1415,6 +1424,37 @@ def add_provider(
             api_key_env=api_key_env,
             source=source,
         )
+    staged = validate_provider_profile(profile)
+
+    def _endpoint_kept() -> None:
+        held = store.get_provider_profile(staged.provider_id)
+        if held is not None and held.base_url != staged.base_url:
+            # R2 (F3): its saved key and key env belong to the endpoint it has
+            raise ProviderError(
+                f"provider {staged.provider_id!r} is registered for {held.base_url}, and its "
+                f"key belongs there — register {staged.base_url} under its own id "
+                f"(e.g. {staged.provider_id}-2)"
+            )
+
+    from .llm import provider_lock, provider_rollback
+
+    _endpoint_kept()
+    if not activate:
+        with provider_lock(home):  # R3 (H2): checked and written under the provider lock
+            _endpoint_kept()
+            return _registered(store, profile, preset)
+    if home is None:
+        raise ProviderError("activating a provider needs the supervisor home")
+    _probe_profile(store, home, staged)
+    with provider_rollback(store, home):
+        _endpoint_kept()
+        result = _registered(store, profile, preset)
+        provider_id = str(result["provider"]["provider_id"])
+        result.update(use_provider(store, home, provider_id=provider_id, probe=False))
+    return result
+
+
+def _registered(store: RunStore, profile: Any, preset: str | None) -> dict[str, Any]:
     saved = store.upsert_provider_profile(profile)
     result: dict[str, Any] = {"provider": asdict(saved)}
     if preset:
@@ -1425,23 +1465,123 @@ def add_provider(
     return result
 
 
-def remove_provider(store: RunStore, *, provider_id: str) -> dict[str, Any]:
-    """Delete a profile. Removing the ACTIVE profile does not touch the saved
-    assistant llm_* settings — the Queen keeps speaking its current config
-    until another profile is activated."""
+def _probe_profile(
+    store: RunStore, home: Path, profile: Any, *, key: str | None = None, kept: str = ""
+) -> None:
+    """Phase 05 R1: the live probe (model list + 1-token completion) of
+    ``profile`` with ``key`` — else the credential it resolves on its own —
+    raising ProviderError when it fails, before anything is written. A
+    ChatGPT-login profile is checked for a usable login instead (I9)."""
+    from ..codex_login import uses_codex_login
+    from ..providers import ProviderError, check_provider_health, live_probes
+    from .llm import OllamaError, _codex_login_key, wire_key
+
+    if not kept:
+        previous = store.active_provider_profile()
+        kept = (
+            f"the previous provider {previous.provider_id!r} is still active"
+            if previous is not None
+            else "no provider was active before and none is now"
+        )
+    if uses_codex_login(profile.base_url):
+        try:
+            _codex_login_key(profile.base_url)
+        except OllamaError as exc:
+            raise ProviderError(f"{exc} — nothing changed: {kept}") from exc
+        return
+    # a Copilot GitHub token works only once exchanged, as at run time
+    probes = live_probes(
+        home,
+        store,
+        key_for=(lambda p: wire_key(p.base_url, key)) if key is not None else None,
+        timeout=15.0,
+    )
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    health = check_provider_health(profile, now=now, **probes)
+    if not health.ok:
+        raise ProviderError(f"{health.error} — nothing changed: {kept}")
+
+
+def _still_probed(store: RunStore, probed: Any) -> Any:
+    """R3 (H2), under the provider lock: ``probed`` as it is now — provided
+    its id still names the endpoint and protocol that were tested; else
+    ProviderConflict and nothing is written (a key probed for A never lands
+    on the id re-added for B)."""
+    from ..providers import ProviderConflict
+
+    current = store.get_provider_profile(probed.provider_id)
+    if current is None or (current.base_url, current.protocol) != (
+        probed.base_url,
+        probed.protocol,
+    ):
+        raise ProviderConflict(
+            f"provider {probed.provider_id!r} changed while it was being tested — nothing was "
+            "saved: check it and try again"
+        )
+    return current
+
+
+def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str) -> dict[str, Any]:
+    """Phase 05 R1: THE write of one profile's key value (``skep provider
+    set-key``, PUT /api/providers/{id}/key). A non-empty key is probed
+    against that profile's own endpoint and model first — a refused key
+    raises ProviderError and the saved one stays. Saved, it clears the
+    ``api_key_env`` that would shadow it (the env var is read first); the
+    active profile's llm-secret mirror follows. Empty clears the key file.
+    ``home`` is the supervisor home."""
+    from ..codex_login import NO_KEY_REFUSAL, uses_codex_login
     from ..providers import ProviderError
+    from .llm import _save_profile_key, provider_rollback
 
     profile = store.get_provider_profile(provider_id)
     if profile is None:
         raise ProviderError(f"unknown provider {provider_id!r}")
-    store.delete_provider_profile(provider_id)
+    if uses_codex_login(profile.base_url):
+        raise ProviderError(f"{provider_id} {NO_KEY_REFUSAL}")
+    key = key.strip()
+    if key:
+        _probe_profile(
+            store, home, profile, key=key, kept=f"the saved key for {provider_id!r} is as it was"
+        )
+    with provider_rollback(store, home):
+        _save_profile_key(store, home, _still_probed(store, profile), key)
+    return {
+        "provider_id": provider_id,
+        "api_key_set": bool(key),
+        "api_key_env_cleared": profile.api_key_env if key else None,
+    }
+
+
+def remove_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, Any]:
+    """Delete a profile and its key file (v108-F4: no orphaned credential; a
+    re-add of the id never inherits it — every face, ADR 0050). Removing the
+    ACTIVE profile does not touch the saved assistant llm_* settings — the
+    Queen keeps speaking its current config until another profile is
+    activated. ``home`` is the supervisor home."""
+    from ..providers import ProviderError
+    from .llm import provider_rollback, store_provider_api_key
+
+    with provider_rollback(store, home):  # R3 (H2): serialized with every provider write
+        profile = store.get_provider_profile(provider_id)
+        if profile is None:
+            raise ProviderError(f"unknown provider {provider_id!r}")
+        store.delete_provider_profile(provider_id)
+        store_provider_api_key(home, provider_id, "")
     return {"removed": provider_id, "was_active": profile.active}
 
 
-def use_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, Any]:
+def use_provider(
+    store: RunStore, home: Path, *, provider_id: str, probe: bool = True
+) -> dict[str, Any]:
     """Activate a profile AND write it through to the assistant llm_* settings
     (the v19-F9 contract) — an activation the Queen does not actually speak
-    would be a lie (I8). ``home`` is the supervisor home."""
+    would be a lie (I8). ``home`` is the supervisor home.
+
+    Phase 05 R1: the profile is probed with its own credential first; a dead
+    or refused one raises ProviderError and the active one stays. ``probe``
+    is False only for a caller that just probed this exact profile (onboard,
+    ``add_provider(activate=True)``). llm-secret stays with the endpoint it
+    was saved for — it never follows the switch."""
     from ..providers import ProviderError
     from .llm import (
         LLM_BASE_URL,
@@ -1449,6 +1589,8 @@ def use_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, 
         LLM_PROTOCOL,
         REGISTRY_PROTOCOLS,
         _write_through_profile,
+        pin_legacy_key,
+        provider_rollback,
         refresh_model_ctx,
     )
 
@@ -1460,12 +1602,18 @@ def use_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, 
         # The v42 lesson: an unroutable protocol refuses loudly, never falls
         # back to a different wire format.
         raise ProviderError(f"protocol {profile.protocol!r} has no wire client")
-    store.set_active_provider(provider_id)
-    store.set_setting(LLM_BASE_URL, profile.base_url)
-    store.set_setting(LLM_DEFAULT_MODEL, profile.model)
-    store.set_setting(LLM_PROTOCOL, serve_protocol)
+    if probe:
+        _probe_profile(store, home, profile)
+    with provider_rollback(store, home):
+        if probe:
+            _still_probed(store, profile)
+        pin_legacy_key(store, home)
+        store.set_active_provider(provider_id)
+        store.set_setting(LLM_BASE_URL, profile.base_url)
+        store.set_setting(LLM_DEFAULT_MODEL, profile.model)
+        store.set_setting(LLM_PROTOCOL, serve_protocol)
+        _write_through_profile(store, home.parent)
     refresh_model_ctx(store, home, profile.model)
-    _write_through_profile(store, home.parent)
     from ..codex_login import uses_codex_login
 
     note = "chats and default workers use this from their next turn"

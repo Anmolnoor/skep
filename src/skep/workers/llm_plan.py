@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import urllib.parse
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, get_args
 
@@ -18,13 +18,10 @@ from skep.supervisor.netproxy import domain_allowed
 from skep.supervisor.provider_relay import RELAY_ENV
 from skep.supervisor.serve.llm import (
     DEFAULT_LLM_PROTOCOL,
-    LLM_BASE_URL,
-    LLM_DEFAULT_MODEL,
-    LLM_PROTOCOL,
     LLMProtocol,
     OllamaError,
+    assistant_llm,
     chat_stream,
-    resolve_api_key,
 )
 from skep.supervisor.store import RunStore
 from skep.worker_contract import MemoryContextEntry
@@ -40,6 +37,17 @@ class LlmPlanError(Exception):
     """
 
     raw_content: str | None = None
+
+
+class LlmUpstreamError(LlmPlanError):
+    """Phase 05 R2 (F11): resolving the worker's credential needed an upstream
+    call that failed — a refused Copilot token exchange. ``status`` is its
+    HTTP status (None: no answer), so doctor and the scheduler classify it
+    like a refused completion instead of crashing on the OllamaError."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -134,6 +142,13 @@ def _relayed_provider() -> WorkerProvider | None:
 
 
 def worker_provider_from_home(home: Path) -> WorkerProvider | None:
+    # Phase 05 R1 (P10): the active registry profile first — the Queen's own
+    # read — so the Queen and workers never diverge. profile.json only when
+    # the registry has no ordinary active profile: none yet, or the Queen on
+    # the ChatGPT plan login, which workers never get (ADR 0063).
+    registry = _registry_provider_from_home(home)
+    if registry is not None:
+        return registry
     if not profile_path(home).is_file():
         return _assistant_provider_from_home(home)
     try:
@@ -149,9 +164,17 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     # fall back to that secret to authenticate. v108-F4: the active registry
     # profile's own key file outranks the legacy secret when the endpoints match.
     # v119-F1: the legacy secret only for the endpoint it was saved for.
-    api_key = None
-    if not provider.api_key_env:
-        api_key = _worker_key(home, provider.endpoint or "")
+    # R2 (F9): a registry profile for this endpoint is the truth — its key,
+    # not an env var profile.json still names after the key replaced it.
+    # R3 (H5): and its own env var, so a missing one is a config error, never
+    # a keyless call.
+    # R4 (Sol R4-3): a profile-named env var is the credential when no registry
+    # row is — a stale legacy token is never resolved (or exchanged) first
+    row, api_key = _worker_key(home, provider.endpoint or "", legacy=not provider.api_key_env)
+    if row is not None:
+        provider = replace(provider, api_key_env=row.api_key_env)
+    elif provider.api_key_env:
+        api_key = None
     return WorkerProvider(profile=provider, api_key=api_key)
 
 
@@ -171,29 +194,84 @@ def _refuse_queen_only(endpoint: str) -> None:
         )
 
 
-def _worker_key(personal_home: Path, endpoint: str) -> str | None:
-    """v108-F4: the active registry profile's per-profile credential — only
-    while the profile's endpoint matches the one this worker will dial (a
-    diverged config must not leak another provider's key onto its URL) —
-    else the legacy secret, only for the endpoint it was saved for (v119-F1)."""
-    from skep.supervisor.serve.llm import (
-        legacy_api_key,
-        resolve_provider_api_key,
-        worker_key_profile,
-    )
+def _worker_key(
+    personal_home: Path, endpoint: str, *, legacy: bool = True
+) -> tuple[Any, str | None]:
+    """(registry row, key). v108-F4: the active registry profile's per-profile
+    credential — only while the profile's endpoint matches the one this
+    worker will dial (a diverged config must not leak another provider's key
+    onto its URL) — else (None, the legacy secret), only for the endpoint it
+    was saved for (v119-F1)."""
+    from skep.supervisor.serve.llm import worker_key_profile
 
     supervisor_home = personal_home / "supervisor"
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
-        return legacy_api_key(supervisor_home, endpoint)
+        return None, _legacy_key(supervisor_home, endpoint) if legacy else None
     store = RunStore(db_path, readonly=True)
     try:
         active = worker_key_profile(store, endpoint)
         if active is None:
-            return legacy_api_key(supervisor_home, endpoint, store)
-        return resolve_provider_api_key(supervisor_home, active, store)
+            return None, _legacy_key(supervisor_home, endpoint, store) if legacy else None
+        return active, _profile_key(supervisor_home, active, store)
     finally:
         store.close()
+
+
+def _legacy_key(supervisor_home: Path, endpoint: str, store: RunStore | None = None) -> str | None:
+    """R3 (H6): the legacy secret as ``endpoint`` takes it — a Copilot
+    GitHub token exchanged, like the key Settings probed — under the
+    worker's error contract (a refused exchange is an LlmUpstreamError)."""
+    from skep.supervisor.serve.llm import legacy_api_key, wire_key
+
+    try:
+        return wire_key(endpoint, legacy_api_key(supervisor_home, endpoint, store))
+    except OllamaError as exc:
+        raise LlmUpstreamError(str(exc), status=exc.status) from exc
+
+
+def _profile_key(supervisor_home: Path, profile: Any, store: RunStore) -> str | None:
+    """A registry profile's credential, under the worker's error contract
+    (R2, F11): a refused Copilot exchange is an LlmUpstreamError."""
+    from skep.supervisor.serve.llm import resolve_provider_api_key
+
+    try:
+        return resolve_provider_api_key(supervisor_home, profile, store)
+    except OllamaError as exc:
+        raise LlmUpstreamError(str(exc), status=exc.status) from exc
+
+
+def _registry_provider_from_home(home: Path) -> WorkerProvider | None:
+    from skep.supervisor.codex_login import uses_codex_login
+    from skep.supervisor.serve.llm import REGISTRY_PROTOCOLS
+
+    supervisor_home = home / "supervisor"
+    db_path = supervisor_home / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return None
+    store = RunStore(db_path, readonly=True)
+    try:
+        active = store.active_provider_profile()
+        if (
+            active is None
+            or active.protocol not in REGISTRY_PROTOCOLS
+            or uses_codex_login(active.base_url)
+        ):
+            return None
+        # the credential chat and the probe resolve: named env var → own key
+        # file → llm-secret, the last only for the endpoint it was saved for
+        api_key = _profile_key(supervisor_home, active, store)
+    finally:
+        store.close()
+    return WorkerProvider(
+        profile=ProviderProfile(
+            name=REGISTRY_PROTOCOLS[active.protocol],
+            model=active.model,
+            endpoint=active.base_url,
+            api_key_env=active.api_key_env,
+        ),
+        api_key=api_key,
+    )
 
 
 def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
@@ -203,23 +281,25 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         return None
     store = RunStore(db_path, readonly=True)
     try:
-        base_url = store.get_setting(LLM_BASE_URL)
-        model = store.get_setting(LLM_DEFAULT_MODEL)
-        protocol = store.get_setting(LLM_PROTOCOL)
+        # Phase 05 (5.1): the one read — the active registry profile, the
+        # llm_* settings only while none is active.
+        base_url, model, protocol = assistant_llm(store)
         if not isinstance(base_url, str) or not base_url.strip():
             return None
         if not isinstance(model, str) or not model.strip():
             return None
         _refuse_queen_only(base_url)
-        from skep.supervisor.serve.llm import resolve_provider_api_key, worker_key_profile
+        from skep.supervisor.serve.llm import worker_key_profile
 
         # v108-F4: the active registry profile's own credential — but only while
         # the saved settings still point at that profile's endpoint (a manual
         # config PUT must not leak another provider's key onto its URL).
-        api_key = resolve_api_key(supervisor_home)
         active = worker_key_profile(store, base_url)
-        if active is not None:
-            api_key = resolve_provider_api_key(supervisor_home, active, store)
+        api_key = (
+            _profile_key(supervisor_home, active, store)
+            if active is not None
+            else _legacy_key(supervisor_home, base_url, store)
+        )
     finally:
         store.close()
     known = get_args(LLMProtocol)
@@ -346,7 +426,7 @@ def _api_key(provider: WorkerProvider) -> str | None:
         try:
             return resolve_copilot_bearer(value)
         except OllamaError as exc:
-            raise LlmPlanError(str(exc)) from exc
+            raise LlmUpstreamError(str(exc), status=exc.status) from exc
     return value
 
 

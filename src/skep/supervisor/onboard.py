@@ -73,11 +73,18 @@ def onboard_status(supervisor_home: Path) -> dict[str, Any]:
     template step is complete only while the baseline verifies AND is what
     ④ would lock now for the recorded template under the recorded sandbox —
     a tampered lock, or a sandbox switch after the lock (O3-F1, D8), sends
-    onboard back to step ④. ``relock`` names the template in the second case."""
+    onboard back to step ④. ``relock`` names the template in the second case.
+
+    Phase 05 (5.1): the ONE setup truth — ``/api/onboard``, the CLI and
+    ``/api/setup/status`` all read it. A home set up before onboard existed
+    is reconciled first (``reconcile_onboard``), and a work directory that
+    is gone from disk is not done."""
     home = supervisor_home.parent
-    state = _read(home / STATE_FILE)
+    state = reconcile_onboard(supervisor_home)
     first_run = _read(home / FIRST_RUN_FILE)
     records: dict[str, Any] = {step: state.get(step) for step in STEPS[:4]}
+    if records["workdir"] is not None and not Path(str(records["workdir"]["path"])).is_dir():
+        records["workdir"] = None
     relock = None
     if records["template"] is not None:
         baseline = verify(supervisor_home)
@@ -98,6 +105,66 @@ def onboard_status(supervisor_home: Path) -> dict[str, Any]:
         "done": not pending,
         "relock": relock,
     }
+
+
+def reconcile_onboard(supervisor_home: Path) -> dict[str, Any]:
+    """Phase 05 (5.1): fill the onboard records a pre-onboard home already
+    proves, so ``/api/setup/status`` ("complete" since 07-08) and
+    ``/api/onboard`` ("0 of 5") stop disagreeing. Idempotent: a step that
+    has a record is never touched, so a second call writes nothing.
+
+    - ② workdir: a project bound to a repo folder that exists;
+    - ③ sandbox: a ``sandbox_backend`` the store holds explicitly;
+    - ④ template: ONLY a baseline that already verifies — this never
+      approves anything; a home with no approved baseline stays at ④.
+
+    Never ① (a model record means a test call passed — L2's keep path
+    records it) and never ⑤ (``first_run.json`` is the operator's answer).
+    Returns onboard.json's state after the fill."""
+    home = supervisor_home.parent
+    state = _read(home / STATE_FILE)
+    found: dict[str, dict[str, Any]] = {}
+    db = supervisor_home / "supervisor.sqlite3"
+    if (state.get("workdir") is None or state.get("sandbox") is None) and db.is_file():
+        from .projects import list_projects
+
+        store = RunStore(db, readonly=True)
+        try:
+            backend = store.get_setting(SANDBOX_BACKEND)
+            bound = sorted(
+                (project.project_id != "workspace", project.project_id, binding.value, project)
+                for project in list_projects(store)
+                for binding in project.bindings
+                if binding.kind == "repo_path" and Path(binding.value).is_dir()
+            )
+        finally:
+            store.close()
+        if state.get("workdir") is None and bound:
+            _, project_id, path, project = bound[0]
+            found["workdir"] = {
+                "path": path,
+                "project_id": project_id,
+                "created": False,
+                "git": (Path(path) / ".git").exists(),
+                "verify_command": str(project.policy.get("verify_command") or ""),
+            }
+        if state.get("sandbox") is None and backend in SANDBOX_BACKENDS:
+            found["sandbox"] = {"backend": backend, "rings": rings_line(str(backend))}
+    if state.get("template") is None:
+        from .policy_templates import TEMPLATE_NAMES
+
+        baseline = verify(supervisor_home)
+        if isinstance(baseline, Ok) and baseline.layer.template in TEMPLATE_NAMES:
+            found["template"] = {
+                "template": baseline.layer.template,
+                "sha256": baseline.lock.get("sha256"),
+            }
+    if not found:
+        return state
+    for step, record in found.items():
+        state[step] = {**record, "reconciled": True, "at": _now()}
+    _write(home / STATE_FILE, state)
+    return state
 
 
 # --- ① model -----------------------------------------------------------------
@@ -155,7 +222,6 @@ def onboard_model(
     make a test call, and say where prompts go. ``mock`` is the stub for
     tests and dry runs: profile only, no call."""
     from ..profile import run_personal_setup
-    from ..status import worker_provider_check
 
     home = _personal_home(holder)
     provider = provider.strip()
@@ -174,8 +240,14 @@ def onboard_model(
             },
         )
     from .provider_presets import preset_egress_note
+    from .providers import (
+        ProviderProfile,
+        check_provider_health,
+        live_probes,
+        validate_provider_profile,
+    )
     from .serve.actions import add_provider, use_provider
-    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
+    from .serve.llm import provider_rollback
 
     preset = _preset_for(provider, endpoint, model, api_key_env)
     base_url = (endpoint or preset.base_url or "").strip()
@@ -183,60 +255,78 @@ def onboard_model(
     if not model:
         raise ValueError("name a --model")
     key_env = api_key_env or preset.api_key_env
+    # R2 (F3): the preset's id — unless it is registered for another endpoint,
+    # whose key stays there: then this endpoint gets the first free <id>-N
+    pid = next(
+        c
+        for c in (preset.preset_id, *(f"{preset.preset_id}-{n}" for n in range(2, 1000)))
+        if (held := store.get_provider_profile(c)) is None or held.base_url == base_url.rstrip("/")
+    )
 
-    # L2: the test call needs the switch written (it probes exactly what a
-    # worker would resolve), so snapshot what the switch touches first and put
-    # it all back if anything fails — a failed switch changes nothing (I8).
-    profile_file = home / "profile.json"
-    saved_profile = profile_file.read_bytes() if profile_file.exists() else None
-    saved_row = store.get_provider_profile(preset.preset_id)
-    previous = store.active_provider_profile()
-    saved_settings = {
-        key: store.get_setting(key) for key in (LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL)
-    }
-    try:
-        if preset.preset_id in ("ollama", "openai-compatible"):
-            add_provider(
-                store,
-                provider_id=preset.preset_id,
-                protocol=preset.protocol,
-                base_url=base_url,
-                model=model,
-                api_key_env=key_env,
-                cost_class=preset.cost_class,
-                source="onboard",
-            )
-        else:
-            add_provider(
-                store, preset=preset.preset_id, base_url=base_url, model=model, api_key_env=key_env
-            )
-        used = use_provider(store, holder.current.home, provider_id=preset.preset_id)
-        # use_provider writes profile.json through with no key env (v19-F9); put
-        # the operator's NAME back so doctor and workers read the same truth.
-        run_personal_setup(
-            home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
+    # Phase 05 (5.1): stage the candidate — exactly the profile the switch
+    # below writes, with the credential it would resolve — and probe it (the
+    # model list AND a 1-token completion) BEFORE anything is written. A
+    # refused key (ollama.com lists models to anyone, then 401s the chat)
+    # leaves the live provider byte-for-byte as it was (I8). R1: validated
+    # first (a pasted key in --api-key-env, a bad URL) — never sent anywhere.
+    # The probe resolves the credential exactly as the builtin worker will
+    # (named env var → the profile's key file → llm-secret for its own
+    # endpoint; workers read this registry profile first, P10).
+    candidate = validate_provider_profile(
+        ProviderProfile(
+            provider_id=pid,
+            protocol=preset.protocol,
+            base_url=base_url,
+            model=model,
+            api_key_env=key_env,
+            cost_class=preset.cost_class,
         )
-        check = worker_provider_check(home, 5.0)
-        if check.get("status") != "ready":
-            raise ValueError(f"test call failed: {check.get('label')}")
-    except BaseException as exc:  # an interrupt mid-probe rolls back too
-        if saved_row is None:
-            store.delete_provider_profile(preset.preset_id)
-        else:
-            store.upsert_provider_profile(saved_row)
-        if previous is not None:
-            store.set_active_provider(previous.provider_id)
-        for key, value in saved_settings.items():
-            if value is None:  # absent before: delete, not a JSON null row
-                store.delete_setting(key)
+    )
+    health = check_provider_health(
+        candidate, now=_now(), **live_probes(holder.current.home, store, timeout=15.0)
+    )
+    if not health.ok:
+        previous = store.active_provider_profile()
+        kept = (
+            f"the previous provider {previous.provider_id!r} is still active"
+            if previous is not None
+            else "no provider was active before and none is now"
+        )
+        raise ValueError(f"test call failed: {health.error} — nothing changed: {kept}")
+
+    # L2: what the switch touches is put back if anything fails mid-write
+    # (an interrupt included) — a failed switch changes nothing (I8). Phase
+    # 05: the test call already ran, on the candidate.
+    previous = store.active_provider_profile()
+    try:
+        with provider_rollback(store, holder.current.home):
+            if preset.preset_id in ("ollama", "openai-compatible"):
+                add_provider(
+                    store,
+                    provider_id=pid,
+                    protocol=preset.protocol,
+                    base_url=base_url,
+                    model=model,
+                    api_key_env=key_env,
+                    cost_class=preset.cost_class,
+                    source="onboard",
+                )
             else:
-                store.set_setting(key, value)
-        if saved_profile is None:
-            profile_file.unlink(missing_ok=True)
-        else:
-            profile_file.write_bytes(saved_profile)
-        if not isinstance(exc, Exception):
-            raise
+                add_provider(
+                    store,
+                    preset=preset.preset_id,
+                    provider_id=pid,
+                    base_url=base_url,
+                    model=model,
+                    api_key_env=key_env,
+                )
+            used = use_provider(store, holder.current.home, provider_id=pid, probe=False)
+            # use_provider writes profile.json through with no key env (v19-F9); put
+            # the operator's NAME back so doctor and workers read the same truth.
+            run_personal_setup(
+                home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
+            )
+    except Exception as exc:
         kept = (
             f"the previous provider {previous.provider_id!r} is still active"
             if previous is not None
@@ -251,7 +341,8 @@ def onboard_model(
             "model": model,
             "endpoint": base_url,
             "api_key_env": key_env,
-            "test": str(check.get("label")),
+            "test": f"provider ready ({model} via {base_url})"
+            + ("" if health.model_found else f" — {model!r} is not in its model list"),
             "egress": preset_egress_note(preset, base_url),
         },
     )

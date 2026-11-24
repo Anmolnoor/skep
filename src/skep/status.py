@@ -4,9 +4,8 @@ import json
 import os
 import shlex
 import shutil
-import urllib.error
+import sys
 import urllib.parse
-import urllib.request
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +25,24 @@ def build_status(
     env: Mapping[str, str] | None = None,
     provider_timeout: float = 1.0,
     now: datetime | None = None,
+    offline: bool = False,
+) -> dict[str, Any]:
+    from contextlib import nullcontext
+
+    from .supervisor.serve.llm_copilot import no_exchange
+
+    # Phase 05 review R1 (I8): --offline dials nothing, the Copilot token
+    # exchange behind the worker credential and the relay summary included
+    with no_exchange() if offline else nullcontext():
+        return _build_status(home, env, provider_timeout, now, offline)
+
+
+def _build_status(
+    home: Path,
+    env: Mapping[str, str] | None,
+    provider_timeout: float,
+    now: datetime | None,
+    offline: bool,
 ) -> dict[str, Any]:
     env = os.environ if env is None else env
     home = Path(home)
@@ -43,14 +60,13 @@ def build_status(
             None,
             required,
             sandbox=_sandbox_check(home),
-            coding_worker=worker_provider_check(home, provider_timeout),
+            coding_worker=worker_provider_check(home, provider_timeout, offline=offline),
         )
         payload["advisories"] = (
             _provider_advisories(home, provider_ready=False)
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
             + _verify_pin_advisories(home)
-            + _workspace_mode_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
@@ -78,20 +94,16 @@ def build_status(
         "queen_id": profile.queen_id,
     }
     required["storage"] = _storage_check(home)
-    required["provider"] = _provider_check(profile, env, provider_timeout)
+    worker = worker_provider_check(home, provider_timeout, offline=offline)
+    required["provider"] = _provider_check(profile, env, worker, offline=offline)
     payload = _status_payload(
-        home,
-        profile,
-        required,
-        sandbox=_sandbox_check(home),
-        coding_worker=worker_provider_check(home, provider_timeout),
+        home, profile, required, sandbox=_sandbox_check(home), coding_worker=worker
     )
     payload["advisories"] = (
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
         + _verify_pin_advisories(home)
-        + _workspace_mode_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
@@ -111,7 +123,7 @@ def build_status(
     return payload
 
 
-def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
+def worker_provider_check(home: Path, timeout: float, *, offline: bool = False) -> dict[str, Any]:
     """v49-F1: the WORKER's provider path, resolved exactly like a run would
     (profile.json rules incl. the api_key_env trap and the llm-secret
     fallback, else the daemon store settings), then probed with the worker's
@@ -120,6 +132,7 @@ def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
     from .supervisor.serve.llm import OllamaError, list_models
     from .workers.llm_plan import (
         LlmPlanError,
+        LlmUpstreamError,
         provider_probe_target,
         worker_provider_from_home,
     )
@@ -134,6 +147,8 @@ def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
                 "finish setup in the web UI or run skep setup --personal",
             }
         endpoint, protocol, api_key, model = provider_probe_target(provider)
+    except LlmUpstreamError as exc:  # R2 (F11): a refused token exchange, by its status
+        return _probe_failure(exc, "the worker credential", "the provider {} the token exchange")
     except LlmPlanError as exc:
         # v127-F4: ``kind`` says why — a config error no run could get past
         # ("config"), a refused key ("auth": HTTP 401/403), or anything else
@@ -146,6 +161,8 @@ def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             "detail": f"{exc}",
         }
     target = f"{model} via {endpoint}"
+    if offline:  # Phase 05 5.2: resolved like a run would, never dialed
+        return {"status": "skipped", "label": f"skipped (--offline): {target}", "detail": target}
     try:
         models = list_models(endpoint, api_key, protocol=protocol, timeout=timeout)
     except OllamaError as exc:
@@ -681,22 +698,11 @@ def _browse_advisories(home: Path) -> list[str]:
 
 
 def _verify_pin_advisories(home: Path) -> list[str]:
-    """v91-F1 (I2): name the projects whose verify_command cannot do its job.
-
-    Two independent ways that happens, and both were silent.
-
-    Pinned to nothing (v91-F1): setup pins a verify_command for new projects,
-    but nothing rewrites a stored policy — an already-registered project keeps
-    re-running whatever the worker nominated for itself, and the maintain lane
-    will not auto-land it (v90-F4).
-
-    Pinned to something this host cannot run (v101-F14): the inverse, and the
-    reason it went unnoticed through v100 is that only the first half was ever
-    reported. Run 019faa33 re-verified with `make test` and got exit 127 on a
-    machine with no `make`, so G10 was permanently inoperative on that project.
-
-    Silence in either case is indistinguishable from a project that is fine
-    (I8)."""
+    """v101-F14 (I2): name the projects pinned to a verify_command this host
+    cannot run. Run 019faa33 re-verified with `make test` and got exit 127 on
+    a machine with no `make`, so G10 was permanently inoperative on that
+    project — and silent, because only the "pins nothing" half (v91-F1, now
+    a Projects-needing-upgrade line) was ever reported (I8)."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
@@ -705,67 +711,87 @@ def _verify_pin_advisories(home: Path) -> list[str]:
 
     store = RunStore(db_path, readonly=True)
     try:
-        unpinned: list[str] = []
         unrunnable: list[str] = []
         for project in list_projects(store):
             pin = str(project.policy.get("verify_command") or "").strip()
-            if not pin:
-                unpinned.append(project.project_id)
-                continue
-            # v101-F14: the inverse advisory. A project pinned to a binary this
-            # host does not have re-verifies with exit 127 forever — outcome
-            # `unavailable`, confirmed 0, on every run. It fails closed, so
-            # nothing lands unsafely, but a gate that can never confirm has
-            # stopped measuring, and it was silent through v100 because only
-            # the "pins nothing" half was ever reported (I8).
+            # A pin whose binary is missing re-verifies with exit 127 forever —
+            # outcome `unavailable`, confirmed 0. It fails closed, but a gate
+            # that can never confirm has stopped measuring.
             binary = shlex.split(pin)[0] if pin else ""
             if binary and shutil.which(binary) is None:
                 unrunnable.append(f"{project.project_id} ({pin})")
     finally:
         store.close()
-    advisories: list[str] = []
-    if unpinned:
-        advisories.append(
-            f"{len(unpinned)} project(s) pin no verify_command, so re-verification (G10) "
-            "re-runs the command the worker nominated for itself and the maintain lane "
-            f"will not auto-land: {', '.join(sorted(unpinned))}. Re-run "
-            "`skep project setup <repo>` to seed one from the repo's toolchain, or set "
-            "verify_command in the project policy overlay."
-        )
-    if unrunnable:
-        advisories.append(
-            f"{len(unrunnable)} project(s) pin a verify_command whose binary is not on "
-            "this host, so re-verification (G10) can never confirm — every run reports "
-            f"`unavailable`, not `failed`: {', '.join(sorted(unrunnable))}. Re-pin with "
-            '`skep project setup <repo> --verify-command "<runnable command>"`.'
-        )
-    return advisories
+    if not unrunnable:
+        return []
+    return [
+        f"{len(unrunnable)} project(s) pin a verify_command whose binary is not on "
+        "this host, so re-verification (G10) can never confirm — every run reports "
+        f"`unavailable`, not `failed`: {', '.join(sorted(unrunnable))}. Re-pin with "
+        '`skep project setup <repo> --verify-command "<runnable command>"`.'
+    ]
 
 
-def _workspace_mode_advisories(home: Path) -> list[str]:
-    """v127-F8 (ADR 0066): new projects default to the sandbox; existing ones
-    keep their stored mode, so name the ones still running unsandboxed."""
+def _project_upgrades(home: Path, *, strict_backend: bool) -> list[dict[str, Any]]:
+    """Phase 05 5.2 (I9): every project a stored policy keeps behind what a
+    new one gets — unsandboxed (v127-F8), no verify_command pin (v91-F1), reads
+    not confined where the backend can (ADR 0068) — with the ONE `skep project
+    setup` line that fixes all of it. Setup never rewrites a stored policy by
+    itself, so this is the migration path."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
+    from .supervisor.projects import list_projects
+    from .supervisor.serve.registry import verify_command_seed
     from .supervisor.store import RunStore
 
     store = RunStore(db_path, readonly=True)
     try:
-        workspace = sorted(
-            record.project_id
-            for record in store.list_project_policies()
-            if record.policy.get("default_execution_mode") == "workspace"
-        )
+        projects = list_projects(store)
     finally:
         store.close()
-    if not workspace:
-        return []
-    return [
-        f"{len(workspace)} project(s) run workers unsandboxed (workspace): "
-        f"{', '.join(workspace)}. Move one into the sandbox: `skep project setup <repo> "
-        f"--project-id {workspace[0]} --execution-mode sandbox`."
-    ]
+    upgrades: list[dict[str, Any]] = []
+    for project in sorted(projects, key=lambda p: p.project_id):
+        policy = project.policy
+        repo = next((b.value for b in project.bindings if b.kind == "repo_path"), None)
+        slug = next((b.value for b in project.bindings if b.kind == "repo_slug"), None)
+        managed = home / "repos" / slug if slug else None
+        if repo is None and managed is not None and managed.is_dir():
+            repo = str(managed.resolve())  # review R1 D4: the managed clone, by path
+        mode = policy.get("default_execution_mode")
+        fixes: dict[str, tuple[str, str]] = {}  # need -> (flag, why)
+        if mode == "workspace":
+            fixes["sandbox"] = ("--execution-mode sandbox", "runs workers unsandboxed (workspace)")
+        strict = policy.get(STRICT_READS_KEY) is True
+        if strict_backend and mode in {"sandbox", "workspace"} and not strict:
+            fixes["strict_reads"] = ("--strict-reads", "reads are not confined to an allowlist")
+        if not str(policy.get("verify_command") or "").strip():
+            # what setup itself would seed; nothing detectable is the operator's to name
+            seed = verify_command_seed(Path(repo)) if repo else ""
+            fixes["verify_command"] = (
+                f"--verify-command {shlex.quote(seed or '<your test command>')}",
+                "pins no verify_command, so G10 re-runs the worker's own nomination"
+                + ("" if seed else " (no test entry point detected: put your test command in)"),
+            )
+        if not fixes:
+            continue
+        flags = " ".join(flag for flag, _ in fixes.values())
+        tail = f"--project-id {shlex.quote(project.project_id)} {flags}"
+        upgrade: dict[str, Any] = {
+            "project_id": project.project_id,
+            "needs": list(fixes),
+            "why": "; ".join(why for _, why in fixes.values()),
+            "command": f"skep project setup {shlex.quote(repo)} {tail}" if repo else None,
+        }
+        if repo is None:
+            # review R1 D4 (I9): no checkout to name — say so, not a `<repo>` that fails
+            where = f"its managed clone {managed} is missing" if managed else "no repo binding"
+            upgrade["instruction"] = (
+                f"no checkout found ({where}): clone or locate the repo, then run "
+                f"`skep project setup` on that folder with {tail}"
+            )
+        upgrades.append(upgrade)
+    return upgrades
 
 
 def _repo_registry_advisories(home: Path) -> list[str]:
@@ -895,12 +921,11 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     lines = [
         f"Skep: {status['overall']}",
         "",
-        "Required checks:",
+        f"Health: {'pass' if status['overall'] == 'ready' else 'fail'}",
     ]
     for name, check in status.get("required", {}).items():
         lines.append(_format_check(name, check))
 
-    lines.extend(["", "Personal surface:"])
     queen = status.get("queen", {})
     if queen.get("queen_id") and queen.get("hive_id"):
         lines.append(f"- queen: {queen.get('queen_id')} in {queen.get('hive_id')}")
@@ -929,9 +954,6 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
         if login:
             lines.extend(_codex_login_lines(login))
-    relay = status.get("provider_key_relay", {})
-    if relay:
-        lines.append(f"- provider key relay: {relay.get('label')}")
     for queen in status.get("queen_chatgpt_login", []):
         lines.append(_queen_login_line(queen))
 
@@ -951,10 +973,24 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     if memory:
         lines.append(f"- memory: {memory.get('status')} at {memory.get('path')}")
 
+    lines.extend(["", "Security posture:"])
     sandbox = status.get("sandbox", {})
     if sandbox:
-        lines.extend(["", "Runtime checks:"])
         lines.append(_format_check("sandbox", sandbox))
+    relay = status.get("provider_key_relay", {})
+    if relay:
+        lines.append(f"- provider key relay: {relay.get('label')}")
+    baseline = status.get("baseline_lock", {})
+    if baseline:
+        lines.append(f"- baseline lock: {baseline.get('label')}")
+
+    lines.extend(["", "Projects needing upgrade:"])
+    upgrades = status.get("project_upgrades", [])
+    for upgrade in upgrades:
+        fix = upgrade["command"] or upgrade["instruction"]
+        lines.append(f"- {upgrade['project_id']}: {fix}  # {upgrade['why']}")
+    if not upgrades:
+        lines.append("- none")
 
     planned = status.get("planned", {})
     if planned:
@@ -1200,8 +1236,16 @@ def _status_payload(
     sandbox: dict[str, Any] | None = None,
     coding_worker: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    required_ready = all(check.get("status") == "ready" for check in required.values())
+    # Phase 05 5.2: a probe --offline skipped does not fail the run; its line says so (I8)
+    required_ready = all(check.get("status") in {"ready", "skipped"} for check in required.values())
+    # review R1 (I8): a worker whose key the provider refuses fails health;
+    # `unavailable` (no worker provider at all, a mock home) does not
+    required_ready = required_ready and (coding_worker or {}).get("status") != "blocked"
     provider = profile.provider.to_dict() if profile else {}
+    sandbox = sandbox or {}
+    upgrades = _project_upgrades(
+        home, strict_backend=sandbox.get("read_confinement") == "strict-allowlist"
+    )
     return {
         "overall": "ready" if required_ready else "blocked",
         "home": str(home),
@@ -1230,9 +1274,27 @@ def _status_payload(
         "queen_chatgpt_login": _queen_login_check(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
-        "sandbox": sandbox or {},
+        "sandbox": sandbox,
+        "baseline_lock": _baseline_lock(home),
+        "project_upgrades": upgrades,
+        # Phase 05 5.2: the doctor's three sections, as the keys each one reads
+        "groups": {
+            "health": ["required", "workers", "coding_engines", "approvals", "memory"],
+            "security_posture": ["sandbox", "provider_key_relay", "baseline_lock"],
+            "projects_needing_upgrade": [u["project_id"] for u in upgrades],
+        },
         "planned": {},
     }
+
+
+def _baseline_lock(home: Path) -> dict[str, Any]:
+    """The approved baseline's state as every face reports it (ES-F2), plus
+    its one-line label."""
+    from .supervisor.policy_baseline import baseline_status, status_line
+
+    supervisor = home / "supervisor"
+    label = status_line(supervisor).removeprefix("baseline: ")
+    return {**baseline_status(supervisor), "label": label}
 
 
 def _storage_check(home: Path) -> dict[str, Any]:
@@ -1253,7 +1315,9 @@ def _storage_check(home: Path) -> dict[str, Any]:
 def _provider_check(
     profile: PersonalProfile,
     env: Mapping[str, str],
-    timeout: float,
+    worker: Mapping[str, Any],
+    *,
+    offline: bool = False,
 ) -> dict[str, Any]:
     provider = profile.provider
     if not provider.name or provider.name == "unconfigured":
@@ -1268,7 +1332,13 @@ def _provider_check(
             "detail": "Provider model is missing.",
             "next_step": "run setup --personal --provider <name> --model <model>",
         }
-    if provider.api_key_env and not env.get(provider.api_key_env):
+    # R2 (F9): the worker's actual credential decides — a registry key file
+    # that replaced the env var profile.json names is no missing key
+    if (
+        provider.api_key_env
+        and not env.get(provider.api_key_env)
+        and worker.get("status") not in ("ready", "skipped")
+    ):
         return {
             "status": "blocked",
             "detail": f"Provider credential env var {provider.api_key_env} is not set.",
@@ -1296,7 +1366,19 @@ def _provider_check(
             "next_step": "set a valid http or https provider endpoint",
         }
 
-    return _probe_provider_endpoint(provider.name, provider.endpoint, timeout)
+    if offline:
+        return {"status": "skipped", "detail": "skipped (--offline): the endpoint was not probed"}
+    # review R1 (I8): ready means the authenticated 1-token completion
+    # answered (worker_provider_check) — an unauthenticated GET of the model
+    # list passed a dead key on ollama.com
+    if worker.get("status") == "ready":
+        return {"status": "ready", "detail": f"the model answered a completion: {worker['label']}"}
+    next_step = {
+        "auth": "the key was refused — store a working one (`skep provider set-key <id>`, "
+        "or the env var the profile names), then run skep doctor again",
+        "unreachable": "check the endpoint is up and reachable, then run skep doctor again",
+    }.get(worker.get("kind", ""), "fix the provider configuration, then run skep doctor again")
+    return {"status": "blocked", "detail": str(worker.get("label")), "next_step": next_step}
 
 
 def _sandbox_check(home: Path) -> dict[str, Any]:
@@ -1338,17 +1420,23 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
     detail = reason
     if probe.detail:
         detail = f"{detail}: {probe.detail}"
-    return {
+    check = {
         "status": "unavailable",
         "detail": detail,
         "reason": probe.reason,
         "backend": probe.backend,
     }
+    if probe.reason == "missing_binary" and sys.platform.startswith("linux"):
+        check["next_step"] = (
+            "install bubblewrap: `sudo apt install bubblewrap` (Debian/Ubuntu) or "
+            "`sudo dnf install bubblewrap` (Fedora), then run skep doctor again"
+        )
+    return check
 
 
 def _sandboxed_projects(home: Path) -> dict[str, bool]:
     """ADR 0068: each sandboxed project → whether it reads strictly (the
-    unsandboxed ones are ``_workspace_mode_advisories``' to name)."""
+    unsandboxed ones are ``_project_upgrades``' to name)."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return {}
@@ -1363,32 +1451,6 @@ def _sandboxed_projects(home: Path) -> dict[str, bool]:
         }
     finally:
         store.close()
-
-
-def _probe_provider_endpoint(provider: str, endpoint: str, timeout: float) -> dict[str, Any]:
-    target = endpoint.rstrip("/")
-    if provider == "ollama":
-        target = f"{target}/api/tags"
-
-    request = urllib.request.Request(target, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if 200 <= response.status < 300:
-                return {
-                    "status": "ready",
-                    "detail": "Provider endpoint responded successfully.",
-                }
-            return {
-                "status": "blocked",
-                "detail": f"Provider endpoint returned HTTP {response.status}.",
-                "next_step": "check provider endpoint and model settings",
-            }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "status": "blocked",
-            "detail": f"Provider endpoint check failed: {exc.__class__.__name__}.",
-            "next_step": "check provider endpoint and credentials",
-        }
 
 
 def _format_check(name: str, check: Mapping[str, Any]) -> str:

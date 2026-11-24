@@ -9,7 +9,15 @@
      is in "Already gave the service account sudo?"), and the Telegram user id was read
      from the web UI rather than with the getUpdates call shown. The tested install also
      copied llm-secret from another install instead of using serve.env, and bound
-     0.0.0.0; the guide says so where it matters. -->
+     0.0.0.0; the guide says so where it matters.
+     Re-checked 2026-11-23 (Phase 05) in an ubuntu:24.04 container with a skep 1.6.1 wheel:
+     `skep doctor` without bwrap names the install command, `apt install bubblewrap` clears
+     it, and the section 7 unit passes `systemd-analyze --user verify`. The Tailscale steps
+     are marked "(not run as written)": they were checked only against `tailscale serve
+     --help` (Tailscale 1.104) and a request to a loopback `skep serve` carrying a tailnet
+     Host header. Re-checked on Fedora 45 (systemd 262): the section 7 unit, written to a
+     temp dir, passes `systemd-analyze --user verify` with no warnings, and `dnf info
+     bubblewrap` confirms the Fedora package name; Tailscale still not run. -->
 
 This guide is for someone who wants skep on a machine that never sleeps, such
 as a home lab VM or a small server, so schedules fire on time and you can reach
@@ -165,6 +173,11 @@ Pinning a commit makes the install reproducible. To upgrade, run the same
 command with a newer commit and `--force`, since pipx won't replace an
 existing install without it.
 
+After any upgrade, run `skep doctor`. An upgrade never rewrites a project's
+stored policy, so a project set up before a newer default (the sandbox,
+strict read confinement, a pinned verify command) shows up under **Projects
+needing upgrade** with the one `skep project setup …` line that moves it.
+
 After that, skep keeps itself current. Every 12 hours it checks PyPI and tells
 you about a new release once, in your Telegram chat. Send `/update` and it
 installs the release with pipx, waits for any run in progress to finish, and
@@ -213,7 +226,17 @@ skep onboard --check
 ```
 
 `--check` should pass every line: model reachable, sandbox working, policy
-baseline locked. If you copy the policy template from another machine, compare
+baseline locked. Then run the full report:
+
+```sh
+skep doctor
+```
+
+It should start with `Health: pass`, list `sandbox: ready - bubblewrap backend
+is usable` under Security posture, and show `- none` under Projects needing
+upgrade. If the sandbox line says `bwrap was not found on PATH`, install
+bubblewrap (section 2). `skep doctor --offline` runs the same checks without
+calling the model. If you copy the policy template from another machine, compare
 the baseline's sha256 that onboarding prints. Both machines then share the same
 rules.
 
@@ -255,8 +278,8 @@ Read it from `~/.skep/supervisor/serve-token` when you need it.
   systemd service doesn't read your shell profile.
 - **Binding.** `127.0.0.1` keeps the web UI on the box. Telegram still works,
   because skep polls Telegram rather than waiting for it to connect. Reach the
-  UI with an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 skep@<server>`) or bind to
-  a VPN address such as Tailscale's. `--host 0.0.0.0`, which the tested install
+  UI with an SSH tunnel (`ssh -L 8765:127.0.0.1:8765 skep@<server>`) or with
+  `tailscale serve` (below). `--host 0.0.0.0`, which the tested install
   used, opens it to your whole LAN over plain HTTP. Every `/api/` call except
   Slack's signed webhooks needs the serve token
   (`~/.skep/supervisor/serve-token`), and skep doesn't restrict the Host
@@ -267,6 +290,28 @@ Read it from `~/.skep/supervisor/serve-token` when you need it.
   at the address you actually reach it on.
 - **Restarting.** Run `systemctl --user restart skep.service` as `skep`. A
   restart clears approvals given "for this session".
+
+### Reach the UI over Tailscale (optional, as admin)
+
+(Not run as written: checked against `tailscale serve --help` and a loopback
+request with a tailnet Host header, not on an Ubuntu host.)
+
+`tailscale serve` publishes the loopback-bound UI to your tailnet over HTTPS,
+so skep keeps binding `127.0.0.1`:
+
+```sh
+curl -fsSL https://tailscale.com/install.sh | sh   # once: install Tailscale
+sudo tailscale up                                 # once: join your tailnet
+sudo tailscale serve --bg 8765
+tailscale serve status
+```
+
+`tailscale serve status` prints the `https://<machine>.<tailnet>.ts.net` URL.
+Only devices on your tailnet can open it. If the tailnet does not have HTTPS
+certificates turned on yet, `tailscale serve` prints a link to enable them.
+The serve token still guards every `/api/` call. Never use `tailscale funnel`
+for this, because it puts the UI on the public internet. To stop serving, run
+`sudo tailscale serve reset`.
 
 ## 8. Set the timezone (as admin)
 
@@ -364,7 +409,9 @@ written at first boot stay in place.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `skep doctor` says `missing_binary: bwrap was not found on PATH` | bubblewrap isn't installed | `sudo apt install bubblewrap` (section 2) |
 | `skep onboard --check` or `skep doctor` says the sandbox is unusable | AppArmor blocks bubblewrap's user namespaces | Section 3 |
+| `skep doctor` lists a project under Projects needing upgrade | Its stored policy predates a newer default | Run the `skep project setup …` line it prints |
 | Codex workers fail with `codex` not found, but it works in your shell | The service's PATH doesn't include `~/.npm-global/bin` | The `Environment=PATH` line in section 7 |
 | `id skep` no longer lists `sudo` or `lxd`, but the service still has the group | The user manager kept the old groups | Restart `user@<uid>.service` (section 10) |
 | Schedules the assistant made fire hours early or late | The server is on UTC, so "9 am" became 9 am UTC | Section 8, then recreate the schedule |

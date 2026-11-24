@@ -664,7 +664,14 @@ model/key-env from it. `provider add/use/remove` (v108) are the
 registry's write faces — the same verbs as `POST/DELETE /api/providers` and
 the carded chat tools. `--api-key-env` names the env var holding the key;
 key values never ride the command line, and `use` writes the profile through
-to the saved assistant config so the Queen actually speaks it. `login` (v108)
+to the saved assistant config so the Queen actually speaks it. `set-key`,
+`use` and `add --activate` first send the provider one 1-token completion —
+with the new key for `set-key`, the profile's own credential otherwise — and
+a refusal (a dead key, an unreachable endpoint) exits non-zero and changes
+nothing: the stored key, the active provider and the registry stay as they
+were (Phase 05). An id keeps the endpoint it was registered for, since its
+key belongs there: `add` with an existing id and a different `--base-url` is
+refused — register the new endpoint under its own id. `login` (v108)
 runs the RFC 8628 device-code flow with the OPERATOR'S own `--client-id` —
 skep ships no OAuth client id for any provider — and stores the access token
 it returns exactly where `set-key` would. A profile on `chatgpt.com` (the

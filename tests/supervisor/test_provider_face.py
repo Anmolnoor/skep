@@ -28,6 +28,10 @@ from .fake_ollama import FakeOllama
 from .test_serve_chat import sse_events
 from .test_serve_chat_tools import chat_client
 
+# Phase 05 R1: activation probes live — these tests are about the faces, so
+# the probe is stubbed (nothing reaches openrouter.ai or z.ai).
+pytestmark = pytest.mark.usefixtures("accept_probes")
+
 
 @pytest.fixture()
 def ollama() -> Iterator[FakeOllama]:
@@ -108,6 +112,7 @@ def test_second_activation_flips_the_single_active_flag(config: SupervisorConfig
     assert client.get("/api/llm/config").json()["default_model"] == "gpt-5-mini"
 
 
+@pytest.mark.usefixtures("accept_probes")  # the probe has its own tests
 def test_cli_add_use_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # build_config() appends /supervisor: tmp_path plays the personal ~/.skep.
     home = tmp_path

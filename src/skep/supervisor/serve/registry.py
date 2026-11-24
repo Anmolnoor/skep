@@ -1759,59 +1759,57 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 fallback_order=body.fallback_order,
                 allowed_network_hosts=tuple(body.allowed_network_hosts),
                 preset=body.preset,
+                # Phase 05 R1: staged and probed before the row is written
+                home=holder.current.home,
+                activate=body.activate,
             )
-            if body.activate:
-                saved_id = str(result["provider"]["provider_id"])
-                result.update(
-                    actions.use_provider(run_store, holder.current.home, provider_id=saved_id)
-                )
         except ProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return result
 
     @app.post("/api/providers/{provider_id}/activate")
     def activate_provider_route(provider_id: str) -> dict[str, Any]:
-        from ..providers import ProviderError
+        from ..providers import ProviderConflict, ProviderError
         from . import actions
 
+        if run_store.get_provider_profile(provider_id) is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
         try:
             return actions.use_provider(run_store, holder.current.home, provider_id=provider_id)
-        except ProviderError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProviderConflict as exc:  # R3 (H2): it changed while it was probed
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProviderError as exc:  # Phase 05 R1: a refused probe — nothing changed
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.delete("/api/providers/{provider_id}")
     def remove_provider_route(provider_id: str) -> dict[str, Any]:
         from ..providers import ProviderError
         from . import actions
-        from .llm import store_provider_api_key
 
         try:
-            result = actions.remove_provider(run_store, provider_id=provider_id)
+            return actions.remove_provider(run_store, holder.current.home, provider_id=provider_id)
         except ProviderError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        # v108-F4: a removed profile leaves no orphaned credential behind.
-        store_provider_api_key(holder.current.home, provider_id, "")
-        return result
 
     @app.put("/api/providers/{provider_id}/key")
     def set_provider_key_route(provider_id: str, body: ProviderKeyRequest) -> dict[str, Any]:
         # v108-F4: the ONE write-only route for a profile's key value (G2 /
         # ADR 0019's exception, extended per profile by ADR 0051). Empty
-        # clears. The value never appears in sqlite or any GET.
-        from .llm import provider_secret_path, store_provider_api_key
+        # clears. The value never appears in sqlite or any GET. Phase 05 R1:
+        # the shared verb probes a new key against its endpoint first.
+        from ..providers import ProviderConflict, ProviderError
+        from . import actions
 
-        profile = run_store.get_provider_profile(provider_id)
-        if profile is None:
+        if run_store.get_provider_profile(provider_id) is None:
             raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
-        from ..codex_login import NO_KEY_REFUSAL, uses_codex_login
-
-        if uses_codex_login(profile.base_url):
-            raise HTTPException(status_code=400, detail=f"{provider_id} {NO_KEY_REFUSAL}")
-        store_provider_api_key(holder.current.home, provider_id, body.api_key.strip())
-        return {
-            "provider_id": provider_id,
-            "api_key_set": provider_secret_path(holder.current.home, provider_id).is_file(),
-        }
+        try:
+            return actions.set_provider_key(
+                run_store, holder.current.home, provider_id=provider_id, key=body.api_key
+            )
+        except ProviderConflict as exc:  # R3 (H2): it changed while the key was probed
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # -- v15: ops node registry ----------------------------------------------
 

@@ -119,6 +119,27 @@ def _isolated_skep_home(
 
 
 @pytest.fixture()
+def accept_probes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Phase 05 R1: activating a provider or saving a key probes it live.
+    A test about a REST/CLI face rather than the probe stubs it, so nothing
+    reaches a real host (openrouter.ai, z.ai, ollama.com); the probed base
+    URLs are recorded."""
+    import skep.supervisor.providers as providers
+
+    probed: list[str] = []
+
+    def _stub(*_a: Any, **_k: Any) -> dict[str, Any]:
+        def _list(profile: Any) -> list[str]:
+            probed.append(profile.base_url)
+            return [profile.model or "stub-model"]
+
+        return {"list_models": _list, "probe": lambda _p: None}
+
+    monkeypatch.setattr(providers, "live_probes", _stub)
+    return probed
+
+
+@pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()

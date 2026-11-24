@@ -29,7 +29,9 @@ skep --version          # verify it resolves
 ```
 
 `uv tool install skep` works the same way. To upgrade: `pipx upgrade skep`
-(or `uv tool upgrade skep`), then restart `skep serve`.
+(or `uv tool upgrade skep`), then restart `skep serve` and run `skep doctor`.
+An upgrade never rewrites a project's stored policy, so the doctor lists the
+projects a newer default left behind (see below).
 
 The Linux sandbox backend needs `bubblewrap`; macOS ships Seatbelt:
 
@@ -40,6 +42,35 @@ sudo dnf install bubblewrap
 # Ubuntu/Debian
 sudo apt install bubblewrap
 ```
+
+## Check the setup
+
+```sh
+skep doctor
+```
+
+The report has three sections, and the command exits 0 only when Health
+passes:
+
+- **Health: pass** (or **fail**): the profile, storage and provider checks,
+  the coding worker, each engine, approvals and memory. The provider and
+  coding worker lines send the model one authenticated live completion, not
+  just a model-list request (ollama.com lists models to anyone), so a key the
+  provider refuses (HTTP 401/403) fails Health here instead of your first run.
+- **Security posture**: the sandbox and how it confines reads, the provider
+  key relay, and the policy baseline lock. On Linux without bubblewrap the
+  sandbox line says `bwrap was not found on PATH` and gives the install
+  command above.
+- **Projects needing upgrade**: each project that still runs unsandboxed,
+  pins no verify command, or reads the whole disk, followed by the one
+  `skep project setup …` line that fixes it. Run that line as printed. If it
+  ends in `--verify-command '<your test command>'`, skep found no test entry
+  point in the repository, so replace the placeholder with your own command.
+  A project bound by name to a managed clone gets that clone's path; when no
+  checkout can be found, the line says so and what to run once you have one.
+
+`skep doctor --offline` makes no network call (not even the GitHub Copilot
+token exchange); the provider lines then say `skipped (--offline)`. `skep doctor --json` prints the same report as JSON.
 
 ## 2. Run a task
 

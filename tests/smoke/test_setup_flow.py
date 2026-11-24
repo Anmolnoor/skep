@@ -56,7 +56,8 @@ def test_login_setup_complete_then_dispatch(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home-dir"))
     config = SupervisorConfig(
-        home=tmp_path / "home",
+        # the real layout: workers find the store at <personal home>/supervisor
+        home=tmp_path / "home" / "supervisor",
         worker_command=(sys.executable, str(FAKE_WORKER)),
         grace_seconds=0.5,
         heartbeat_seconds=0.1,
@@ -99,6 +100,20 @@ def test_login_setup_complete_then_dispatch(
             _git(workspace, "config", "user.name", "Smoke")
             _git(workspace, "add", "existing.py")
             _git(workspace, "commit", "-qm", "seed smoke file")
+
+            # Phase 05 (5.1): setup is complete when onboard is — the saved
+            # provider is kept (tested), the workspace is step ②
+            def step(name: str, body: dict[str, str]) -> None:
+                done = client.post(f"/api/onboard/{name}", headers=headers, json=body)
+                assert done.status_code == 200, done.text
+
+            step("model", {})
+            step("sandbox", {"backend": "none"})
+            preview = client.get(
+                "/api/onboard/template", headers=headers, params={"template": "builder"}
+            ).json()
+            step("template", {"template": "builder", "expect_sha256": preview["sha256"]})
+            step("role", {"role": "builder"})
             complete = client.post("/api/setup/complete", headers=headers)
             assert complete.status_code == 200
             assert complete.json()["complete"] is True

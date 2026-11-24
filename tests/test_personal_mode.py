@@ -410,10 +410,10 @@ class PersonalModeTests(unittest.TestCase):
                 api_key_env="SKEP_TEST_API_KEY",
             )
 
-            status = build_status(
-                home,
-                env={"SKEP_TEST_API_KEY": "super-secret-value"},
-            )
+            # review R1 D1: ready = the worker's authenticated completion,
+            # which reads the key from the real environment like a run does
+            with mock.patch.dict(os.environ, {"SKEP_TEST_API_KEY": "super-secret-value"}):
+                status = build_status(home, env={"SKEP_TEST_API_KEY": "super-secret-value"})
             report = format_doctor_report(status)
 
             self.assertEqual(status["overall"], "ready")

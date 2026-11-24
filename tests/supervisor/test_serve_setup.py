@@ -21,12 +21,9 @@ def test_setup_status_reports_fresh_home_as_incomplete(config: SupervisorConfig)
 
     assert status["complete"] is False
     assert status["marked_complete"] is False
-    assert status["missing"] == [
-        "llm",
-        "default_model",
-        "workspace_project",
-        "policy",
-    ]
+    # Phase 05 (5.1): readiness is the onboard record — its pending steps
+    assert status["missing"] == ["model", "workdir", "sandbox", "template", "role"]
+    assert status["onboard"] == client.get("/api/onboard").json()
     assert status["llm"]["ready"] is False
     assert status["default_model"]["ready"] is False
     assert status["workspace_project"]["ready"] is False
@@ -49,12 +46,8 @@ def test_setup_completion_is_recomputed_even_with_stale_marker(
 
     blocked = client.post("/api/setup/complete")
     assert blocked.status_code == 409
-    assert "llm" in blocked.json()["detail"]
+    assert "model" in blocked.json()["detail"]
 
-    client.put(
-        "/api/llm/config",
-        json={"base_url": "http://localhost:11434", "default_model": "llama3.2"},
-    )
     saved = client.post(
         "/api/projects/setup",
         json={
@@ -67,11 +60,26 @@ def test_setup_completion_is_recomputed_even_with_stale_marker(
         },
     )
     assert saved.status_code == 201
+    # the bound project IS step ② (reconciled); the rest go through onboard
+    status = client.get("/api/setup/status").json()
+    assert status["workspace_project"]["ready"] is True
+    assert status["missing"] == ["model", "sandbox", "template", "role"]
+    assert status["policy"]["project_execution_modes"] == ["workspace"]
+
+    post = client.post
+    assert post("/api/onboard/model", json={"provider": "mock", "model": "stub"}).status_code == 200
+    assert post("/api/onboard/sandbox", json={"backend": "none"}).status_code == 200
+    preview = client.get("/api/onboard/template", params={"template": "builder"}).json()
+    locked = post(
+        "/api/onboard/template",
+        json={"template": "builder", "expect_sha256": preview["sha256"], "approved_by": "web"},
+    )
+    assert locked.status_code == 200
+    assert post("/api/onboard/role", json={"role": "builder"}).status_code == 200
 
     status = client.get("/api/setup/status").json()
     assert status["complete"] is True
     assert status["missing"] == []
-    assert status["policy"]["project_execution_modes"] == ["workspace"]
 
     completed = client.post("/api/setup/complete").json()
     assert completed["complete"] is True
@@ -102,11 +110,12 @@ def test_default_workspace_setup_is_opt_in(
     assert applied["project"]["policy"]["default_execution_mode"] == "workspace"
 
     status = client.get("/api/setup/status").json()
-    assert status["workspace_project"]["ready"] is True
-    assert status["policy"]["ready"] is True
+    assert status["workspace_project"]["ready"] is True  # step ②, reconciled
+    assert status["onboard"]["steps"]["workdir"]["path"] == str(workspace)
+    assert status["policy"]["ready"] is False  # no baseline locked: step ④ waits
     assert status["default_workspace"]["path"] == str(workspace)
 
     shutil.rmtree(workspace)
     stale = client.get("/api/setup/status").json()
     assert stale["workspace_project"]["ready"] is False
-    assert "workspace_project" in stale["missing"]
+    assert "workdir" in stale["missing"]

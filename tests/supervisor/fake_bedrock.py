@@ -16,7 +16,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tests.supervisor.strict_wire import bedrock_errors, check
+from tests.supervisor.strict_wire import bedrock_errors, check, is_probe
 
 _CONVERSE_PATH = re.compile(r"^/model/(?P<model>[^/]+)/converse-stream$")
 _STRING_HEADER_TYPE = 7
@@ -69,6 +69,9 @@ class FakeBedrock:
         self.models = models if models is not None else ["anthropic.claude-sonnet-4-v1:0"]
         self.chat_scripts: list[bytes] = []
         self.requests: list[dict[str, Any]] = []
+        # Phase 05: 1-token liveness probes (strict_wire.is_probe), kept apart
+        # so the requests a test indexes are its own turns.
+        self.probes: list[dict[str, Any]] = []
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -182,7 +185,7 @@ class FakeBedrock:
             def do_POST(self) -> None:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 body = json.loads(raw) if raw else None
-                fake.requests.append(
+                (fake.probes if is_probe(body) else fake.requests).append(
                     {"path": self.path, "headers": dict(self.headers), "body": body}
                 )
                 if not self._signed():
@@ -192,6 +195,9 @@ class FakeBedrock:
                     if problem:
                         self._send(400, json.dumps({"message": problem}).encode())
                         return
+                    if is_probe(body):  # Phase 05: answered, no scripted turn spent
+                        fake.script_reply("pong")
+                        fake.chat_scripts.insert(0, fake.chat_scripts.pop())
                     if not fake.chat_scripts:
                         self._send(500, b'{"message": "no scripted reply left"}')
                         return

@@ -46,7 +46,7 @@ On a fresh home with nothing configured, the relevant lines are:
 - engine claude_code: NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — /home/you/.local/bin/claude (sandbox-confined; needs verify_command)
 - engine codex: NO AUTH ENV — set one of OPENAI_API_KEY — /home/you/.nvm/versions/node/v24.15.0/bin/codex (sandbox-confined; needs verify_command)
 ...
-Runtime checks:
+Security posture:
 - sandbox: ready - bubblewrap backend is usable. Landlock ABI 10: a worker connects only to unix sockets in its own roots or ones it made itself.
 ```
 

@@ -13,7 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tests.supervisor.strict_wire import check, responses_errors
+from tests.supervisor.strict_wire import check, is_probe, responses_errors
 
 # The counts every scripted turn reports, so a test can assert the mapping
 # onto ollama's prompt_eval_count/eval_count without guessing.
@@ -39,6 +39,9 @@ class FakeResponses:
         self.models = models if models is not None else ["gpt-5.2", "o5-mini"]
         self.chat_scripts: list[list[dict[str, Any]]] = []
         self.requests: list[dict[str, Any]] = []
+        # Phase 05: 1-token liveness probes (strict_wire.is_probe), kept apart
+        # so the requests a test indexes are its own turns.
+        self.probes: list[dict[str, Any]] = []
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -179,7 +182,7 @@ class FakeResponses:
             def do_POST(self) -> None:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 body = json.loads(raw) if raw else None
-                fake.requests.append(
+                (fake.probes if is_probe(body) else fake.requests).append(
                     {"path": self.path, "headers": dict(self.headers), "body": body}
                 )
                 if not self._authorized():
@@ -194,6 +197,9 @@ class FakeResponses:
                             ).encode(),
                         )
                         return
+                    if is_probe(body):  # Phase 05: answered, no scripted turn spent
+                        fake.script_reply("pong")
+                        fake.chat_scripts.insert(0, fake.chat_scripts.pop())
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')
                         return

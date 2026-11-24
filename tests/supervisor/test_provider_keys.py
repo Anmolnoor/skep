@@ -92,6 +92,7 @@ def test_provider_id_slug_guard_blocks_traversal() -> None:
     validate_provider_profile(_profile(provider_id="a-b.c_9"))
 
 
+@pytest.mark.usefixtures("accept_probes")  # Phase 05 R1: the key is probed first
 def test_rest_key_route_writes_file_and_never_a_get(config: SupervisorConfig) -> None:
     client = serve_client(config)
     client.post(
@@ -107,7 +108,11 @@ def test_rest_key_route_writes_file_and_never_a_get(config: SupervisorConfig) ->
 
     put = client.put("/api/providers/openrouter/key", json={"api_key": "sk-secret-value"})
     assert put.status_code == 200
-    assert put.json() == {"provider_id": "openrouter", "api_key_set": True}
+    assert put.json() == {
+        "provider_id": "openrouter",
+        "api_key_set": True,
+        "api_key_env_cleared": None,
+    }
     path = provider_secret_path(config.home, "openrouter")
     assert path.read_text().strip() == "sk-secret-value"
     assert path.stat().st_mode & 0o777 == 0o600
@@ -141,11 +146,14 @@ def test_chat_speaks_with_the_active_profiles_key(
             "base_url": ollama.base_url,
             "model": "qwen3",
             "cost_class": "local",
-            "activate": True,
         },
     )
     assert created.status_code == 201
-    client.put("/api/providers/local-fake/key", json={"api_key": "sk-profile-key"})
+    # Phase 05 R1: the key first (probed against the fake), then the switch —
+    # activating a profile that has no working credential yet is refused.
+    keyed = client.put("/api/providers/local-fake/key", json={"api_key": "sk-profile-key"})
+    assert keyed.status_code == 200
+    assert client.post("/api/providers/local-fake/activate").status_code == 200
 
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     ollama.script_reply("hello from the profile key")
@@ -155,6 +163,7 @@ def test_chat_speaks_with_the_active_profiles_key(
     assert auth == "Bearer sk-profile-key"
 
 
+@pytest.mark.usefixtures("accept_probes")  # the zai preset is a real host
 def test_worker_bootstrap_uses_the_active_profiles_key(tmp_path: Path) -> None:
     personal = tmp_path
     supervisor_home = personal / "supervisor"
@@ -182,6 +191,7 @@ def test_worker_bootstrap_uses_the_active_profiles_key(tmp_path: Path) -> None:
     assert provider.api_key == "sk-worker-key"
 
 
+@pytest.mark.usefixtures("accept_probes")  # the probe has its own tests
 def test_cli_set_key_reads_stdin_not_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -216,6 +226,25 @@ def test_cli_set_key_reads_stdin_not_argv(
         == 0
     )
     assert not path.exists()
+
+
+@pytest.mark.usefixtures("accept_probes")
+def test_cli_set_key_prompts_hidden_on_a_tty_and_refuses_an_empty_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = RunStore(tmp_path / "supervisor" / "supervisor.sqlite3")
+    store.upsert_provider_profile(_profile(provider_id="tty", base_url="http://127.0.0.1:9"))
+    store.close()
+    tty = io.StringIO("")
+    tty.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.stdin", tty)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-hidden")
+    args = argparse.Namespace(home=tmp_path, provider_id="tty", clear=False)
+    assert cmd_provider_set_key(args) == 0
+    assert provider_secret_path(tmp_path / "supervisor", "tty").read_text().strip() == "sk-hidden"
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "  ")
+    assert cmd_provider_set_key(args) != 0
+    assert "empty key" in capsys.readouterr().err
 
 
 def test_activation_and_probe_get_per_profile_keys(tmp_path: Path) -> None:
@@ -420,3 +449,21 @@ def test_doctor_names_a_remote_profile_left_without_a_key(
     assert "https://ollama.com" in lines[0]
     store_provider_api_key(supervisor_home, "openrouter", "sk-own")
     assert keyless(build_status(tmp_path)["advisories"]) == []
+
+
+def test_every_face_s_remove_leaves_no_key_behind(tmp_path: Path) -> None:
+    """Phase 05 R2 (I11, ADR 0050): the shared remove deletes the profile's
+    key file — CLI, chat tool and REST alike — so a re-add of the same id
+    for another endpoint never inherits the old key."""
+    from skep.supervisor.serve.actions import remove_provider
+
+    supervisor_home = tmp_path / "supervisor"
+    supervisor_home.mkdir()
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    try:
+        store.upsert_provider_profile(_profile(provider_id="gone"))
+        store_provider_api_key(supervisor_home, "gone", "sk-old")
+        remove_provider(store, supervisor_home, provider_id="gone")
+    finally:
+        store.close()
+    assert not provider_secret_path(supervisor_home, "gone").exists()

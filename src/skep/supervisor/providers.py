@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from skep.profile import _ENV_VAR_NAME_RE
@@ -51,6 +51,11 @@ class ProviderError(ValueError):
     """An invalid provider profile."""
 
 
+class ProviderConflict(ProviderError):
+    """Phase 05 R2 (F5): what a save was staged and probed on changed before
+    it could commit — nothing was written (REST: 409)."""
+
+
 @dataclass(frozen=True)
 class ProviderProfile:
     provider_id: str
@@ -75,6 +80,40 @@ class ProviderHealth:
     error: str | None
     checked_at: str
     models: tuple[str, ...] = field(default_factory=tuple)
+    # Phase 05 (5.1): the 1-token completion — None when no probe ran (the
+    # ticker's listing-only sweep), else whether it answered.
+    completion_ok: bool | None = None
+    # the provider's HTTP status when a refusal carried one (401/403/429/5xx)
+    http_status: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Usable: the completion answered — or, with no probe run, the
+        listing did and named the model."""
+        if not self.reachable:
+            return False
+        return self.completion_ok if self.completion_ok is not None else self.model_found
+
+
+def _refusal(exc: Exception, profile: ProviderProfile, what: str) -> tuple[str, int | None]:
+    """The I9 detail for a failed probe: the provider's words, plus the fix
+    when the status says the key was refused."""
+    from .policy_v3 import redact
+
+    status = getattr(exc, "status", None)
+    detail = f"{what}: {redact(str(exc) or exc.__class__.__name__)}"
+    if status in (401, 403):
+        detail += (
+            f" — the key was refused; give {profile.provider_id!r} a working key "
+            f"(skep provider set-key {profile.provider_id}, or the env var it names)"
+        )
+    return detail, status if isinstance(status, int) else None
+
+
+def _redacted(exc: Exception) -> str:
+    from .policy_v3 import redact
+
+    return redact(str(exc) or exc.__class__.__name__)
 
 
 def check_provider_health(
@@ -82,26 +121,46 @@ def check_provider_health(
     *,
     list_models: Callable[[ProviderProfile], list[str]],
     now: str,
+    probe: Callable[[ProviderProfile], None] | None = None,
 ) -> ProviderHealth:
     """Probe a provider: is the endpoint reachable, does its model list contain
     the configured model, and how long did it take. ``list_models`` is injected
     (tests fake it; production maps the protocol and resolves credentials) so this
-    stays deterministic and reaches only the profile's explicit endpoint host."""
+    stays deterministic and reaches only the profile's explicit endpoint host.
+
+    Phase 05 (5.1): ``probe`` adds the staged live 1-token completion — a
+    model list is public on ollama.com, so a dead key passed the listing.
+    ``live_probes`` builds both callables for production, with the profile's
+    own credential or a candidate's. It reads ``profile`` and never writes
+    anything: a candidate is tested before it is saved (I8)."""
     start = time.monotonic()
     try:
         models = tuple(list_models(profile))
     except Exception as exc:  # any client/transport error is an unreachable provider
+        refusal, refused = _refusal(exc, profile, "the model list failed")
         return ProviderHealth(
             provider_id=profile.provider_id,
             reachable=False,
             model_found=False,
             latency_ms=None,
-            error=str(exc) or exc.__class__.__name__,
+            error=refusal if refused in (401, 403) else _redacted(exc),
             checked_at=now,
+            http_status=refused,
         )
     latency_ms = int((time.monotonic() - start) * 1000)
     model_found = profile.model in models
     error = None if model_found else f"configured model {profile.model!r} not in provider list"
+    completion_ok: bool | None = None
+    status: int | None = None
+    if probe is not None:
+        try:
+            probe(profile)
+            completion_ok = True
+        except Exception as exc:  # the provider's refusal, in its words
+            completion_ok = False
+            error, status = _refusal(
+                exc, profile, "the provider lists models but a completion failed"
+            )
     return ProviderHealth(
         provider_id=profile.provider_id,
         reachable=True,
@@ -110,7 +169,55 @@ def check_provider_health(
         error=error,
         checked_at=now,
         models=models,
+        completion_ok=completion_ok,
+        http_status=status,
     )
+
+
+def live_probes(
+    supervisor_home: Path,
+    store: RunStore | None,
+    *,
+    key_for: Callable[[ProviderProfile], str | None] | None = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Phase 05 (5.1): the production ``list_models`` + 1-token ``probe``
+    for ``check_provider_health(profile, now=..., **live_probes(...))``.
+    The key is ``key_for(profile)`` — a candidate's, tested before it is
+    saved — or, without it, the profile's own credential resolved exactly as
+    chat and the ticker do (named env var → own key file → llm-secret, the
+    last only for its own endpoint)."""
+    from .serve.llm import (
+        REGISTRY_PROTOCOLS,
+        list_models,
+        probe_completion,
+        resolve_provider_api_key,
+    )
+
+    def _target(profile: ProviderProfile) -> tuple[Any, str | None]:
+        protocol = REGISTRY_PROTOCOLS.get(profile.protocol)
+        if protocol is None:
+            raise ProviderError(f"protocol {profile.protocol!r} has no wire client")
+        key = (
+            key_for(profile)
+            if key_for
+            else resolve_provider_api_key(supervisor_home, profile, store)
+        )
+        return protocol, key
+
+    # Phase 05 R2 (F1): list_models and probe_completion scrub the key a
+    # provider quotes back themselves, so every caller is covered.
+    def _list(profile: ProviderProfile) -> list[str]:
+        protocol, key = _target(profile)
+        return list_models(profile.base_url, key, protocol=protocol, timeout=timeout)
+
+    def _probe(profile: ProviderProfile) -> None:
+        protocol, key = _target(profile)
+        probe_completion(
+            profile.base_url, key, model=profile.model, protocol=protocol, timeout=timeout
+        )
+
+    return {"list_models": _list, "probe": _probe}
 
 
 @dataclass(frozen=True)
@@ -168,7 +275,10 @@ def resolve_fallback_chain(
 
 
 def provider_host(base_url: str) -> str | None:
-    parsed = urlparse(base_url)
+    try:
+        parsed = urlparse(base_url)
+    except ValueError:  # Phase 05 R2 (F12): "http://[::1" is no URL, not a 500
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     return parsed.hostname
@@ -226,18 +336,103 @@ def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
     )
 
 
+# Phase 05 (5.1): set once this home's active profile is the one truth for
+# the assistant's provider/model; from then on the llm_* settings are mirrors.
+LLM_REGISTRY_CANONICAL = "llm_registry_canonical"
+
+
 def migrate_legacy_provider(store: RunStore, home: Path) -> ProviderProfile | None:
     """Seed the registry from legacy config on first use.
 
     If the registry already has any profile, do nothing. Otherwise read the
     sqlite ``llm_*`` settings (falling back to ``profile.json``) and create one
     active ``default`` profile. Returns the created profile, or None when there
-    is nothing to migrate.
+    is nothing to migrate. Phase 05: then, once per home, adopt the settings
+    into the active profile where they diverged (``legacy_adoption``).
     """
-    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
+    seeding = not store.list_provider_profiles()
+    rows, canonical = legacy_adoption(store, home)
+    for row in rows:
+        store.upsert_provider_profile(row)
+    if canonical:
+        from datetime import UTC, datetime
 
+        store.set_setting(LLM_REGISTRY_CANONICAL, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return rows[0] if seeding and rows else None
+
+
+def legacy_adoption(store: RunStore, home: Path) -> tuple[list[ProviderProfile], bool]:
+    """(the rows migrate_legacy_provider upserts, in order; whether it marks
+    the home canonical) — computed, never written. Phase 05 R2 (F6): a save
+    resolves its candidate on these and writes them only with its own
+    commit, so a refused save on an upgraded home changes nothing.
+
+    Phase 05 (5.1), once per home: before Phase 05 chat read the llm_*
+    settings while routing read the registry, and the two drifted (Fedora,
+    2026-11-18: settings glm-5.3-flash, the profile glm-5.2). What the Queen
+    actually spoke wins, once: the same endpoint updates the active profile
+    in place (the v115-F5 mirror, applied to a home no write had synced); a
+    different endpoint becomes its own profile and is activated, keyless, so
+    the old profile's key never follows to a new host (v119-F1) and the old
+    profile is kept. Afterwards the settings are read-only mirrors."""
+    import dataclasses
+
+    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL, REGISTRY_PROTOCOLS
+
+    rows: list[ProviderProfile] = []
     if store.list_provider_profiles():
-        return None
+        active = store.active_provider_profile()
+    else:
+        active = _seed_from_legacy(store, home)
+        rows += [active] if active is not None else []
+    if store.get_setting(LLM_REGISTRY_CANONICAL) or active is None:
+        return rows, False  # already canonical, or nothing yet: the settings stage a first save
+    base_url, model = store.get_setting(LLM_BASE_URL), store.get_setting(LLM_DEFAULT_MODEL)
+    if isinstance(base_url, str) and base_url.strip() and isinstance(model, str) and model.strip():
+        wire = store.get_setting(LLM_PROTOCOL)
+        protocol = next((k for k, v in REGISTRY_PROTOCOLS.items() if v == wire), active.protocol)
+        base_url = base_url.strip().rstrip("/")
+        if base_url == active.base_url.rstrip("/"):
+            adopted = dataclasses.replace(active, model=model.strip(), protocol=protocol)
+            rows += [validate_provider_profile(adopted)] if adopted != active else []
+        else:
+            fresh = endpoint_profile(
+                store,
+                base_url=base_url,
+                protocol=protocol,
+                model=model.strip(),
+                source="migrated:llm-settings",
+            )
+            rows.append(validate_provider_profile(dataclasses.replace(fresh, active=True)))
+    return rows, True
+
+
+def endpoint_profile(
+    store: RunStore, *, base_url: str, protocol: str, model: str, source: str
+) -> ProviderProfile:
+    """Phase 05: the profile a NEW endpoint gets — its own unused id, no key
+    and no key env (a credential never follows to a new host, v119-F1), its
+    endpoint host as the only allowlist entry, and a cost class from that
+    host (a remote one is never ``local``, which would skip allow_remote).
+    Not saved, not active."""
+    taken = {p.provider_id for p in store.list_provider_profiles()}
+    pid = next(
+        c for c in ("assistant", *(f"assistant-{n}" for n in range(2, 1000))) if c not in taken
+    )
+    return ProviderProfile(
+        provider_id=pid,
+        protocol=protocol,
+        base_url=base_url,
+        model=model,
+        cost_class="local"
+        if provider_host(base_url) in {"localhost", "127.0.0.1", "::1"}
+        else "paid",
+        source=source,
+    )
+
+
+def _seed_from_legacy(store: RunStore, home: Path) -> ProviderProfile | None:
+    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
 
     base_url = store.get_setting(LLM_BASE_URL)
     model = store.get_setting(LLM_DEFAULT_MODEL)
@@ -276,4 +471,4 @@ def migrate_legacy_provider(store: RunStore, home: Path) -> ProviderProfile | No
         api_key_env=api_key_env,
         active=True,
     )
-    return store.upsert_provider_profile(profile)
+    return validate_provider_profile(profile)

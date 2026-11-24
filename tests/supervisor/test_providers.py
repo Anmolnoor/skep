@@ -129,20 +129,21 @@ def test_the_settings_writer_mirrors_into_the_active_registry_profile(
     """v115-F5: the registry's active profile was seeded once and never
     followed the settings — `skep provider health` said the model was
     missing and routing refused every provider while chat ran the new one."""
-    from skep.supervisor.serve.llm import _write_through_profile
+    from skep.supervisor.serve.llm import save_assistant_llm
 
     store.set_setting(LLM_BASE_URL, "http://localhost:11434")
     store.set_setting(LLM_DEFAULT_MODEL, "deepseek-v4-pro")
     store.set_setting(LLM_PROTOCOL, "ollama")
     assert migrate_legacy_provider(store, tmp_path / "home") is not None
 
-    store.set_setting(LLM_DEFAULT_MODEL, "glm-5.3")  # the Settings page, the chat tool
-    _write_through_profile(store, tmp_path / "home")
+    # the Settings page, the chat tool — Phase 05: one writer, the profile first
+    save_assistant_llm(store, tmp_path / "home" / "supervisor", model="glm-5.3")
 
     active = store.active_provider_profile()
     assert active is not None and active.provider_id == "default"
     assert active.model == "glm-5.3"
     assert active.active is True
+    assert store.get_setting(LLM_DEFAULT_MODEL) == "glm-5.3"  # the mirror follows
 
 
 def test_migration_maps_openai_compat_and_noops_when_empty(store: RunStore, tmp_path: Path) -> None:

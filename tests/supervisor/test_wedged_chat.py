@@ -16,9 +16,10 @@ import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve.chat import _request_too_large
-from skep.supervisor.serve.llm import OllamaError
+from skep.supervisor.serve.llm import OllamaError, store_assistant_key
 
 from .fake_ollama import FakeOllama
+from .fake_openai import FakeOpenAI
 from .test_serve_chat import configured_client, sse_events
 
 
@@ -184,7 +185,13 @@ def test_a_bad_key_says_check_the_key_and_never_shrinks(
     """Lane M1-16: a 401 drew the halved retry, a [replay halved…] row and
     "outgrown the provider"."""
     client = configured_client(config, ollama)
-    client.put("/api/llm/config", json={"api_key": "sk-bogus"})
+    # a key revoked after it was saved (Phase 05: Settings refuses to SAVE a
+    # refused key, so the stored one is swapped underneath, like a revocation)
+    store = RunStore(config.db_path)
+    try:
+        store_assistant_key(store, config.home, "sk-bogus")
+    finally:
+        store.close()
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).text)
     assert events[-1][0] == "error"
@@ -213,7 +220,7 @@ def test_a_non_size_400_names_the_body_and_never_shrinks(
 
 
 def test_a_provider_or_model_change_clears_the_ceiling(
-    config: SupervisorConfig, ollama: FakeOllama
+    config: SupervisorConfig, ollama: FakeOllama, accept_probes: list[str]
 ) -> None:
     """ES-F13 (B86): a ceiling measures ONE provider+model, and nothing ever
     cleared it — a later halving could only lower it (lane M1-21)."""
@@ -244,11 +251,19 @@ def test_a_provider_or_model_change_clears_the_ceiling(
         store.set_chat_model(pinned, None)
         assert ceilings() == (None, 9000)
         measure()
-        # A new provider (URL or protocol) re-measures every chat.
+        # A new provider (URL or protocol) re-measures every chat. (Phase 05 R2:
+        # a protocol switch is probed first — the fake speaks only ollama, so
+        # the probe is stubbed; test_provider_writes covers the probe itself.)
         client.put("/api/llm/config", json={"protocol": "openai-compat"})
         assert ceilings() == (None, None)
         measure()
-        client.put("/api/llm/config", json={"base_url": "http://127.0.0.1:1"})
+        # Phase 05 R1: a new endpoint is probed before it is saved — a live one
+        other = FakeOpenAI(models=["other"]).start()
+        try:
+            moved = client.put("/api/llm/config", json={"base_url": other.base_url})
+        finally:
+            other.stop()
+        assert moved.status_code == 200
         assert ceilings() == (None, None)
     finally:
         store.close()
