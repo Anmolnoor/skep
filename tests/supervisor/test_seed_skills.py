@@ -703,7 +703,9 @@ def test_a_chat_recipe_seed_is_refused_for_worker_binding(tmp_path: Path) -> Non
         # register_mcp_server, so the error names them and points at chat.
         message = str(refused.value)
         assert "call_mcp_tool" in message and "register_mcp_server" in message
-        assert "list_mcp_tools" not in message.split("refuses")[-1]
+        # Phase 09 R1 (S8): a prompt tick holds store reads only, and
+        # list_mcp_tools starts a server — refused too, so named too.
+        assert "list_mcp_tools" in message.split("refuses")[-1]
         assert "run it from chat (view_skill notion)" in message
         assert "caste 'prompt'" not in message
         with pytest.raises(TemplateError, match="Queen chat recipe"):

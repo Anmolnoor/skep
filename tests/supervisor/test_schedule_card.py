@@ -54,7 +54,12 @@ def test_a_script_schedule_card_says_what_will_run_and_is_high(
     assert (
         facts["runs"]
         == SCRIPT_SENTENCE
-        == ("runs as you, on this host, unattended, until disabled")
+        == (
+            "runs as you, on this host, unattended, until disabled, inside the wall: "
+            "besides the system and its toolchains it reads only the files its command "
+            "names (the live files, read-only), and it reaches only its listed hosts "
+            "(none unless listed)"
+        )
     )
     assert facts["env"] == sorted(script_env())
     assert "SKEP_FAKE_API_TOKEN" not in facts["env"]
@@ -64,8 +69,8 @@ def test_a_script_schedule_card_says_what_will_run_and_is_high(
     assert "chain" not in facts and "replaces" not in facts
 
 
-def test_the_env_on_the_card_is_the_env_the_script_gets() -> None:
-    output, ok = run_schedule_script("env | cut -d= -f1 | sort")
+def test_the_env_on_the_card_is_the_env_the_script_gets(tmp_path: Path) -> None:
+    output, ok = run_schedule_script("env | cut -d= -f1 | sort", skep_home=tmp_path / "skep")
     assert ok
     shell_own = {"_", "PWD", "OLDPWD", "SHLVL"}  # /bin/sh sets these itself
     assert sorted(set(output.split()) - shell_own) == sorted(script_env())
@@ -289,3 +294,65 @@ def test_propose_schedule_caste_help_names_the_worker_castes_and_the_role_rule()
     assert "these four dispatch no worker" in help_text
     assert "'coding', 'audit', 'researcher' and 'document' dispatch a worker" in help_text
     assert "in this chat's role" in help_text
+
+
+# --- Phase 09 R1: a script schedule runs inside the wall (9D's wall.py) ---------
+
+
+def test_a_chat_created_script_schedule_keeps_the_hosts_it_declares(tmp_path: Path) -> None:
+    """The chat face stores a script schedule's `network` (its only egress
+    inside the wall, none by default), as the REST and CLI faces do; other
+    repo-less kinds reach nothing and store none."""
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS, execute_mutation
+
+    config = SupervisorConfig(home=tmp_path / "skep-home", worker_command=("true",))
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        for args in (
+            {**SCRIPT, "name": "wx", "network": ["api.weather.gov"]},
+            {**SCRIPT, "name": "quiet"},
+            {"name": "memo", "caste": "note", "instructions": "hi", "every": "1d",
+             "network": ["x.example"]},
+        ):  # fmt: skip
+            execute_mutation(
+                "propose_schedule",
+                args,
+                store=store,
+                holder=ConfigHolder(config, store),
+                runner=None,  # type: ignore[arg-type]
+                actor="tester",
+                chat_id=chat_id,
+            )
+        stored = {name: store.get_schedule(name) for name in ("wx", "quiet", "memo")}
+    finally:
+        store.close()
+
+    assert {name: s.network for name, s in stored.items() if s} == {
+        "wx": ["api.weather.gov"], "quiet": [], "memo": []
+    }  # fmt: skip
+    spec = next(t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "propose_schedule")
+    described = spec["function"]["parameters"]["properties"]["network"]["description"]
+    assert "script schedule" in described and "none by default" in described
+
+
+def test_a_script_card_names_its_hosts_and_the_proxy_env_it_adds(store: RunStore) -> None:
+    from skep.supervisor.spawner import proxy_env
+
+    hosts = ["api.weather.gov", "imap.example.com"]
+    facts = schedule_facts({**SCRIPT, "network": hosts}, store)
+    quiet = schedule_facts(SCRIPT, store)
+
+    assert facts is not None and quiet is not None
+    assert facts["hosts"] == hosts and quiet["hosts"] == []
+    assert facts["env"] == sorted({*script_env(), *proxy_env(0)})
+    assert quiet["env"] == sorted(script_env())
+    assert "inside the wall" in facts["runs"] and "the files its command names" in facts["runs"]
+
+
+def test_the_script_high_line_says_it_runs_inside_the_wall(store: RunStore) -> None:
+    card = card_summary("propose_schedule", SCRIPT, "", store=store)
+    assert card["tier"] == "high"
+    assert "inside the wall" in card["high"] and "hosts" in card["high"]

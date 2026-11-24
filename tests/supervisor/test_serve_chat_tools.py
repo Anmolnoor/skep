@@ -1112,6 +1112,7 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         "tamper_flags": (),
         "test_counts": {"status": "unknown", "runner": None},
         "head_commit": None,  # Phase 09 (9.0): set only on a PR-head verdict
+        "pr": None,  # Phase 09 R1: and the PR tuple with it
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {
@@ -2533,20 +2534,35 @@ def test_merge_pr_tool_is_web_ui_only_hitl(
         return github.MergeResult(True, "merged 7 (merge)")
 
     monkeypatch.setattr(github, "merge_pull_request", fake_merge)
+    # Phase 09 R1 (D3): it merges only the verified head its card pinned.
+    pin = {
+        "repo": "acme/widget", "number": 7, "base_branch": "main", "base_commit": "b" * 40,
+        "head_commit": "a" * 40, "merge_base": "b" * 40, "task_id": "t",
+    }  # fmt: skip
     store = RunStore(config.db_path)
     try:
-        result = execute_mutation(
-            "merge_pr",
-            {"repo": str(repo), "pr": "7"},
-            store=store,
-            holder=ConfigHolder(config, store),
-            runner=Dispatcher(ConfigHolder(config, store), store),
-            actor="tester",
-        )
+
+        def confirm(card: dict[str, Any] | None) -> Any:
+            return execute_mutation(
+                "merge_pr",
+                {"repo": str(repo), "pr": "7"},
+                store=store,
+                holder=ConfigHolder(config, store),
+                runner=Dispatcher(ConfigHolder(config, store), store),
+                actor="tester",
+                card=card,
+            )
+
+        with pytest.raises(ValueError, match="propose merge_pr again"):
+            confirm(None)
+        result = confirm({"merge": pin})
     finally:
         store.close()
-    assert result == {"merged": True, "detail": "merged 7 (merge)"}
-    assert merges[0]["pr"] == "7" and merges[0]["strategy"] == "merge"
+    assert result == {
+        "ok": True, "merged": True, "detail": "merged 7 (merge)", "head_commit": "a" * 40,
+        "base_commit": "b" * 40, "landed_base": None,
+    }  # fmt: skip
+    assert merges == [{"repo": repo.resolve(), "pin": pin, "strategy": "merge"}]
 
 
 def test_land_run_tool_refuses_when_nothing_to_land(repo: Path, config: SupervisorConfig) -> None:

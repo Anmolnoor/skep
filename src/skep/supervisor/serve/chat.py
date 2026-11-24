@@ -61,6 +61,8 @@ from .cards import (
     fold_subject,
     headline,
     high_tier,
+    merge_pin,
+    merge_target,
     recorded_card,
     unreadable_under_deny,
 )
@@ -391,21 +393,54 @@ def _proposal_subject(tool: str, args: dict[str, Any]) -> str | None:
     return json.dumps([tool, values], ensure_ascii=True)
 
 
+def _merge_key(pin: Any, args: dict[str, Any]) -> tuple[str, int, str, str, str, str] | None:
+    """A merge_pr card's identity (R2 S13, R3 S7/N4): the tuple it pins —
+    repo, PR, head, base SHA, base branch — and the effective strategy, or
+    None when it pins nothing."""
+    if not isinstance(pin, dict) or "error" in pin:
+        return None
+    return (
+        str(pin["repo"]), int(pin["number"]), str(pin["head_commit"]),
+        str(pin["base_commit"]), str(pin["base_branch"]), str(args.get("strategy") or "merge"),
+    )  # fmt: skip
+
+
 def _canonical_args(args: dict[str, Any]) -> str:
     return json.dumps(args, sort_keys=True, ensure_ascii=True)
 
 
 def pending_duplicate_action(
-    store: RunStore, chat_id: str, tool: str, args: dict[str, Any]
+    store: RunStore,
+    chat_id: str,
+    tool: str,
+    args: dict[str, Any],
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> tuple[ChatActionRecord, bool] | None:
     """The pending card already asking this question, with whether its args
     are byte-identical. Only 'proposed' rows count — a denied card is a
-    verdict, and re-proposing after one is a new question for the human."""
+    verdict, and re-proposing after one is a new question for the human.
+    ``merge`` is a merge_pr proposal's pin, already read (R3 S6)."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
+    proposed = None
+    if tool == "merge_pr":
+        proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
     for record in store.pending_chat_actions(chat_id):
         if record.tool != tool:
             continue
+        held = _merge_key((record.card or {}).get("merge"), record.args)
+        if proposed is not None and held is not None:
+            # Phase 09 R2 (S13): a merge card IS its pinned tuple — the same
+            # tuple is the pending card whatever was typed; a new one for
+            # that PR (a newer verdict, another branch or strategy) supersedes.
+            if held == proposed:
+                return record, True
+            if held[:2] == proposed[:2]:
+                return record, False
+            continue
+        if proposed is not None and merge_target(store, record.args) == proposed[:2]:
+            return record, False  # R3 (S7/N4): it pins nothing; a valid proposal stands
         if _canonical_args(record.args) == args_key:
             return record, True
         if subject is not None and _proposal_subject(record.tool, record.args) == subject:
@@ -1555,15 +1590,118 @@ _SECRET_ARG_KEY = re.compile(
 )
 
 
+# Phase 09 R1 (S8, ADR 0042): ALL a scheduled prompt turn may call — store
+# reads, named. Anything else is off its menu: list_prs reads GitHub as you,
+# repo_state/git_* read checkouts, list_mcp_tools starts a server; R2 (S12):
+# get_run reads patch/draft files, list_repos walks checkout dirs; R3 (S11):
+# await_runs blocks and probes patch files, and list_runs/list_approvals
+# run as SCHEDULED_PROJECTIONS (store rows, no event logs, files or git).
+SCHEDULED_TURN_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_runs", "list_approvals",
+        "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
+        "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
+        "list_schedules", "list_projects",
+        "describe_tools", CLARIFY_TOOL_NAME,  # turn control: they read nothing
+    }
+)  # fmt: skip
+SCHEDULED_STORE_ONLY_REFUSAL = (
+    "does not run in a scheduled turn — nobody is watching, so it calls store "
+    "reads only (runs, approvals, chats, notes, tasks, memory, schedules). "
+    "Say what you would check; the user can ask for it in a live chat."
+)
+
+
+SCHEDULED_PROJECTIONS: frozenset[str] = frozenset({"list_runs", "list_approvals"})
+_PROJECTION_NOTE = (
+    "a scheduled turn's view: store rows only (no event logs, patch files or git), "
+    "so unlanded patches and live gate details are not shown here"
+)
+
+
+def _stored_run_row(store: Any, record: Any) -> dict[str, Any]:
+    """A run as its store row says — what ``_run_view`` shows minus every
+    disk probe."""
+    row = {
+        "task_id": record.task_id,
+        "state": record.state,
+        "repo": record.repo,
+        "ref": record.ref,
+        "summary": record.summary,
+        "verification": record.verification_outcome,
+        "updated_at": record.updated_at,
+        "resume_of": record.resume_of,
+        "resumed_as": store.resumed_as_for(record.task_id),
+        "reverification": actions.reverification_summary(store.reverification_for(record.task_id)),
+        "applied_branch": actions.applied_branch_for(store, record.task_id),
+    }
+    if (pr := store.run_pr(record.task_id)) is not None:  # R4 (N6): a store lookup
+        row["pr"] = f"{pr['repo']}#{pr['number']}"
+    return row
+
+
+def scheduled_read(name: str, args: dict[str, Any], *, store: Any) -> dict[str, Any]:
+    """Phase 09 R3 (S11): a scheduled turn's ``list_runs`` / ``list_approvals``
+    (SCHEDULED_PROJECTIONS) from store rows alone — the attended tools open
+    worker event logs, probe patch files and may run git."""
+    if name == "list_runs":
+        limit = max(1, min(int(args.get("limit") or 10), 50))
+        runs = [_stored_run_row(store, record) for record in store.recent_runs(limit)]
+        return {"runs": runs, "note": _PROJECTION_NOTE}
+    approvals = []
+    for approval in store.pending_approvals():
+        record = store.get_run(approval.task_id)
+        approvals.append(
+            {
+                "review_id": approval.review_id,
+                "task_id": approval.task_id,
+                "action": approval.action,
+                "reason": approval.reason,
+                "requested_at": approval.requested_at,
+                "run": None if record is None else _stored_run_row(store, record),
+            }
+        )
+    resolved = [
+        {
+            "review_id": a.review_id,
+            "task_id": a.task_id,
+            "action": a.action,
+            "status": a.status,
+            "resolved_by": a.resolved_by,
+            "decided_by": a.decided_by,
+            "landing_branch": a.landing_branch,
+            "resolved_at": a.resolved_at,
+            "resumed_as": store.resumed_as_for(a.task_id),
+        }
+        for a in store.resolved_approvals()
+    ]
+    return {"approvals": approvals, "recently_resolved": resolved, "note": _PROJECTION_NOTE}
+
+
 def off_menu(*, read_only: bool, unattended: bool) -> frozenset[str]:
     """v121-F2: the tools an unattended turn refuses, so it is never offered
     them — by schema or by the system prompt's index. A scheduled turn
-    (``read_only``) is offered no mutation either. Every call it makes off
-    this menu is one it was never offered: the alarm's signal."""
+    (``read_only``) is offered SCHEDULED_TURN_TOOLS and nothing else (S8).
+    Every call it makes off this menu is one it was never offered: the
+    alarm's signal."""
     if not unattended:
         return frozenset()
     blocked = UNATTENDED_BLOCKED_STORE_WRITES | UNATTENDED_BLOCKED_READ_TOOLS
-    return frozenset(blocked | MUTATING_TOOL_NAMES) if read_only else blocked
+    if read_only:
+        return frozenset((READ_TOOL_NAMES | MUTATING_TOOL_NAMES | blocked) - SCHEDULED_TURN_TOOLS)
+    return blocked
+
+
+def _described_on_menu(result: dict[str, Any], hidden: frozenset[str]) -> dict[str, Any]:
+    """S8: describe_tools never hands an unattended turn a schema it may not call."""
+    tools = result.get("tools")
+    if not hidden or not isinstance(tools, list):
+        return result
+    kept = [t for t in tools if not (isinstance(t, dict) and t.get("name") in hidden)]
+    if len(kept) == len(tools):
+        return result
+    dropped = [t["name"] for t in tools if t not in kept]
+    return {**result, "tools": kept, "not_in_this_turn": dropped}
 
 
 def stream_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -2885,8 +3023,13 @@ class ChatEngine:
                     # P3-5 (V11): a policy write is checked at PROPOSAL — one
                     # the write-time check refuses gets no card (its confirm
                     # could only fail, B22); one it passes carries the replay.
+                    # R3 (S6): a merge_pr proposal reads its pin ONCE; the
+                    # check, the de-duplication and the card all use it.
+                    pin = merge_pin(self.store, args) if name == "merge_pr" else None
                     try:
-                        checked = policy_write_preview(self.store, self.holder, name, args)
+                        checked = policy_write_preview(
+                            self.store, self.holder, name, args, merge=pin
+                        )
                     except PolicyWriteRejected as exc:
                         payload = {"ok": False, "error": str(exc)}
                         self.store.add_chat_message(
@@ -2912,7 +3055,7 @@ class ChatEngine:
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
                     # superseded and the fresh one stands alone.
-                    duplicate = pending_duplicate_action(self.store, chat_id, name, args)
+                    duplicate = pending_duplicate_action(self.store, chat_id, name, args, merge=pin)
                     if duplicate is not None and (
                         duplicate[1]
                         # I7: a model proposal never supersedes an operator's
@@ -2960,6 +3103,7 @@ class ChatEngine:
                                     proposed_schedule_role(self.store, self.holder, args, chat_id)
                                     if name == "propose_schedule"
                                     else None,
+                                    merge=pin,
                                 )
                                 or {}
                             ),
@@ -2998,8 +3142,11 @@ class ChatEngine:
                     # legitimately block for minutes.
                     yield ("turn_status", {"state": "tool", "tool": name})
                     call_key = (name, json.dumps(args, sort_keys=True, ensure_ascii=True))
-                    blocked = unattended and name in (
-                        UNATTENDED_BLOCKED_READ_TOOLS | UNATTENDED_BLOCKED_STORE_WRITES
+                    off_store = read_only and unattended and name not in SCHEDULED_TURN_TOOLS
+                    blocked = off_store or (
+                        unattended
+                        and name
+                        in (UNATTENDED_BLOCKED_READ_TOOLS | UNATTENDED_BLOCKED_STORE_WRITES)
                     )
                     if blocked:
                         # v121-F2: never offered (_advertised_tools), so a call
@@ -3017,6 +3164,9 @@ class ChatEngine:
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
                         result = {"error": f"{name} {UNATTENDED_WRITE_REFUSAL}"}
+                        previous_read_tool = name
+                    elif off_store:  # S8: a scheduled turn calls its allowlist only
+                        result = {"error": f"{name} {SCHEDULED_STORE_ONLY_REFUSAL}"}
                         previous_read_tool = name
                     elif call_key in nudged_keys:
                         # v79-F5: already nudged this turn — refuse without
@@ -3044,14 +3194,28 @@ class ChatEngine:
                         ):
                             self.sleep(self.get_run_repeat_delay_seconds)
                         try:
-                            result = execute_read_tool(
-                                name, args, store=self.store, holder=self.holder, chat_id=chat_id
-                            )
+                            if (  # S11; a role-hidden tool still gets its refusal below
+                                read_only
+                                and unattended
+                                and name in SCHEDULED_PROJECTIONS
+                                and name not in self._hidden(self.store.get_chat(chat_id))
+                            ):
+                                result = scheduled_read(name, args, store=self.store)
+                            else:
+                                result = execute_read_tool(
+                                    name,
+                                    args,
+                                    store=self.store,
+                                    holder=self.holder,
+                                    chat_id=chat_id,
+                                )
                             ran = True
                         except HTTPException as exc:
                             result = {"error": str(exc.detail)}
                         except (KeyError, ValueError, TypeError) as exc:
                             result = {"error": f"bad arguments: {exc}"}
+                        if name == DESCRIBE_TOOL_NAME and isinstance(result, dict):
+                            result = _described_on_menu(result, hidden)
                         previous_read_tool = name
                         _track_run_artifacts(
                             name, args, result, completed_runs_seen, artifact_contact
@@ -3568,7 +3732,10 @@ class ChatEngine:
                     "memory_id": item.memory_id,
                     "note": "approved on its card — active in future prompts",
                 }
-            payload: dict[str, Any] = {"ok": True, "result": result}
+            # R3 (S8, I8): merge_pr's result says whether it merged — a merge
+            # that did not happen is a failed card (github.merge_record).
+            ok = result.get("ok") is not False if tool == "merge_pr" else True
+            payload: dict[str, Any] = {"ok": ok, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
             # always-tier writes to, so resolve() composes it unchanged and

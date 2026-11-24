@@ -71,20 +71,29 @@ the bot only sees commands, mentions and replies. Address it with
 
 ## 6. Pull your mail at 16:25 (a script schedule, from a web chat)
 
-Store the mail password once, at `~/.skep/supervisor/mail-secret` (mode 0600).
-Script schedules run with a scrubbed environment: only `PATH`, `HOME`, `USER`
-and a few locale variables are passed, and no `env_allowlist` applies. The
-command therefore names the mail host and login inline. The password is
-found through `HOME`. Never put `SKEP_HOME=<path>` inline: the Queen refuses
-any command that sets it.
+A script schedule runs inside skep's sandbox wall (ADR 0068): it reads the
+system dirs, skep's own python and the files its command names, nothing
+else; it writes only a throwaway workspace (its `HOME`); it reaches only the
+hosts the schedule names in `network` (none by default). Its environment is
+scrubbed too: only `PATH`, `HOME`, `USER`, a few locale variables and, with
+hosts, the proxy variables. So the command names the mail host and login
+inline, and the password comes from a file of its own, which the command
+names by its absolute path: write it once to, say,
+`~/.config/skep-mail/password` (mode 0600). It cannot live under `~/.skep`:
+the wall masks the skep home, and a command that names a file there is
+refused. Never put `SKEP_HOME=<path>` inline either.
 
 Find skep's own python. It is the interpreter on the first line of the
 `skep` launcher (`head -1 "$(command -v skep)"`). Then, from a **web** chat (a
 web chat has no channel binding, so the raw digest is never pushed to a
 phone), ask for a script schedule:
 
-> propose_schedule name=mail-pull caste=script every=1d start_at=2026-11-20T16:25:00-08:00
-> instructions="SKEP_MAIL_IMAP_HOST=imap.example.com SKEP_MAIL_USER=you@example.com /abs/path/to/python -m skep.mcp_servers.mail --digest 5"
+> propose_schedule name=mail-pull caste=script every=1d start_at=2026-11-20T16:25:00-08:00 network=["imap.example.com"]
+> instructions="SKEP_MAIL_IMAP_HOST=imap.example.com SKEP_MAIL_USER=you@example.com SKEP_MAIL_PASSWORD_FILE=/abs/path/to/mail-password /abs/path/to/python -m skep.mcp_servers.mail --digest 5"
+
+IMAP has no proxy support of its own, so inside the wall the digest opens
+one tunnel through the schedule's proxy, which admits only
+`imap.example.com`.
 
 The digest prints the newest 5 messages as `From:` / `Subject:` / `Date:`
 blocks with every body line quoted `> `, and stays under the 4000-character

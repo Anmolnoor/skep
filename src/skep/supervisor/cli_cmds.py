@@ -2674,6 +2674,10 @@ def _schedule_role_refusal(config: SupervisorConfig, store: RunStore, schedule: 
 
 
 def cmd_schedule_add(args: argparse.Namespace) -> int:
+    if args.caste in ("note", "script") and args.instructions is None and not args.template:
+        # Phase 09 R2 (N8b, ADR 0050): repo-less, as on REST and propose_schedule —
+        # the one positional after NAME is the text or command, verbatim
+        return _schedule_add_repo_less(args)
     repo = Path(args.repo).expanduser().resolve()
     if not (repo / ".git").exists():
         return _err(f"{repo} is not a git repository.", next_command="point at a git repo")
@@ -2734,6 +2738,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     start_at=args.start_at,  # v126-F11
                     once=args.once,
                     role=args.role,
+                    skep_home=config.home.parent,  # R3 (N2): a script's inputs
                 )
             except ValueError as exc:  # v127-F11: a retired caste
                 return _err(str(exc), next_command="skep schedule add ... --caste coding")
@@ -2744,6 +2749,39 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
             print(f"scheduled {args.name!r}: {args.caste} on {repo} every {args.every}")
     finally:
         store.close()
+    print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
+    return 0
+
+
+def _schedule_add_repo_less(args: argparse.Namespace) -> int:
+    """A note/script schedule with no repo: the tick posts the text or runs
+    the command inside the wall (script hosts: ``--network``)."""
+    config = build_config(args.home, None)
+    try:
+        interval = parse_interval(args.every)
+        schedule = make_schedule(
+            name=args.name,
+            repo="",
+            instructions=args.repo,
+            interval_seconds=interval,
+            worker_kind=args.caste,
+            network=(args.network or []) if args.caste == "script" else (),
+            start_at=args.start_at,
+            once=args.once,
+            role=args.role,
+            skep_home=config.home.parent,  # R3 (N2): a script's inputs
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    store = RunStore(config.db_path)
+    try:
+        refusal = _schedule_role_refusal(config, store, schedule)
+        if refusal is not None:
+            return refusal
+        store.add_schedule(schedule)
+    finally:
+        store.close()
+    print(f"scheduled {args.name!r}: {args.caste} every {args.every}")
     print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
     return 0
 
@@ -3590,24 +3628,51 @@ def _pr_repo(args: argparse.Namespace) -> Path | int:
 
 def cmd_pr_merge(args: argparse.Namespace) -> int:
     from . import github
+    from .roles import ROLE_LESS_CHAT_ROLE
     from .serve.cards import merge_line, merge_pin
+    from .serve.chat import executed_status
 
     repo = _pr_repo(args)
     if isinstance(repo, int):
         return repo
-    # Phase 09 (9.0, I1): pinned to the head G10 verified, as on the chat card.
+    # Phase 09 R1 (D3, I1): only a clean G10 verdict on this PR's head pins
+    # a merge, exactly as on the chat card — and the CLI has no override.
     store = RunStore(build_config(args.home, None).db_path)
     try:
         pin = merge_pin(store, {"repo": str(repo), "pr": args.number})
+        if "error" in pin:
+            return _err(f"merge refused: {pin['error']}")
+        print(f"  pin: {merge_line(pin)}")
+        # R2 (S8, I8): the operator's decision and the exact tuple are on
+        # record — the same merge_pr row a confirmed card leaves, claimed —
+        # BEFORE gh runs; a crash mid-merge leaves it 'executing', which the
+        # next serve start marks interrupted (outcome unknown), never lost.
+        actor = getpass.getuser()
+        chat = store.create_chat(
+            title=f"skep pr merge {pin['repo']}#{pin['number']}",
+            model=None,
+            source="cli",
+            role=ROLE_LESS_CHAT_ROLE,
+        )
+        action_id = store.add_chat_action(
+            chat.chat_id,
+            tool="merge_pr",
+            args={"repo": str(repo), "pr": str(pin["number"]), "strategy": args.method},
+            source="operator",
+            decided_by=actor,
+            card={"merge": pin},
+        )
+        store.claim_chat_action(action_id)
+        result = github.merge_pull_request(repo=repo, pin=pin, strategy=args.method)
+        record = {**github.merge_record(result, pin), "actor": actor}
+        store.resolve_chat_action(
+            action_id,
+            status=executed_status(record),  # R3 (S8): the chat card's own mapping
+            result=record,
+            claimed=True,
+        )
     finally:
         store.close()
-    print(f"  pin: {merge_line(pin)}")
-    result = github.merge_pull_request(
-        repo=repo,
-        pr=args.number,
-        strategy=args.method,
-        expected_head_sha=pin.get("expected_head_sha"),
-    )
     # gh failures come back as ok=False with the reason rather than raising, so
     # the exit code has to be derived — a merge that did not happen must not
     # report success (I8).
@@ -3642,9 +3707,12 @@ def cmd_pr_list(args: argparse.Namespace) -> int:
         return 0
     for pr in listing.prs:
         number = f"#{pr.get('number', '?')}"
+        author = pr["author"]["login"] or "?"
+        bot = " (bot)" if pr["author"]["is_bot"] else ""
         print(
             f"  {number:<6} {pr.get('state', '')!s:<8} "
-            f"{pr.get('headRefName', '')!s:<44} {str(pr.get('title', ''))[:60]}"
+            f"{pr.get('headRefName', '')!s:<44} {author + bot:<22} "
+            f"{str(pr.get('title', ''))[:60]}"
         )
     return 0
 
@@ -4434,7 +4502,8 @@ def register_supervisor_commands(
 
     sched_add = schedule_sub.add_parser("add", help="add a recurring schedule")
     sched_add.add_argument("name")
-    sched_add.add_argument("repo", type=Path)
+    # a note/script schedule takes no repo: this is then its text or command (N8b)
+    sched_add.add_argument("repo", metavar="repo|command")
     # Optional so `schedule add NAME REPO --template T` works; required for a
     # direct (inline-instructions) schedule.
     sched_add.add_argument("instructions", nargs="?", default=None)

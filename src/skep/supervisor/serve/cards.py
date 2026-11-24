@@ -331,7 +331,9 @@ def high_tier(
         return _TRIFECTA
     if tool == "propose_schedule":
         if safe.get("caste") == "script":
-            return "a script schedule runs a command as you, on this host, unattended"
+            return (
+                f"a script schedule runs a command as you, on this host, unattended, {SCRIPT_WALL}"
+            )
         if safe.get("chain"):
             return "a chained schedule feeds another schedule's output into this one"
         existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
@@ -625,7 +627,15 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
-SCRIPT_SENTENCE = "runs as you, on this host, unattended, until disabled"
+# Phase 09 R1 (I8): what 9D's wall (wall.py) lets a script schedule do —
+# reads beyond the system and its toolchains: only the files its command
+# names (scheduler.script_inputs); egress: only its `network` hosts.
+SCRIPT_WALL = (
+    "inside the wall: besides the system and its toolchains it reads only the files "
+    "its command names (the live files, read-only), and it reaches only its listed hosts "
+    "(none unless listed)"
+)
+SCRIPT_SENTENCE = f"runs as you, on this host, unattended, until disabled, {SCRIPT_WALL}"
 
 
 def schedule_facts(
@@ -643,6 +653,7 @@ def schedule_facts(
     other schedule. With no ``store`` (a resolved card) the chain is the one
     named, not walked."""
     from ..scheduler import next_fire_times, parse_interval, script_env
+    from ..spawner import proxy_env
 
     caste = args.get("caste")
     existing = None if store is None else store.get_schedule(str(args.get("name") or ""))
@@ -651,7 +662,9 @@ def schedule_facts(
     facts: dict[str, Any] = {"name": str(args.get("name") or ""), "caste": caste}
     if caste == "script":
         facts["command"] = str(args.get("instructions") or "")
-        facts["env"] = sorted(script_env())
+        facts["hosts"] = [str(host) for host in args.get("network") or []]
+        # a schedule with hosts reaches them through the wall's proxy vars
+        facts["env"] = sorted({*script_env(), *(proxy_env(0) if facts["hosts"] else ())})
         facts["runs"] = SCRIPT_SENTENCE
     if role_line is not None:
         facts["runs"] = role_line
@@ -690,6 +703,8 @@ def recorded_card(
     manifest: dict[str, Any] | None = None,
     schedule_role: str | None = None,
     schedule_role_name: str | None = None,
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """What the server records on a card when it is proposed (P4-2): its
     HIGH tier, a dispatch's manifest, and for a schedule the facts the card
@@ -709,56 +724,91 @@ def recorded_card(
         record["forge"] = promotion_card(store, args)
     if tool == "capture_skill":
         record["capture"] = capture_card(store, args)
-    if tool == "merge_pr":
-        record["merge"] = merge_pin(store, args)
+    if tool == "merge_pr":  # R3 (S6): the pin the proposal already validated
+        record["merge"] = merge_pin(store, args) if merge is None else merge
     return record or None
 
 
-def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
-    """Phase 09 (9.0, I1, I8): the PR head a merge_pr card pins — the head
-    of G10's newest verdict on this PR (a review run on refs/skep/pr/<N>/head),
-    recorded when the card is proposed; the confirm passes exactly it to
-    GitHub. ``{}``: no verdict covers the PR, so the merge is not pinned."""
+def _merge_target(store: RunStore, args: dict[str, Any]) -> Any:
+    """The canonical PR a merge_pr call names (R1 D1: never the typed
+    text) — a ``PrId`` — or ``{"error": why}``."""
     from pathlib import Path
 
     from fastapi import HTTPException
 
-    from ..github import pr_ref
+    from ..github import PrSelectorError, resolve_pr
     from .registry import resolve_repo_arg
 
-    number = re.search(r"(\d+)/*$", str(args.get("pr") or "").strip())
     try:
         root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
         repo = resolve_repo_arg(str(args.get("repo") or ""), root, store)
+        return resolve_pr(repo, args.get("pr", ""))
     except HTTPException as exc:
         return {"error": str(exc.detail)}
-    verdict = store.pr_head_verdict(str(repo), pr_ref(number.group(1))) if number else None
-    if verdict is None:
-        return {}
-    return {
-        "expected_head_sha": verdict.head_commit,
-        "base_sha": verdict.base_commit,
-        "task_id": verdict.task_id,
-        "outcome": verdict.outcome,
-        "confirmed": verdict.confirmed,
-    }
+    except PrSelectorError as exc:
+        return {"error": str(exc)}
+
+
+def merge_target(store: RunStore, args: dict[str, Any]) -> tuple[str, int] | None:
+    """R3 (S7): the (repo, PR) a merge_pr card names, or None — how a card
+    that recorded no pin is matched to a new proposal for the same PR."""
+    pid = _merge_target(store, args)
+    return None if isinstance(pid, dict) else (pid.repo, pid.number)
+
+
+def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
+    """Phase 09 R1 (D3, I1, I8): what a merge_pr card pins, read ONCE, when
+    it is proposed — the newest G10 verdict on the PR's canonical identity
+    (origin owner/name, number). Only a clean, confirmed verdict pins:
+    ``{repo, number, base_branch, base_commit, head_commit, merge_base,
+    task_id}``. Anything else is ``{"error": why}`` and nothing merges.
+    R3 (S6): a proposal calls this once and hands that pin to the
+    propose-time check, the de-duplication and the saved card."""
+    from ..github import pr_ref
+
+    pid = _merge_target(store, args)
+    if isinstance(pid, dict):
+        return pid
+    verdict = store.pr_head_verdict(pid.repo, pid.number)
+    again = (
+        f"refresh_repo pr={pid.number}, dispatch_run ref={pr_ref(pid.number)}, "
+        "then propose merge_pr again"
+    )
+    if verdict is None or not verdict.pr:
+        return {"error": f"no G10 verdict covers {pid.repo}#{pid.number}: {again}"}
+    problem = _unclean(verdict)
+    if problem is not None:
+        return {
+            "error": f"G10 did not cleanly confirm {pid.repo}#{pid.number} at head "
+            f"{verdict.head_commit} ({problem}; run {verdict.task_id}) — an unverified head "
+            f"never merges: fix the PR, then {again}"
+        }
+    keys = ("repo", "number", "base_branch", "base_commit", "head_commit", "merge_base")
+    return {**{key: verdict.pr[key] for key in keys}, "task_id": verdict.task_id}
+
+
+def _unclean(verdict: Any) -> str | None:
+    """Why a PR verdict is not G10 passed + V1 clean, or None (D3)."""
+    if verdict.tamper_flags:
+        return "V1: " + ", ".join(verdict.tamper_flags)
+    if verdict.outcome != "passed":
+        return f"G10 {verdict.outcome}"
+    if not verdict.confirmed:
+        return "G10 passed, but not confirmed: the review worker itself did not pass"
+    if (verdict.test_counts or {}).get("status") == "unparseable":
+        return "V1 could not read the test counts"
+    return None
 
 
 def merge_line(pin: dict[str, Any]) -> str:
     if "error" in pin:
-        return f"it cannot be pinned to a verified head: {pin['error']}"
-    if not pin:
-        return (
-            "NOT pinned: no G10 verdict covers this PR's head (refresh_repo pr=<N>, then a "
-            "review run on refs/skep/pr/<N>/head) — it merges whatever head the PR has"
-        )
-    verdict = (
-        "G10 confirmed it" if pin["confirmed"] else f"G10 did NOT confirm it ({pin['outcome']})"
-    )
+        return f"REFUSED — {pin['error']}"
+    branch = pin["base_branch"]
     return (
-        f"merges only head {pin['expected_head_sha'][:12]} — {verdict} on base "
-        f"{str(pin['base_sha'] or 'unknown')[:12]} (run {pin['task_id'][:8]}); "
-        "a push to the PR after this card makes GitHub refuse the merge"
+        f"merges only {pin['repo']}#{pin['number']} at head {pin['head_commit'][:12]} — "
+        f"G10 confirmed that exact tree and V1 found nothing (run {pin['task_id'][:8]}) — "
+        f"onto {branch} {pin['base_commit'][:12]}; a push to the PR or to {branch} after "
+        "this card refuses the merge (one landing while GitHub merges is reported)"
     )
 
 
@@ -961,8 +1011,14 @@ def card_summary(
         line = _promotion_line(forged)
         danger = line if danger is None else f"{danger} — {line}"
     pinned = (recorded or {}).get("merge")
-    if tool == "merge_pr" and pinned is None and store is not None and live_tier:
-        pinned = merge_pin(store, safe_args)  # a card proposed without the record
+    if tool == "merge_pr" and pinned is None:
+        # R2 (N5): only an unsaved preview reads a live pin; a saved card
+        # shows the pin it holds — or that it holds none (the confirm refuses).
+        pinned = (
+            merge_pin(store, safe_args)
+            if recorded is None and store is not None and live_tier
+            else {"error": "no pin was recorded when this was proposed — propose merge_pr again"}
+        )
     if tool == "merge_pr" and isinstance(pinned, dict):
         summary["merge"] = pinned
         danger = f"{merge_line(pinned)} — {danger}"

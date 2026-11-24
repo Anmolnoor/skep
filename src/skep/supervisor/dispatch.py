@@ -69,6 +69,7 @@ from .contracts_io import (
     read_result,
     write_task_file,
 )
+from .github import PR_HEAD_REF, pr_ref
 from .ingest import IngestOutcome, ingest_run
 from .monitor import (
     AdoptedWorker,
@@ -103,6 +104,7 @@ from .worker_state import (
 )
 from .worktree import (
     TREE_LOCK,
+    WorktreeError,
     cleanup_orphans,
     create_worktree,
     is_linked_worktree,
@@ -792,6 +794,50 @@ def run_task(
                 resume_workspace = _resume_workspace(run_store, repo, worktrees_root, resume_of)
             if resume_workspace is None or not with_cursor:
                 effective_worker_state = strip_resume_cursor(effective_worker_state)
+        # Phase 09 R1 (D2, S6): a review run on a fetched PR head is pinned
+        # ONCE, here, to the (base, head) pair its fetch recorded: the worker
+        # starts from that head, and G10, V1 and the verdict use the same pair —
+        # refs/skep/pr/<N>/* is never read again for this run.
+        pr_pin: dict[str, Any] | None = None
+        if ref is not None and (pr_match := PR_HEAD_REF.fullmatch(ref)):
+            # R2 (S11, N6): a resume inherits its run's pin while the reused
+            # tree is still at that head; a tree whose HEAD moved is never
+            # reused — the resume starts fresh on the latest fetch, unmixed.
+            pr_pin = None if resume_of is None else run_store.run_pr(resume_of)
+            if (
+                pr_pin is not None
+                and resume_workspace is not None
+                and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]
+            ):
+                resume_workspace, pr_pin = None, None
+                effective_worker_state = strip_resume_cursor(effective_worker_state)
+            if pr_pin is None:
+                pr_pin = run_store.pr_fetch(str(repo.resolve()), int(pr_match[1]))
+                if pr_pin is None:
+                    raise WorktreeError(
+                        f"{ref}: skep has no fetch of PR #{pr_match[1]} recorded for {repo}, "
+                        "so there is no head to pin the review to — refresh_repo "
+                        f"pr={pr_match[1]} first, then dispatch the review"
+                    )
+                pr_pin.pop("fetched_at")
+                # R4 (S4): the pin and refs/skep/pr/<N>/* publish together under
+                # refresh_repo's lock; apart, neither one is the PR skep fetched.
+                published = [resolve_commit(repo, pr_ref(pr_match[1], s)) for s in ("head", "base")]
+                if published != [pr_pin["head_commit"], pr_pin["base_commit"]]:
+                    raise WorktreeError(
+                        f"{ref}: the recorded fetch of PR #{pr_match[1]} (head "
+                        f"{pr_pin['head_commit']}, base {pr_pin['base_commit']}) is not what "
+                        f"refs/skep/pr/{pr_match[1]}/ holds now ({' '.join(map(str, published))}) "
+                        f"— refresh_repo pr={pr_match[1]} again, then dispatch the review"
+                    )
+                if (
+                    resume_workspace is not None
+                    and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]
+                ):
+                    # R3 (N5): an unpinned run's warm tree is at whatever head
+                    # it had — never paired with this newly resolved pin.
+                    resume_workspace = None
+                    effective_worker_state = strip_resume_cursor(effective_worker_state)
         # v89-F1: shield registration and the sweep share one lock, and the
         # keep-set snapshot sits INSIDE it with the sweep it feeds — a snapshot
         # taken outside would reopen the very window the lock exists to close.
@@ -855,7 +901,12 @@ def run_task(
             workspace = (
                 resume_workspace
                 if resume_workspace is not None
-                else create_worktree(repo, worktrees_root, provisional.task_id, ref)
+                else create_worktree(
+                    repo,
+                    worktrees_root,
+                    provisional.task_id,
+                    pr_pin["head_commit"] if pr_pin else ref,
+                )
             )
         task = provisional.model_copy(update={"workspace": str(workspace)})
 
@@ -880,7 +931,8 @@ def run_task(
             execution_mode=execution_mode,
             # v81-F3: pin the base the patch is generated against, so a land
             # can say "the branch has advanced" instead of shrugging.
-            base_commit=resolve_commit(repo, ref),
+            base_commit=pr_pin["head_commit"] if pr_pin else resolve_commit(repo, ref),
+            pr=pr_pin,
             # v101-F4: which agent edited the repo — the RESOLVED name, not the
             # raw argument, or every builtin run would record NULL and the
             # record would be silent about the commonest case. Only the coding
@@ -1638,7 +1690,8 @@ def recover_interrupted_runs(
 
 def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: RunRecord) -> str:
     """ES-F290/F291 (L1, I2 I8): re-verify one completed run that has a patch
-    but no re-verification record — the supervisor stopped between ingest
+    (or is a pinned PR review, which verifies the PR head: R3 S14) but no
+    re-verification record — the supervisor stopped between ingest
     committing COMPLETED and G10. The same restart path (pinned verify, no
     auto-apply) a late deposit takes. Returns "" when it re-verified, else
     why it did not (a teaching line for ``skep review --reverify``)."""
@@ -1659,7 +1712,10 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
             f"`skep review {task_id}` shows it"
         )
     patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
-    if not patches or not patches[0].is_file():
+    # Phase 09 R3 (S14): a pinned PR review that changed nothing has no patch
+    # by design — G10 verifies the PR head itself, in ``reverify-<task_id>``.
+    pr_review = PR_HEAD_REF.fullmatch(record.ref or "") and run_store.run_pr(task_id)
+    if not pr_review and (not patches or not patches[0].is_file()):
         return "no patch on disk — nothing to re-verify or land"
     me = process_owner()
     supervisor = run_store.run_supervisor(task_id)
@@ -1684,7 +1740,7 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
         return in_flight
     if run_store.reverification_for(task_id) is not None:  # one finished meanwhile
         return f"already re-verified (G10) — `skep review {task_id}` shows it"
-    name = f"reverify-{patches[0].stem}"
+    name = f"reverify-{task_id if pr_review else patches[0].stem}"
     with TREE_LOCK:  # shield it from a concurrent run's orphan sweep (v89-F1)
         _ACTIVE.add(name)
         # The stopped re-verify's half-built tree would make create_worktree fail.
@@ -1711,7 +1767,8 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
 def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
     """ES-F290 (L1): at serve startup, after ``recover_interrupted_runs``
     (which only looks at in-flight states), re-verify every completed,
-    unlanded run with a patch and no re-verification record. Serve runs it on
+    unlanded run with a patch (or a pinned PR review) and no re-verification
+    record. Serve runs it on
     a background thread (landing refuses those runs until their record
     exists, ES-F291); ``reverify_unverified`` claims each run first. Returns
     the task ids it re-verified."""

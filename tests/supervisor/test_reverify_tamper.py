@@ -676,10 +676,10 @@ def test_a_guard_that_cannot_read_the_patch_fails_closed(
     _seed(repo)
     patch = _patch(repo, "any", lambda r: (r / "a.txt").write_text("a\n"))
 
-    def broken(*_args: object) -> tuple[str, ...]:
+    def broken(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         raise OSError("git vanished")
 
-    monkeypatch.setattr(reverify_mod, "patch_paths", broken)
+    monkeypatch.setattr(reverify_mod, "test_config_changes", broken)
     flags = reverify_mod.static_tamper_flags(repo, patch, "HEAD")
     assert flags == ["tamper_check_failed:OSError"]
 
