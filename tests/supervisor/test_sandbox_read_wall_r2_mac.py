@@ -211,7 +211,12 @@ def test_git_lists_loose_branches_tags_and_the_stash(
     assert proc.returncode == 0, proc.stderr
     refs = proc.stdout.split()
     assert {"refs/heads/feature", "refs/tags/v1", "refs/stash"} <= set(refs), proc.stdout
-    assert proc.stderr == ""  # 3H: no broken (unreadable) refs/stash any more
+    # 3H: no broken (unreadable) refs/stash any more. Apple's /usr/bin/git
+    # shim (xcrun) may warn that it cannot write its cache in the host's
+    # temp dir — the wall denies that on purpose (a run must never seed a
+    # host tool cache); git itself still answers.
+    noise = [line for line in proc.stderr.splitlines() if "couldn't create cache file" not in line]
+    assert noise == [], proc.stderr
     branches = _run(profile, ["git", "branch", "--format=%(refname:short)"], worktree)
     assert "feature" in branches.stdout.split(), branches.stdout + branches.stderr
     log = _run(profile, ["git", "log", "--all", "--oneline"], worktree)  # stopped on it before

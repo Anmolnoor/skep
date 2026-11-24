@@ -822,7 +822,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "read_url",
-        "PROPOSE reading ONE public web page as text (requires user confirmation "
+        "PROPOSE reading ONE public web page or PDF as text (requires user confirmation "
         "— the card shows the exact URL; nothing is fetched until the user "
         "confirms). EXCEPTION: a host the policy allows (an allow_fetch_domain "
         "grant, or a baseline rule naming it) reads inside the turn "
