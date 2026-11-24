@@ -268,17 +268,32 @@ def _in_place(path: Path, skep_home: Path) -> bool:
 
 
 def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
-    """The env (or bin dir) of each hop in ``executable``'s symlink chain."""
+    """Each hop in ``executable``'s symlink chain: its env when the hop sits in
+    a verified one (``pyvenv.cfg``), else the interpreter file alone — never a
+    plain bin dir and its siblings (Sol C2-1)."""
     hops: list[Path] = []
     current = executable
     for _ in range(limit):
         env = current.parent.parent
-        hops.append(env if (env / "pyvenv.cfg").is_file() else current.parent)
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current)
         if not current.is_symlink():
             break
         target = Path(os.readlink(current))
         current = target if target.is_absolute() else current.parent / target
     return hops
+
+
+def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
+    """The links on the interpreter's path — a hop that is one, or a dir it is
+    reached through (uv's ``cpython-3.12-…`` minor-version link to its patch
+    dir) — whose target a ``bound`` root already holds. bwrap's empty root
+    gets them as links ONLY (``_alias_links``), never as bind roots: a
+    retarget after this check can leave one dangling, never widen a read
+    (Sol C2-2); without them exec by the linked path is ENOENT."""
+    roots = [Path(root) for root in bound]
+    chain = [Path(os.path.abspath(hop)) for hop in _interpreter_chain(Path(sys.executable))]
+    links = dict.fromkeys(p for hop in chain for p in (hop, *hop.parents) if p.is_symlink())
+    return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
 
 
 def _strict_candidates(
@@ -290,8 +305,8 @@ def _strict_candidates(
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
     chain = [Path(os.path.abspath(hop)) for hop in _interpreter_chain(Path(sys.executable))]
-    # Sol C-1 (W2): a hop reached through a link is no bind root of its own —
-    # its links are recreated below only where an approved root covers them
+    # Sol C-1 (W2): a hop reached through a link is no bind root of its own;
+    # its links are recreated as links only (``_interpreter_links``)
     linked = [hop for hop in chain if hop.resolve() != hop]
     detected = [
         Path(sys.prefix),
@@ -343,13 +358,6 @@ def _strict_candidates(
         )
     detected = [Path(os.path.abspath(root)) for root in detected]
     found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
-    # a linked dir a hop is reached through (uv's ``cpython-3.12-…`` minor-version
-    # link to its patch dir) must exist in the wall, or exec by that path is ENOENT
-    # (_alias_links recreates it) — but only one whose target a root above already
-    # binds: a linked ~/.local never opens its whole target (W2)
-    bound = [root.resolve() for root in found]
-    links = dict.fromkeys(p for hop in linked for p in (hop, *hop.parents) if p.is_symlink())
-    found += [link for link in links if any(link.resolve().is_relative_to(r) for r in bound)]
     # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
     # above makes the bind fail closed instead of narrowing the worker's wall.
     return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))
@@ -1458,6 +1466,8 @@ def write_profile(
             else []
         )
         extra_readable += dict.fromkeys(path.resolve() for path in aliases)
+        if read_allowlist is not None:
+            aliases += _interpreter_links(extra_readable)
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(

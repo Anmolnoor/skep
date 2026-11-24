@@ -427,3 +427,44 @@ def test_a_linked_interpreter_dir_never_opens_its_whole_target(
     (overlay / "bin" / "python").symlink_to(tmp_path / "linkbin" / "python3.12")
     monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
     assert broad.resolve() not in sandbox.strict_read_roots(tmp_path / "skep")
+
+
+def test_a_plain_interpreter_hop_binds_the_file_not_its_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C2-1: a hop outside a verified env is the interpreter file alone —
+    its bin dir's siblings stay closed."""
+    real = Path(os.path.realpath(sys.executable))
+    plain = tmp_path / "plainbin"
+    plain.mkdir()
+    (plain / "notes.txt").write_text("private\n", encoding="utf-8")
+    shim = plain / "python3"  # a real file, not a link: the chain ends here
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(shim)
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert shim.resolve() in roots and plain.resolve() not in roots
+
+
+def test_interpreter_links_are_aliases_never_bind_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C2-2: uv's minor-version dir link is recreated as a link only — it
+    never enters the bind roots, so a retarget cannot add an unchecked root."""
+    real = Path(os.path.realpath(sys.executable))
+    pythons = tmp_path / "pythons"
+    (pythons / "cpython-3.12.99" / "bin").mkdir(parents=True)
+    (pythons / "cpython-3.12.99" / "bin" / "python3.12").symlink_to(real)
+    (pythons / "cpython-3.12").symlink_to(pythons / "cpython-3.12.99")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(pythons / "cpython-3.12" / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    candidates = sandbox._strict_candidates(tmp_path / "skep", worker_llm_key=False, extra=())
+    assert pythons / "cpython-3.12" not in candidates
+    assert sandbox._interpreter_links([pythons / "cpython-3.12.99"]) == [pythons / "cpython-3.12"]
+    assert sandbox._interpreter_links([tmp_path / "elsewhere"]) == []
