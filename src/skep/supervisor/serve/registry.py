@@ -1931,6 +1931,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     start_at=body.start_at,
                     chain=body.chain,
                     role=body.role,
+                    skep_home=holder.current.home.parent,  # R3 (N2): a script's inputs
                 )
                 actions.check_schedule_role(holder, run_store, schedule)
             except ValueError as exc:
@@ -1981,6 +1982,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     start_at=body.start_at,
                     chain=body.chain,
                     role=body.role,
+                    skep_home=holder.current.home.parent,
                 )
             actions.check_schedule_role(holder, run_store, schedule)
         except (TemplateError, ValueError) as exc:

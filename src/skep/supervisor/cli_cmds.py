@@ -2267,6 +2267,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     start_at=args.start_at,  # v126-F11
                     once=args.once,
                     role=args.role,
+                    skep_home=config.home.parent,  # R3 (N2): a script's inputs
                 )
             except ValueError as exc:  # v127-F11: a retired caste
                 return _err(str(exc), next_command="skep schedule add ... --caste coding")
@@ -2284,6 +2285,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
 def _schedule_add_repo_less(args: argparse.Namespace) -> int:
     """A note/script schedule with no repo: the tick posts the text or runs
     the command inside the wall (script hosts: ``--network``)."""
+    config = build_config(args.home, None)
     try:
         interval = parse_interval(args.every)
         schedule = make_schedule(
@@ -2296,10 +2298,10 @@ def _schedule_add_repo_less(args: argparse.Namespace) -> int:
             start_at=args.start_at,
             once=args.once,
             role=args.role,
+            skep_home=config.home.parent,  # R3 (N2): a script's inputs
         )
     except ValueError as exc:
         return _err(str(exc))
-    config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
         refusal = _schedule_role_refusal(config, store, schedule)

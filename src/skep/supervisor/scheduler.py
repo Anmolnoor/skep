@@ -161,6 +161,22 @@ def script_inputs(command: str) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(files))
 
 
+def script_input_problem(command: str, skep_home: Path) -> str | None:
+    """Phase 09 R3 (N2): why a script's declared inputs (``script_inputs``)
+    cannot run — in or over the skep home, at or above the home, or under a
+    secret mask — or None. Every face checks it at creation; the run and the
+    wall check again."""
+    from .sandbox import masked_input_problem
+
+    for path in script_inputs(command):
+        problem = extra_read_path_problem(path, skep_home) or masked_input_problem(
+            path, skep_home=skep_home
+        )
+        if problem:
+            return f"a script schedule's input {problem}"
+    return None
+
+
 def run_schedule_script(
     command: str,
     *,
@@ -186,10 +202,9 @@ def run_schedule_script(
     """
     from .wall import walled
 
+    if problem := script_input_problem(command, skep_home):
+        return (f"script refused: {problem}", False)
     inputs = script_inputs(command)
-    for path in inputs:
-        if problem := extra_read_path_problem(path, skep_home):
-            return (f"script refused: {problem}", False)
     workspace = Path(tempfile.mkdtemp(prefix="skep-script-"))
     try:
         with walled(
@@ -426,11 +441,20 @@ def make_schedule(
     once: bool = False,
     chain: str | None = None,
     role: str | None = None,
+    skep_home: Path | None = None,
 ) -> ScheduleRecord:
+    """``skep_home`` (the top-level home) lets a script's inputs be checked
+    at creation (R3, N2); every face that creates one passes it."""
     if worker_kind in RETIRED_CASTES:  # v127-F11: refused at creation, every face
         raise ValueError(f"caste {worker_kind!r} is retired: {RETIRED_CASTES[worker_kind]}")
     if worker_kind == "script" and (problem := script_network_problem(network)):
         raise ValueError(problem)  # R2 (N1): refused at creation, every face
+    if (
+        worker_kind == "script"
+        and skep_home is not None
+        and (problem := script_input_problem(instructions, skep_home))
+    ):
+        raise ValueError(problem)  # R3 (N2)
     created = now_ts()
     start = _start_slot(start_at)
     return ScheduleRecord(
@@ -1400,6 +1424,8 @@ def run_due(
                     report = f"[{schedule.name}] {output}" if not script_ok else output
                     _deliver_tick_text(store, schedule, report, notify, script_output=True)
                     blocked_state = "script_ran" if script_ok else "script_failed"
+                    if output.startswith("script refused:"):  # R3 (S10): health says why
+                        blocked_state = f"script_failed: {output[:200]}"
             elif schedule.worker_kind == "prompt":
                 # v83-F5 (ADR 0042): a Queen turn at tick time. Read-only by
                 # construction (mutations refuse, never card — nobody is

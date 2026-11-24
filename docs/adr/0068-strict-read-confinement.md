@@ -612,7 +612,21 @@ the launch path `forged_lane` now shares, so the two cannot drift:
   a link, or no longer a regular file, refuses; bubblewrap binds a copy
   taken from the file opened without following links, and Seatbelt grants
   its `(literal …)` path, so a directory swapped in after the check is
-  never opened up. The secret masks still land last.
+  never opened up. The secret masks still land last, and an input that is
+  a mask or under one (`sandbox.masked_input_problem`, both sides
+  resolved) refuses before anything is copied or granted — at every
+  creation face and again at the run and the wall (Phase 09 R3): a copy
+  would carry the masked file to a path no mask covers.
+  On Linux (bubblewrap) a script therefore sees a **snapshot** of each
+  input taken at launch, not live updates: the copies go to a private
+  `0700` temp dir outside the workspace that `wall.walled` removes after
+  the run, each `0600` plus the source's owner-execute bit (never
+  setuid, setgid or sticky), capped at 16 MiB per file and 64 MiB in all
+  (`sandbox.READ_FILE_MAX_BYTES`, `READ_FILES_TOTAL_MAX_BYTES`). An
+  oversize input refuses the run, naming the file and the cap. A run
+  with no inputs stages nothing. Seatbelt reads the live file. A refused
+  run's reason is the schedule's health state (`script_failed: script
+  refused: …`).
   The card shows the command, so the operator sees every input.
 - **Writes:** a throwaway workspace (its `HOME`, `TMPDIR`), deleted after
   the run.

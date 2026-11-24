@@ -493,16 +493,75 @@ def open_read_file(path: Path) -> int:
     return fd
 
 
+# Phase 09 R3 (S2): bubblewrap stages a snapshot of each input; bounded.
+READ_FILE_MAX_BYTES = 16 * 1024 * 1024
+READ_FILES_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _cap(limit: int) -> str:
+    return f"{limit // 2**20} MiB" if limit % 2**20 == 0 else f"{limit} bytes"
+
+
+def masked_input_problem(
+    path: Path, *, skep_home: Path, denied: Iterable[Path] | None = None
+) -> str | None:
+    """Phase 09 R3 (N2): why ``path`` cannot be an input — it is a secret-floor
+    mask or under one, judged where both resolve — or None. A copy (bwrap)
+    or a literal grant would hand the run a file every wall hides."""
+    real = Path(path).resolve()
+    masks = secret_paths(skep_home) if denied is None else denied
+    for mask in masks:
+        if _over(Path(mask).resolve(), real):
+            return (
+                f"{path} is under the secret mask {mask}, which every run is denied; "
+                "an input never reopens it. Name a file outside it"
+            )
+    return None
+
+
 def _staged_read_files(files: list[Path], stage: Path) -> list[tuple[Path, Path]]:
-    """bwrap's half of S7: each input copied from its pinned fd into
-    ``stage``, paired with the path it is bound at. The copy is what the
-    wall binds, so a swap after this point changes nothing inside."""
-    stage.mkdir(mode=0o700, exist_ok=True)
+    """bwrap's half of S7: each input copied from its pinned fd into the
+    private ``stage`` (R3: outside the workspace; the caller removes it),
+    paired with the path it is bound at. The copy is what the wall binds, so
+    a swap after this point changes nothing inside. Each copy is 0600 plus
+    the source's owner-execute bit (S9), never setuid/setgid/sticky, and the
+    byte caps hold from fstat and again while copying."""
     pairs: list[tuple[Path, Path]] = []
+    total = 0
     for index, path in enumerate(files):
-        copy = stage / f"{index}-{path.name}"
-        with os.fdopen(open_read_file(path), "rb") as src, copy.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
+        with os.fdopen(open_read_file(path), "rb") as src:
+            info = os.fstat(src.fileno())
+            if info.st_size > READ_FILE_MAX_BYTES:
+                raise SandboxUnavailableError(
+                    f"input {path} is {info.st_size} bytes, over the cap of "
+                    f"{_cap(READ_FILE_MAX_BYTES)} per file a run's snapshot holds"
+                )
+            if total + info.st_size > READ_FILES_TOTAL_MAX_BYTES:
+                raise SandboxUnavailableError(
+                    f"input {path} brings the inputs to {total + info.st_size} bytes, over "
+                    f"the cap of {_cap(READ_FILES_TOTAL_MAX_BYTES)} in all"
+                )
+            limit = min(READ_FILE_MAX_BYTES, READ_FILES_TOTAL_MAX_BYTES - total)
+            mode = 0o600 | (info.st_mode & stat.S_IXUSR)
+            copy = stage / f"{index}-{path.name}"
+            try:
+                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+                with os.fdopen(fd, "wb") as dst:
+                    os.fchmod(dst.fileno(), mode)  # the umask may have cut the x bit
+                    copied = 0
+                    while chunk := src.read(1 << 16):
+                        copied += len(chunk)
+                        if copied > limit:
+                            raise SandboxUnavailableError(
+                                f"input {path} grew past the cap of {_cap(limit)} while it "
+                                "was copied"
+                            )
+                        dst.write(chunk)
+            except OSError as exc:
+                raise SandboxUnavailableError(
+                    f"input {path} could not be staged: {exc.strerror}"
+                ) from exc
+        total += copied
         pairs.append((copy, path))
     return pairs
 
@@ -1181,8 +1240,11 @@ def _bubblewrap_args(
         # ES-F4: after the writable binds, so a mask wins inside one too.
         # /tmp and /run are fresh tmpfs here: their host paths do not exist,
         # except inside a root bound back in (R5: a repo's git dir under /tmp).
-        if denied.parts[1:2] in (("tmp",), ("run",)) and not any(
-            denied.is_relative_to(root) for root in [*readable_roots, *writable_roots]
+        # R3: an input bound there counts too.
+        if (
+            denied.parts[1:2] in (("tmp",), ("run",))
+            and not any(denied.is_relative_to(root) for root in [*readable_roots, *writable_roots])
+            and not any(dest.is_relative_to(denied) for _copy, dest in read_files)
         ):
             continue
         args.extend(
@@ -1468,6 +1530,7 @@ def write_profile(
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
     read_files: Iterable[Path] = (),
+    read_files_stage: Path | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1504,9 +1567,13 @@ def write_profile(
 
     ``read_files`` (Phase 09 R2, S7): single files a strict run may read,
     never as roots. Each must be a regular file named by its real path
-    (``open_read_file``) and pass ``extra_read_path_problem``. bubblewrap
-    binds a copy taken from the pinned fd (next to the profile); Seatbelt
-    grants its ``(literal …)`` path. The masks still land last.
+    (``open_read_file``) and pass ``extra_read_path_problem`` and
+    ``masked_input_problem``. bubblewrap binds a copy taken from the pinned
+    fd into ``read_files_stage`` — a private dir outside the run's writable
+    roots that the caller makes and removes (``wall.walled``; R3) — so a run
+    sees a snapshot taken at launch, capped at ``READ_FILE_MAX_BYTES`` per
+    file and ``READ_FILES_TOTAL_MAX_BYTES`` in all. Seatbelt grants its
+    ``(literal …)`` path. The masks still land last.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
@@ -1554,6 +1621,10 @@ def write_profile(
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
+    for path in read_files:  # R3 (N2): before anything is copied or granted
+        masked = masked_input_problem(path, skep_home=skep_home, denied=[*read_denied, *git_masked])
+        if masked:
+            raise SandboxUnavailableError(f"input {masked}")
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
         # linked message file refuses the wall rather than going unmasked (R5, Sol)
@@ -1593,6 +1664,21 @@ def write_profile(
         return _write_argv_profile(profile_path, args, header=_PODMAN_HEADER)
     if probe.backend == "bubblewrap":
         writable_roots = [workspace, *extra_writable]
+        staged: list[tuple[Path, Path]] = []
+        if read_files:
+            if read_files_stage is None:
+                raise SandboxUnavailableError(
+                    "input files on bubblewrap are copied into a private stage dir outside "
+                    "the workspace (wall.walled makes one); none was given, so this run is "
+                    "refused"
+                )
+            stage = Path(read_files_stage).resolve()
+            if any(stage.is_relative_to(Path(root).resolve()) for root in writable_roots):
+                raise SandboxUnavailableError(
+                    f"the input stage {stage} must lie outside the run's writable roots, or "
+                    "the run could rewrite its own inputs; this run is refused"
+                )
+            staged = _staged_read_files(read_files, stage)
         args = _bubblewrap_args(
             writable_roots=writable_roots,
             network=network,
@@ -1605,7 +1691,7 @@ def write_profile(
             unmasked=unmasked,
             strict=read_allowlist is not None,
             aliases=aliases,
-            read_files=_staged_read_files(read_files, profile_path.parent / ".skep-inputs"),
+            read_files=staged,
         )
         # After the netshim when there is one (it alone needs the proxy
         # bridge); wrap_command's "--" then ends the step's options.

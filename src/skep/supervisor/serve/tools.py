@@ -2063,7 +2063,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 ],
                 "description": (
                     "'note' posts the text each tick; 'script' runs the instructions "
-                    "as a shell command on the supervisor host and posts its output; "
+                    "as a shell command in a sandbox wall on the supervisor host and "
+                    "posts its output (it reads only files the command names; on Linux "
+                    "a launch-time copy, 16 MiB each, 64 MiB in all); "
                     "'digest' posts a summary of pending approvals/runs/schedules "
                     "(no repo or instructions needed); 'prompt' runs the "
                     "instructions as a read-only Queen turn in this chat; these four "
@@ -6201,6 +6203,7 @@ def _execute_mutation(
                 role=None if args.get("role") is None else str(args["role"]),
                 # Phase 09 R1: a script's only egress inside its wall (wall.py)
                 network=[str(h) for h in args.get("network") or []] if caste == "script" else (),
+                skep_home=holder.current.home.parent,  # R3 (N2): a script's inputs
             )
             actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
@@ -6245,6 +6248,7 @@ def _execute_mutation(
                 # v123-F3: its hosts (the role decides each at tick) and its chat
                 network=[str(host) for host in args.get("network") or []],
                 chat_id=chat_id,
+                skep_home=holder.current.home.parent,
             )
         actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)
@@ -6653,12 +6657,19 @@ def _mutation_execution_decision(
     if skep_self is not None:  # D11: refused at proposal, no card
         return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
     if name == "propose_schedule" and args.get("caste") == "script":
-        from ..scheduler import script_network_problem
+        from ..scheduler import script_input_problem, script_network_problem
 
         if hosts_refused := script_network_problem(list(args.get("network") or [])):
             # R2 (N1): a `*` host is refused at proposal, no card
             return AutonomyDecision(
                 verdict="deny", reason="schedule.deny.hosts", detail=hosts_refused
+            )
+        inputs_refused = script_input_problem(
+            str(args.get("instructions") or ""), holder.current.home.parent
+        )
+        if inputs_refused:  # R3 (N2): a masked input is refused at proposal, no card
+            return AutonomyDecision(
+                verdict="deny", reason="schedule.deny.inputs", detail=inputs_refused
             )
     role_refused = (
         _schedule_role_refusal(store, holder, chat_id, args) if name == "propose_schedule" else None

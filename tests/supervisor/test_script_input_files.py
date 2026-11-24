@@ -41,9 +41,10 @@ def _usable(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
 def _profile(tmp_path: Path, home: Path, files: tuple[Path, ...]) -> Path:
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
+    (stage := tmp_path / "stage").mkdir(exist_ok=True)  # R3: outside the workspace
     return sandbox.write_profile(
         workspace / "p.profile", workspace=workspace, skep_home=home,
-        read_allowlist=(), read_files=files,
+        read_allowlist=(), read_files=files, read_files_stage=stage,
     )  # fmt: skip
 
 

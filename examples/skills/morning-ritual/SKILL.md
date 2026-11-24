@@ -22,7 +22,9 @@ It runs inside skep's sandbox wall (ADR 0068), the one forged tools run in:
 
 - **Reads:** system dirs, skep's own python and package, and the files its
   command names: `fetch_brief.py`, your `.ics` file, your mail password
-  file. Nothing else in your home.
+  file. Nothing else in your home. On Linux each is a copy taken when the
+  run starts (16 MiB per file, 64 MiB in all); a file under a secret mask
+  (`~/.ssh`, the skep home) is refused when the schedule is created.
 - **Network:** only the hosts the schedule names in `network`, through
   skep's filtering proxy. None by default. IMAP rides one tunnel through it.
 - **Writes:** a throwaway workspace (its `HOME`), deleted after the run.
