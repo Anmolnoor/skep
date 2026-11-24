@@ -448,18 +448,25 @@ skep proof export TASK_ID [--format md|json]
 Every `decisions.jsonl` row is `"v": 2` and hash-chained: `seq`, `prev_hash`
 (the row before it, `GENESIS` first) and `hash` (sha256 of the row's
 canonical JSON). The chain runs on across rotated generations; rows written
-before it (`"v": 1`) stay as they were and are counted as unchained. Every
-100th row's hash is also kept in `audit/policy/chain.sqlite3`.
+before it (`"v": 1`, no chain keys) stay as they were and are counted as
+unchained; any other line before the chain (not JSON, another version, a
+chained row relabelled) is a break. Every 100th row's hash is also kept in
+`audit/policy/chain.sqlite3`; a checkpoint that could not be written (a
+corrupt, read-only or locked file) never costs the decision, and verify
+counts it as missing (degraded coverage), not as a break.
 `ledger verify` walks every generation and exits 0 (`VALID`) or 1 naming the
-first break as `file:line` — an edited, inserted, deleted or reordered row, a
-missing generation, or a checkpoint the log no longer matches (a cut tail or a
-rewrite). `--path` checks one offline copy; its first row is its anchor.
+first break as `file:line` — an edited (byte for byte, newline included),
+inserted, deleted or reordered row, a missing generation, or a checkpoint the
+log no longer matches (a cut tail or a rewrite). `--path` checks one offline
+copy; its first row is its anchor, unless v1 rows precede it (then it must
+start at seq 1 from `GENESIS`).
 
 `proof export` is one run's local receipt — repo, baseline sha, patch
 sha256, skep version, sandbox and read confinement, key relay, policy
 baseline, taint, the G10 command with V1 status and executed test counts,
 the run's decision count and the ledger head hash — as a collapsible Markdown
-block for a PR (`md`, the default) or JSON. It is not tamper-proof: whoever
+block for a PR (`md`, the default) or JSON. Every string passes the secret
+redactor, URL userinfo stripped. It is not tamper-proof: whoever
 can write the skep home can rewrite the whole log and its checkpoints, so the
 anchor outside your machine is the head hash where you publish the receipt.
 Both commands only read.

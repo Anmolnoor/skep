@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..worker_contract import Event, EventType
-from .ledger_proof import verify_ledger
+from .ledger_proof import broken_at, verify_ledger
 from .policy_v3 import _rotated_generations, redact
 from .sandbox import _BUBBLEWRAP_HEADER, _PODMAN_HEADER
 from .serve.actions import UNLOCKED_ACTOR, policy_block_views, policy_decisions, require_run
@@ -52,13 +52,13 @@ ALARMS = (
 )
 
 
-def _redacted(value: Any) -> Any:
+def _redacted(value: Any, scrub: Callable[[str], str] = redact) -> Any:
     if isinstance(value, str):
-        return redact(value)
+        return scrub(value)
     if isinstance(value, dict):
-        return {key: _redacted(item) for key, item in value.items()}
+        return {key: _redacted(item, scrub) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return [_redacted(item) for item in value]
+        return [_redacted(item, scrub) for item in value]
     return value
 
 
@@ -207,23 +207,63 @@ def _dispatch_decision(audit_dir: Path, store: RunStore, task_id: str) -> dict[s
     return decision if isinstance(decision, dict) else {}
 
 
+def run_chat_taint(store: RunStore, audit_dir: Path, task_id: str) -> list[str] | None:
+    """The bits of the chat that dispatched the run (P4-1). R2 G3: a
+    resume's decision carries no chat_taint; the nearest ancestor's holds."""
+    chain = _resume_chain(store, task_id)
+    return next(
+        (
+            taint
+            for tid in reversed(chain[: chain.index(task_id) + 1])
+            if isinstance(
+                taint := _dict(_dispatch_decision(audit_dir, store, tid).get("constraints")).get(
+                    "chat_taint"
+                ),
+                list,
+            )
+        ),
+        None,
+    )
+
+
 def _v1(tamper_flags: tuple[str, ...], test_counts: dict[str, Any] | None) -> str:
-    """Phase 08: V1's verdict in one word — a row from before V1 (or with no
-    command run) recorded no counts, and says so."""
+    """Phase 08: V1's verdict, led by one word. Review R1 (Q5): clean,
+    tampered, unreadable (counts nobody could read: auto-landing blocks) or
+    not inspected (the check could not read the patch) — and a row from
+    before V1 (or with no command run) recorded nothing, and says so."""
+    found = [flag for flag in tamper_flags if not flag.startswith("tamper_check_failed")]
+    if found:
+        return "tampered: " + ", ".join(found)
     if tamper_flags:
-        return "tampered: " + ", ".join(tamper_flags)
-    return "not recorded" if test_counts is None else "clean"
+        return (
+            "not inspected: the tamper check could not read the patch ("
+            + ", ".join(tamper_flags)
+            + "); auto-landing is blocked"
+        )
+    status = (test_counts or {}).get("status")
+    if status == "unparseable":
+        return "unreadable: the test counts could not be read; auto-landing is blocked"
+    if test_counts is None:
+        return "not recorded"
+    return (
+        "clean (test files only: this runner's counts are not read)"
+        if status == "unknown"
+        else "clean"
+    )
 
 
-def _ledger(audit_dir: Path) -> dict[str, Any]:
-    """Phase 08 8.1: the decision log's chain head and whether it verifies."""
-    result = verify_ledger(audit_dir)
+def _ledger(audit_dir: Path, task_id: str) -> dict[str, Any]:
+    """Phase 08 8.1: the decision log's chain head and whether it verifies;
+    the run's own row count from the same snapshot (Review R1, Q6)."""
+    result = verify_ledger(audit_dir, count_task=task_id)
     head = result["head"] or {}
     return {
         "status": result["status"],
         "head_seq": head.get("seq"),
         "head_hash": head.get("hash"),
         "unchained_rows": result["unchained"],
+        "checkpoints_missing": result["checkpoints_missing"],
+        "task_rows": result["task_rows"],
         "break": result["break"],
     }
 
@@ -260,15 +300,7 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
     own = [row for row in trail if row.get("task_id") == task_id]
     dispatch = {tid: _dispatch_decision(audit_dir, store, tid) for tid in chain}
     delegation = _dict(dispatch[task_id].get("delegation"))
-    # R2 G3: a resume's decision carries no chat_taint; the nearest ancestor's holds
-    chat_taint = next(
-        (
-            taint
-            for tid in reversed(chain[: chain.index(task_id) + 1])
-            if isinstance(taint := _dict(dispatch[tid].get("constraints")).get("chat_taint"), list)
-        ),
-        None,
-    )
+    chat_taint = run_chat_taint(store, audit_dir, task_id)
     transitions = [
         {"state": state, "detail": detail, "ts": ts}
         for state, detail, ts in store.transitions_for(task_id)
@@ -330,7 +362,7 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 "detail": reverify.detail,
             },
         },
-        "ledger": _ledger(audit_dir),
+        "ledger": _ledger(audit_dir, task_id),
         "resume_chain": chain,
         "policy_trail": trail,
         "policy_blocks": [
@@ -402,8 +434,7 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
     ledger = report["ledger"]
     lines.append(head("Ledger"))
     if ledger["break"]:
-        where = ledger["break"]
-        lines.append(f"{item}BROKEN at {where['file']}:{where['line']}: {where['reason']}")
+        lines.append(f"{item}{broken_at(ledger['break'])}")
     elif ledger["head_hash"]:
         lines.append(
             f"{item}chain head seq {ledger['head_seq']} sha256 {ledger['head_hash']} (VALID)"
@@ -412,6 +443,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
         lines.append(f"{item}no chained rows yet (VALID)")
     if ledger["unchained_rows"]:
         lines.append(f"{item}{ledger['unchained_rows']} older v1 rows are not covered by the chain")
+    if ledger["checkpoints_missing"]:
+        lines.append(f"{item}{ledger['checkpoints_missing']} checkpoints were never kept")
     lines.append(head(f"Policy trail (resume chain: {' -> '.join(report['resume_chain'])})"))
     lines += [
         f"{item}{row.get('at', '?')} {row.get('task_id')} {row.get('actor', '?')} "

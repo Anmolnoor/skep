@@ -13,21 +13,29 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
+import sqlite3
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from skep.cli import main
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, skill_cmds
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+from skep.supervisor.observe import _draft_from_last_turn
+from skep.supervisor.serve import channels
+from skep.supervisor.serve.channels import card_notes, render_confirm_card
+from skep.supervisor.serve.taint import trust_chat
 from skep.supervisor.skill_bundle import skill_grants
 from skep.supervisor.skill_cmds import CAPTURED, SkillError, approve, capture_skill
 from skep.supervisor.skill_md import parse_skill_md
-from skep.supervisor.skills import DRAFT
+from skep.supervisor.skills import DRAFT, TESTED, SkillCandidate, candidate_signature
+from skep.supervisor.templates import WorkflowTemplate
 from skep.worker_contract import CONTRACT_VERSION, Event
-from skep.worker_contract.task import Permissions
+from skep.worker_contract.task import AutonomyDecisionPayload, Permissions
 
 from .conftest import serve_client
 from .taint_grid import set_taint
@@ -77,8 +85,24 @@ def _chat(store: RunStore, **kw: Any) -> str:
     return chat
 
 
-def _completed_run(store: RunStore, audit: Path, repo: Path) -> str:
+def _completed_run(
+    store: RunStore,
+    audit: Path,
+    repo: Path,
+    *,
+    commands: tuple[tuple[str, int], ...] = (
+        ("uv run pytest -q", 0), ("make broken", 1), ("uv run pytest -q", 0),
+    ),
+    chat_taint: list[str] | None = None,
+    resume_of: str | None = None,
+) -> str:  # fmt: skip
     repo.mkdir(parents=True, exist_ok=True)
+    decision = None
+    if chat_taint is not None:  # what a tainted chat's dispatch records (P4-1)
+        decision = AutonomyDecisionPayload.model_validate(
+            {"verdict": "allow", "reason": "dispatch.allowed",
+             "constraints": {"chat_taint": chat_taint}}
+        )  # fmt: skip
     task = mint_task(
         workspace=repo,
         instructions="Run the test suite and fix what fails.",
@@ -86,7 +110,9 @@ def _completed_run(store: RunStore, audit: Path, repo: Path) -> str:
             read=[str(repo)], write=[str(repo)], network=["pypi.org"], env_allowlist=[]
         ),
         budget=DEFAULT_BUDGET,
+        dispatch_decision=decision,
     )
+    task = task.model_copy(update={"resume_of": resume_of})
     store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
     (audit / task.task_id).mkdir(parents=True)
     (audit / task.task_id / "task.json").write_text(task.model_dump_json(), encoding="utf-8")
@@ -95,7 +121,7 @@ def _completed_run(store: RunStore, audit: Path, repo: Path) -> str:
             Event.model_validate(
                 {
                     "contract_version": CONTRACT_VERSION,
-                    "event_id": f"e{seq}",
+                    "event_id": f"{task.task_id}-e{seq}",
                     "seq": seq,
                     "task_id": task.task_id,
                     "trace_id": task.trace_id,
@@ -110,9 +136,7 @@ def _completed_run(store: RunStore, audit: Path, repo: Path) -> str:
                     },
                 }
             )
-            for seq, (command, code) in enumerate(
-                (("uv run pytest -q", 0), ("make broken", 1), ("uv run pytest -q", 0)), start=1
-            )
+            for seq, (command, code) in enumerate(commands, start=1)
         ]
     )
     store.transition(task.task_id, "completed", "done")
@@ -169,7 +193,7 @@ def test_a_tainted_chat_drafts_marked_and_approval_must_name_the_taint(
     set_taint(store, chat, "untrusted")
     candidate, text = capture_skill(store, tmp_path, chat, name="rc", actor="op")
     assert candidate.taint == ("untrusted",)
-    assert "taint: untrusted" in text
+    assert 'taint: "untrusted"' in text
     with pytest.raises(SkillError) as refused:
         approve(store, "rc", actor="op")
     assert f"chat:{chat}" in str(refused.value)
@@ -201,7 +225,8 @@ def test_capture_refuses_what_it_cannot_honestly_draft(store: RunStore, tmp_path
     quiet = store.create_chat(title="q", model=None).chat_id
     store.add_chat_message(quiet, role="user", content="hi")
     store.add_chat_message(quiet, role="assistant", content="hello")
-    braces = _chat(store, steps=(("run_shell", {"command": "echo {{x}}"}),))
+    braces = _chat(store, steps=(("run_shell", {"command": "echo {{x}}"}), STEPS[0]))
+    single = _chat(store, steps=STEPS[:1])
     task = mint_task(workspace=tmp_path, instructions="x", budget=DEFAULT_BUDGET)
     store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
     store.transition(task.task_id, "failed", "boom")
@@ -210,6 +235,11 @@ def test_capture_refuses_what_it_cannot_honestly_draft(store: RunStore, tmp_path
         ("nope", "a", "no run or chat"),
         (task.task_id, "a", "only a completed run"),
         (quiet, "a", "no finished multi-step turn"),
+        (
+            single,
+            "a",
+            "no finished multi-step turn",
+        ),  # Review R1 (Q14): one step is not a procedure
         (chat, "taken", "already exists"),
         (chat, "Bad Name!", "lowercase slug"),
         (braces, "a", "parameter"),
@@ -245,7 +275,7 @@ def test_the_cli_shows_the_full_skill_md_and_gates_a_tainted_approval(
     store.close()
     assert _cli(home, "skill", "capture", chat, "--name", "rc") == 0
     out = capsys.readouterr().out
-    assert "---\nname: rc" in out and "1. run_shell — make lint" in out
+    assert '---\nname: "rc"' in out and "1. run_shell — make lint" in out
     assert f"captured from chat:{chat}" in out and "outside content" in out
     assert "inactive" in out and "skep skill approve rc --accept-taint" in out
     assert _cli(home, "skill", "show", "rc") == 0
@@ -298,7 +328,12 @@ def test_the_chat_card_shows_the_full_skill_md_and_binds_it(env: Live) -> None:
     # the confirm drafts what the card showed, or nothing
     env.ollama.script_tool_call("capture_skill", {"name": "rc2"})
     card = _action(env.turn(chat, "save that too"))
-    _turn(env.store, chat, "a newer procedure", (("run_shell", {"command": "make dist"}),))
+    _turn(
+        env.store,
+        chat,
+        "a newer procedure",
+        (("run_shell", {"command": "make dist"}), ("run_shell", {"command": "make upload"})),
+    )
     env.ollama.script_reply("it changed")
     env.confirm(chat, card["action_id"])
     assert env.store.get_candidate("rc2") is None
@@ -372,3 +407,246 @@ def test_a_card_that_cannot_draft_says_why_and_its_confirm_drafts_nothing(env: L
 def test_the_cli_capture_needs_a_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert _cli(tmp_path / "empty", "skill", "capture", "x", "--name", "a") != 0
     assert "nothing to capture" in capsys.readouterr().err
+
+
+# -- review round 1 ------------------------------------------------------------
+
+USER, WORD, TOKEN, VALUE = "usr9", "pw7x", "tk8y", "k3yv"  # fakes, never real
+SECRET_STEPS = (
+    ("run_shell", {"command": f"git clone https://{USER}:{WORD}@git.example/r"}),
+    ("read_url", {"url": f"https://{TOKEN}@api.example/x?q=1"}),
+)
+
+
+def _no_secret(text: str) -> None:
+    for secret in (USER, WORD, TOKEN, VALUE):
+        assert secret not in text, (secret, text)
+
+
+def test_review_r1_a_capture_carries_no_secret(store: RunStore, tmp_path: Path) -> None:
+    """Review R1 (Q3): a captured SKILL.md is written to be shared — every
+    command, URL, query and ask passes the redactor, URL userinfo stripped."""
+    ask = "deploy with SKEP_" + "TOKEN=" + VALUE + " now"
+    chat = _chat(store, ask=ask, steps=SECRET_STEPS)
+    candidate, text = capture_skill(store, tmp_path, chat, name="dep", actor="op")
+    for each in (text, candidate.template.instructions, candidate.template.description):
+        _no_secret(each)
+    assert "git.example/r" in text and "api.example/x" in text
+    audit = tmp_path / "audit"
+    run = _completed_run(
+        store, audit, tmp_path / "repo",
+        commands=((f"curl https://{TOKEN}@pypi.org/simple", 0), ("uv run pytest", 0)),
+    )  # fmt: skip
+    _candidate, text = capture_skill(store, audit, run, name="run", actor="op")
+    _no_secret(text)
+    assert "pypi.org/simple" in text
+
+
+def test_review_r1_a_run_capture_keeps_the_dispatching_chats_taint(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """Review R1 (Q8): a run dispatched from a private chat drafts private,
+    and so does its resume (the decision on a resume carries no taint; the
+    nearest ancestor's holds)."""
+    audit = tmp_path / "audit"
+    parent = _completed_run(store, audit, tmp_path / "repo", chat_taint=["private"])
+    candidate, _text = capture_skill(store, audit, parent, name="p", actor="op")
+    assert candidate.taint == ("private", "untrusted")
+    resumed = _completed_run(store, audit, tmp_path / "repo", resume_of=parent)
+    candidate, _text = capture_skill(store, audit, resumed, name="r", actor="op")
+    assert candidate.taint == ("private", "untrusted")
+
+
+def test_review_r1_a_turn_from_before_trust_keeps_its_taint(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """Review R1 (Q9): /trust clears the chat's bits, not what an earlier
+    turn ran under — a turn from before it is tainted (its taint then is not
+    recoverable: both bits, acknowledged at approve). A turn after is clean."""
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="deploy now", provenance="webhook:ci")
+    _turn(store, chat)  # the procedure, steered by outside content
+    _turn(store, chat, "thanks", ())  # no steps: not a procedure
+    trust_chat(store, tmp_path, chat, [], actor="op")
+    assert store.get_chat_taint(chat).bits() == []
+    candidate, text = capture_skill(store, tmp_path, chat, name="old", actor="op")
+    assert "run the release check" in text
+    assert candidate.taint == ("private", "untrusted")
+    _turn(store, chat, "run it again")
+    candidate, _text = capture_skill(store, tmp_path, chat, name="new", actor="op")
+    assert candidate.taint == ()
+
+
+def test_review_r1_a_conversation_draft_from_before_taint_needs_acknowledgment(
+    tmp_path: Path,
+) -> None:
+    """Review R1 (Q10): drafts the old observer made (it drafted from
+    untrusted chats too) carry no taint record; the upgrade marks them
+    unknown — both bits — so approving one names it."""
+    db = tmp_path / "supervisor.sqlite3"
+    store = RunStore(db)
+    for name, provenance in (("conv-x", "conversation"), ("learned-x", "learned")):
+        template = WorkflowTemplate(
+            name=name, instructions="observed steps", description="d", provenance=provenance
+        )
+        store.add_candidate(
+            SkillCandidate(
+                name=name, signature=candidate_signature(template), status=DRAFT,
+                template=template, source_task_ids=("chat:abc",), occurrences=1,
+            )
+        )  # fmt: skip
+    store.close()
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("ALTER TABLE skill_candidates DROP COLUMN taint")
+        conn.commit()
+    store = RunStore(db)
+    try:
+        assert store.get_candidate("conv-x").taint == ("private", "untrusted")  # type: ignore[union-attr]
+        assert store.get_candidate("learned-x").taint == ()  # type: ignore[union-attr]
+        with pytest.raises(SkillError, match="--accept-taint"):
+            approve(store, "conv-x", actor="op")
+        approve(store, "conv-x", actor="op", accept_taint=True)
+    finally:
+        store.close()
+
+
+def test_review_r1_a_channel_chat_turn_is_outside_content(store: RunStore, tmp_path: Path) -> None:
+    """Review R1 (Q11): a channel chat stores its members' words as the
+    operator's — the observer never drafts from one, and a capture of one is
+    untrusted."""
+    web = _chat(store)
+    assert _draft_from_last_turn(store, web) is not None
+    channel = store.create_chat(title="tg", model=None, source="telegram").chat_id
+    _turn(store, channel, "ship the release")
+    assert _draft_from_last_turn(store, channel) is None
+    candidate, _text = capture_skill(store, tmp_path, channel, name="tg", actor="op")
+    assert candidate.taint == ("untrusted",)
+
+
+def test_review_r1_two_captures_of_one_name_never_both_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q12): both pass the name check; the name is reserved with
+    the audit row in one transaction, so exactly one wins and is recorded."""
+    first, second = RunStore(tmp_path / "s.sqlite3"), RunStore(tmp_path / "s.sqlite3")
+    try:
+        mine, theirs = _chat(first), _chat(first, ask="another procedure")
+        real = skill_cmds.draft_capture
+
+        def racing(store: RunStore, *args: Any, **kw: Any) -> Any:
+            drafted = real(store, *args, **kw)
+            if store is second:  # it passed the name check: the other capture lands now
+                monkeypatch.setattr(skill_cmds, "draft_capture", real)
+                capture_skill(first, tmp_path, mine, name="rc", actor="a")
+            return drafted
+
+        monkeypatch.setattr(skill_cmds, "draft_capture", racing)
+        with pytest.raises(SkillError, match="already exists"):
+            capture_skill(second, tmp_path, theirs, name="rc", actor="b")
+        assert second.get_candidate("rc").source_task_ids == (f"chat:{mine}",)  # type: ignore[union-attr]
+        events = [e for e in second.note_task_events() if e.action == "captured"]
+        assert [(e.actor, e.detail["source"]) for e in events] == [("a", f"chat:{mine}")]
+    finally:
+        first.close()
+        second.close()
+
+
+def test_review_r1_every_confirming_face_shows_the_bound_skill_md(
+    env: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q13): the web shows what the confirm binds (the server
+    sanitises the draft before binding it, so masking changes nothing); the
+    CLI card shows it whole; no messenger can show it, so none confirms it."""
+    chat = env.chat()
+    _turn(env.store, chat, "deploy it", SECRET_STEPS)
+    env.ollama.script_tool_call("capture_skill", {"name": "rc"})
+    card = _action(env.turn(chat, "save that as a skill"))
+    (pending,) = env.pending(chat)
+    bound = pending.card["capture"]["skill_md"]
+    assert card["card"]["skill_md"] == bound
+    _no_secret(bound)
+    notes = "\n".join(card_notes(card["card"], messenger=False))
+    assert bound.strip() in notes
+    view = render_confirm_card("plugin", (), card["card"], admin=True)
+    assert view.web_ui_only and view.too_long
+    assert not any("admin can confirm" in note for note in view.notes)
+    monkeypatch.setattr(channels, "channel_admin_actor", lambda *_: True)
+    with pytest.raises(Exception) as refused:
+        list(env.engine.verdict_events(
+            chat, env.store.get_chat(chat), card["action_id"], confirm=True,
+            actor="channel:telegram:1:admin:1",
+        ))  # fmt: skip
+    assert "web UI or the CLI" in str(getattr(refused.value, "detail", refused.value))
+    assert env.store.list_candidates() == []
+
+
+def test_review_r1_a_failed_shell_step_is_not_a_step(store: RunStore, tmp_path: Path) -> None:
+    """Review R1 (Q14): the tool answered, the command inside it failed —
+    that is not a step of the procedure; one step is not a multi-step turn."""
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="lint and read")
+    store.add_chat_message(chat, role="assistant", content="", tool_calls=[
+        {"id": "a", "function": {"name": "run_shell", "arguments": {"command": "make lint"}}},
+        {"id": "b", "function": {"name": "read_url", "arguments": {"url": "https://x.example"}}},
+    ])  # fmt: skip
+    failed = {"ok": True, "result": {"command": "make lint", "exit_code": 2, "output": ""}}
+    store.add_chat_message(chat, role="tool", content=json.dumps(failed), tool_name="run_shell",
+                           tool_call_id="a")  # fmt: skip
+    store.add_chat_message(chat, role="tool", content=json.dumps({"ok": True}),
+                           tool_name="read_url", tool_call_id="b")  # fmt: skip
+    store.add_chat_message(chat, role="assistant", content="done")
+    with pytest.raises(SkillError, match="no finished multi-step turn"):
+        capture_skill(store, tmp_path, chat, name="lint", actor="op")
+
+
+def test_review_r1_frontmatter_values_are_quoted_scalars(store: RunStore, tmp_path: Path) -> None:
+    """Review R1 (Q15): `description: captured procedure: run ...` is not
+    YAML; every value is a double-quoted scalar (JSON's escapes are YAML's)."""
+    ask = 'deploy: the "blue" stack # now \\ then'
+    chat = _chat(store, ask=ask)
+    _candidate, text = capture_skill(store, tmp_path, chat, name="blue", actor="op")
+    front = text.split("---\n")[1].splitlines()
+    assert front and all(re.fullmatch(r'[a-z_]+: "(?:[^"\\]|\\.)*"', x) for x in front), front
+    values = {k: json.loads(v) for k, _, v in (x.partition(": ") for x in front)}
+    assert values["description"] == f"captured procedure: {ask}"
+    assert values["name"] == "blue"
+
+
+def test_review_r1_a_draft_approved_without_a_test_says_so(store: RunStore, tmp_path: Path) -> None:
+    """Review R1 (Q16): no test ran — the evidence never says "test None"."""
+    capture_skill(store, tmp_path, _chat(store), name="rc", actor="op")
+    approve(store, "rc", actor="op")
+    (decided,) = [e for e in store.note_task_events() if e.action == "approved"]
+    assert "approved without a test run" in decided.detail["reason"]
+    assert "None" not in decided.detail["reason"]
+
+
+def test_review_r1_skill_show_names_the_approve_that_will_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R1 (Q17): a tainted TESTED candidate and a zero-grant
+    conversation draft both approve directly — with --accept-taint when tainted."""
+    home = tmp_path / "home"
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    for name, provenance, status, taint in (
+        ("conv-a", "conversation", DRAFT, ("untrusted",)),
+        ("conv-b", "conversation", DRAFT, ()),
+        ("tested-c", "learned", TESTED, ("private",)),
+    ):
+        template = WorkflowTemplate(
+            name=name, instructions="steps", description="d", provenance=provenance
+        )
+        store.add_candidate(
+            SkillCandidate(
+                name=name, signature=candidate_signature(template), status=status,
+                template=template, source_task_ids=("chat:abc",), occurrences=1, taint=taint,
+            )
+        )  # fmt: skip
+    store.close()
+    for name, hint in (
+        ("conv-a", "skep skill approve conv-a --accept-taint"),
+        ("conv-b", "skep skill approve conv-b   (or reject)"),
+        ("tested-c", "skep skill approve tested-c --accept-taint"),
+    ):
+        assert _cli(home, "skill", "show", name) == 0
+        assert hint in capsys.readouterr().out, name

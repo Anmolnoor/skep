@@ -15,6 +15,7 @@ dispatchable, schedulable, governed by normal worker capabilities at run time.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -157,6 +158,12 @@ def template_from_skill_md(
 
 def render_skill_md(front: dict[str, str], body: str) -> str:
     """Phase 08 (8.2): the inverse of ``parse_skill_md`` for one-line
-    frontmatter values — what ``skep skill capture`` drafts."""
-    head = "".join(f"{key}: {' '.join(value.split())}\n" for key, value in front.items() if value)
+    frontmatter values — what ``skep skill capture`` drafts. Review R1
+    (Q15): each value a double-quoted scalar (JSON's escapes are YAML's), so
+    ``description: captured procedure: run ...`` stays one valid value."""
+    head = "".join(
+        f"{key}: {json.dumps(' '.join(value.split()), ensure_ascii=False)}\n"
+        for key, value in front.items()
+        if value
+    )
     return f"---\n{head}---\n\n{body.strip()}\n"

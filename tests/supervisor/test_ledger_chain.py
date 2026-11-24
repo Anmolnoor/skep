@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import resource
 import shutil
 import sqlite3
 import subprocess
@@ -23,8 +26,8 @@ from typing import Any
 import pytest
 
 from skep.cli import main
-from skep.supervisor import RunStore, SupervisorConfig, policy_v3
-from skep.supervisor.forensics import build_run_forensics, render_forensics
+from skep.supervisor import RunStore, SupervisorConfig, ledger_proof, policy_v3
+from skep.supervisor.forensics import _v1, build_run_forensics, render_forensics
 from skep.supervisor.ledger_proof import build_receipt, render_receipt, verify_ledger
 from skep.supervisor.policy_v3 import chain_hash, log_decision
 
@@ -82,20 +85,78 @@ def test_a_caller_hash_or_version_never_bends_the_chain(tmp_path: Path) -> None:
 def test_v1_rows_stay_as_written_and_read_unchained(tmp_path: Path) -> None:
     policy = tmp_path / "policy"
     policy.mkdir()
-    old = '{"value": "ls", "v": 1}\n{"value": "pwd"}\nnot json at all\n'
+    old = '{"value": "ls", "v": 1}\n{"value": "pwd"}\n'
     (policy / "decisions.jsonl.1").write_text('{"value": "older", "v": 1}\n')
     _live(tmp_path).write_text(old)
     log_decision(tmp_path, {"value": "new"})
     log_decision(tmp_path, {"value": "newer"})
     text = _live(tmp_path).read_text()
     assert text.startswith(old)  # never rewritten
-    first, second = (json.loads(line) for line in text.splitlines()[3:])
+    first, second = (json.loads(line) for line in text.splitlines()[2:])
     assert (first["seq"], first["prev_hash"]) == (1, "GENESIS")
     assert second["prev_hash"] == first["hash"]
     result = verify_ledger(tmp_path)
     assert result["status"] == "VALID"
-    assert (result["unchained"], result["chained"]) == (4, 2)
-    assert result["head"]["line"] == 5
+    assert (result["unchained"], result["chained"]) == (3, 2)
+    assert result["head"]["line"] == 4
+
+
+def _chain(tmp_path: Path, rows: int = 3) -> Path:
+    for n in range(rows):
+        log_decision(tmp_path, {"value": f"row {n}"})
+    copy = tmp_path / "copy.jsonl"
+    shutil.copy(_live(tmp_path), copy)
+    return copy
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('"v": 2', '"v": 1'),  # a chained row passed off as an old v1 row
+        ('"v": 2', '"v": 3'),  # an unknown version
+        ('{"', "{"),  # not JSON any more
+    ],
+)
+def test_review_r1_a_tampered_first_row_is_never_an_old_unchained_row(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    """Review R1 (Q1): only a JSON row that is v1 (or older) and carries no
+    chain keys reads as pre-chain; anything else on line 1 is the break."""
+    copy = _chain(tmp_path)
+    _flip(copy, 1, old, new)
+    _flip(_live(tmp_path), 1, old, new)
+    for result in (verify_ledger(path=copy), verify_ledger(tmp_path)):
+        assert result["status"] == "BROKEN"
+        assert result["break"]["line"] == 1
+
+
+def test_review_r1_the_sole_chained_row_and_the_final_newline_are_checked(
+    tmp_path: Path,
+) -> None:
+    sole = _chain(tmp_path, rows=1)
+    _flip(sole, 1, '"hash": "', '"hash: "')
+    assert verify_ledger(path=sole)["break"]["line"] == 1
+    cut = _chain(tmp_path / "b", rows=2)
+    cut.write_bytes(cut.read_bytes().removesuffix(b"\n"))  # the bytes skep wrote end in \n
+    broken = verify_ledger(path=cut)["break"]
+    assert broken["line"] == 2 and "bytes" in broken["reason"]
+
+
+def test_review_r1_v1_rows_before_the_chain_anchor_it_at_genesis_even_offline(
+    tmp_path: Path,
+) -> None:
+    """Rows from before the chain mean the copy holds the log's start: its
+    first chained row must then be seq 1 from GENESIS, --path or not."""
+    lines = _lines(_chain(tmp_path))
+    copy = tmp_path / "spliced.jsonl"
+    copy.write_text('{"value": "old", "v": 1}\n' + "".join(f"{x}\n" for x in lines[1:]))
+    result = verify_ledger(path=copy)
+    assert result["status"] == "BROKEN" and result["break"]["line"] == 2
+    assert "GENESIS" in result["break"]["reason"]
+    for first in ('{"value": "old", "v": 1, "seq": 4}', "[]", '"a row?"'):
+        odd = tmp_path / "odd.jsonl"
+        odd.write_text(f"{first}\n{lines[0]}\n")
+        assert verify_ledger(path=odd)["break"]["line"] == 1, first
 
 
 def test_rotation_carries_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,6 +508,8 @@ def test_forensics_shows_the_chain_head_and_v1(config: SupervisorConfig, landed:
         "head_seq": head["seq"],
         "head_hash": head["hash"],
         "unchained_rows": 0,
+        "checkpoints_missing": 0,
+        "task_rows": 2,
         "break": None,
     }
     assert report["outcome"]["g10"]["v1"] == "clean"
@@ -481,3 +544,240 @@ def test_a_run_with_no_patch_and_no_g10_says_so(config: SupervisorConfig, tmp_pa
     assert receipt["ledger"]["head_hash"] is None
     markdown = render_receipt(receipt, "md")
     assert "G10 not run" in markdown and "no chained rows yet" in markdown
+
+
+# -- review round 1 ------------------------------------------------------------
+
+
+def test_review_r1_a_failing_checkpoint_store_never_loses_a_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review R1 (Q2, I8/I13): the JSONL row IS the decision. A corrupt,
+    read-only or locked chain.sqlite3 costs its checkpoint, logged — never
+    the row, and never the caller's loop (a raise here aborted batches)."""
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_EVERY", 2)
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_TIMEOUT_SECONDS", 0.05)
+    corrupt = tmp_path / "corrupt"
+    (corrupt / "policy").mkdir(parents=True)
+    (corrupt / "policy" / "chain.sqlite3").write_text("not sqlite")
+    with caplog.at_level(logging.WARNING):
+        for n in range(5):
+            log_decision(corrupt, {"n": n})
+    assert [r["seq"] for r in _rows(_live(corrupt))] == [1, 2, 3, 4, 5]
+    assert "checkpoint" in caplog.text
+
+    readonly = tmp_path / "readonly"
+    for n in range(2):
+        log_decision(readonly, {"n": n})  # seq 2's checkpoint is kept
+    db = readonly / "policy" / "chain.sqlite3"
+    db.chmod(0o444)
+    try:
+        for n in range(2, 6):
+            log_decision(readonly, {"n": n})
+    finally:
+        db.chmod(0o644)
+    result = verify_ledger(readonly)
+    assert result["status"] == "VALID" and result["head"]["seq"] == 6
+    assert result["checkpoints_missing"] == 2  # seq 4 and 6: said, never a false break
+
+    locked = tmp_path / "locked"
+    log_decision(locked, {"n": 0})
+    holder = sqlite3.connect(locked / "policy" / "chain.sqlite3", isolation_level=None)
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        log_decision(locked, {"n": 1})  # a checkpoint row is due: waits briefly, then moves on
+    finally:
+        holder.close()
+    assert [r["seq"] for r in _rows(_live(locked))] == [1, 2]
+
+
+def test_review_r1_the_receipt_strips_url_userinfo_in_both_formats(
+    config: SupervisorConfig, landed: str, capsys: Any
+) -> None:
+    """Review R1 (Q3): a G10 command's URL userinfo — a bare username can be
+    the token — never reaches a receipt, markdown or JSON."""
+    user, word, token = "usr9", "pw7x", "tk8y"
+    store = RunStore(config.db_path)
+    try:
+        store.record_reverification(
+            landed,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=[f"git clone https://{user}:{word}@git.example/r",
+                      f"curl https://{token}@api.example/x"],
+            exit_codes=[0, 0],
+            detail="ok [command from the project's pinned verify_command]",
+            base_commit="abc123",
+        )  # fmt: skip
+    finally:
+        store.close()
+    home = str(config.home.parent)
+    outs = []
+    for fmt in ("md", "json"):
+        assert main(["--home", home, "proof", "export", landed, "--format", fmt]) == 0
+        outs.append(capsys.readouterr().out)
+    for out in outs:
+        assert "api.example/x" in out
+        for secret in (user, word, token):
+            assert secret not in out, (secret, out)
+
+
+@pytest.mark.parametrize(
+    ("source", "said"),
+    [
+        ("project", "from the project pin"),
+        ("worker", "from the worker's own verify step (unpinned fallback)"),
+        ("unknown", "source unknown"),
+    ],
+)
+def test_review_r1_the_receipt_names_where_the_g10_command_came_from(
+    config: SupervisorConfig, landed: str, source: str, said: str
+) -> None:
+    """Review R1 (Q4, I2/I8): an unpinned repo's fallback is the worker's own
+    choice — never "the worker pin"."""
+    receipt = _receipt(config, landed)
+    receipt["g10"]["commands_source"] = source
+    line = next(x for x in render_receipt(receipt, "md").splitlines() if x.startswith("| G10 "))
+    assert said in line and "worker pin" not in line
+
+
+def test_review_r1_v1_says_clean_tampered_unreadable_or_not_inspected() -> None:
+    """Review R1 (Q5): counts nobody could read block auto-landing — that is
+    not "clean"; a check that could not read the patch is not "tampered"."""
+    ok = {"status": "ok", "runner": "pytest"}
+    assert _v1((), ok) == "clean"
+    assert _v1(("test_file_deleted:tests/a.py",), ok) == "tampered: test_file_deleted:tests/a.py"
+    assert _v1((), {"status": "unparseable", "runner": "pytest"}).startswith("unreadable:")
+    assert _v1(("tamper_check_failed:OSError",), None).startswith("not inspected:")
+    both = ("tamper_check_failed:OSError", "test_total_dropped")
+    assert _v1(both, ok).startswith("tampered: ")
+    assert _v1((), {"status": "unknown", "runner": None}).startswith("clean")
+    assert _v1((), None) == "not recorded"
+
+
+def test_review_r1_verify_holds_one_generation_open_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q6): one descriptor per retained generation ran a
+    long-lived home out of them (EMFILE)."""
+    monkeypatch.setattr(policy_v3, "DECISION_LOG_MAX_BYTES", 1)
+    for n in range(150):
+        log_decision(tmp_path, {"n": n})
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (len(os.listdir("/dev/fd")) + 40, hard))
+    try:
+        result = verify_ledger(tmp_path)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert result["status"] == "VALID" and result["chained"] == 150
+
+
+def test_review_r1_verified_generations_are_not_rehashed_until_they_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q6): forensics and every receipt verify the log; a rotated
+    generation never changes, so once verified it is not hashed again —
+    until its bytes (or a checkpoint inside it) change."""
+    monkeypatch.setattr(policy_v3, "DECISION_LOG_MAX_BYTES", 200)
+    for n in range(8):
+        log_decision(tmp_path, {"value": f"row {n}"})
+    hashed: list[int] = []
+
+    def counting(body: dict[str, Any]) -> str:
+        hashed.append(body["seq"])
+        return chain_hash(body)
+
+    monkeypatch.setattr(ledger_proof, "chain_hash", counting)
+    assert verify_ledger(tmp_path)["status"] == "VALID"
+    assert sorted(hashed) == list(range(1, 9))
+    hashed.clear()
+    again = verify_ledger(tmp_path)
+    assert again["status"] == "VALID" and again["head"]["seq"] == 8
+    live = {row["seq"] for row in _rows(_live(tmp_path))}
+    assert set(hashed) == live  # only the live file, which still grows
+    with sqlite3.connect(tmp_path / "policy" / "chain.sqlite3") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS checkpoints"
+            " (seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, at TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO checkpoints VALUES (1, 'f00d', 'x')")
+    assert verify_ledger(tmp_path)["break"]["line"] == 1  # a checkpoint added later, checked
+    (tmp_path / "policy" / "chain.sqlite3").unlink()
+    _flip(tmp_path / "policy" / "decisions.jsonl.1", 1, "row 0", "row 9")
+    result = verify_ledger(tmp_path)
+    assert result["status"] == "BROKEN" and result["break"]["file"].endswith(".jsonl.1")
+
+
+def test_review_r1_the_receipt_counts_decisions_in_the_snapshot_it_heads(
+    config: SupervisorConfig, landed: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q6): the count and the head come from one snapshot — rows
+    of the run in a rotated generation count, as the head covers them."""
+    monkeypatch.setattr(policy_v3, "DECISION_LOG_MAX_BYTES", 1)
+    log_decision(config.audit_dir, _row(landed, value="git log"))
+    log_decision(config.audit_dir, _row(landed, value="git diff"))
+    receipt = _receipt(config, landed)
+    result = verify_ledger(config.audit_dir, count_task=landed)
+    assert receipt["decisions"] == result["task_rows"] == 4
+    assert receipt["ledger"]["head_seq"] == result["head"]["seq"] == 5
+
+
+def test_review_r1_markdown_and_paths_are_quoted_where_they_land(
+    config: SupervisorConfig, landed: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (Q7): a checkpoint db under a path with ? or # still opens;
+    a break with no file says "-", never None; a pipe or a backtick in a
+    command cannot reshape the receipt's table."""
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_EVERY", 2)
+    odd = tmp_path / "a?b#c%20d"
+    for n in range(3):
+        log_decision(odd, {"n": n})
+    result = verify_ledger(odd)
+    assert result["status"] == "VALID" and result["checkpoints"] == 1
+
+    store = RunStore(config.db_path)
+    try:
+        store.record_reverification(
+            landed, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["uv run pytest | tee out.txt", "echo `date`"], exit_codes=[0, 0],
+            detail="ok [command from the project's pinned verify_command]",
+        )  # fmt: skip
+    finally:
+        store.close()
+    (config.audit_dir / "policy" / "chain.sqlite3").write_text("not sqlite")
+    markdown = render_receipt(_receipt(config, landed), "md")
+    assert "None" not in markdown and "BROKEN at -:-" in markdown
+    for line in markdown.splitlines():
+        if line.startswith("| ") and "---" not in line:
+            assert line.replace("\\|", "").count("|") == 3, line
+    g10 = next(x for x in markdown.splitlines() if x.startswith("| G10 "))
+    assert "`` uv run pytest \\| tee out.txt && echo `date` ``" in g10
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        report_text = render_forensics(
+            build_run_forensics(store, config.audit_dir, landed), markdown=False
+        )
+    finally:
+        store.close()
+    assert "None:None" not in report_text and "BROKEN at -:-" in report_text
+
+
+def test_review_r1_missing_checkpoints_read_as_degraded_on_every_face(
+    config: SupervisorConfig, landed: str, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """Review R1 (Q2): a checkpoint that was due but never kept is said on
+    the CLI, in forensics and on the receipt — VALID, coverage degraded."""
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_EVERY", 1)  # all three rows were due one
+    assert main(["--home", str(config.home.parent), "ledger", "verify"]) == 0
+    assert "3 due were never kept: coverage degraded" in capsys.readouterr().out
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        text = render_forensics(
+            build_run_forensics(store, config.audit_dir, landed), markdown=False
+        )
+    finally:
+        store.close()
+    assert "3 checkpoints were never kept" in text
+    markdown = render_receipt(_receipt(config, landed), "md")
+    assert "VALID" in markdown and "3 checkpoints were never kept" in markdown

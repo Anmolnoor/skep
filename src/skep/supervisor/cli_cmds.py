@@ -800,6 +800,8 @@ def cmd_ledger_verify(args: argparse.Namespace) -> int:
     summary += (
         f"; {result['unchained']} older v1 rows unchained; {result['checkpoints']} checkpoints"
     )
+    if result["checkpoints_missing"]:  # Review R1 (Q2): a failed write, said — not a break
+        summary += f" ({result['checkpoints_missing']} due were never kept: coverage degraded)"
     if result["break"]:
         where = result["break"]
         print(f"BROKEN {where['file'] or '-'}:{where['line'] or '-'}: {where['reason']}")

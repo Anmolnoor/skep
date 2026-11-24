@@ -1378,6 +1378,15 @@ class RunStore:
                 # W21: the bits of the chat that wrote the row (a JSON list,
                 # NULL = none); a chat that reads the row takes them on.
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
+                if table == "skill_candidates":
+                    # Review R1 (Q10): the observer drafted from untrusted chats
+                    # before taint was recorded; what an open conversation draft
+                    # read is unknown — both bits, so approving it names them.
+                    self._conn.execute(
+                        "UPDATE skill_candidates SET taint = ? WHERE status IN ('draft', 'tested')"
+                        " AND json_extract(template_json, '$.provenance') = 'conversation'",
+                        (_taint_json(TAINT_BITS),),
+                    )
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
@@ -2904,24 +2913,56 @@ class RunStore:
         self._conn.execute(
             f"INSERT OR REPLACE INTO skill_candidates ({self._CANDIDATE_COLS})"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                candidate.name,
-                candidate.signature,
-                candidate.status,
-                json.dumps(template_to_dict(candidate.template)),
-                json.dumps(list(candidate.source_task_ids)),
-                candidate.occurrences,
-                candidate.test_task_id,
-                candidate.test_outcome,
-                candidate.decided_by,
-                candidate.decided_at,
-                candidate.decision_note,
-                candidate.registry_name,
-                candidate.created_at or _now(),
-                _taint_json(candidate.taint),
-            ),
+            self._candidate_values(candidate),
         )
         self._conn.commit()
+
+    @_locked
+    def add_new_candidate(
+        self, candidate: SkillCandidate, *, action: str, actor: str, detail: dict[str, Any]
+    ) -> bool:
+        """Review R1 (Q12): insert a candidate whose name no candidate or
+        template holds, with its audit row, in one write transaction — False,
+        nothing written, when the name is taken (of two racing writers on
+        separate connections, exactly one wins)."""
+        with self._conn:
+            self._begin_immediate()
+            taken = self._conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM skill_candidates WHERE name = ?)"
+                " OR EXISTS (SELECT 1 FROM templates WHERE name = ?)",
+                (candidate.name, candidate.name),
+            ).fetchone()[0]
+            if taken:
+                return False
+            self._conn.execute(
+                f"INSERT INTO skill_candidates ({self._CANDIDATE_COLS})"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                self._candidate_values(candidate),
+            )
+            self._record_note_task_event(
+                kind="skill_candidate", item_id=candidate.name, action=action, actor=actor,
+                detail=detail,
+            )  # fmt: skip
+        return True
+
+    @staticmethod
+    def _candidate_values(candidate: SkillCandidate) -> tuple[Any, ...]:
+        return (
+            candidate.name,
+            candidate.signature,
+            candidate.status,
+            json.dumps(template_to_dict(candidate.template)),
+            json.dumps(list(candidate.source_task_ids)),
+            candidate.occurrences,
+            candidate.test_task_id,
+            candidate.test_outcome,
+            candidate.decided_by,
+            candidate.decided_at,
+            candidate.decision_note,
+            candidate.registry_name,
+            candidate.created_at or _now(),
+            _taint_json(candidate.taint),
+        )
 
     @_locked
     def get_candidate(self, name: str) -> SkillCandidate | None:

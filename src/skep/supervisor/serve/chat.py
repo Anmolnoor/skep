@@ -3310,6 +3310,13 @@ class ChatEngine:
             from .channels import fold_fits_a_messenger, forge_fits_a_messenger
 
             forged = (action.card or {}).get("forge")
+            if action.tool == "capture_skill":
+                # Review R1 (Q13, I6/I8): no press saves a SKILL.md no messenger shows whole
+                raise HTTPException(
+                    status_code=403,
+                    detail="this capture_skill card saves a SKILL.md a messenger does not show "
+                    "in full: open the skep web UI or the CLI (skep chat) to read and confirm it",
+                )
             if action.tool == "promote_tool" and not (
                 isinstance(forged, dict) and forge_fits_a_messenger(forged)
             ):

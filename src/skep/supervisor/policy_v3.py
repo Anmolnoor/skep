@@ -1096,11 +1096,22 @@ def redact(value: str) -> str:
     return value
 
 
+_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@]+@")
+
+
+def redact_export(value: str) -> str:
+    """Review R1 (Q3): ``redact`` for text that leaves skep (a receipt, a
+    captured SKILL.md) — and no URL userinfo at all, since a bare username
+    can be the token (``https://<token>@host``)."""
+    return redact(_USERINFO.sub(r"\1***@", value))
+
+
 # ES-F281: every logger skep creates. test_log_redaction scans the source, so
 # a new getLogger("skep.*") that is not listed here fails the suite.
 SKEP_LOGGERS = (
     "skep.dispatch",
     "skep.ingest",
+    "skep.policy",
     "skep.scheduler",
     "skep.serve",
     "skep.spawner",
@@ -1164,6 +1175,8 @@ def decision_log_paths(audit_dir: Path) -> list[Path]:
 GENESIS = "GENESIS"
 CHECKPOINT_EVERY = 100
 CHAIN_DB = "chain.sqlite3"
+CHECKPOINT_TIMEOUT_SECONDS = 1.0  # a locked chain.sqlite3 delays a decision this long at most
+_log = logging.getLogger("skep.policy")
 
 
 def chain_hash(body: Mapping[str, Any]) -> str:
@@ -1239,13 +1252,24 @@ def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({**body, "hash": digest}) + "\n")
         if (seq + 1) % CHECKPOINT_EVERY == 0:
-            with closing(sqlite3.connect(path.parent / CHAIN_DB)) as db, db:
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS checkpoints"
-                    " (seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, at TEXT NOT NULL)"
-                )
-                # OR IGNORE: a restarted chain never overwrites the first anchor
-                db.execute(
-                    "INSERT OR IGNORE INTO checkpoints VALUES (?, ?, ?)",
-                    (seq + 1, digest, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
-                )
+            _checkpoint(path.parent / CHAIN_DB, seq + 1, digest)
+
+
+def _checkpoint(db_path: Path, seq: int, digest: str) -> None:
+    """Review R1 (Q2, I8/I12/I13): the row above IS the decision, already
+    written. A corrupt, read-only or locked ``chain.sqlite3`` costs this
+    checkpoint, logged — never the row, never the caller's batch;
+    ``verify_ledger`` counts the missing checkpoint as degraded coverage."""
+    try:
+        with closing(sqlite3.connect(db_path, timeout=CHECKPOINT_TIMEOUT_SECONDS)) as db, db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS checkpoints"
+                " (seq INTEGER PRIMARY KEY, hash TEXT NOT NULL, at TEXT NOT NULL)"
+            )
+            # OR IGNORE: a restarted chain never overwrites the first anchor
+            db.execute(
+                "INSERT OR IGNORE INTO checkpoints VALUES (?, ?, ?)",
+                (seq, digest, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            )
+    except (sqlite3.Error, OSError) as exc:
+        _log.warning("decision log: seq %d is written; its checkpoint is not (%s)", seq, exc)
