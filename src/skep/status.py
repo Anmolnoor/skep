@@ -132,6 +132,7 @@ def worker_provider_check(home: Path, timeout: float, *, offline: bool = False) 
     from .supervisor.serve.llm import OllamaError, list_models
     from .workers.llm_plan import (
         LlmPlanError,
+        LlmUpstreamError,
         provider_probe_target,
         worker_provider_from_home,
     )
@@ -146,6 +147,8 @@ def worker_provider_check(home: Path, timeout: float, *, offline: bool = False) 
                 "finish setup in the web UI or run skep setup --personal",
             }
         endpoint, protocol, api_key, model = provider_probe_target(provider)
+    except LlmUpstreamError as exc:  # R2 (F11): a refused token exchange, by its status
+        return _probe_failure(exc, "the worker credential", "the provider {} the token exchange")
     except LlmPlanError as exc:
         # v127-F4: ``kind`` says why — a config error no run could get past
         # ("config"), a refused key ("auth": HTTP 401/403), or anything else
@@ -1210,7 +1213,7 @@ def _queen_context_check(home: Path) -> dict[str, Any]:
     the store only; the probe runs where the model changes."""
     from dataclasses import asdict
 
-    from .supervisor.serve.llm import assistant_llm, resolve_context_window
+    from .supervisor.serve.llm import _staged_view, assistant_llm, resolve_context_window
     from .supervisor.store import RunStore
 
     db = home / "supervisor" / "supervisor.sqlite3"
@@ -1220,7 +1223,8 @@ def _queen_context_check(home: Path) -> dict[str, Any]:
     try:
         if assistant_llm(store)[1] is None:
             return {}
-        return asdict(resolve_context_window(store))
+        # R3 (Neon R3-1): keyed as Settings reads it on an upgraded home
+        return asdict(resolve_context_window(_staged_view(store, home / "supervisor")))
     finally:
         store.close()
 
@@ -1357,7 +1361,13 @@ def _provider_check(
             "detail": "Provider model is missing.",
             "next_step": "run setup --personal --provider <name> --model <model>",
         }
-    if provider.api_key_env and not env.get(provider.api_key_env):
+    # R2 (F9): the worker's actual credential decides — a registry key file
+    # that replaced the env var profile.json names is no missing key
+    if (
+        provider.api_key_env
+        and not env.get(provider.api_key_env)
+        and worker.get("status") not in ("ready", "skipped")
+    ):
         return {
             "status": "blocked",
             "detail": f"Provider credential env var {provider.api_key_env} is not set.",

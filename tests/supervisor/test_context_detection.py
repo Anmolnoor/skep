@@ -263,37 +263,219 @@ def test_a_credential_error_is_a_miss_never_a_crash(
     assert store.get_setting(key) is None
 
 
+def _recorded(
+    monkeypatch: pytest.MonkeyPatch, clock: list[float] | None = None
+) -> tuple[list[str], list[float]]:
+    """(every URL the probe asks, each one's timeout) — each answered 404,
+    no network. With ``clock``, each request costs one second of it."""
+    import contextlib
+
+    import httpx
+
+    asked: list[str] = []
+    timeouts: list[float] = []
+
+    def answer(method: str, url: str, **kwargs: object) -> httpx.Response:
+        asked.append(url)
+        timeouts.append(float(kwargs["timeout"]))  # type: ignore[arg-type]
+        if clock is not None:
+            clock[0] += 1.0
+        return httpx.Response(404, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: answer("GET", url, **kw))
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: answer("POST", url, **kw))
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda method, url, **kw: contextlib.nullcontext(answer(method, url, **kw)),
+    )
+    return asked, timeouts
+
+
 def test_one_deadline_covers_every_probe_and_a_dead_host_stops_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F10: the probes share one wall-clock budget, and a transport failure
     ends the probe — no second wait on a host that just timed out."""
+    import contextlib
     from types import SimpleNamespace
 
     import httpx
 
     clock = [100.0]
-    asked: list[tuple[str, float]] = []
-
-    def slow_404(url: str, **kwargs: object) -> httpx.Response:
-        asked.append((url, float(kwargs["timeout"])))  # type: ignore[arg-type]
-        clock[0] += 1.0
-        return httpx.Response(404, request=httpx.Request("GET", url))
-
     monkeypatch.setattr(llm, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(httpx, "get", slow_404)
-    assert llm.detect_model_ctx("http://h", None, model="m1", protocol="openai-compat") is None
-    assert [timeout for _, timeout in asked] == [3.0, 2.0, 1.0]  # one 3 s budget, shrinking
+    _asked, timeouts = _recorded(monkeypatch, clock)
+    local = "http://127.0.0.1:9"
+    assert llm.detect_model_ctx(local, None, model="m1", protocol="openai-compat") is None
+    assert timeouts == [3.0, 2.0, 1.0]  # one 3 s budget, shrinking
 
-    asked.clear()
+    dead_asked: list[str] = []
 
-    def dead(url: str, **kwargs: object) -> httpx.Response:
-        asked.append((url, float(kwargs["timeout"])))  # type: ignore[arg-type]
+    def dead(method: str, url: str, **kwargs: object) -> contextlib.AbstractContextManager[None]:
+        dead_asked.append(url)
         raise httpx.ConnectTimeout("timed out")
 
-    monkeypatch.setattr(httpx, "get", dead)
-    assert llm.detect_model_ctx("http://h", None, model="m1", protocol="openai-compat") is None
-    assert [url for url, _ in asked] == ["http://h/v1/models"]
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: dead("GET", url, **kw))
+    monkeypatch.setattr(httpx, "stream", dead)
+    assert llm.detect_model_ctx(local, None, model="m1", protocol="openai-compat") is None
+    assert dead_asked == [f"{local}/v1/models"]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://gw.example/tenant/v1", "https://api.example.com/v1", "http://127.0.0.1:9/tenant/v1"],
+)
+def test_a_credential_never_leaves_the_configured_prefix(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """R2 (G1, I11): a listing with no window was followed by
+    <root>/api/v1/models and <root>/props with the bearer — for
+    <base>/tenant/v1 that is <base>/tenant/api/v1/models, outside the API
+    the key was configured for (maybe another service on the gateway).
+    Outside the prefix is asked only on a local server's host root or an
+    LM Studio preset."""
+    asked, _ = _recorded(monkeypatch)
+    assert llm.detect_model_ctx(base_url, "sk-a", model="m1", protocol="openai-compat") is None
+    assert asked == [f"{base_url}/models"]
+
+
+def test_an_lm_studio_preset_still_asks_its_native_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked, _ = _recorded(monkeypatch)
+    base = "http://192.168.1.5:1234/v1"  # LM Studio served on the LAN
+    llm.detect_model_ctx(base, None, model="m1", protocol="openai-compat", lmstudio=True)
+    assert asked == [f"{base}/models", "http://192.168.1.5:1234/api/v1/models"]
+
+
+def test_refresh_names_an_lm_studio_preset_profile(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[object] = []
+    monkeypatch.setattr(llm, "detect_model_ctx", lambda *a, **kw: seen.append(kw["lmstudio"]))
+    store.upsert_provider_profile(
+        ProviderProfile(
+            "lmstudio", "openai_compat", "http://10.0.0.2:1234/v1", "m1",
+            active=True, source="preset:lmstudio",
+        )
+    )  # fmt: skip
+    refresh_model_ctx(store, tmp_path, "m1")
+    _profile(store, "other", "http://10.0.0.3:1234/v1", "m1")
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert seen == [True, False]
+
+
+@pytest.mark.parametrize("protocol", ["openai-compat", "ollama"])
+def test_a_host_that_trickles_bytes_never_holds_the_probe_past_its_deadline(
+    protocol: llm.LLMProtocol,
+) -> None:
+    """R2 (G3): httpx's timeout is per read, so one byte every 50 ms kept a
+    0.35 s probe going for 0.63 s; the deadline is wall-clock now."""
+    import socket
+    import threading
+    import time
+
+    server = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def trickle() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                for _ in range(100):
+                    if stop.is_set():
+                        return
+                    try:
+                        conn.sendall(b" ")
+                    except OSError:
+                        break
+                    time.sleep(0.05)
+
+    threading.Thread(target=trickle, daemon=True).start()
+    base = f"http://127.0.0.1:{server.getsockname()[1]}"
+    try:
+        began = time.monotonic()
+        assert llm.detect_model_ctx(base, None, model="m1", protocol=protocol, timeout=0.3) is None
+        assert time.monotonic() - began < 0.6
+    finally:
+        stop.set()
+        server.close()
+
+
+def test_a_slow_probe_never_overwrites_a_newer_refresh(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (G4): the startup probe of the old configuration finishing after a
+    save's refresh (key or protocol changed meanwhile) left the old answer."""
+    import threading
+
+    _profile(store, "vllm", "http://127.0.0.1:9", "m1")
+    started, release = threading.Event(), threading.Event()
+
+    def detect(*_: object, **__: object) -> tuple[int, None]:
+        if not started.is_set():
+            started.set()
+            release.wait(5)
+            return 8192, None  # what the old configuration answered
+        return 131072, None
+
+    monkeypatch.setattr(llm, "detect_model_ctx", detect)
+    old = threading.Thread(target=refresh_model_ctx, args=(store, tmp_path, "m1"))
+    old.start()
+    assert started.wait(5)
+    refresh_model_ctx(store, tmp_path, "m1")
+    release.set()
+    old.join(5)
+    assert resolve_context_window(store).model_window == 131072
+
+
+def test_a_bad_body_or_url_is_a_miss_and_the_next_probe_still_runs(
+    store: RunStore, tmp_path: Path, openai: FakeOpenAI
+) -> None:
+    """R2 (G5): a bad gzip body (httpx.DecodingError) or an invalid URL
+    escaped _get_json — a 500 after a committed save."""
+    openai.api_key = None
+    openai.listing_bad_gzip = True
+    openai.props = {"default_generation_settings": {"n_ctx": 8192}}
+    _profile(store, "llamacpp", openai.base_url, "m1")
+    refresh_model_ctx(store, tmp_path, "m1")
+    assert resolve_context_window(store).model_window == 8192
+    for protocol in ("openai-compat", "ollama"):
+        assert llm.detect_model_ctx("http://a\x00b", None, model="m1", protocol=protocol) is None
+
+
+def test_the_startup_probe_caches_under_the_identity_settings_will_read(tmp_path: Path) -> None:
+    """R2 (G2): on an upgraded home (llm_* settings, no profile yet) the
+    startup probe cached under provider_id "" — then the first Settings read
+    adopted the settings into a ``default`` profile and the window read
+    "default". The probe resolves the adoption first, as Settings will."""
+    from skep.supervisor.serve.llm import (
+        LLM_BASE_URL,
+        LLM_DEFAULT_MODEL,
+        LLM_PROTOCOL,
+        llm_config_view,
+        refresh_missing_model_ctx,
+    )
+
+    server = FakeOpenAI(models=["m1"]).start()
+    s = RunStore(tmp_path / "supervisor.sqlite3")
+    try:
+        server.model_fields["m1"] = {"max_model_len": 32768}
+        s.set_setting(LLM_BASE_URL, server.base_url)
+        s.set_setting(LLM_DEFAULT_MODEL, "m1")
+        s.set_setting(LLM_PROTOCOL, "openai-compat")
+        refresh_missing_model_ctx(s, tmp_path)
+        assert not s.list_provider_profiles()  # the probe adopts nothing
+        view = llm_config_view(s, tmp_path)
+        assert (view["model_window"], view["num_ctx_source"]) == (32768, "provider-api")
+    finally:
+        s.close()
+        server.stop()
 
 
 def test_doctor_names_the_window_and_its_source(tmp_path: Path) -> None:
@@ -331,3 +513,69 @@ def test_the_chat_replay_budget_follows_the_detected_window(store: RunStore) -> 
     assert ChatEngine._history_budget(engine, 1000) == DEFAULT_NUM_CTX * 4 - floor  # type: ignore[arg-type]
     store.set_setting(context_cache_key("or", profile.base_url, "big-model"), {"window": 200_000})
     assert ChatEngine._history_budget(engine, 1000) == AUTO_NUM_CTX_CAP * 4 - floor  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "loopback"),
+    [
+        ("http://127.0.0.1:1234/v1", True),
+        ("http://localhost:8080", True),
+        ("http://[::1]:8080", True),
+        ("https://127.evil.example/v1", False),  # a DNS name, not a loopback literal
+        ("https://localhost.evil.example", False),
+    ],
+)
+def test_loopback_means_a_loopback_literal_or_localhost(base_url: str, loopback: bool) -> None:
+    """Phase 06 R3 (Sol R2-1): a host merely named 127.* is remote — it must
+    never get the outside-prefix probes (and their bearer)."""
+    assert llm._is_loopback(base_url) is loopback
+
+
+def test_lmstudio_permission_follows_the_probed_endpoint(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 06 R3 (Sol R3-1): the native-path permission comes from the same
+    profile as the endpoint probed — an LM Studio preset active elsewhere
+    never opens /api/v1/models for another endpoint's bearer."""
+    seen: list[bool] = []
+
+    def fake_detect(base_url: str, api_key: object, **kw: object) -> None:
+        seen.append(bool(kw["lmstudio"]))
+
+    monkeypatch.setattr(llm, "detect_model_ctx", fake_detect)
+    store.upsert_provider_profile(
+        ProviderProfile(
+            "lm", "openai_compat", "http://10.0.0.5:1234/v1", "m", source="preset:lmstudio"
+        )
+    )
+    _profile(store, "other", "https://gw.example/tenant/v1", "m")  # active
+    monkeypatch.setattr(
+        llm,
+        "_context_identity",
+        lambda *_a: ("other", "https://gw.example/tenant/v1", "m", "openai-compat"),
+    )
+    monkeypatch.setattr(store, "active_provider_profile", lambda: store.get_provider_profile("lm"))
+    refresh_model_ctx(store, tmp_path, "m")
+    assert seen == [False]
+
+
+def test_a_probe_whose_configuration_changed_never_publishes(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 06 R3 (Sol R2-2): a probe captured under the old protocol that
+    finishes after a save changed it is dropped, not cached over the new."""
+    profile = _profile(store, "p", "http://127.0.0.1:9/v1", "m", protocol="ollama")
+    key = context_cache_key("p", profile.base_url, "m")
+
+    def fake_detect(*_a: object, **_k: object) -> tuple[int, None]:
+        # the operator switches the protocol while this probe is in flight
+        store.upsert_provider_profile(
+            ProviderProfile("p", "openai_compat", profile.base_url, "m", active=True)
+        )
+        store.set_setting("llm_protocol", "openai-compat")
+        return 8192, None
+
+    monkeypatch.setattr(llm, "detect_model_ctx", fake_detect)
+    store.set_setting(key, {"window": 131072, "max_output": None})
+    refresh_model_ctx(store, tmp_path, "m")
+    assert store.get_setting(key) == {"window": 131072, "max_output": None}

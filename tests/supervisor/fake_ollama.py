@@ -55,6 +55,10 @@ class FakeOllama:
         self.probe_reply: list[dict[str, Any]] | None = None
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
+        # Phase 05 R2: a set gate holds each probe until the test opens it
+        # (``arrived`` says one is waiting) — a slow provider, on demand.
+        self.gate: threading.Event | None = None
+        self.arrived = threading.Event()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -209,6 +213,9 @@ class FakeOllama:
                         "raw_len": len(raw),
                     }
                 )
+                if fake.gate is not None and is_probe(body):
+                    fake.arrived.set()
+                    fake.gate.wait(10)
                 if not self._authorized():
                     self._send(401, b'{"error": "unauthorized"}')
                 elif self.path == "/api/show":

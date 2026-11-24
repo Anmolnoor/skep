@@ -51,6 +51,11 @@ class ProviderError(ValueError):
     """An invalid provider profile."""
 
 
+class ProviderConflict(ProviderError):
+    """Phase 05 R2 (F5): what a save was staged and probed on changed before
+    it could commit — nothing was written (REST: 409)."""
+
+
 @dataclass(frozen=True)
 class ProviderProfile:
     provider_id: str
@@ -184,7 +189,6 @@ def live_probes(
     last only for its own endpoint)."""
     from .serve.llm import (
         REGISTRY_PROTOCOLS,
-        OllamaError,
         list_models,
         probe_completion,
         resolve_provider_api_key,
@@ -201,33 +205,16 @@ def live_probes(
         )
         return protocol, key
 
-    def _scrubbed(call: Callable[[Any, str | None], Any], profile: ProviderProfile) -> Any:
-        """Phase 05 R1 (I9/I11): a provider that quotes the key back
-        ("Incorrect API key provided: ...") never gets it into a reply, a
-        CLI line or a stored health row — the provider's words otherwise."""
-        protocol, key = _target(profile)
-        try:
-            return call(protocol, key)
-        except OllamaError as exc:
-            text = str(exc).replace(key, "***") if key else str(exc)
-            raise OllamaError(text, status=exc.status) from None
-
+    # Phase 05 R2 (F1): list_models and probe_completion scrub the key a
+    # provider quotes back themselves, so every caller is covered.
     def _list(profile: ProviderProfile) -> list[str]:
-        return list(
-            _scrubbed(
-                lambda protocol, key: list_models(
-                    profile.base_url, key, protocol=protocol, timeout=timeout
-                ),
-                profile,
-            )
-        )
+        protocol, key = _target(profile)
+        return list_models(profile.base_url, key, protocol=protocol, timeout=timeout)
 
     def _probe(profile: ProviderProfile) -> None:
-        _scrubbed(
-            lambda protocol, key: probe_completion(
-                profile.base_url, key, model=profile.model, protocol=protocol, timeout=timeout
-            ),
-            profile,
+        protocol, key = _target(profile)
+        probe_completion(
+            profile.base_url, key, model=profile.model, protocol=protocol, timeout=timeout
         )
 
     return {"list_models": _list, "probe": _probe}
@@ -288,7 +275,10 @@ def resolve_fallback_chain(
 
 
 def provider_host(base_url: str) -> str | None:
-    parsed = urlparse(base_url)
+    try:
+        parsed = urlparse(base_url)
+    except ValueError:  # Phase 05 R2 (F12): "http://[::1" is no URL, not a 500
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     return parsed.hostname
@@ -358,18 +348,26 @@ def migrate_legacy_provider(store: RunStore, home: Path) -> ProviderProfile | No
     sqlite ``llm_*`` settings (falling back to ``profile.json``) and create one
     active ``default`` profile. Returns the created profile, or None when there
     is nothing to migrate. Phase 05: then, once per home, adopt the settings
-    into the active profile where they diverged (``_adopt_legacy_settings``).
+    into the active profile where they diverged (``legacy_adoption``).
     """
-    if store.list_provider_profiles():
-        _adopt_legacy_settings(store)
-        return None
-    created = _seed_from_legacy(store, home)
-    _adopt_legacy_settings(store)
-    return created
+    seeding = not store.list_provider_profiles()
+    rows, canonical = legacy_adoption(store, home)
+    for row in rows:
+        store.upsert_provider_profile(row)
+    if canonical:
+        from datetime import UTC, datetime
+
+        store.set_setting(LLM_REGISTRY_CANONICAL, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return rows[0] if seeding and rows else None
 
 
-def _adopt_legacy_settings(store: RunStore) -> None:
-    """Phase 05 (5.1), once per home: before Phase 05 chat read the llm_*
+def legacy_adoption(store: RunStore, home: Path) -> tuple[list[ProviderProfile], bool]:
+    """(the rows migrate_legacy_provider upserts, in order; whether it marks
+    the home canonical) — computed, never written. Phase 05 R2 (F6): a save
+    resolves its candidate on these and writes them only with its own
+    commit, so a refused save on an upgraded home changes nothing.
+
+    Phase 05 (5.1), once per home: before Phase 05 chat read the llm_*
     settings while routing read the registry, and the two drifted (Fedora,
     2026-11-18: settings glm-5.3-flash, the profile glm-5.2). What the Queen
     actually spoke wins, once: the same endpoint updates the active profile
@@ -381,11 +379,14 @@ def _adopt_legacy_settings(store: RunStore) -> None:
 
     from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL, REGISTRY_PROTOCOLS
 
-    if store.get_setting(LLM_REGISTRY_CANONICAL):
-        return
-    active = store.active_provider_profile()
-    if active is None:
-        return  # nothing canonical yet: the settings still stage a first save
+    rows: list[ProviderProfile] = []
+    if store.list_provider_profiles():
+        active = store.active_provider_profile()
+    else:
+        active = _seed_from_legacy(store, home)
+        rows += [active] if active is not None else []
+    if store.get_setting(LLM_REGISTRY_CANONICAL) or active is None:
+        return rows, False  # already canonical, or nothing yet: the settings stage a first save
     base_url, model = store.get_setting(LLM_BASE_URL), store.get_setting(LLM_DEFAULT_MODEL)
     if isinstance(base_url, str) and base_url.strip() and isinstance(model, str) and model.strip():
         wire = store.get_setting(LLM_PROTOCOL)
@@ -393,24 +394,17 @@ def _adopt_legacy_settings(store: RunStore) -> None:
         base_url = base_url.strip().rstrip("/")
         if base_url == active.base_url.rstrip("/"):
             adopted = dataclasses.replace(active, model=model.strip(), protocol=protocol)
-            if adopted != active:
-                store.upsert_provider_profile(adopted)
+            rows += [validate_provider_profile(adopted)] if adopted != active else []
         else:
-            store.upsert_provider_profile(
-                dataclasses.replace(
-                    endpoint_profile(
-                        store,
-                        base_url=base_url,
-                        protocol=protocol,
-                        model=model.strip(),
-                        source="migrated:llm-settings",
-                    ),
-                    active=True,
-                )
+            fresh = endpoint_profile(
+                store,
+                base_url=base_url,
+                protocol=protocol,
+                model=model.strip(),
+                source="migrated:llm-settings",
             )
-    from datetime import UTC, datetime
-
-    store.set_setting(LLM_REGISTRY_CANONICAL, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            rows.append(validate_provider_profile(dataclasses.replace(fresh, active=True)))
+    return rows, True
 
 
 def endpoint_profile(
@@ -477,4 +471,4 @@ def _seed_from_legacy(store: RunStore, home: Path) -> ProviderProfile | None:
         api_key_env=api_key_env,
         active=True,
     )
-    return store.upsert_provider_profile(profile)
+    return validate_provider_profile(profile)

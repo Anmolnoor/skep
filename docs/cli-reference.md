@@ -669,7 +669,9 @@ to the saved assistant config so the Queen actually speaks it. `set-key`,
 with the new key for `set-key`, the profile's own credential otherwise — and
 a refusal (a dead key, an unreachable endpoint) exits non-zero and changes
 nothing: the stored key, the active provider and the registry stay as they
-were (Phase 05). `login` (v108)
+were (Phase 05). An id keeps the endpoint it was registered for, since its
+key belongs there: `add` with an existing id and a different `--base-url` is
+refused — register the new endpoint under its own id. `login` (v108)
 runs the RFC 8628 device-code flow with the OPERATOR'S own `--client-id` —
 skep ships no OAuth client id for any provider — and stores the access token
 it returns exactly where `set-key` would. A profile on `chatgpt.com` (the

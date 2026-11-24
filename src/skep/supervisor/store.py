@@ -763,6 +763,8 @@ class ChatMessageRecord:
     # ``webhook:<name>``, ``channel:<platform>:<user>``, ``schedule:<name>``,
     # ``worker:<task>``. A row older than the column reads as its role's author.
     provenance: str = ""
+    # Phase 06 R2 (G6): the skill hint the server appended to ``content``.
+    skill_hint: str | None = None
 
     @property
     def trusted(self) -> bool:
@@ -1286,6 +1288,10 @@ class RunStore:
             # column reads as its role's own author (operator / queen / tool):
             # an old chat is never retroactively tainted.
             self._conn.execute("ALTER TABLE chat_messages ADD COLUMN provenance TEXT")
+        if "skill_hint" not in chat_message_columns:
+            # Phase 06 R2 (G6): the hint the server appended to this user row,
+            # so the bubble strips exactly that — never an operator's own line.
+            self._conn.execute("ALTER TABLE chat_messages ADD COLUMN skill_hint TEXT")
         project_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(project_policies)")
         }
@@ -4458,6 +4464,7 @@ class RunStore:
         attachments: list[str] | None = None,
         tool_call_id: str | None = None,
         provenance: str | None = None,
+        skill_hint: str | None = None,
     ) -> int:
         """Append one transcript row. ``provenance`` names its author when that
         is not the one its role implies (ADR 0059 D5): a row from outside —
@@ -4469,8 +4476,8 @@ class RunStore:
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
-            " tool_name, tool_call_id, created_at, attachments_json, provenance)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_name, tool_call_id, created_at, attachments_json, provenance, skill_hint)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 role,
@@ -4482,6 +4489,7 @@ class RunStore:
                 now,
                 None if not attachments else json.dumps(attachments),
                 provenance,
+                skill_hint,
             ),
         )
         message_id = int(cursor.lastrowid or 0)
@@ -5084,11 +5092,12 @@ class RunStore:
             attachments=None if row[8] is None else list(json.loads(str(row[8]))),
             tool_call_id=None if row[9] is None else str(row[9]),
             provenance=str(row[10]) if row[10] else _ROLE_AUTHOR.get(str(row[2]), "queen"),
+            skill_hint=None if row[11] is None else str(row[11]),
         )
 
     _CHAT_MESSAGE_COLS = (
         "id, chat_id, role, content, thinking, tool_calls_json, tool_name,"
-        " created_at, attachments_json, tool_call_id, provenance"
+        " created_at, attachments_json, tool_call_id, provenance, skill_hint"
     )
 
     @_locked

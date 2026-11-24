@@ -1783,15 +1783,11 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
     def remove_provider_route(provider_id: str) -> dict[str, Any]:
         from ..providers import ProviderError
         from . import actions
-        from .llm import store_provider_api_key
 
         try:
-            result = actions.remove_provider(run_store, provider_id=provider_id)
+            return actions.remove_provider(run_store, holder.current.home, provider_id=provider_id)
         except ProviderError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        # v108-F4: a removed profile leaves no orphaned credential behind.
-        store_provider_api_key(holder.current.home, provider_id, "")
-        return result
 
     @app.put("/api/providers/{provider_id}/key")
     def set_provider_key_route(provider_id: str, body: ProviderKeyRequest) -> dict[str, Any]:

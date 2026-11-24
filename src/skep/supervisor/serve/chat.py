@@ -70,6 +70,7 @@ from .llm import (
     _TRANSIENT_STATUSES,
     LLMProtocol,
     OllamaError,
+    _staged_view,
     chat_num_ctx,
     chat_stream,
     llm_config_view,
@@ -1287,7 +1288,6 @@ def skill_index_block(store: RunStore) -> str:
 # the operator's own skills are already described in the index above.
 SKILL_HINT_MAX = 5
 SKILL_HINT_CHARS = 40
-_SKILL_HINT_TAIL = re.compile(r"\n\n\[Relevant skills: [^\n]*\]\Z")  # R1 (F7)
 _SKILL_HINT_STOPWORDS = frozenset({"a", "an", "the", "and", "of", "to", "for", "with", "on"})
 
 
@@ -1582,10 +1582,11 @@ def shown_message(message: Any) -> dict[str, Any]:
     calls carry their args masked (``stream_args``), as the card does; the
     stored row keeps them raw for the transcript the model replays."""
     row: dict[str, Any] = asdict(message)
-    if row["role"] == "user" and row["content"]:
+    if hint := row.pop("skill_hint"):
         # R1 (F7): the skill hint is for the model's replay; the user's bubble
-        # (and Resend, which copies it) shows what they typed.
-        row["content"] = _SKILL_HINT_TAIL.sub("", row["content"])
+        # (and Resend, which copies it) shows what they typed. R2 (G6): only
+        # the hint the server recorded on the row — never an operator's line.
+        row["content"] = row["content"].removesuffix(f"\n\n{hint}")
     row["tool_calls"] = row["tool_calls"] and [
         {**call, "function": {**(call.get("function") or {}),
                               "arguments": stream_args(_call_args(call))}}
@@ -2088,7 +2089,9 @@ class ChatEngine:
         tool_surface_chars = len(json.dumps(self._advertised_tools(chat)))
         # R1 (F6): the replay cap the budget uses AND the model's own window —
         # a 262k model replaying 16k is two numbers, never one (I8).
-        window = resolve_context_window(self.store, model=getattr(chat, "model", None))
+        # R3 (Neon R3-1): keyed as Settings reads it on an upgraded home
+        view = _staged_view(self.store, self.home)
+        window = resolve_context_window(view, model=getattr(chat, "model", None))
         floor_chars = len(system) + len(summary) + tool_surface_chars
         window_chars = window.replay_cap * 4
         compacted = dropped > 0 or bool(chat and (chat.compacted_through or 0))
@@ -4184,6 +4187,7 @@ def add_chat_routes(
             role="user",
             content=f"{body.content}\n\n{hint}" if hint else body.content,
             attachments=body.attachments or None,
+            skill_hint=hint or None,
         )
         return StreamingResponse(
             _as_sse(

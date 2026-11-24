@@ -38,6 +38,8 @@ class FakeOpenAI:
         # and a raw /v1/models body that replaces the listing (malformed shapes).
         self.native_models: dict[str, Any] | None = None
         self.listing_body: Any = None
+        # Phase 06 R2 (G5): /v1/models claims gzip and sends garbage.
+        self.listing_bad_gzip = False
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -157,6 +159,13 @@ class FakeOpenAI:
                 )
                 if not (self._authorized() or fake.public_listing):
                     self._refuse()
+                elif self.path == "/v1/models" and fake.listing_bad_gzip:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Content-Length", "9")
+                    self.end_headers()
+                    self.wfile.write(b"not gzip!")
                 elif self.path == "/v1/models" and fake.listing_body is not None:
                     self._send(200, json.dumps(fake.listing_body).encode())
                 elif self.path == "/api/v1/models" and fake.native_models is not None:
