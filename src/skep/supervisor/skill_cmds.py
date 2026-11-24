@@ -408,14 +408,20 @@ def _call_args(call: dict[str, Any] | None) -> dict[str, Any]:
 
 def _refused(content: str) -> bool:
     """A refused step — or, Review R1 (Q14), one whose command failed inside
-    a tool that answered (``{"ok": true, "result": {"exit_code": 2}}``)."""
+    a tool that answered (``{"ok": true, "result": {"exit_code": 2}}``), or,
+    Review R2 (F5), one the engine skipped (``{"refused": ...}``)."""
     try:
         result = json.loads(content)
     except ValueError:
         return False
     return any(
         isinstance(each, dict)
-        and ("error" in each or each.get("ok") is False or each.get("exit_code") not in (None, 0))
+        and (
+            "error" in each
+            or "refused" in each
+            or each.get("ok") is False
+            or each.get("exit_code") not in (None, 0)
+        )
         for each in (result, result.get("result") if isinstance(result, dict) else None)
     )
 

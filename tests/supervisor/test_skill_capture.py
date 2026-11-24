@@ -668,3 +668,27 @@ def test_review_r2_a_run_capture_strips_userinfo_from_its_declared_hosts(
     for each in (text, candidate.template.instructions):
         _no_secret(each)
     assert "https://***@git.example, https://***@api.example" in text
+
+
+def test_review_r2_a_refused_tool_call_is_not_a_step(store: RunStore, tmp_path: Path) -> None:
+    """Review R2 (F5): the engine skipped a repeated call (``{"refused":
+    "asked_and_answered"}``) — it never ran, so it is not a step."""
+    chat = store.create_chat(title="ops", model=None).chat_id
+    store.add_chat_message(chat, role="user", content="lint and read")
+    url = {"url": "https://x.example"}
+    store.add_chat_message(chat, role="assistant", content="", tool_calls=[
+        {"id": "a", "function": {"name": "run_shell", "arguments": {"command": "make lint"}}},
+        {"id": "b", "function": {"name": "read_url", "arguments": url}},
+        {"id": "c", "function": {"name": "read_url", "arguments": url}},
+    ])  # fmt: skip
+    skipped = {"refused": "asked_and_answered", "nudge": "this exact call already ran"}
+    for call_id, name, result in (
+        ("a", "run_shell", {"ok": True}),
+        ("b", "read_url", skipped),
+        ("c", "read_url", {"refused": True}),
+    ):
+        store.add_chat_message(chat, role="tool", content=json.dumps(result), tool_name=name,
+                               tool_call_id=call_id)  # fmt: skip
+    store.add_chat_message(chat, role="assistant", content="done")
+    with pytest.raises(SkillError, match="no finished multi-step turn"):
+        capture_skill(store, tmp_path, chat, name="lint", actor="op")
