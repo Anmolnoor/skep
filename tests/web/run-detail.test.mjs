@@ -327,3 +327,29 @@ test("R4 K8: run detail and Approvals list a batch from command_lines, falling b
   assert.deepEqual(await listed("/api/approvals", { approvals: [batch] }, "viewApprovals"),
     ["npm install", "npm run build:it 'a b'"]);
 });
+
+// R5 item 7: Run Detail says when a recorded patch cannot be read (the
+// route's 409 "patch unreadable: …"); only a missing artifact (404) is quiet.
+test("R5-7: run detail shows 'the patch could not be read' for any diff error but a 404", async () => {
+  const app = loadApp();
+  const shown = async error => {
+    const body = {
+      run: { task_id: "t1", instructions: "x", state: "completed", repo: "/r" },
+      transitions: [], artifacts: [{ kind: "patch", path: "/a/p.patch" }], commands: [],
+      approvals: [], policy_blocks: [], reverification: null,
+    };
+    app.api = async (_m, path) => {
+      if (path === "/api/runs/t1") return body;
+      if (path === "/api/runs/t1/diff") throw error;
+      return { events: [] };
+    };
+    const main = app.document.createElement("main");
+    main.dataset.route = "1";
+    await app.viewRunDetail(main, "t1");
+    return main.querySelectorAll(".error").map(n => n.textContent);
+  };
+  const status = (code, message) => Object.assign(new Error(message), { status: code });
+  assert.deepEqual(await shown(status(409, "patch unreadable: Permission denied")),
+    ["the patch could not be read: patch unreadable: Permission denied"]);
+  assert.deepEqual(await shown(status(404, "no patch artifact for this run")), []);
+});

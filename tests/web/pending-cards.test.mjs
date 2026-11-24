@@ -36,6 +36,7 @@ async function openChat(actions, posts = []) {
   };
   app.renderThreads = () => {};
   app.setInterval = () => 0;
+  app.clearInterval = () => {};
   app.watchStatus = () => {};
   const main = app.document.createElement("main");
   await app.viewChat(main, "c1");
@@ -103,4 +104,39 @@ test("R4 K1: a land_run / open_pr card lists each run with its G10 warning and V
   assert.match(lines[2].textContent, /V1 · TEST-TAMPER: tests changed/);
   assert.equal(lines[2].textContent.match(/TEST-TAMPER/g).length, 1, "a warning that IS the tamper is said once");
   assert.match(landCard.querySelector(".card-runs").textContent, /run bbbbbbbb · ⚠ re-verification RAN and FAILED/);
+});
+
+// R5-2: the web confirm binds to the items the card rendered (K2's server
+// check) — 1 included — and a card that changed since is reloaded, not approved.
+test("R5-2: the chat confirm posts the rendered item count; a changed card reloads and nothing is approved", async () => {
+  const fetch = { action_id: "a-url", chat_id: "c1", tool: "read_url", args: { url: "https://x.dev" },
+    status: "proposed", source: "assistant", card: { headline: "read_url — https://x.dev" } };
+  const { app, main } = await openChat([fetch]);
+  const sent = [];
+  app.streamSse = async (path, body) => {
+    sent.push([path, body]);
+    // api.js's ApiError: the detail as the message, the HTTP status beside it
+    throw Object.assign(new Error("this card now holds 2 items, not the 1 you were shown. Nothing ran. Open it in its thread to read every item"), { status: 409 });
+  };
+  let routed = 0;
+  app.route = () => { routed += 1; };
+  const card = main.querySelector(".confirm-card");
+  await card.querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], "/api/chats/c1/actions/a-url/confirm");
+  assert.equal(sent[0][1].items, 1);
+  assert.equal(routed, 1, "the thread reloads with the card as it is now");
+  assert.deepEqual(app.flashes.at(-1), ["bad", "this card changed — review it again; nothing ran"]);
+  assert.ok(!card.classList.contains("resolved"), "nothing is shown as approved");
+});
+
+test("R5-2: a folded card's confirm posts every item it rendered", async () => {
+  const fold = { action_id: "a-fold", chat_id: "c1", tool: "read_url", args: { url: "https://x.dev/a" },
+    status: "proposed", source: "assistant",
+    card: { headline: "read_url — https://x.dev/a (+1 more)", items: ["read_url — https://x.dev/a", "read_url — https://x.dev/b"] } };
+  const { app, main } = await openChat([fold]);
+  const sent = [];
+  app.streamSse = async (path, body) => { sent.push(body); };
+  await main.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  assert.equal(sent[0].items, 2);
 });

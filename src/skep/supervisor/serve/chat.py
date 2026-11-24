@@ -571,6 +571,23 @@ def blocking_cards(
     ]
 
 
+def executed_payload(tool: str, result: Any) -> dict[str, Any]:
+    """R5-7 (I8): a mutation's tool payload — an open_pr whose result says no
+    PR was opened did not do what its card asked, so it is not ok, with the
+    result's own detail (and the result kept beside it)."""
+    if tool == "open_pr" and isinstance(result, dict) and result.get("opened") is False:
+        return {
+            "ok": False,
+            "error": f"the PR was not opened: {result.get('detail')}",
+            "result": result,
+        }
+    # Phase 09 R3 (S8): merge_pr's result says whether it merged — a merge
+    # that did not happen is a failed card (github.merge_record).
+    if tool == "merge_pr" and isinstance(result, dict) and result.get("ok") is False:
+        return {"ok": False, "result": result}
+    return {"ok": True, "result": result}
+
+
 def executed_status(payload: dict[str, Any]) -> str:
     """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
     return "confirmed" if payload.get("ok") else "failed"
@@ -2964,7 +2981,7 @@ class ChatEngine:
                                 decision=decision,
                                 chat_id=chat_id,
                             )
-                            payload = {"ok": True, "result": result}
+                            payload = executed_payload(name, result)
                         except HTTPException as exc:
                             payload = {"ok": False, "error": str(exc.detail)}
                         except (KeyError, ValueError, TypeError) as exc:
@@ -3732,10 +3749,7 @@ class ChatEngine:
                     "memory_id": item.memory_id,
                     "note": "approved on its card — active in future prompts",
                 }
-            # R3 (S8, I8): merge_pr's result says whether it merged — a merge
-            # that did not happen is a failed card (github.merge_record).
-            ok = result.get("ok") is not False if tool == "merge_pr" else True
-            payload: dict[str, Any] = {"ok": ok, "result": result}
+            payload: dict[str, Any] = executed_payload(tool, result)
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
             # always-tier writes to, so resolve() composes it unchanged and
@@ -4618,7 +4632,7 @@ def add_chat_routes(
                     actor=COMMAND_ACTOR,
                     chat_id=chat_id,
                 )
-                payload: dict[str, Any] = {"ok": True, "result": result}
+                payload: dict[str, Any] = executed_payload(tool, result)
                 if not confirm:
                     payload["denied"] = True
             except HTTPException as exc:

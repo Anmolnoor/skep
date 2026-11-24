@@ -496,7 +496,7 @@ def test_review_reads_a_patch_that_is_not_utf8_and_lights_it_on_a_terminal(
         (card,) = cli_cmds._review_cards(store)
     finally:
         store.close()
-    assert "+latin = '\ufffd'" in (card.patch or "")
+    assert "+latin = '\\xe9'" in (card.patch or "")  # R5-5: the byte, reversibly
     assert _run_cli(home, "review", task_id) == 0
     plain = capsys.readouterr().out
     assert "+value = 1" in plain and ANSI not in plain

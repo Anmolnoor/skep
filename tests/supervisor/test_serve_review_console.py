@@ -822,7 +822,10 @@ def test_a_latin_1_patch_neither_500s_the_queue_nor_the_diff(
 
     from skep.supervisor import RunStore
 
-    raw = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1 +1,2 @@\n x\n+caf\xe9\n"
+    raw = (
+        "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1,2 +1,2 @@\n x\n"
+        "-caf\xe8\n+caf\xe9\n"
+    )
     data = raw.encode("latin-1")
     store = RunStore(config.db_path)
     try:
@@ -850,9 +853,11 @@ def test_a_latin_1_patch_neither_500s_the_queue_nor_the_diff(
         (i["kind"], i["id"]) for i in badge["items"]
     ]
     rows = {i["id"]: i for i in full.json()["items"]}
-    assert rows[latin]["files"] == [{"path": "n.txt", "added": 1, "removed": 0}]
+    assert rows[latin]["files"] == [{"path": "n.txt", "added": 1, "removed": 1}]
     diff = client.get(f"/api/runs/{latin}/diff")
-    assert diff.status_code == 200 and "+caf�" in diff.text
+    # R5-5: decoded reversibly — the two sides differ on screen, byte for byte
+    assert diff.status_code == 200
+    assert "-caf\\xe8\n+caf\\xe9" in diff.text and "\ufffd" not in diff.text
 
 
 def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(
@@ -891,7 +896,8 @@ def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(
         assert rows[locked]["files_note"].startswith("patch unreadable: ")
         assert rows[fine]["files"] == [{"path": "app.py", "added": 1, "removed": 0}]
         diff = client.get(f"/api/runs/{locked}/diff")
-        assert diff.status_code == 500 and "patch unreadable" in diff.json()["detail"]
+        # R5-6: the server is fine; this artifact is not — a 409, never a 500
+        assert diff.status_code == 409 and "patch unreadable" in diff.json()["detail"]
         from skep.supervisor.cli_cmds import _moved_since_shown, _Shown
 
         store = RunStore(config.db_path, readonly=True)
@@ -1092,3 +1098,66 @@ def test_save_binds_to_the_endpoint_its_test_resolved(
         ) == other.base_url.rstrip("/")
     finally:
         other.stop()
+
+
+def test_a_branch_mode_card_lists_only_its_own_repos_landings_on_that_branch(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R5-1: skep/maintain is the same name in every maintain-phase repo — a
+    branch-mode open_pr card for repo A resolves A as open_pr does and lists
+    only A's run landed there, never repo B's (nor B's G10 / V1)."""
+    from skep.supervisor import RunStore, mint_task
+
+    store = RunStore(config.db_path)
+    try:
+        landed = {}
+        for name in ("a", "b"):
+            repo = tmp_path / name
+            (repo / ".git").mkdir(parents=True)
+            task = mint_task(workspace=tmp_path / f"w{name}", instructions=name)
+            store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+            store.transition(task.task_id, "completed")
+            _landed_on(store, task.task_id, "skep/maintain")
+            landed[name] = task.task_id
+        chat = store.create_chat(title="pr", model=None)
+        card = store.add_chat_action(
+            chat.chat_id,
+            tool="open_pr",
+            args={"branch": "skep/maintain", "repo": str(tmp_path / "a")},
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    (action,) = client.get(f"/api/chats/{chat.chat_id}").json()["actions"]
+    assert [r["task_id"] for r in action["card"]["runs"]] == [landed["a"]]
+    (row,) = [i for i in client.get("/api/review-queue").json()["items"] if i["id"] == card]
+    assert row["task_ids"] == [landed["a"]]
+
+
+def test_an_open_pr_that_opened_nothing_is_a_failed_card_with_its_reason(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """R5-7 (I8): open_pr answers {opened: false, detail} when no PR was made
+    (the empty-remote case is the common one) — the card is recorded failed
+    and says why, never "confirmed" on the outer ok alone."""
+    from skep.supervisor import RunStore
+
+    from .conftest import git
+
+    git(repo, "branch", "feat")
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    card = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "open_pr", "args": {"branch": "feat", "repo": str(repo)}},
+    ).json()
+    reply = client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/confirm").json()
+    assert reply["ok"] is False
+    assert reply["error"].startswith("the PR was not opened: git ls-remote failed")
+    assert reply["result"]["opened"] is False
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        record = store.get_chat_action(card["action_id"])
+        assert record is not None and record.status == "failed"
+    finally:
+        store.close()

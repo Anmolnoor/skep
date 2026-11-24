@@ -446,3 +446,8 @@ test("R3 J5: only the card's verdict events count; the Queen's follow-up never t
   assert.deepEqual(flashes[0], ["ok", "denied land_run — run x"]);
   assert.deepEqual(flashes[1], ["warn", "denied land_run — run x — ⚠ the Queen's follow-up failed: model offline"]);
 });
+
+test("R5-6: a run row with no file list still shows its files note — 'patch unreadable: …' is never hidden", async () => {
+  const { rows } = await render([{ ...RUN, files: [], files_note: "patch unreadable: Permission denied" }]);
+  assert.match(rows[0].querySelector("small").textContent, /patch unreadable: Permission denied/);
+});

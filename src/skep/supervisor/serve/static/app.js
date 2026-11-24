@@ -2729,10 +2729,18 @@ async function viewChat(main, chatId) {
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard
       try {
+        // R5-2 (K2): a confirm names how many items this card rendered — the
+        // server refuses (409, nothing ran) a card that now holds another set.
+        const items = (d.card?.items || []).length || 1;
         await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`,
-          verb === "confirm" && keep ? { keep: keep.value } : {});
+          verb === "confirm" ? { ...(keep ? { keep: keep.value } : {}), items } : {});
       }
       catch (e) {
+        if (verb === "confirm" && e.status === 409 && /you were shown/.test(e.message)) {
+          flash("bad", "this card changed — review it again; nothing ran");
+          route(); // the thread redraws the card as it is now
+          return;
+        }
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
         approve.disabled = refuse.disabled = false;
@@ -4021,7 +4029,13 @@ async function viewRunDetail(main, taskId) {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
     if (!live()) return;
     main.append(el("h2", {}, "diff"), renderDiff(diff).node);
-  } catch { /* no patch artifact — nothing to show */ }
+  } catch (e) {
+    // R5 item 7: only a missing artifact (404) is quiet; anything else — the
+    // route's 409 "patch unreadable: …" — is said, as the review page says it.
+    if (e.status !== 404 && live()) {
+      main.append(el("h2", {}, "diff"), el("p", { class: "error" }, `the patch could not be read: ${e.message}`));
+    }
+  }
   if (!live()) return; // R3 J10: a failed diff read after navigation draws nothing either
   // Phase 10 10.1: the forensics report (G10, V1, ledger, blame), on demand.
   main.append(forensicsSection(taskId));

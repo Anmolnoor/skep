@@ -1658,7 +1658,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             patch_text = None
             patch_at = -1  # R2 I5: where the patch sits in lines (it may be "")
             if patch_path is not None and patch_path.is_file():
-                patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+                # R5-5: invalid bytes stay distinct on screen (\xe8 vs \xe9)
+                patch_text = patch_path.read_text(encoding="utf-8", errors="backslashreplace")
                 lines.append("")
                 patch_at = len(lines)
                 lines.append(patch_text)
@@ -2236,7 +2237,7 @@ def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
                 style,
                 notice[0],
                 lines,
-                None if raw is None else raw.decode("utf-8", errors="replace"),
+                None if raw is None else raw.decode("utf-8", errors="backslashreplace"),
                 _Shown(
                     record.state,
                     open_review,
