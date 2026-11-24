@@ -138,3 +138,12 @@ test("renderDiff colours a line by its file's type and keeps sign and text intac
   assert.equal(add.textContent, "1+def f(): pass");
   assert.deepEqual(texts(add, "tok-kw"), ["def", "pass"]);
 });
+
+test("R3 J12: an extension named like an Object prototype key is plain text, never a crash", () => {
+  const app = loadApp();
+  for (const path of ["x.constructor", "a.__proto__", "b.toString", "c.hasOwnProperty"]) {
+    assert.deepEqual(plain(app.highlight("let a = 1", path)), ["let a = 1"]);
+  }
+  const { sections } = app.renderDiff("diff --git a/x.constructor b/x.constructor\n--- a/x.constructor\n+++ b/x.constructor\n@@ -1 +1 @@\n-a\n+b\n");
+  assert.equal(sections.length, 1);
+});

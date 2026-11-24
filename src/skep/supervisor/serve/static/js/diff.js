@@ -96,7 +96,8 @@ const EXT = {
 const compiled = {};
 function rules(path) {
   const name = String(path || "").split("/").pop();
-  const lang = EXT[name.includes(".") ? name.split(".").pop().toLowerCase() : ""];
+  const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+  const lang = Object.hasOwn(EXT, ext) ? EXT[ext] : null; // R3 J12: own keys only — never ".constructor"
   if (!lang) return null;
   compiled[lang] ||= {
     re: new RegExp(LANGS[lang].map(([, src]) => `(${src})`).join("|"), "g"),
@@ -133,7 +134,8 @@ function lineNode(line, path) {
 }
 
 function fileSection(file) {
-  const special = SPECIAL[file.newMode] || SPECIAL[file.oldMode] || SPECIAL[file.mode];
+  const named = mode => (Object.hasOwn(SPECIAL, mode ?? "") ? SPECIAL[mode] : null);
+  const special = named(file.newMode) || named(file.oldMode) || named(file.mode);
   const modeChanged = file.oldMode && file.newMode && file.oldMode !== file.newMode;
   const tags = [
     file.status === "modified" ? null : file.status,
