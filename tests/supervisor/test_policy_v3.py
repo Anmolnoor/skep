@@ -391,7 +391,8 @@ def test_the_decision_log_line_rotates_at_10_mb_and_holds_no_secret(
     record = _decide(home, scope="filesystem", action="write", value="/etc/x", repo=str(repo),
                      actor="t", role="builder")  # fmt: skip
     (line,) = [json.loads(raw) for raw in log.read_text().splitlines()]
-    assert line == {**record, "value": "/etc/x", "v": 1}
+    chain = {"v": 2, "seq": 1, "prev_hash": "GENESIS", "hash": line["hash"]}  # Phase 08 8.1
+    assert line == {**record, "value": "/etc/x", **chain}
     assert set(line) >= {"at", "actor", "repo", "scope", "action", "value", "source", "verdict",
                          "rule_id", "decided_by", "layer", "role", "project"}  # fmt: skip
     secrets = (
@@ -499,7 +500,8 @@ def test_a_writer_that_loses_the_rotation_race_still_logs_its_line(
     monkeypatch.setattr(Path, "replace", racing)
     policy_v3.log_decision(tmp_path, {"value": "ls"})
     assert log.with_name("decisions.jsonl.1").read_text() == '{"old": 1}\n'
-    assert json.loads(log.read_text()) == {"value": "ls", "v": 1}
+    row = json.loads(log.read_text())  # Phase 08 8.1: a v1 tail starts the chain at GENESIS
+    assert row == {"value": "ls", "v": 2, "seq": 1, "prev_hash": "GENESIS", "hash": row["hash"]}
 
 
 @pytest.mark.parametrize("role", ["builder", "operator"])

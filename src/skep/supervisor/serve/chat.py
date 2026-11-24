@@ -2520,6 +2520,8 @@ class ChatEngine:
                     break
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
+                if name == "capture_skill" and not args.get("source"):
+                    args = {**args, "source": chat_id}  # Phase 08 (8.2): this chat, pinned
                 shown_args = stream_args(args)
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.
@@ -3308,6 +3310,13 @@ class ChatEngine:
             from .channels import fold_fits_a_messenger, forge_fits_a_messenger
 
             forged = (action.card or {}).get("forge")
+            if action.tool == "capture_skill":
+                # Review R1 (Q13, I6/I8): no press saves a SKILL.md no messenger shows whole
+                raise HTTPException(
+                    status_code=403,
+                    detail="this capture_skill card saves a SKILL.md a messenger does not show "
+                    "in full: open the skep web UI or the CLI (skep chat) to read and confirm it",
+                )
             if action.tool == "promote_tool" and not (
                 isinstance(forged, dict) and forge_fits_a_messenger(forged)
             ):

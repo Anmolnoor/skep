@@ -109,6 +109,9 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
 
     @app.post("/api/notes/{note_id}/propose", status_code=201)
     def propose_from_note(note_id: str, body: ProposeFromItem) -> dict[str, object]:
+        # Phase 08 (8.2): the bits before the text — a note deleted between
+        # the two reads must not file its text as a clean proposal (W21)
+        taint = run_store.content_taint("note", [note_id])
         note = run_store.get_note(note_id)
         if note is None:
             raise HTTPException(status_code=404, detail=f"no note {note_id!r}")
@@ -120,6 +123,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
                 rationale=body.rationale,
                 project_id=body.project_id,
                 sources=(MemorySource(kind="note", source_id=note_id),),
+                taint=sorted(taint),
             )
         except MemoryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -161,6 +165,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
 
     @app.post("/api/tasks/{task_id}/propose", status_code=201)
     def propose_from_task(task_id: str, body: ProposeFromItem) -> dict[str, object]:
+        taint = run_store.content_taint("task", [task_id])  # Phase 08 (8.2): bits first
         task = run_store.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"no task {task_id!r}")
@@ -172,6 +177,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
                 rationale=body.rationale,
                 project_id=body.project_id,
                 sources=(MemorySource(kind="task", source_id=task_id),),
+                taint=sorted(taint),
             )
         except MemoryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -123,12 +123,15 @@ class MemoryProposal:
 _TAINT_WORDS = {"private": "private data", "untrusted": "outside content"}
 
 
+def taint_words(taint: tuple[str, ...]) -> str:
+    return ", ".join(_TAINT_WORDS.get(bit, bit) for bit in sorted(taint))
+
+
 def taint_phrase(taint: tuple[str, ...]) -> str | None:
     """v126-F6: what an approver is told about a tainted proposal."""
     if not taint:
         return None
-    words = ", ".join(_TAINT_WORDS.get(bit, bit) for bit in sorted(taint))
-    return f"filed from a chat that read: {words}"
+    return f"filed from a chat that read: {taint_words(taint)}"
 
 
 @dataclass(frozen=True)

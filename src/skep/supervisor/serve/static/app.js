@@ -442,6 +442,13 @@ function forgeNode(card) {
       el("summary", {}, "full source diff"), el("pre", { class: "mono" }, f.diff)) : null);
 }
 
+// Phase 08 (8.2, I8): a capture_skill card shows the full SKILL.md its
+// confirm saves, drafted by the server when the card was proposed.
+function skillNode(card) {
+  const text = card && card.skill_md;
+  return text ? el("pre", { class: "mono card-skill" }, text) : null;
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3081,6 +3088,7 @@ async function viewChat(main, chatId) {
       foldItems(card),
       scheduleNode(card),
       forgeNode(card),
+      skillNode(card),
       manifestNode(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk

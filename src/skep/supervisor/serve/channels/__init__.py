@@ -250,8 +250,11 @@ def card_notes(
     notes: list[str] = []
     forged = card.get("forge")
     shown = forge_items(forged) if messenger and isinstance(forged, Mapping) else None
-    # L7: a binding no messenger can show is web-UI-only for the admin too
-    too_long = messenger and isinstance(forged, Mapping) and shown is None
+    # L7: a binding no messenger can show is web-UI-only for the admin too;
+    # Review R1 (Q13): so is a captured SKILL.md — shown whole only at the desk
+    too_long = messenger and (
+        (isinstance(forged, Mapping) and shown is None) or bool(card.get("skill_md"))
+    )
     if card.get("tier") == "high" and admin and not too_long:  # v130-F5
         notes.append(
             f"HIGH risk: {card.get('high') or 'see the web UI'}. Only this channel's admin "
@@ -277,6 +280,13 @@ def card_notes(
             )
         else:
             notes.extend(shown if shown is not None else forge_lines(forged))
+    if card.get("skill_md"):
+        notes.extend(
+            ["this saves the SKILL.md below, shown whole only in the skep web UI or the CLI "
+             "(skep chat): read and confirm it there."]
+            if messenger
+            else ["the SKILL.md this saves:", *str(card["skill_md"]).splitlines()]
+        )  # fmt: skip
     manifest = card.get("manifest")
     if isinstance(manifest, Mapping):  # P4-2: what the dispatched run gets
         notes.extend(manifest_lines(manifest))
@@ -419,8 +429,10 @@ def render_confirm_card(
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     items = [str(item) for item in ((card or {}).get("items") or [])]
     forged = (card or {}).get("forge")
-    too_long = (len(items) > 1 and not fold_fits_a_messenger(items)) or (
-        isinstance(forged, Mapping) and not forge_fits_a_messenger(forged)
+    too_long = (
+        (len(items) > 1 and not fold_fits_a_messenger(items))
+        or (isinstance(forged, Mapping) and not forge_fits_a_messenger(forged))
+        or bool((card or {}).get("skill_md"))  # Review R1 (Q13): never shown on a messenger
     )
     web_ui_only = too_long or (
         not admin and (action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high)

@@ -24,15 +24,22 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import getpass
+import json
+import re
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from skep.worker_contract import CodingWorkerTask, TaskState
+from skep.worker_contract import CodingWorkerTask, EventType, TaskState
 
 from .config import SupervisorConfig
 from .dispatch import run_task
+from .memory import taint_words
+from .policy_v3 import redact_export
 from .scheduler import now_ts
+from .skill_bundle import skill_grants
+from .skill_md import render_skill_md
 from .skills import (
     APPROVED,
     DEFAULT_MAX_PARAMS,
@@ -48,8 +55,8 @@ from .skills import (
     generate,
     promote_to_template,
 )
-from .store import RunStore
-from .templates import TemplateError, instantiate
+from .store import TAINT_BITS, ChatMessageRecord, ChatRecord, RunStore
+from .templates import TemplateError, WorkflowTemplate, instantiate, validate_template
 
 
 class SkillError(ValueError):
@@ -133,6 +140,8 @@ class TestResult:
 
 def _evidence_note(candidate: SkillCandidate) -> str:
     sources = ", ".join(candidate.source_task_ids) or "(none)"
+    if candidate.test_task_id is None:  # Review R1 (Q16): the direct lane ran no test
+        return f"drafted from {sources}; zero-grant draft approved without a test run"
     return (
         f"generalized from {candidate.occurrences} run(s): {sources}; "
         f"test {candidate.test_task_id} completed + G10-confirmed"
@@ -252,12 +261,15 @@ def approve(
     note: str | None = None,
     registry_name: str | None = None,
     now: str | None = None,
+    accept_taint: bool = False,
 ) -> tuple[SkillCandidate, str]:
     """The human gate: move a ``tested`` candidate into the registry. Returns the
     candidate and the registry name it landed under.
 
     Refuses anything not ``tested`` (a draft must pass the gate first; a rejected
     candidate is terminal). Refuses to clobber an existing template name.
+    Phase 08 (8.2): a tainted candidate enters only with ``accept_taint`` —
+    the refusal names the taint and its source, so nobody approves it unseen.
     """
     candidate = store.get_candidate(name)
     if candidate is None:
@@ -269,18 +281,23 @@ def approve(
     if candidate.status == REJECTED:
         by = candidate.decided_by or "?"
         raise SkillError(f"candidate {name!r} was rejected (by {by}); it cannot enter the registry")
-    if candidate.status != TESTED and not (
-        candidate.status == DRAFT and candidate.template.provenance == "conversation"
-    ):
+    if candidate.status != TESTED and not _direct_lane(candidate):
         # v53-F1 (ADR 0029): a conversation draft has no runnable worker test
         # — the v51-F4 create_skill reasoning: generated chat procedures get
         # the HUMAN gate, and this approve is exactly that gate. Learned
-        # worker recipes still must pass their test first.
+        # worker recipes still must pass their test first; so does any draft
+        # carrying a grant (Phase 08: the direct lane is zero-grant only).
         raise SkillError(
             f"candidate {name!r} is {candidate.status!r} — test it first: "
             f"skep skill test {name} <repo>"
         )
 
+    tainted = taint_line(candidate)
+    if tainted is not None and not accept_taint:
+        raise SkillError(
+            f"{tainted} — review it (skep skill show {name}), then approve with "
+            "--accept-taint (REST: accept_taint=true)"
+        )
     target = registry_name or candidate.name
     if store.get_template(target) is not None:
         raise SkillError(
@@ -291,6 +308,8 @@ def approve(
     store.add_template(template, actor=actor)
 
     decision_note = note or f"approved into registry as {target!r}"
+    if candidate.taint:
+        decision_note += f"; taint accepted: {taint_words(candidate.taint)}"
     _record_decision(
         store,
         name=name,
@@ -352,6 +371,238 @@ def reject(
     )
     store.add_candidate(updated)
     return updated
+
+
+def _direct_lane(candidate: SkillCandidate) -> bool:
+    """A zero-grant chat draft approves straight from DRAFT (v53-F1, Phase 08)."""
+    return (
+        candidate.status == DRAFT
+        and candidate.template.provenance in ("conversation", CAPTURED)
+        and not skill_grants(candidate.template)["dangerous"]
+    )
+
+
+# -- Phase 08 (8.2): operator-reviewed SKILL.md capture ------------------------
+
+CAPTURED = "captured"
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_SUBJECT_KEYS = ("command", "url", "path", "query", "name", "task_id")
+
+
+def taint_line(candidate: SkillCandidate) -> str | None:
+    if not candidate.taint:
+        return None
+    source = ", ".join(candidate.source_task_ids)
+    return f"⚠ tainted — captured from {source}, which carries: {taint_words(candidate.taint)}"
+
+
+def _call_args(call: dict[str, Any] | None) -> dict[str, Any]:
+    raw = ((call or {}).get("function") or {}).get("arguments")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _refused(content: str) -> bool:
+    """A refused step — or, Review R1 (Q14), one whose command failed inside
+    a tool that answered (``{"ok": true, "result": {"exit_code": 2}}``), or,
+    Review R2 (F5), one the engine skipped (``{"refused": ...}``)."""
+    try:
+        result = json.loads(content)
+    except ValueError:
+        return False
+    return any(
+        isinstance(each, dict)
+        and (
+            "error" in each
+            or "refused" in each
+            or each.get("ok") is False
+            or each.get("exit_code") not in (None, 0)
+        )
+        for each in (result, result.get("result") if isinstance(result, dict) else None)
+    )
+
+
+def _chat_turn(
+    store: RunStore, chat_id: str
+) -> tuple[str, list[tuple[str, dict[str, Any]]], list[ChatMessageRecord]]:
+    """The newest finished operator turn with at least two tool steps that
+    ran: its ask, (tool, args) per step, and its rows. The turn asking for
+    the capture (still running, or only capture_skill) and refused or failed
+    steps are not the procedure."""
+    messages = store.chat_messages(chat_id)
+    end = len(messages)
+    for start in range(len(messages) - 1, -1, -1):
+        if messages[start].role != "user" or messages[start].provenance != "operator":
+            continue
+        turn, end = messages[start:end], start
+        if turn[-1].role != "assistant" or turn[-1].tool_calls:
+            continue
+        calls = {
+            str(call.get("id") or ""): call
+            for row in turn
+            if row.role == "assistant"
+            for call in row.tool_calls or []
+        }
+        steps = [
+            (str(row.tool_name), _call_args(calls.get(row.tool_call_id or "")))
+            for row in turn
+            if row.role == "tool"
+            and row.tool_name
+            and row.tool_name != "capture_skill"
+            and not _refused(row.content)
+        ]
+        if len(steps) >= 2:  # Review R1 (Q14): one step is not a procedure
+            return turn[0].content.strip(), steps, turn
+    raise SkillError(f"chat {chat_id} has no finished multi-step turn to capture")
+
+
+def draft_capture(
+    store: RunStore, audit_dir: Path, source: str, *, name: str
+) -> tuple[SkillCandidate, str]:
+    """Draft (not save) a zero-grant SKILL.md candidate from a completed run
+    or a chat's last multi-step turn; returns it and its full SKILL.md. The
+    hosts and paths it used are DECLARED, never granted: the policy in force
+    when it runs decides every step (I5)."""
+    if not _NAME_RE.match(name):
+        raise SkillError(f"name {name!r} must be a lowercase slug (a-z, 0-9, -)")
+    if store.get_candidate(name) is not None or store.get_template(name) is not None:
+        raise SkillError(_taken(name))
+    run = store.get_run(source)
+    chat = store.get_chat(source) if run is None else None
+    worker_kind = "coding"
+    if run is not None:
+        if run.state != TaskState.COMPLETED.value:
+            raise SkillError(f"run {source} is {run.state!r}; only a completed run is captured")
+        try:
+            task = CodingWorkerTask.model_validate_json(
+                (audit_dir / source / "task.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            raise SkillError(f"run {source} has no readable task.json: {exc}") from exc
+        label, ask, worker_kind = source, task.instructions.strip(), task.worker_kind
+        steps = list(
+            dict.fromkeys(
+                str(event.payload["command"])
+                for event in store.events_for(source)
+                if event.type == EventType.COMMAND_RESULT and event.payload.get("exit_code") == 0
+            )
+        )
+        hosts, paths = list(task.permissions.network), list(task.permissions.read)
+        from .forensics import run_chat_taint
+
+        # the commands are the worker's words (D15); Review R1 (Q8): plus the
+        # bits of the chat that dispatched it (a resume: its nearest ancestor's)
+        taint = {"untrusted", *(run_chat_taint(store, audit_dir, source) or ())}
+    elif chat is not None:
+        ask, calls, turn = _chat_turn(store, source)
+        label = f"chat:{source}"
+        steps, hosts, paths = [], [], []
+        for tool, args in calls:
+            subject = next((str(args[key]) for key in _SUBJECT_KEYS if args.get(key)), "")
+            steps.append(f"{tool} — {subject}" if subject else tool)
+            if tool == "read_url":
+                hosts.append(urllib.parse.urlparse(str(args.get("url"))).hostname or "")
+            elif tool in ("read_file", "search_files") and args.get("path"):
+                paths.append(str(args["path"]))
+        hosts, paths = list(dict.fromkeys(filter(None, hosts))), list(dict.fromkeys(paths))
+        taint = _turn_taint(store, chat, turn)
+    else:
+        raise SkillError(f"no run or chat {source!r}")
+    if not steps:
+        raise SkillError(f"{label} ran no command that succeeded — nothing to capture")
+    # Review R1 (Q3): a SKILL.md is written to be shared — no credential, no URL
+    # userinfo; Review R2 (F3): the declared hosts too
+    ask, steps, hosts, paths = (
+        redact_export(ask),
+        [redact_export(x) for x in steps],
+        [redact_export(x) for x in hosts],
+        [redact_export(x) for x in paths],
+    )
+    description = f"captured procedure: {' '.join(ask.split())[:80]}"
+    numbered = "\n".join(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+    body = (
+        f"# {name}\n\n{description}\n\nWhen asked: {ask}\n\n## Steps\n{numbered}\n\n"
+        "## Declared, not granted\n"
+        f"- hosts: {', '.join(hosts) or 'none'}\n- read paths: {', '.join(paths) or 'none'}\n\n"
+        "This skill grants nothing: the policy in force when it runs decides every step."
+    )
+    template = WorkflowTemplate(
+        name=name,
+        instructions=body,
+        description=description,
+        worker_kind=worker_kind,
+        provenance=CAPTURED,
+    )
+    try:
+        validate_template(template)
+    except TemplateError as exc:
+        raise SkillError(f"cannot draft {name!r}: {exc}") from exc
+    candidate = SkillCandidate(
+        name=name,
+        signature=candidate_signature(template),
+        status=DRAFT,
+        template=template,
+        source_task_ids=(label,),
+        occurrences=1,
+        created_at=now_ts(),
+        taint=tuple(sorted(set(taint) & set(TAINT_BITS))),
+    )
+    front = {
+        "name": name,
+        "description": description,
+        "captured_from": label,
+        "taint": ", ".join(candidate.taint),
+    }
+    return candidate, render_skill_md(front, body)
+
+
+def capture_skill(
+    store: RunStore,
+    audit_dir: Path,
+    source: str,
+    *,
+    name: str,
+    actor: str,
+    expect: str | None = None,
+) -> tuple[SkillCandidate, str]:
+    """Save the draft as a v4 candidate (inactive; the existing approve is
+    its gate) and leave a decision row (I13). ``expect``: the SKILL.md a
+    card showed — the confirm drafts exactly that, or nothing (I8)."""
+    candidate, text = draft_capture(store, audit_dir, source, name=name)
+    if expect is not None and text != expect:
+        raise SkillError(
+            f"{source} changed since the card showed this SKILL.md — propose capture_skill again"
+        )
+    # Review R1 (Q12): the name is reserved with its audit row in one write —
+    # of two captures that both passed the check above, one wins
+    detail = {"source": candidate.source_task_ids[0], "taint": list(candidate.taint)}
+    if not store.add_new_candidate(candidate, action="captured", actor=actor, detail=detail):
+        raise SkillError(_taken(name))
+    return candidate, text
+
+
+def _taken(name: str) -> str:
+    return f"a skill or candidate named {name!r} already exists; pick another name"
+
+
+def _turn_taint(store: RunStore, chat: ChatRecord, turn: list[ChatMessageRecord]) -> set[str]:
+    """Review R1 (Q9, Q11): the bits the captured turn ran under — the
+    chat's own (sticky since its last /trust), outside content in the turn,
+    and a channel chat's members, who write as the operator. A turn from
+    before the last /trust ran under bits that /trust cleared and nothing
+    recorded: unknown, so both (approve names them)."""
+    from .observe import _OPERATOR_CHAT_SOURCES
+
+    taint = set(store.get_chat_taint(chat.chat_id).bits())
+    if chat.source not in _OPERATOR_CHAT_SOURCES or not all(row.trusted for row in turn):
+        taint.add("untrusted")
+    if turn[0].id <= store.chat_trusted_through(chat.chat_id):
+        taint |= set(TAINT_BITS)
+    return taint
 
 
 # -- CLI commands -------------------------------------------------------------
@@ -458,10 +709,14 @@ def cmd_skill_show(args: argparse.Namespace) -> int:
             print(f"                {candidate.decision_note}")
     if candidate.registry_name is not None:
         print(f"  registry:     template {candidate.registry_name!r}")
-    if candidate.status == DRAFT:
+    tainted = taint_line(candidate)
+    if tainted is not None:
+        print(f"  taint:        {tainted}")
+    flag = " --accept-taint" if tainted else ""  # Review R1 (Q17): the approve that will work
+    if candidate.status == TESTED or _direct_lane(candidate):
+        print(f"  next:         skep skill approve {candidate.name}{flag}   (or reject)")
+    elif candidate.status == DRAFT:
         print(f"  next:         skep skill test {candidate.name} <repo> --param ...")
-    elif candidate.status == TESTED:
-        print(f"  next:         skep skill approve {candidate.name}   (or reject)")
     elif candidate.status == APPROVED:
         print(f"  next:         skep run --template {candidate.registry_name} <repo> --param ...")
     return 0
@@ -508,7 +763,12 @@ def cmd_skill_approve(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         candidate, target = approve(
-            store, args.name, actor=actor, note=args.note, registry_name=args.as_name
+            store,
+            args.name,
+            actor=actor,
+            note=args.note,
+            registry_name=args.as_name,
+            accept_taint=args.accept_taint,
         )
     except SkillError as exc:
         return _err(str(exc))
@@ -519,6 +779,36 @@ def cmd_skill_approve(args: argparse.Namespace) -> int:
     required = "".join(f" --param {p.name}=..." for p in candidate.template.params)
     print(f"  run it:      skep run --template {target}{required}")
     print(f"  schedule it: skep schedule add JOB <repo> --template {target} --every 1d{required}")
+    return 0
+
+
+def cmd_skill_capture(args: argparse.Namespace) -> int:
+    """Phase 08 (8.2): draft a SKILL.md from a run or a chat turn — shown in
+    full, inactive until `skep skill approve` (the v4 human gate)."""
+    from .cli_cmds import _err, build_config
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no runs or chats yet — nothing to capture.")
+    store = RunStore(config.db_path)
+    try:
+        candidate, text = capture_skill(
+            store, config.audit_dir, args.source, name=args.name, actor="cli-user"
+        )
+    except SkillError as exc:
+        return _err(str(exc))
+    finally:
+        store.close()
+    print(text)
+    print(
+        f"drafted: skill {candidate.name!r} captured from {candidate.source_task_ids[0]} — "
+        "inactive, zero grants, until you approve it"
+    )
+    tainted = taint_line(candidate)
+    if tainted is not None:
+        print(tainted)
+    flag = " --accept-taint" if tainted else ""
+    print(f"  next: skep skill approve {candidate.name}{flag}   (or skep skill reject)")
     return 0
 
 
@@ -959,7 +1249,21 @@ def register_skill_commands(
     )
     approve_p.add_argument("--actor", default=None, help="who is approving (default: $USER)")
     approve_p.add_argument("--note", default=None)
+    approve_p.add_argument(
+        "--accept-taint",
+        action="store_true",
+        help="approve a candidate drafted from tainted content (skill show names the taint)",
+    )
     approve_p.set_defaults(func=cmd_skill_approve)
+
+    capture_p = skill_sub.add_parser(
+        "capture",
+        help="draft a SKILL.md from a completed run or a chat's last multi-step turn "
+        "(zero grants; inactive until skill approve)",
+    )
+    capture_p.add_argument("source", help="a task_id or a chat_id")
+    capture_p.add_argument("--name", required=True, help="the skill's name (a lowercase slug)")
+    capture_p.set_defaults(func=cmd_skill_capture)
 
     reject_p = skill_sub.add_parser("reject", help="HUMAN gate: deny a candidate")
     reject_p.add_argument("name")
