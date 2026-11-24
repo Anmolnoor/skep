@@ -68,6 +68,7 @@ from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
+    ContextWindow,
     LLMProtocol,
     OllamaError,
     _staged_view,
@@ -1894,7 +1895,9 @@ class ChatEngine:
             for t in specs
         ]  # fmt: skip
 
-    def _history_budget(self, system_chars: int, chat: Any = None) -> int:
+    def _history_budget(
+        self, system_chars: int, chat: Any = None, window: ContextWindow | None = None
+    ) -> int:
         """Replay chars that fit beside the fixed floor (v56-F2, ADR 0037).
 
         v73-F1: a recorded provider ceiling is a second, lower wall the
@@ -1902,8 +1905,9 @@ class ChatEngine:
         # v74-F2: a chat pinned to a bigger model budgets like one. Phase 06:
         # the provider-keyed window's replay cap (override > provider-api >
         # catalog > default), never the 16k fallback for a 200k model
-        model = getattr(chat, "model", None)
-        window_chars = resolve_context_window(self.store, model=model).replay_cap * 4
+        if window is None:
+            window = resolve_context_window(self.store, model=getattr(chat, "model", None))
+        window_chars = window.replay_cap * 4
         tools_chars = len(json.dumps(self._advertised_tools(chat)))
         floor = system_chars + tools_chars + RESPONSE_RESERVE_CHARS
         budget = max(MIN_HISTORY_BUDGET_CHARS, window_chars - floor)
@@ -2080,18 +2084,20 @@ class ChatEngine:
         chat = self.store.get_chat(chat_id)
         system = self._system_prompt(chat_id)
         summary = (chat.context_summary or "") if chat else ""
-        budget = self._history_budget(len(system) + len(summary), chat)
+        # R1 (F6): the replay cap the budget uses AND the model's own window —
+        # a 262k model replaying 16k is two numbers, never one (I8). R3 (Neon
+        # R3-1) keyed as Settings reads it; R4 (Sol R4-1): ONE window feeds
+        # both the meter and its budget.
+        window = resolve_context_window(
+            _staged_view(self.store, self.home), model=getattr(chat, "model", None)
+        )
+        budget = self._history_budget(len(system) + len(summary), chat, window)
         replay, dropped = self._replay(chat_id, chat, budget=budget)
         history_chars = sum(len(str(m.get("content") or "")) for m in replay)
         # v74-F4: the floor in parts — "96% at message one" read as "the chat
         # is full" when it meant "the floor is fixed and the window small";
         # the meter now names its parts (I8). Same functions, same numbers.
         tool_surface_chars = len(json.dumps(self._advertised_tools(chat)))
-        # R1 (F6): the replay cap the budget uses AND the model's own window —
-        # a 262k model replaying 16k is two numbers, never one (I8).
-        # R3 (Neon R3-1): keyed as Settings reads it on an upgraded home
-        view = _staged_view(self.store, self.home)
-        window = resolve_context_window(view, model=getattr(chat, "model", None))
         floor_chars = len(system) + len(summary) + tool_surface_chars
         window_chars = window.replay_cap * 4
         compacted = dropped > 0 or bool(chat and (chat.compacted_through or 0))

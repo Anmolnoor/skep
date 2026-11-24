@@ -16,6 +16,7 @@ adapter at this boundary so the rest of chat sees the same message/tool shape.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import ipaddress
@@ -583,37 +584,55 @@ _WINDOW_FIELDS = ("context_length", "max_model_len", "max_context_length")
 _UNREACHABLE = object()
 
 
+def _http_body(
+    method: str, url: str, *, headers: dict[str, str], json: Any, timeout: float
+) -> tuple[bool, bytes]:
+    """(is an HTTP error, body), read under ONE wall-clock deadline that
+    covers connect, the response headers and the body — R4 (Sol R3-2):
+    httpx's timeout is per read, so a host trickling header bytes kept the
+    worker alive past the deadline (forever, if it never ended them). The
+    async read is cancelled at the deadline and its connection dropped."""
+
+    async def read() -> tuple[bool, bytes]:
+        async with (
+            httpx.AsyncClient(timeout=timeout) as client,
+            client.stream(method, url, headers=headers, json=json) as response,
+        ):
+            if response.is_error:
+                return True, b""
+            return False, b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    try:
+        return asyncio.run(asyncio.wait_for(read(), timeout))
+    except TimeoutError as exc:
+        raise httpx.ReadTimeout("context probe deadline") from exc
+
+
 def _fetch_json(url: str, api_key: str | None, deadline: float, body: Any = None) -> Any:
     """The body (a POST of ``body`` when given), None on an HTTP, decoding,
     URL or JSON error, or _UNREACHABLE when the host did not answer within
     what is left of ``deadline`` (R1 F10: one budget for every probe, and a
-    host that timed out is not asked again). R2 (G3): read as a stream that
-    stops at the deadline — httpx's timeout is per read, so a host trickling
-    bytes kept the probe going. R2 (G5): a bad gzip body or URL is a miss."""
+    host that timed out is not asked again). R2 (G5): a bad gzip body or URL
+    is a miss. R4: the read itself stops at the deadline (``_http_body``)."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return _UNREACHABLE
-    chunks: list[bytes] = []
     try:
-        with httpx.stream(
+        failed, data = _http_body(
             "POST" if body is not None else "GET",
             url,
             headers=_headers(api_key),
             json=body,
             timeout=remaining,
-        ) as response:
-            if response.is_error:
-                return None
-            for chunk in response.iter_bytes():
-                if time.monotonic() >= deadline:
-                    return _UNREACHABLE
-                chunks.append(chunk)
+        )
     except httpx.TransportError:
         return _UNREACHABLE
     except (httpx.HTTPError, httpx.InvalidURL):
         return None
+    if failed:
+        return None
     try:
-        return json.loads(b"".join(chunks))
+        return json.loads(data)
     except ValueError:
         return None
 
