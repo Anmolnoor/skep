@@ -480,7 +480,9 @@ start at seq 1 from `GENESIS`).
 `proof export` is one run's local receipt — repo, baseline sha, patch
 sha256, skep version, sandbox and read confinement, key relay, policy
 baseline, taint, the G10 command with V1 status and executed test counts,
-the run's decision count and the ledger head hash — as a collapsible Markdown
+the run's decision count and the ledger head hash; a PR review run's receipt
+also carries the PR it verified (repo, number, base branch and SHA, head,
+merge-base), and its baseline is that merge-base — as a collapsible Markdown
 block for a PR (`md`, the default) or JSON. Every string passes the secret
 redactor, URL userinfo stripped. It is not tamper-proof: whoever
 can write the skep home can rewrite the whole log and its checkpoints, so the

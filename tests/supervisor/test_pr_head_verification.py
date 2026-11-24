@@ -1099,3 +1099,65 @@ def test_the_cli_fetches_a_pr_and_merges_it_pinned(
     assert main(["--home", str(home), "pr", "merge", "fixture", "7"]) == 0
     assert merges[0]["pin"]["head_commit"] == "a" * 40
     assert f"merges only {ORIGIN}#7 at head {'a' * 12}" in capsys.readouterr().out
+
+
+# --- 4. the PR tuple rides every face that reads the run (N6, S14/N7) ----------
+
+
+def test_list_runs_names_the_pr_and_the_head_g10_verified(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (N6): a maintainer matching runs to PRs reads it from list_runs."""
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    _outcome, _record, task_id = _g10(repo, config, head)
+
+    store = RunStore(config.db_path)
+    try:
+        listing = execute_read_tool(
+            "list_runs", {}, store=store, holder=ConfigHolder(config, store)
+        )
+    finally:
+        store.close()
+
+    view = next(run for run in listing["runs"] if run["task_id"] == task_id)
+    assert view["ref"] == PR_REF and view["pr"] == f"{ORIGIN}#7"
+    assert view["reverification"]["head_commit"] == head
+    assert view["reverification"]["base_commit"] == base
+
+
+def test_the_receipt_and_forensics_carry_the_verified_pr_tuple(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (S14/N7): repo, PR number, base, head and merge-base — and the PR
+    head is never called the baseline (V1 counted on the merge-base)."""
+    from skep.supervisor.forensics import build_run_forensics, render_forensics
+    from skep.supervisor.ledger_proof import build_receipt, render_receipt
+
+    _seed(repo)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "fork point")
+    fork = git(repo, "rev-parse", "main").stdout.strip()
+    _old, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    git(repo, "commit", "-q", "--allow-empty", "-m", "main moves on")
+    base = git(repo, "rev-parse", "main").stdout.strip()
+    git(repo, "update-ref", "refs/skep/pr/7/base", base)
+    _outcome, _record, task_id = _g10(repo, config, head)
+    tuple_ = {**_pair(base, head), "merge_base": fork}
+
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        receipt = build_receipt(store, config.home, config.audit_dir, task_id)
+        report = build_run_forensics(store, config.audit_dir, task_id)
+    finally:
+        store.close()
+
+    assert receipt["pr"] == tuple_ and receipt["baseline_sha"] == fork
+    assert receipt["baseline_sha"] != head
+    markdown = render_receipt(receipt, "md")
+    assert f"{ORIGIN}#7" in markdown and head in markdown and fork in markdown
+    assert report["outcome"]["g10"]["pr"] == tuple_
+    assert f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {fork})" in render_forensics(
+        report, markdown=False
+    )

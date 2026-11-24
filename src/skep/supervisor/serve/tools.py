@@ -345,7 +345,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_runs",
-        "Recent runs, newest first: state, verification, summary.",
+        "Recent runs, newest first: state, ref, verification, summary. A PR review "
+        "run also names its PR (owner/name#N) and the head and base G10 verified.",
         {"limit": {"type": "integer", "description": "max runs to return (default 10)"}},
     ),
     _tool(
@@ -2918,6 +2919,7 @@ def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
         "task_id": record.task_id,
         "state": record.state,
         "repo": record.repo,
+        "ref": record.ref,  # Phase 09 R1 (N6): which PR head a review ran on
         "summary": record.summary,
         "verification": record.verification_outcome,
         "updated_at": record.updated_at,
@@ -2930,6 +2932,8 @@ def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
         # instead of guessing (field test 2026-07-21).
         view["resumed_as"] = store.resumed_as_for(record.task_id)
         view.update(actions.created_transition_views_for_task(store, record.task_id))
+        if (pr := store.run_pr(record.task_id)) is not None:
+            view["pr"] = f"{pr['repo']}#{pr['number']}"
         # v20-F3: carry the re-verification signal onto the chat run list too.
         view["reverification"] = actions.reverification_summary(
             store.reverification_for(record.task_id)

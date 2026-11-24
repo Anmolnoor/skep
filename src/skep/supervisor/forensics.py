@@ -360,6 +360,9 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 "test_counts": reverify.test_counts,
                 "v1": _v1(reverify.tamper_flags, reverify.test_counts),
                 "detail": reverify.detail,
+                # Phase 09 R1 (S14/N7): a PR verdict's repo, number, base,
+                # head and merge-base; None for every other run.
+                "pr": reverify.pr,
             },
         },
         "ledger": _ledger(audit_dir, task_id),
@@ -390,6 +393,14 @@ def _log_tail(path: Path) -> list[str]:
     if size > LOG_TAIL_BYTES:
         lines = lines[1:]  # the window's first line may start mid-line
     return lines[-LOG_TAIL_LINES:]
+
+
+def pr_line(pr: dict[str, Any]) -> str:
+    """Phase 09 R1 (S14/N7): the PR a verdict covers, said one way everywhere."""
+    return (
+        f"PR {pr['repo']}#{pr['number']}: head {pr['head_commit']} on {pr['base_branch']} "
+        f"{pr['base_commit']} (merge-base {pr['merge_base']})"
+    )
 
 
 def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
@@ -429,6 +440,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
             f"{item}V1: {g10['v1']} tamper_flags={g10['tamper_flags']} "
             f"test_counts={g10['test_counts']}"
         )
+        if g10["pr"]:
+            lines.append(f"{item}{pr_line(g10['pr'])}")
         if g10["detail"]:
             lines.append(f"{item}G10 detail: {g10['detail']}")
     ledger = report["ledger"]

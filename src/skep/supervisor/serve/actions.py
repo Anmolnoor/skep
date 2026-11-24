@@ -526,11 +526,14 @@ def reverification_summary(reverify: Any) -> dict[str, Any] | None:
     """
     if reverify is None:
         return None
-    return {
+    summary = {
         "outcome": reverify.outcome,
         "confirmed": reverify.confirmed,
         "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
     }
+    if reverify.pr:  # Phase 09 R1 (N6): the PR head and base this verdict is on
+        summary |= {"head_commit": reverify.head_commit, "base_commit": reverify.base_commit}
+    return summary
 
 
 def tamper_note(reverify: Any) -> str | None:
