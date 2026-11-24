@@ -1490,6 +1490,42 @@ def test_a_pinned_pair_with_no_merge_base_here_confirms_nothing(
     assert "no merge-base" in outcome.detail and "refresh_repo pr=7" in outcome.detail
 
 
+@pytest.mark.parametrize("refusal", ["unpinned", "no-merge-base"])
+def test_an_early_refusal_records_no_merge_base_and_every_export_says_so(
+    repo: Path, config: SupervisorConfig, refusal: str
+) -> None:
+    """R2 (S9, N3): a PR verdict refused before a merge-base was found
+    records ``merge_base: None``; the receipt and the forensics (chat faces
+    of `skep proof export` / `skep run forensics`) say "merge-base
+    unavailable" instead of raising KeyError."""
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task_id = _review_run(store, repo, head, base if refusal == "unpinned" else "f" * 40)
+        reverify_run(
+            store=store, task_id=task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=config, changed_files=(),
+            verify_command="" if refusal == "unpinned" else PIN,
+        )  # fmt: skip
+        record = store.reverification_for(task_id)
+        holder = ConfigHolder(config, store)
+        receipt = execute_read_tool(
+            "proof_export", {"task_id": task_id}, store=store, holder=holder
+        )
+        forensics = execute_read_tool(
+            "run_forensics", {"task_id": task_id}, store=store, holder=holder
+        )
+    finally:
+        store.close()
+
+    assert record is not None and record.pr is not None and record.pr["merge_base"] is None
+    assert "merge-base unavailable" in receipt["receipt"]
+    assert "(merge-base unavailable)" in forensics["forensics"]
+
+
 # --- 6. the evidence is a read the Queen attaches, not a command it names ------
 
 

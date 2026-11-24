@@ -1349,7 +1349,8 @@ def reverify_run(
                 f"so there is nothing G10 may verify — refresh_repo pr={pr[1]} and dispatch "
                 "the review again"
             )
-        pr_head, verdict_pr = pr_pin["head_commit"], dict(pr_pin)
+        # R2 (S9, N3): None until found — a refusal below records that.
+        pr_head, verdict_pr = pr_pin["head_commit"], {**pr_pin, "merge_base": None}
         if not pinned:
             # v88-F4: a PR is never confirmed by a command the worker chose.
             return unavailable(

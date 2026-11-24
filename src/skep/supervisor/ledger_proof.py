@@ -331,7 +331,7 @@ def build_receipt(store: RunStore, home: Path, audit_dir: Path, task_id: str) ->
     if pr:
         # Phase 09 R1 (S14/N7): a PR verdict's baseline is the merge-base V1
         # counted on — the PR head is what was verified, never "baseline".
-        base = pr["merge_base"]
+        base = pr.get("merge_base") or "merge-base unavailable"  # R2 (S9, N3)
     detail = next(
         (t["detail"] for t in report["outcome"]["transitions"] if t["state"] == "dispatched"),
         None,

@@ -399,8 +399,15 @@ def pr_line(pr: dict[str, Any]) -> str:
     """Phase 09 R1 (S14/N7): the PR a verdict covers, said one way everywhere."""
     return (
         f"PR {pr['repo']}#{pr['number']}: head {pr['head_commit']} on {pr['base_branch']} "
-        f"{pr['base_commit']} (merge-base {pr['merge_base']})"
+        f"{pr['base_commit']} ({merge_base_text(pr)})"
     )
+
+
+def merge_base_text(pr: dict[str, Any]) -> str:
+    """R2 (S9, N3): a PR verdict refused before its merge-base was found
+    (``merge_base`` None, or absent on an R1 row) says so."""
+    found = pr.get("merge_base")
+    return f"merge-base {found}" if found else "merge-base unavailable"
 
 
 def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
