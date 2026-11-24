@@ -73,6 +73,54 @@ def test_the_dependabot_nightly_report_calls_only_scheduled_turn_tools() -> None
     assert named == {"list_runs"} and named <= SCHEDULED_TURN_TOOLS
 
 
+def _dependabot() -> str:
+    return (SKILLS / "dependabot-maintainer" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_dependabot_preflight_checks_every_precondition() -> None:
+    """S15: registration, a project, the pinned verify, sandbox, strict reads
+    and unlocked — not the verify pin alone."""
+    preflight = _dependabot().split("## 0. Preflight", 1)[1].split("## 1.", 1)[0]
+    for needed in (
+        "list_repos",
+        "`project` is set",
+        "(worker-nominated fallback)",
+        "`execution_mode` is `sandbox`",
+        "policy_provenance.strict_read_confinement.value",
+        "policy_provenance.unlocked.value",
+    ):
+        assert needed in preflight, needed
+
+
+def test_dependabot_reviews_with_the_builtin_engine_on_the_exact_head() -> None:
+    """N8/N6: engine=builtin (an external engine fails a patchless run before
+    G10), and the run is matched by ref + reverification head_commit."""
+    text = _dependabot()
+    assert "ref=refs/skep/pr/<N>/head execution_mode=sandbox engine=builtin" in text
+    assert "agent produced no workspace patch" in text
+    assert "`ref` is `refs/skep/pr/<N>/head`" in text
+    assert "`reverification.head_commit` is the `head_sha` from 2.1" in text
+    assert "`state` is `failed` and `reverification` is null" in text
+
+
+def test_dependabot_routes_workflow_bumps_to_a_human_review_task() -> None:
+    """S15: a .github/workflows bump never gets a merge card."""
+    bump = _dependabot().split("**Workflow bump**", 1)[1].split("**Red**", 1)[0]
+    assert "never propose `merge_pr`" in bump and "add_task" in bump
+
+
+def test_dependabot_evidence_lines_are_real_cli_commands() -> None:
+    """S14: the receipt on green and the forensics on red, each a command the
+    CLI parses, filled in per task."""
+    from skep.cli import _parser
+
+    report = _dependabot().split("## 4. Report", 1)[1].split("## Nightly", 1)[0]
+    commands = re.findall(r"(skep (?:proof export|run forensics) <task_id>(?: --md)?)", report)
+    assert commands == ["skep proof export <task_id>", "skep run forensics <task_id> --md"]
+    for command in commands:
+        _parser().parse_args(command.replace("<task_id>", "t-1").split()[1:])
+
+
 def test_dependabot_merges_only_behind_the_merge_pr_card() -> None:
     assert "merge_pr" in MUTATING_TOOL_NAMES and "merge_pr" in _tools("dependabot-maintainer")
 
