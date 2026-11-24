@@ -3236,9 +3236,12 @@ def cmd_pr_list(args: argparse.Namespace) -> int:
         return 0
     for pr in listing.prs:
         number = f"#{pr.get('number', '?')}"
+        author = pr["author"]["login"] or "?"
+        bot = " (bot)" if pr["author"]["is_bot"] else ""
         print(
             f"  {number:<6} {pr.get('state', '')!s:<8} "
-            f"{pr.get('headRefName', '')!s:<44} {str(pr.get('title', ''))[:60]}"
+            f"{pr.get('headRefName', '')!s:<44} {author + bot:<22} "
+            f"{str(pr.get('title', ''))[:60]}"
         )
     return 0
 

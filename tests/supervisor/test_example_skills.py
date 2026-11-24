@@ -121,6 +121,18 @@ def test_dependabot_attaches_its_evidence_with_read_tools() -> None:
     assert "skep proof export" not in report and "skep run forensics" not in report
 
 
+def test_dependabot_handles_only_prs_github_s_dependabot_authored() -> None:
+    """R4 (S9): a dependabot/ branch is a name anyone can push; the skill
+    keys on the author list_prs reports (login + is_bot), and the merge
+    queue line matches what merge_pr does (GitHub's 405 names the queue)."""
+    listing = _dependabot().split("## 1.", 1)[1].split("## 2.", 1)[0]
+    assert "`author.is_bot`" in listing
+    assert "`app/dependabot` or `dependabot[bot]`" in listing
+    assert "do not\nreview, card or merge it" in listing
+    assert "list_prs" in _tools("dependabot-maintainer")
+    assert "HTTP 405" in _dependabot().split("## 3. Decide", 1)[1]
+
+
 def test_dependabot_merges_only_behind_the_merge_pr_card() -> None:
     assert "merge_pr" in MUTATING_TOOL_NAMES and "merge_pr" in _tools("dependabot-maintainer")
 

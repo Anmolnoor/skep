@@ -31,7 +31,15 @@ schedule (last section) only reports: it never reviews or merges.
 ## 1. List the Dependabot PRs (read-only)
 
 `list_prs repo=<repo> state=open`. Keep the PRs whose head branch starts
-with `dependabot/`. None: say so and stop.
+with `dependabot/` AND whose author is GitHub's Dependabot: `author.is_bot`
+is true and `author.login` is `app/dependabot` or `dependabot[bot]`. Anyone
+can name a branch `dependabot/...`: a PR with any other author is an
+ordinary PR. List it as "not Dependabot's (author <login>)" and do not
+review, card or merge it under this skill. None left: say so and stop.
+
+The PRs `scripts/seed-dependabot-fixture.sh` opens are authored by you, not
+Dependabot, so this check skips them too. Review one only when the
+operator's own message names its PR number as a fixture to review.
 
 ## 2. For each PR, one at a time
 
@@ -62,8 +70,10 @@ the head, base branch and base SHA G10 confirmed; without a clean verdict
 skep refuses the proposal itself. If the card's head or base differs from
 the verdict's, tell the operator to deny it. If the PR or its base moves
 after the card, the merge is refused: say so and start again at 2.1.
-A base that uses a merge queue or auto-merge is refused too: tell the
-operator to merge it on GitHub. If the result says it merged onto another
+A PR with auto-merge set, or a base that uses a merge queue, is refused
+too: tell the operator to merge it on GitHub. If skep could not check for a
+queue, GitHub refuses the merge itself (HTTP 405) and the result names the
+queue: report it the same way. If the result says it merged onto another
 base than the one verified, report that line verbatim: the branch needs a
 re-verify.
 

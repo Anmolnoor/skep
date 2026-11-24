@@ -1502,17 +1502,15 @@ def test_merge_pull_request_refuses_a_pr_that_moved_since_the_verdict(
     [
         ({"autoMergeRequest": {"enabledAt": "2026-11-24T00:00:00Z"}}, None, 0),
         (None, {"id": "MQ_1"}, 0),
-        (None, None, 1),
     ],
-    ids=["auto-merge-set", "merge-queue", "queue-unreadable"],
+    ids=["auto-merge-set", "merge-queue"],
 )
 def test_a_pr_that_would_land_deferred_is_never_merged(
     repo: Path, live: dict[str, Any] | None, queue: Any, api_code: int
 ) -> None:
     """R2 (D5, S2/N7): auto-merge or a merge queue lands later, at whatever
-    the base is then — skep refuses before it merges, and a queue it
-    cannot rule out counts as one (R3: the REST merge is the safety; this
-    pre-check names the reason)."""
+    the base is then — skep refuses before it merges (R3: the REST merge is
+    the safety; this pre-check names the reason)."""
     calls: list[list[str]] = []
     runner = _merge_gh(calls, live, queue=queue, api_code=api_code)
 
@@ -1524,7 +1522,7 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
 
 
 @pytest.mark.parametrize(
-    ("code", "answer", "needle"),
+    ("code", "answer"),
     [
         (
             1,
@@ -1532,33 +1530,54 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
                 "data": {"repository": {"mergeQueue": None}},
                 "errors": [{"message": "Resource not accessible by personal access token"}],
             },
-            "Resource not accessible by personal access token",
         ),
-        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}, "no repo"),
-        (0, {"data": {"repository": None}}, "could not check"),
-        (0, {"data": {"repository": "x"}}, "could not check"),
+        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}),
+        (0, {"data": {"repository": None}}),
+        (0, {"data": {"repository": "x"}}),
     ],
     ids=["exit-1-with-null-queue", "errors-with-exit-0", "repository-null", "repository-not-dict"],
 )
-def test_a_merge_queue_probe_that_failed_is_never_read_as_no_queue(
-    repo: Path, code: int, answer: Any, needle: str
+def test_a_merge_queue_probe_that_failed_leaves_the_refusal_to_github(
+    repo: Path, code: int, answer: Any
 ) -> None:
-    """R3 (S5/N3): a fine-grained token without Merge queues: Read gets
-    ``mergeQueue: null`` AND an error — the probe checks the exit code,
-    ``errors`` and that ``data.repository`` is an object, and refuses
-    naming GitHub's own words."""
+    """R4 (orchestrator, N3 over S7): the GraphQL queue probe is best-effort
+    — a fine-grained token without Merge queues: Read gets ``mergeQueue:
+    null`` AND an error, which is never read as "no queue", but neither is
+    it a refusal: the REST merge never enqueues and answers 405 when a
+    queue is required, and that refusal names the queue skep could not
+    rule out. Only a clean, non-null mergeQueue refuses before the PUT."""
     calls: list[list[str]] = []
 
     def graphql(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, code, json.dumps(answer), "gh: error")
 
-    result = github.merge_pull_request(
-        repo=repo, pin=PIN_7, runner=_merge_gh(calls, graphql=graphql)
-    )
+    queued = {"message": "Changes must be made through the merge queue"}
+    runner = _merge_gh(calls, graphql=graphql, merge_status=405, merge_body=queued)
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
 
-    assert not result.merged and needle in result.detail and "nothing merged" in result.detail
-    assert "merge it on GitHub" in result.detail
-    assert not [c for c in calls if "PUT" in c]
+    assert [c for c in calls if "PUT" in c], "the probe's failure never stops the REST merge"
+    assert not result.merged and "nothing merged" in result.detail
+    assert "Changes must be made through the merge queue" in result.detail
+    assert "merge queue" in result.detail and "merge it on GitHub" in result.detail
+
+    unqueued = github.merge_pull_request(
+        repo=repo, pin=PIN_7, runner=_merge_gh([], graphql=graphql)
+    )
+    assert unqueued.merged, unqueued.detail  # no queue after all: GitHub merged it
+
+
+def test_a_merge_answer_github_could_not_read_quotes_its_body_not_its_headers(
+    repo: Path,
+) -> None:
+    """R4 (N7): "outcome unknown" quotes GitHub's own message (or the body),
+    never the status line and headers ``gh api --include`` prints first."""
+    said = _merge_gh([], merge_status=502, merge_body={"message": "Bad Gateway"})
+    plain = _merge_gh([], merge_status=200, merge_body="<html>gateway</html>")
+
+    for runner, needle in ((said, "Bad Gateway"), (plain, "<html>gateway</html>")):
+        result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+        assert "outcome unknown" in result.detail and needle in result.detail
+        assert "Content-Type" not in result.detail and "HTTP/2.0" not in result.detail
 
 
 @pytest.mark.parametrize("strategy", ["merge", "squash"])
@@ -2184,3 +2203,31 @@ def test_a_runner_config_that_becomes_a_submodule_is_a_flag(repo: Path) -> None:
 
     flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
     assert "tamper_check_failed:config_mode:pyproject.toml" in flags
+
+
+def test_skep_pr_list_shows_each_author_and_marks_a_bot(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R4 (S9, ADR 0050): the operator's face shows the author list_prs gives chat."""
+    from skep.cli import main
+
+    from .test_cli import _registered_clone
+
+    home = tmp_path / "home"
+    _registered_clone(home, repo)
+    prs = [
+        {"number": 7, "state": "OPEN", "headRefName": "dependabot/pip/x", "title": "Bump x",
+         "author": {"login": "app/dependabot", "is_bot": True}},
+        {"number": 8, "state": "OPEN", "headRefName": "dependabot/pip/y", "title": "Bump y",
+         "author": {"login": "mallory", "is_bot": False}},
+    ]  # fmt: skip
+    monkeypatch.setattr(
+        github, "list_pull_requests", lambda **_: github.PullRequestList(True, prs, "2 open PR(s)")
+    )
+
+    assert main(["--home", str(home), "pr", "list", "fixture"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "app/dependabot (bot)" in out[0] and "mallory" in out[1] and "(bot)" not in out[1]

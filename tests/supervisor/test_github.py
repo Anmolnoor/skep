@@ -7,6 +7,7 @@ degrade honestly on failure) is proven without auth.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -56,9 +57,11 @@ def test_open_pull_request_success(tmp_path: Path) -> None:
     assert result.url == "https://github.com/me/repo/pull/7"
     # The PR targets the skep branch as head and never pushes to the base directly.
     gh_call = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
-    # R3 (S16): the repo named as HOST/OWNER/REPO, the head as OWNER:BRANCH.
+    # R3 (S16): the repo named as HOST/OWNER/REPO; R4 (S2): the head is the
+    # bare branch — OWNER:BRANCH is gh's cross-repo (fork) form, and an
+    # org-owned same-repo PR breaks on it.
     assert gh_call[3:5] == ["--repo", "github.com/me/repo"]
-    assert gh_call[gh_call.index("--head") + 1] == "me:skep/abc"
+    assert gh_call[gh_call.index("--head") + 1] == "skep/abc"
     assert gh_call[gh_call.index("--base") + 1] == "main"
     # v60-F2: the base probe runs before any side effect.
     probe_call = next(c for c in calls if "ls-remote" in c)
@@ -247,3 +250,29 @@ def test_list_pull_requests_parses_json_and_degrades_honestly(tmp_path: Path) ->
 
     bad_state = list_pull_requests(repo=tmp_path, state="weird", runner=ok)
     assert bad_state.ok is False and "unknown state" in bad_state.detail
+
+
+def test_list_pull_requests_names_each_author_and_whether_it_is_a_bot(tmp_path: Path) -> None:
+    """R4 (S9): the author is what tells GitHub's Dependabot from anyone
+    who named a branch dependabot/... — login and is_bot, nothing else."""
+    from skep.supervisor.github import list_pull_requests
+
+    author = {"id": "BOT_1", "is_bot": True, "login": "app/dependabot", "name": ""}
+    payload = json.dumps(
+        [
+            {"number": 7, "headRefName": "dependabot/pip/x", "author": author},
+            {"number": 8, "headRefName": "dependabot/pip/y", "author": {"login": "mallory"}},
+            {"number": 9, "headRefName": "z", "author": None},
+        ]
+    )
+    calls: list[list[str]] = []
+    listed = list_pull_requests(
+        repo=_github_repo(tmp_path), runner=_gh_fake(0, payload, calls=calls)
+    )
+
+    assert "author" in calls[0][calls[0].index("--json") + 1].split(",")
+    assert [pr["author"] for pr in listed.prs] == [
+        {"login": "app/dependabot", "is_bot": True},
+        {"login": "mallory", "is_bot": False},
+        {"login": None, "is_bot": False},
+    ]
