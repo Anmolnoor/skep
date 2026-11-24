@@ -212,7 +212,11 @@ def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
     tools = [m.tool_name for m in turn if m.role == "tool" and m.tool_name]
     if len(tools) < MIN_TOOL_STEPS or turn[-1].role != "assistant":
         return None
-    ask = turn[0].content.strip()
+    from .policy_v3 import redact_export
+
+    # Review R3 (R3-1): a draft is shared like a capture — the ask passes the
+    # export redactor before it names, describes or instructs it (I8, I13).
+    ask = redact_export(turn[0].content.strip())
     if not ask:
         return None
     name = "conv-" + (_SLUG_RE.sub("-", ask.lower()).strip("-")[:40] or chat_id[:8])

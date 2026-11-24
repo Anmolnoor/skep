@@ -778,3 +778,40 @@ def test_review_r2_the_observer_never_replaces_a_draft_captured_under_its_name(
     finally:
         observer.close()
         operator.close()
+
+
+def test_review_r3_an_observed_draft_carries_no_secret_from_the_ask(store: RunStore) -> None:
+    """Review R3 (R3-1): the observer's draft is shared like a capture — the
+    ask passes the export redactor before it names, describes or instructs
+    the draft, and before the ``observed`` audit row records it."""
+    store.set_setting("conversation_skill_observer", True)
+    chat = _chat(store, ask=f"clone https://{USER}:{WORD}@git.example/r and https://{TOKEN}@x.io")
+    name = _draft_from_last_turn(store, chat)
+    assert name is not None
+    candidate = store.get_candidate(name)
+    assert candidate is not None
+    template = candidate.template
+    for text in (name, template.description, template.instructions):
+        _no_secret(text)
+    (event,) = [e for e in store.note_task_events() if e.action == "observed"]
+    _no_secret(repr(event))
+
+
+def test_review_r3_two_opens_of_a_legacy_store_both_migrate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3 (R3-2): two opens of a pre-taint store both saw the column
+    missing; the one that took the write lock second failed with
+    ``duplicate column name``. The column is re-checked under the lock."""
+    db = _legacy_drafts(tmp_path)
+    begin = RunStore._begin_immediate
+
+    def the_other_open_migrates_first(self: RunStore) -> None:
+        monkeypatch.setattr(RunStore, "_begin_immediate", begin)
+        RunStore(db).close()  # it won the write lock and finished
+        begin(self)
+
+    monkeypatch.setattr(RunStore, "_begin_immediate", the_other_open_migrates_first)
+    RunStore(db).close()
+    monkeypatch.undo()
+    _drafts_need_acknowledgment(db)
