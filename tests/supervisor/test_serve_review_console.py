@@ -243,6 +243,152 @@ def test_review_queue_count_only_is_the_same_membership_the_list_has(
     assert set(light["items"][0]) == {"kind", "id", "boundary", "at"}  # nothing costly
 
 
+_PATCH = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n x\n+y\n"
+
+
+def _completed(store: object, tmp_path: Path, name: str, *, patch: bool, **g10: object) -> str:
+    """A completed run, with a patch on disk if asked and a G10 record if given."""
+    import hashlib
+
+    from skep.supervisor import mint_task
+
+    task = mint_task(workspace=tmp_path / name, instructions=f"run {name}")
+    store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")  # type: ignore[attr-defined]
+    store.transition(task.task_id, "completed")  # type: ignore[attr-defined]
+    if patch:
+        path = tmp_path / f"{name}.patch"
+        path.write_text(_PATCH)
+        digest = hashlib.sha256(_PATCH.encode()).hexdigest()
+        store.add_artifact(task.task_id, kind="patch", audit_path=path, sha256=digest)  # type: ignore[attr-defined]
+    if g10:
+        record = {"worker_outcome": "passed", "commands": ["uv run pytest"], "detail": "ran"}
+        store.record_reverification(task.task_id, **(record | g10))  # type: ignore[attr-defined]
+    return str(task.task_id)
+
+
+def test_review_queue_holds_unlanded_patches_and_g10_disagreements_skep_review_walks(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 H1: a completed run holding an unlanded patch and a run whose G10
+    re-verify disagreed wait on the operator before any approval row exists —
+    the queue lists both (as `skep review` does), the badge counts them, and
+    the row opens the run: there is no inline land."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        unlanded = _completed(
+            store, tmp_path, "unlanded", patch=True, outcome="passed", confirmed=True,
+            exit_codes=[0],
+        )  # fmt: skip
+        disagreed = _completed(
+            store, tmp_path, "disagreed", patch=False, outcome="failed", confirmed=False,
+            exit_codes=[1],
+        )  # fmt: skip
+        _completed(store, tmp_path, "quiet", patch=False)  # nothing to land, nothing waits
+    finally:
+        store.close()
+    client = serve_client(config)
+    queue = client.get("/api/review-queue").json()
+    runs = {item["id"]: item for item in queue["items"] if item["kind"] == "run"}
+    assert set(runs) == {unlanded, disagreed} and queue["count"] == 2
+    ok, bad = runs[unlanded], runs[disagreed]
+    assert ok["boundary"] == bad["boundary"] == "patch-landing"
+    assert ok["g10"] == "CONFIRMED" and ok["warning"] is None and ok["tamper"] is None
+    assert ok["files"] == [{"path": "app.py", "added": 1, "removed": 0}]
+    assert ok["waiting"]  # the same "waiting" line `skep review` prints
+    assert bad["g10"] == "NOT CONFIRMED" and bad["files"] == []
+    assert "re-verification" in bad["warning"] or "re-verify" in bad["warning"]
+    light = client.get("/api/review-queue?detail=false").json()
+    assert light["count"] == 2
+    assert {i["id"] for i in light["items"]} == {unlanded, disagreed}
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        assert store.pending_approvals() == []  # reading the queue opened no review
+    finally:
+        store.close()
+
+
+def test_a_land_run_card_carries_its_g10_warning_and_tamper_and_is_the_runs_one_row(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 H2: a standalone land_run card is a patch-landing item like a gate —
+    G10's warning and V1's tamper are computed for it from its task — and it is
+    that run's one row (no second "run" row beside it)."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        tampered = _completed(
+            store, tmp_path, "tampered", patch=True, outcome="tampered", confirmed=False,
+            exit_codes=[0], tamper_flags=("deleted_test:test_x.py",),
+        )  # fmt: skip
+        fine = _completed(
+            store, tmp_path, "fine", patch=True, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        chat = store.create_chat(title="landing", model=None)
+        bad_card = store.add_chat_action(
+            chat.chat_id, tool="land_run", args={"task_id": tampered, "branch": "skep/maintain"}
+        )
+        good_card = store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": fine})
+    finally:
+        store.close()
+    queue = serve_client(config).get("/api/review-queue").json()
+    assert [(i["kind"], i["id"]) for i in queue["items"]] == [
+        ("card", bad_card),
+        ("card", good_card),
+    ]
+    bad, good = queue["items"]
+    assert bad["boundary"] == "patch-landing" and bad["task_id"] == tampered
+    assert bad["tamper"].startswith("TEST-TAMPER") and bad["warning"].startswith("TEST-TAMPER")
+    assert bad["branch"] == "skep/maintain"
+    assert good["warning"] is None and good["tamper"] is None and good["branch"] is None
+
+
+def test_a_batch_gate_carries_every_command_its_approval_grants(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R2 H3: approving a batch gate grants its whole stored command list —
+    the row carries that list, not just the reason naming the first."""
+    from skep.supervisor import RunStore, mint_task
+
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path / "w", instructions="batch")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "pending_approval")
+        review = store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="command: npm install",
+            commands=[["npm", "install"], ["npm", "run", "build:it", "a b"]],
+        )
+    finally:
+        store.close()
+    (item,) = serve_client(config).get("/api/review-queue").json()["items"]
+    assert item["id"] == review
+    assert item["commands"] == ["npm install", "npm run build:it 'a b'"]
+
+
+def test_a_card_the_web_cannot_confirm_says_where_to_answer_it(
+    config: SupervisorConfig,
+) -> None:
+    """R2 H5: the row carries card_refusal(WEB, card) — the same words the
+    chat page draws its read-only card with."""
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    model = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "set_assistant_model", "args": {"model": "m2"}},
+    ).json()["action_id"]
+    role = client.post(
+        f"/api/chats/{chat_id}/commands", json={"tool": "set_role", "args": {"name": "x"}}
+    ).json()["action_id"]
+    items = {i["id"]: i for i in client.get("/api/review-queue").json()["items"]}
+    assert items[model]["web_refusal"].endswith("answer it in skep chat")
+    assert items[role]["web_refusal"] is None
+
+
 # ---------- E3: the forged tools, as their records bind them ----------
 
 

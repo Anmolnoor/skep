@@ -7,6 +7,7 @@ that was there before it.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -18,8 +19,16 @@ from ..memory import taint_phrase, taint_words
 from ..skill_cmds import _direct_lane, taint_line
 from ..skills import DRAFT, TESTED
 from ..store import RunStore
-from .actions import approval_views, policy_decisions, tamper_note
+from .actions import (
+    approval_views,
+    never_reverified_error,
+    patch_digest,
+    policy_decisions,
+    reverification_warning,
+    tamper_note,
+)
 from .cards import BOUNDARIES, boundary
+from .commands import WEB
 from .llm import LlmTestRequest, probe_staged
 from .settings import ConfigHolder
 
@@ -39,6 +48,13 @@ REVIEW_ORDER = (
 )
 assert set(REVIEW_ORDER) == set(BOUNDARIES)
 _GATE_CARDS = ("approve_review", "deny_review")
+
+
+def landing_warning(store: RunStore, task_id: str) -> str | None:
+    """The G10 line a landing approval carries (approval_view's own pair)."""
+    return reverification_warning(store.reverification_for(task_id)) or never_reverified_error(
+        store, task_id
+    )
 
 
 def ledger_line(result: dict[str, Any]) -> str:
@@ -116,12 +132,19 @@ def review_queue(
     pending gate's question (approve_review / deny_review by review, land_run
     by the gate's run) is that gate, not a second row. The Inbox renders it
     and the sidebar badge counts it, so the two never disagree.
+    R2 H1: and every run `skep review` walks that no gate or card already
+    asks about — an unlanded patch, a G10 disagreement — as a "run" item that
+    opens the run (it has no approval row until land_run makes one).
     ``detail=False``: membership and order only — what the badge's poll needs."""
+    from ..cli_cmds import _review_cards
+    from .chat import card_refusal
+
     pending = store.pending_approvals()
     gates = {a.review_id: a for a in pending}
     landing = {a.task_id: a.review_id for a in pending if a.action == "apply_patch"}
     mirrors: dict[str, list[dict[str, Any]]] = {}
     items: list[dict[str, Any]] = []
+    asked: set[str] = {a.task_id for a in pending}  # runs a row already asks about
     titles = {c.chat_id: c.title for c in store.list_chats()} if detail else {}
     for card in store.proposed_chat_actions():
         mirrored = (
@@ -150,8 +173,13 @@ def review_queue(
         item: dict[str, Any] = {
             "kind": "card", "id": card.action_id, "boundary": label, "at": card.created_at
         }  # fmt: skip
+        # H2: a landing card is a patch-landing item like a gate — its run's G10 and V1
+        lands = str(card.args.get("task_id") or "") if label == "patch-landing" else ""
+        if lands:
+            asked.add(lands)
         if detail:
             shown = engine.card_fields(card.chat_id, card)["card"]
+            reverify = store.reverification_for(lands) if lands else None
             item.update(
                 chat_id=card.chat_id,
                 chat_title=titles.get(card.chat_id, card.chat_id),
@@ -159,9 +187,13 @@ def review_queue(
                 source=card.source,
                 headline=shown.get("headline"),
                 risk=shown.get("risk"),
-                tamper=shown.get("tamper"),
+                tamper=shown.get("tamper") or tamper_note(reverify),
+                warning=landing_warning(store, lands) if lands else None,
+                task_id=lands or None,
+                branch=card.args.get("branch") if lands else None,
                 taint=shown.get("taint"),
                 high=shown.get("high") if shown.get("tier") == "high" else None,
+                web_refusal=card_refusal(WEB, card),  # H5: the chat page's D1 words
             )
         items.append(item)
     for approval in pending:
@@ -187,6 +219,8 @@ def review_queue(
                     if label == "patch-landing"
                     else None
                 ),
+                # H3: an approve grants the whole stored batch, not the reason's first
+                commands=[shlex.join(c) for c in store.approval_commands(approval.review_id) or ()],
                 stale_base=(view.get("stale_base") or {}).get("detail"),
                 remediation=view.get("remediation"),
                 taint=(
@@ -195,6 +229,31 @@ def review_queue(
                     else None
                 ),
                 mirrored_by=mirrors.get(approval.review_id, []),
+            )
+        items.append(item)
+    # ponytail: reads every completed run each poll, as `skep review` does;
+    # an indexed "waiting" column if the badge poll ever shows up in a profile.
+    for waiting in _review_cards(store):
+        if waiting.task_id in asked:
+            continue
+        record = store.get_run(waiting.task_id)
+        item = {
+            "kind": "run", "id": waiting.task_id, "boundary": "patch-landing",
+            "at": record.updated_at if record else None,
+        }  # fmt: skip
+        if detail:
+            digest = patch_digest(store, waiting.task_id) or {}
+            item.update(
+                task_id=waiting.task_id,
+                g10=waiting.label,
+                waiting=waiting.waiting,
+                summary=record.summary if record else None,
+                warning=landing_warning(store, waiting.task_id),
+                tamper=tamper_note(store.reverification_for(waiting.task_id)),
+                files=[
+                    {k: f[k] for k in ("path", "added", "removed")} for f in digest.get("files", [])
+                ],
+                files_note=digest.get("note"),
             )
         items.append(item)
     for proposal in store.list_memory_proposals(state="pending_review"):
@@ -228,7 +287,7 @@ def review_queue(
             )
         items.append(item)
     rank = {label: n for n, label in enumerate(REVIEW_ORDER)}
-    kinds = ("gate", "card", "memory", "skill")  # a same-second tie: a run's gate first
+    kinds = ("gate", "card", "run", "memory", "skill")  # a same-second tie: a run's gate first
     items.sort(
         key=lambda i: (
             rank.get(i["boundary"], len(rank)),
