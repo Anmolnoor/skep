@@ -50,10 +50,16 @@ def test_importing_the_cli_loads_neither_httpx_nor_rich() -> None:
 
 def test_rich_only_on_a_terminal_without_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TERM", raising=False)
     assert cli_ui.rich_enabled(_Tty()) is True
     assert cli_ui.rich_enabled(io.StringIO()) is False  # a pipe / a file / CI
     monkeypatch.setenv("NO_COLOR", "1")
     assert cli_ui.rich_enabled(_Tty()) is False
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")  # R2 I12: a dumb terminal gets the plain bytes
+    assert cli_ui.rich_enabled(_Tty()) is False
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert cli_ui.rich_enabled(_Tty()) is True
 
 
 def test_no_skep_module_imports_rich_at_import_time() -> None:
