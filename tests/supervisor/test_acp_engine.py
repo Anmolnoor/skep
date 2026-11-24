@@ -86,9 +86,11 @@ def _dispatch(
     binding: tuple[str, str] | None = None,
     chat_id: str | None = None,
     stop: str | None = None,
+    run: dict[str, Any] | None = None,
     **policy: Any,
 ) -> IngestOutcome:
-    """One real dispatch of the ACP engine with the fake adapter playing ``steps``."""
+    """One real dispatch of the ACP engine with the fake adapter playing ``steps``
+    (``run``: more run_task arguments)."""
     context = _project(config, repo, binding=binding, **policy)
     scenario = tmp_path / "scenario.json"
     extra = {**({"modes": modes} if modes else {}), **({"stop": stop} if stop else {})}
@@ -102,7 +104,7 @@ def _dispatch(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")  # an inert name, not a key
     return run_task(
         repo, "add feature.py", config=config, execution_mode="sandbox", coding_engine=ENGINE,
-        verify_command=VERIFY, project_context=context, chat_id=chat_id,
+        verify_command=VERIFY, project_context=context, chat_id=chat_id, **(run or {}),
     )  # fmt: skip
 
 
@@ -1212,3 +1214,113 @@ def test_a_managed_clone_named_by_its_path_offers_its_slug(config: SupervisorCon
     finally:
         store.close()
     assert candidates == [("repo_slug", "myrepo")]
+
+
+# --- Phase 04 review R3 (4G) -------------------------------------------------
+
+
+def test_an_unattended_run_launches_behind_the_wall_its_gate_checked(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R3 G1 (I12): a schedule's gate checked strict reads, then the project
+    switched them off before dispatch. run_task launches behind the wall it
+    was handed — never a re-read. G2: a clean session's success is on disk
+    as the supervisor's own verdict."""
+    outcome = _dispatch(
+        config, repo, monkeypatch, tmp_path, [EDIT], unlocked=True, strict_read_confinement=False,
+        run={"unattended": True, "read_allowlist": ()},
+    )  # fmt: skip
+    task_id = outcome.record.task_id
+    assert outcome.record.state == "completed", outcome.record.summary
+    detail = next(d for st, d in _transitions(config, task_id) if st == "dispatched")
+    assert json.loads(detail or "{}")["read_allowlist"] == []
+    verdict = json.loads((config.audit_dir / task_id / "supervisor_verdict.json").read_text())
+    assert verdict["status"] == "completed" and verdict["worker_status"] == "completed"
+
+
+def test_an_unattended_external_run_handed_no_wall_is_refused(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 G1 (I2, I12): an unattended external coding run must be handed the
+    wall its gate checked — handed none, it is refused before any worker
+    starts (sandbox_unavailable), even on a project whose policy says strict
+    reads are on: dispatch never re-reads it."""
+    context = _project(config, repo)
+    monkeypatch.setattr(engines, "engine_available", lambda engine: (True, "stub"))
+    monkeypatch.setenv("OPENAI_API_KEY", "x")  # an inert name, not a key
+    outcome = run_task(
+        repo, "x", config=config, execution_mode="sandbox", coding_engine="codex",
+        verify_command=VERIFY, project_context=context, unattended=True,
+    )  # fmt: skip
+    assert outcome.record.state == "worker_crashed"
+    assert _transitions(config, outcome.record.task_id)[-1][1] == "sandbox_unavailable"
+    assert "checked" in (outcome.record.summary or "")
+
+
+def test_a_crash_before_any_verdict_never_lets_recovery_complete_an_acp_run(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R3 G2 (I2, I8): the supervisor dies after the worker deposited
+    ``completed`` but before it judged the session — no verdict on disk at
+    all. An ACP run's success is the supervisor's to record, so recovery
+    fails it ("ACP session outcome unknown"): never completed, never G10'd."""
+    from skep.supervisor.dispatch import recover_interrupted_runs, reverify_unverified_runs
+    from skep.workers.acp import AcpEngine
+
+    real, calls = AcpEngine.finish, []
+
+    def dies(self: AcpEngine, timeout: float = 30.0) -> str | None:
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise _Crash  # the session's judgement never ran
+        return real(self, timeout)
+
+    monkeypatch.setattr(AcpEngine, "finish", dies)
+    with pytest.raises(_Crash):
+        _dispatch(config, repo, monkeypatch, tmp_path, [EDIT], stop="refusal", unlocked=True)
+    store = RunStore(config.db_path)
+    try:
+        (run,) = store.recent_runs()
+        assert not (config.audit_dir / run.task_id / "supervisor_verdict.json").exists()
+        recover_interrupted_runs(store, config)
+        reverify_unverified_runs(store, config)
+        record, reverified = store.get_run(run.task_id), store.reverification_for(run.task_id)
+    finally:
+        store.close()
+    assert record is not None and record.state == "failed"
+    transitions = _transitions(config, run.task_id)
+    assert "completed" not in [state for state, _ in transitions] and reverified is None
+    assert "outcome unknown" in (transitions[-1][1] or "")
+
+
+@pytest.mark.parametrize("engine", [ENGINE, "acp"])
+@pytest.mark.parametrize("judged", [False, True])
+def test_startup_reverify_fails_a_completed_acp_run_with_no_verdict(
+    config: SupervisorConfig, tmp_path: Path, engine: str, judged: bool
+) -> None:
+    """R3 G2: a completed ACP run with no verdict beside it (a crash before
+    R3 wrote success verdicts) never had its session judged — startup fails
+    it instead of re-verifying it into landing. Beside a recorded success it
+    stays completed (here: no patch, so nothing to re-verify)."""
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.dispatch import reverify_unverified_runs
+
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path, instructions="x", budget=DEFAULT_BUDGET)
+        store.create_run(
+            task, repo=tmp_path, ref="main", execution_mode="sandbox", coding_engine=engine
+        )
+        store.transition(task.task_id, "completed")
+        if judged:
+            (config.audit_dir / task.task_id).mkdir(parents=True)
+            (config.audit_dir / task.task_id / "supervisor_verdict.json").write_text(
+                json.dumps({"status": "completed", "worker_status": "completed"})
+            )
+        assert reverify_unverified_runs(store, config) == []
+        record = store.get_run(task.task_id)
+    finally:
+        store.close()
+    assert record is not None and record.state == ("completed" if judged else "failed")
+    if not judged:
+        assert "outcome unknown" in (_transitions(config, task.task_id)[-1][1] or "")

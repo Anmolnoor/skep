@@ -1090,26 +1090,25 @@ def _foreign_untrusted_row(store: RunStore, schedule: ScheduleRecord, origin: in
     own output never refuses its next tick, though the Queen still sees the
     bit. Review R2 (F4): the store records every row that contributes the
     bit, even once it is on, so only those count — words, a private-only
-    read or a denied tool set none. Unknown taint, a setter not in this chat
-    (inherited) or one never recorded is the answer as is — fail closed.
+    read or a denied tool set none. Review R3 (G3): EVERY recorded
+    contributor is judged, read with the transcript in one snapshot — not
+    only the rows from the first setter on, since a row written before the
+    notice can be recorded after it. Unknown taint, a setter never recorded,
+    or a contributor this transcript does not hold (inherited) is the answer
+    — fail closed.
 
-    ponytail: reads the whole transcript, only for an untrusted external
-    tick; a tool row whose bit lands (serve/taint.py) after this read is not
-    seen."""
+    ponytail: a tool row whose bit lands (serve/taint.py) after this read is
+    not seen."""
     chat = schedule.chat_id
     if not chat or origin == UNKNOWN_TAINT_ORIGIN:
         return origin
-    since = [message for message in store.chat_messages(chat) if message.id >= origin]
-    contributed = store.chat_untrusted_rows(chat)
-    if not since or since[0].id != origin or origin not in contributed:
+    sources = store.chat_untrusted_sources(chat)
+    if origin not in sources:
         return origin
-    for message in since:
-        kind, _, task = message.provenance.partition(":")
-        if message.id not in contributed or (
-            kind == "worker" and store.schedule_for_task(task) == schedule.name
-        ):
-            continue
-        return message.id
+    for row, provenance in sorted(sources.items()):
+        kind, _, task = (provenance or "").partition(":")
+        if kind != "worker" or store.schedule_for_task(task) != schedule.name:
+            return row
     return None
 
 
@@ -1463,6 +1462,9 @@ def run_due(
                         planning_protocol=planning_protocol,
                         # Phase 04 A10: an ACP run's cards land in the chat that made the schedule
                         chat_id=schedule.chat_id,
+                        # review R3 (G1): the wall the gates judged, never re-read
+                        unattended=True,
+                        read_allowlist=read_allowlist_for(policy),
                     )
             else:
                 repo = Path(schedule.repo).expanduser().resolve()
@@ -1573,6 +1575,9 @@ def run_due(
                         planning_protocol=planning_protocol,
                         # Phase 04 A10: an ACP run's cards land in the chat that made the schedule
                         chat_id=schedule.chat_id,
+                        # review R3 (G1): the wall the gates judged, never re-read
+                        unattended=True,
+                        read_allowlist=read_allowlist_for(policy),
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state

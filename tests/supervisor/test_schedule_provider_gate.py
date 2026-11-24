@@ -14,7 +14,7 @@ import pytest
 from skep import status
 from skep.supervisor import SupervisorConfig
 from skep.supervisor.scheduler import MAX_SCHEDULE_CONSECUTIVE_FAILURES, make_schedule, run_due
-from skep.supervisor.store import RunStore
+from skep.supervisor.store import ChatTaint, RunStore
 
 NOW = "2026-06-11T09:00:00Z"
 DEAD = {
@@ -1078,3 +1078,114 @@ def test_the_binary_must_sit_inside_the_strict_walls_roots(
         return
     assert seen == [] and "gate engine_auth:" in result.state
     assert "strict read wall" in result.state and str(elsewhere) in result.state
+
+
+# Phase 04 review R3.
+
+
+def test_the_read_wall_the_gate_checked_is_the_one_dispatch_gets(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 G1 (I12): strict reads switched off after the gate passed cannot
+    reach the launch as None — the tick hands dispatch the wall its gate
+    checked, marked unattended, and dispatch uses that, never a re-read."""
+    import json
+
+    from skep.supervisor import scheduler
+
+    _bound(store, tmp_path, monkeypatch)  # codex, every gate open, strict reads on
+    real = scheduler._external_gates
+
+    def gate_then_edit(*args: Any, **kwargs: Any) -> Any:
+        verdict = real(*args, **kwargs)
+        off = json.dumps({**GATES_OPEN, "strict_read_confinement": False})
+        store._conn.execute("UPDATE project_policies SET policy_json = ?", (off,))
+        store._conn.commit()
+        return verdict
+
+    monkeypatch.setattr(scheduler, "_external_gates", gate_then_edit)
+    seen, dispatch = _capture()
+    run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    (run,) = seen
+    assert run["unattended"] is True and run["read_allowlist"] == ()
+
+
+@pytest.mark.parametrize("foreign", ["earlier_tool", "missing"])
+def test_every_recorded_contributor_is_judged_not_only_those_after_the_setter(
+    store: RunStore,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign: str,
+) -> None:
+    """R3 G3 (I6): both committed before the tick, in the bad order — a tool
+    row written BEFORE the schedule's own notice whose bit is recorded AFTER
+    it (serve/taint.py marks it once the tool returns), or a recorded row
+    this transcript does not hold. The notice is the bit's first setter;
+    the other contributor still refuses the tick."""
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    store.record_schedule_outcome("nightly", task_id="t-0", state="completed")
+    tool = store.add_chat_message(chat_id, role="tool", content="{}", tool_name="web_fetch")
+    notice = store.add_chat_message(
+        chat_id, role="user", content="t-0 done", provenance="worker:t-0"
+    )
+    other = tool if foreign == "earlier_tool" else 10_000
+    store.add_chat_taint(chat_id, untrusted=other)
+    assert store.get_chat_taint(chat_id).untrusted == notice
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and f"message {other}" in result.state
+
+
+def test_an_unreadable_contributor_record_refuses_the_tick(
+    store: RunStore, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 G3: a ``taint`` that does not parse as a record of contributors
+    names none — never "only the schedule's own" (fail closed)."""
+    chat_id = store.create_chat(title="c", model=None).chat_id
+    _bound(store, tmp_path, monkeypatch, chat_id=chat_id)
+    store.record_schedule_outcome("nightly", task_id="t-0", state="completed")
+    store.add_chat_message(chat_id, role="user", content="t-0 done", provenance="worker:t-0")
+    assert len(store.chat_untrusted_sources(chat_id)) == 1
+    monkeypatch.setattr(store, "get_chat_taint", lambda chat: ChatTaint(untrusted=1))
+    store._conn.execute("UPDATE chats SET taint = '{not json' WHERE chat_id = ?", (chat_id,))
+    store._conn.commit()
+    assert store.chat_untrusted_sources(chat_id) == {}
+    seen, dispatch = _capture()
+    (result,) = run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    assert seen == [] and result.state.startswith("policy_blocked: ")
+
+
+def test_two_stores_adding_contributors_at_once_both_record_theirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 G4: two connections on one store file (serve's and another
+    RunStore's) each record a contributor while the other is mid
+    read-modify-write — neither overwrites the other's addition, so the
+    self-notice exemption can never lose a foreign row."""
+    import threading
+
+    db = tmp_path / "s.sqlite3"
+    first, second = RunStore(db), RunStore(db)
+    try:
+        chat_id = first.create_chat(title="c", model=None).chat_id
+        first.add_chat_taint(chat_id, untrusted=1)
+        real = first.chat_untrusted_rows
+        other = threading.Thread(target=lambda: second.add_chat_taint(chat_id, untrusted=2))
+
+        def mid_write(chat: str) -> set[int]:
+            rows = real(chat)
+            if other.ident is None:  # once: the other lands now, unless the write lock holds it
+                other.start()
+                other.join(0.5)
+            return rows
+
+        monkeypatch.setattr(first, "chat_untrusted_rows", mid_write)
+        first.add_chat_taint(chat_id, untrusted=3)
+        other.join(10)
+        assert not other.is_alive()
+        assert second.chat_untrusted_rows(chat_id) == {1, 2, 3}
+    finally:
+        first.close()
+        second.close()

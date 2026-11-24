@@ -9,7 +9,8 @@ counts and the `skep approval answer` CLI face are not. Amended by the Phase
 required, run-bound stacks, port-aware wall, card expiry at the claim, the
 worker's claim kept beside the supervisor's verdict. Amended by round 2 (4E,
 2026-11-23): the checked read wall carried to launch, race-free cards, one
-terminal verdict.
+terminal verdict. Amended by round 3 (4G, 2026-11-23): a schedule's checked
+wall reaches the launch, and an ACP success is durable too.
 **Depends on:** ADR 0054 (the governor: `acp/proxy.py`, `acp/mapper.py`,
 `acp/govern.py`), ADR 0047 (CLI-agent engines), ADR 0059 (`decide()`),
 ADR 0061 (unlocked mode), ADR 0068 (strict reads).
@@ -99,7 +100,10 @@ strict run launches is usable with the sandbox on. Strict reads stay a
 project choice for every other engine; for this one they are the engine's.
 *R2 (E1):* the project's read wall is read once — the A2 check and the
 launch use that one value, so a policy edit in between cannot start the
-adapter denylist-only.
+adapter denylist-only. *R3 (G1):* a schedule tick hands run_task the wall
+its gates checked (`unattended=True, read_allowlist=`), which dispatch uses
+without reading the policy at all; an unattended external coding run handed
+none is refused `sandbox_unavailable` before its worker starts.
 
 *R1 (A7, A15):* `AcpEngine.finish()` joins the session and every forwarded
 ask; dispatch calls it before the store closes (in its `finally` too). A
@@ -259,7 +263,11 @@ never `completed` first. A crash before the ingest leaves the run in
 flight; restart recovery reads the verdict file and fails it. A failed
 verdict-file write still fails the run in the store. Startup re-verify
 fails a `completed` run that has a verdict file (a pre-R2 crash) instead
-of running G10 on it.
+of running G10 on it. *R3 (G2):* the session's success is a verdict too
+(`status: completed`), written before the claim is ingested. Restart
+recovery and startup re-verify accept an ACP run's claim only beside one:
+with no verdict file the session was never judged, so the run is `failed`
+("ACP session outcome unknown"), never `completed` and never re-verified.
 
 ## Mediated vs observed (I8)
 
@@ -282,8 +290,9 @@ the honest record of that, and the sandbox is what bounded them.
   call into a decision.
 - An ACP session does not survive a serve restart (ADR 0060): the governor
   and client lived in the old serve, so the adapter loses its client and
-  stops. Whatever the worker inside then files is re-verified like any other
-  run; asks after that point were never made.
+  stops; asks after that point were never made. *R3 (G2):* whatever the
+  worker inside then files has no session verdict beside it, so recovery
+  fails the run ("ACP session outcome unknown") rather than re-verifying it.
 
 ## Consequences
 
