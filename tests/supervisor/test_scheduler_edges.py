@@ -5,6 +5,7 @@ Each test names its ledger row. The plumbing tests stay in test_scheduler.py.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -342,14 +343,29 @@ def test_serve_start_reconciles_interrupted_scripts(
         task_id=None,
         state=SCRIPT_RUNNING_STATE,
     )
+    from skep.supervisor.wall import INPUT_STAGES
+
+    # R4 (S6/N5): the same start sweeps an input stage a dead pid left.
+    pid = 4_000_000
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            pass
+        pid += 1
+    leftover = config.home.parent / "supervisor" / INPUT_STAGES / f"{pid}-x"
+    leftover.mkdir(parents=True)
     holder = ConfigHolder(config, store)
     ticker = Ticker(holder, store)
     ticker.start()
     ticker.stop()
     row = store.get_schedule("backup")
     assert row is not None and (row.last_state or "").startswith("script_interrupted")
+    assert not leftover.exists()
 
-    def _boom(_store: RunStore) -> list[str]:
+    def _boom(_store: RunStore, **_kw: object) -> list[str]:
         raise RuntimeError("boom")
 
     monkeypatch.setattr("skep.supervisor.serve.ticker.reconcile_interrupted_scripts", _boom)

@@ -632,8 +632,10 @@ the launch path `forged_lane` now shares, so the two cannot drift:
   only) and keeps working.
   On Linux (bubblewrap) a script therefore sees a **snapshot** of each
   input taken at launch, not live updates: the copies go to a private
-  `0700` temp dir outside the workspace that `wall.walled` removes after
-  the run, each `0600` plus the source's owner-execute bit (never
+  `0700` dir under the skep home (`<home>/supervisor/script-inputs/<pid>-*`,
+  never `$TMPDIR`, outside every root the run can write) that
+  `wall.walled` removes after the run — and that the next serve start
+  removes if a crash skipped that and its pid is gone — each `0600` plus the source's owner-execute bit (never
   setuid, setgid or sticky), capped at 16 MiB per file and 64 MiB in all
   (`sandbox.READ_FILE_MAX_BYTES`, `READ_FILES_TOTAL_MAX_BYTES`). An
   oversize input refuses the run, naming the file and the cap. A run

@@ -308,10 +308,15 @@ def _run_script_process(
 SCRIPT_RUNNING_STATE = "script_running"
 
 
-def reconcile_interrupted_scripts(store: RunStore) -> list[str]:
+def reconcile_interrupted_scripts(store: RunStore, *, skep_home: Path | None = None) -> list[str]:
     """ES B120: at serve start, a schedule still marked running was cut off
     by the last shutdown. Record that as a health failure; its slot already
-    advanced, so it fires at the next one, not at once."""
+    advanced, so it fires at the next one, not at once. Given ``skep_home``
+    (R4: S6/N5), it also removes the input stages a dead process left."""
+    if skep_home is not None:
+        from .wall import sweep_dead_input_stages
+
+        sweep_dead_input_stages(skep_home)
     interrupted: list[str] = []
     for schedule in store.list_schedules():
         if schedule.last_state != SCRIPT_RUNNING_STATE:

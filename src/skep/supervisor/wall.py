@@ -14,6 +14,39 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+INPUT_STAGES = "script-inputs"  # under <skep home>/supervisor (R4: S6/N5)
+
+
+def input_stage_root(skep_home: Path) -> Path:
+    """Where bubblewrap stages script inputs: private (0700), in the skep
+    home rather than a shared $TMPDIR, outside every run's bound roots."""
+    root = skep_home / "supervisor" / INPUT_STAGES
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    return root
+
+
+def sweep_dead_input_stages(skep_home: Path) -> list[Path]:
+    """Remove the stages a dead process left (``<pid>-*``: a crash skips
+    ``walled``'s cleanup); a live owner's stays, as does a name that is not
+    a stage. The removed paths."""
+    root = skep_home / "supervisor" / INPUT_STAGES
+    if not root.is_dir():
+        return []
+    removed: list[Path] = []
+    for stage in root.iterdir():
+        owner = stage.name.partition("-")[0]
+        if not owner.isdigit():
+            continue
+        try:
+            os.kill(int(owner), 0)
+        except ProcessLookupError:
+            shutil.rmtree(stage, ignore_errors=True)
+            removed.append(stage)
+        except PermissionError:
+            pass  # alive, another user's
+    return removed
+
 
 @contextlib.contextmanager
 def walled(
@@ -32,9 +65,12 @@ def walled(
     detected toolchains incl. ``<skep home>/tools/.venvs``, the workspace,
     ``read_allowlist``) and ``read_files`` as single files (R2, S7), never
     the operator's other files; the secret masks land last, and an input
-    under one refuses (R3). On bubblewrap each input is a snapshot copied at
-    launch into a private temp dir this block removes, capped per file and
-    in all (``sandbox.READ_FILE_MAX_BYTES``). Writes: ``workspace`` (+
+    under one refuses (R3), as does anything but an ordinary file (R4:
+    ``sandbox.open_read_file``). On bubblewrap each input is a snapshot
+    copied at launch into a private 0700 dir under the skep home
+    (``input_stage_root``; ``<pid>-*``) that this block removes — and the
+    next serve start sweeps if a crash skipped that — capped per file and in
+    all (``sandbox.READ_FILE_MAX_BYTES``). Writes: ``workspace`` (+
     ``writable``). Env: PATH and LANG, HOME and TMPDIR in the workspace.
     Egress: deny-all when ``hosts`` is empty, else pinned to them through a
     FilteringProxy (D1) — never allow-all: an entry that is not a concrete
@@ -78,7 +114,9 @@ def walled(
             stack.callback(proxy.stop)
         stage = None
         if read_files and probe.backend == "bubblewrap":  # R3 (S2): private, outside, removed
-            stage = Path(tempfile.mkdtemp(prefix="skep-inputs-"))
+            stage = Path(
+                tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=input_stage_root(skep_home))
+            )
             stack.callback(shutil.rmtree, stage, ignore_errors=True)
         try:
             profile = sandbox.write_profile(
