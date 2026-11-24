@@ -4,10 +4,12 @@ INSTALLED wheel, not the source tree.
 The source-tree crawl (test_serve_ui) cannot see a packaging miss: a module or
 font the wheel forgot still answers 200 from ``src/``. This builds the wheel,
 installs it into a throwaway venv, serves the UI from that install with a
-throwaway home, and crawls it as a browser would. Offline throughout: the
-wheel builds with ``UV_OFFLINE``, installs ``--no-deps``, and its runtime deps
-come from this test's own environment through a ``.pth`` — the venv's own
-site-packages (the wheel's ``skep``) always wins over it.
+throwaway home, and crawls it as a browser would. Offline: the wheel builds
+with ``UV_OFFLINE`` (only a cold uv cache — a fresh checkout, the release
+gate's private ``UV_CACHE_DIR`` — fetches the build backend once), installs
+``--no-deps``, and its runtime deps come from this test's own environment
+through a ``.pth`` — the venv's own site-packages (the wheel's ``skep``)
+always wins over it.
 """
 
 from __future__ import annotations
@@ -46,24 +48,36 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def _step(*args: str | Path, offline: bool = True) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "UV_OFFLINE": "1"} if offline else dict(os.environ)
+    return subprocess.run(
+        [str(a) for a in args], capture_output=True, text=True, timeout=180, env=env
+    )
+
+
 def _run(*args: str | Path) -> str:
     """One offline step; its stdout. A failure shows uv's own words."""
-    done = subprocess.run(
-        [str(a) for a in args],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "UV_OFFLINE": "1"},
-    )
+    done = _step(*args)
     assert done.returncode == 0, done.stderr
     return done.stdout.strip()
+
+
+def _build_wheel(uv: str, dist: Path, root: Path) -> None:
+    """Offline when uv's cache holds the build backend. The release gate
+    failed on v2.0.0's tag because its private cache did not: a cold cache
+    fetches the backend, once, and every later step stays offline."""
+    build = (uv, "build", "--wheel", "--out-dir", dist, root)
+    done = _step(*build)
+    if done.returncode != 0 and "network was disabled" in done.stderr:
+        done = _step(*build, offline=False)
+    assert done.returncode == 0, done.stderr
 
 
 def _install_wheel(tmp_path: Path, uv: str) -> Path:
     """Build the wheel and install it into a fresh venv; its python."""
     root = Path(__file__).resolve().parents[2]
     dist = tmp_path / "dist"
-    _run(uv, "build", "--wheel", "--out-dir", dist, root)
+    _build_wheel(uv, dist, root)
     (wheel,) = dist.glob("skep-*.whl")
     venv = tmp_path / "venv"
     _run(uv, "venv", "--python", sys.executable, venv)
