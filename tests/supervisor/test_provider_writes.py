@@ -1458,3 +1458,32 @@ def test_clearing_on_the_first_endpoint_probes_with_the_unowned_env_key(
         profile = ProviderProfile("w", "openai_compat", "https://w.example", "m")
         got = llm._committed_key(store, config.home, "https://w.example", profile, False, "")
     assert got == "env-u1"
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_a_save_that_may_claim_an_unowned_key_holds_the_writers_lock(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, owned: bool
+) -> None:
+    """R6 (Sol R6-1): resolving an unowned env key, probing with it and
+    pinning it are one step — a concurrent writer cannot pin it to A while B
+    is being probed with it. An owned key keeps the probe outside the lock."""
+    from skep.supervisor.serve import llm
+    from skep.supervisor.serve.llm import LLM_ENV_KEY_ENDPOINT
+
+    held: list[bool] = []
+
+    def probe(*_a: Any, **_k: Any) -> str:
+        held.append(llm._PROVIDER_WRITES._is_owned())  # type: ignore[attr-defined]
+        raise ProviderError("refused — nothing changed")
+
+    monkeypatch.setattr(llm, "_probe_or_refuse", probe)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u2")
+    with _store(config) as store:
+        store.upsert_provider_profile(
+            ProviderProfile("a", "openai_compat", "https://a.example", "m", active=True)
+        )
+        if owned:
+            store.set_setting(LLM_ENV_KEY_ENDPOINT, "https://a.example")
+        with pytest.raises(ProviderError):
+            llm.save_assistant_llm(store, config.home, base_url="https://b.example", api_key="")
+    assert held == [not owned]

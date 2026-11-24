@@ -1657,6 +1657,31 @@ def save_assistant_llm(
     api_key: str | None = None,
     settings: dict[str, Any] | None = None,
 ) -> None:
+    """``_save_assistant_llm`` — R6 (Sol R6-1): while a legacy key is still
+    unowned, resolving it, probing with it and pinning it are ONE step under
+    the writers' lock, so a concurrent writer can never pin it to A while B
+    is being probed with it. An owned key keeps the probe outside the lock."""
+    unowned = any(
+        key and legacy_key_endpoint(home, store, marker) == ""
+        for marker, key in _legacy_values(home)
+    )
+    with _PROVIDER_WRITES if unowned else contextlib.nullcontext():
+        _save_assistant_llm(
+            store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
+            settings=settings,
+        )  # fmt: skip
+
+
+def _save_assistant_llm(
+    store: RunStore,
+    home: Path,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    protocol: LLMProtocol | None = None,
+    api_key: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> None:
     """Phase 05 (5.1): THE write of the assistant's provider/model — Web
     Settings and the Queen's model dial land here, ``use_provider`` (CLI
     ``skep provider``, onboard) activates a profile. The active registry
