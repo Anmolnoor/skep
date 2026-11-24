@@ -305,3 +305,43 @@ def test_a_symlinked_git_message_refuses_the_wall(tmp_path: Path) -> None:
             tmp_path / "p.profile", workspace=worktree, skep_home=tmp_path / "skep",
             read_allowlist=(),
         )  # fmt: skip
+
+
+@needs_bwrap
+def test_the_interpreter_s_whole_link_chain_is_inside_the_wall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI's `uv run --with` overlay python links to an activated project
+    .venv's python, which links to the base interpreter; an unbound middle
+    hop dangled (`bwrap: execvp …/bin/python: No such file or directory`)."""
+    real = Path(os.path.realpath(sys.executable))
+    venvs: list[Path] = []
+    for name, target in (("proj-venv", real), ("overlay", None)):
+        env = tmp_path / name
+        (env / "bin").mkdir(parents=True)
+        (env / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+        (env / "bin" / "python").symlink_to(target or venvs[-1] / "bin" / "python")
+        venvs.append(env)
+    overlay_python = venvs[-1] / "bin" / "python"
+    # like uv's overlay: skep reaches the env through a .pth (the wall's own
+    # pre-exec step, `python -m skep.landlock`, runs on this interpreter)
+    site = (
+        venvs[-1] / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    )
+    site.mkdir(parents=True)
+    import skep
+
+    (site / "skep.pth").write_text(str(Path(skep.__file__).resolve().parents[1]) + "\n")
+    monkeypatch.setattr(sys, "executable", str(overlay_python))
+    work = tmp_path / "work"
+    work.mkdir()
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile", workspace=work, skep_home=tmp_path / "skep", read_allowlist=()
+    )
+    # every hop resolves inside the wall, so the overlay interpreter is there
+    probe = f"test -x {overlay_python} && {overlay_python} -S -c 'print(1+1)'"
+    proc = subprocess.run(
+        sandbox.wrap_command(["/bin/sh", "-c", probe], profile),
+        cwd=work, capture_output=True, text=True, check=False, timeout=60,
+    )  # fmt: skip
+    assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr

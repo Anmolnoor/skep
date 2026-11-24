@@ -267,6 +267,20 @@ def _in_place(path: Path, skep_home: Path) -> bool:
     return False
 
 
+def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
+    """The env (or bin dir) of each hop in ``executable``'s symlink chain."""
+    hops: list[Path] = []
+    current = executable
+    for _ in range(limit):
+        env = current.parent.parent
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current.parent)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    return hops
+
+
 def _strict_candidates(
     skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
 ) -> list[Path]:
@@ -282,6 +296,13 @@ def _strict_candidates(
         Path(__file__).resolve().parents[2],
         # what .pth files chain in (uv's `run --with` overlay env, an editable install)
         *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
+        # every env along the interpreter's link chain: CI's `uv run --with`
+        # overlay python links to an activated .venv's python, which links on
+        # to the base one — an unbound middle hop dangles inside the wall
+        *_interpreter_chain(Path(sys.executable)),
+        # the uv binary itself (never its directory): G10's pinned
+        # `uv run pytest` needs it wherever it was installed
+        *(Path(found) for found in [shutil.which("uv")] if found),
     ]
     toolchains = [
         Path(os.environ.get(env) or home / rel) if env else home / rel
