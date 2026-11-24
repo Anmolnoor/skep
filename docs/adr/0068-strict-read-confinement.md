@@ -138,8 +138,10 @@ readable. A denylist cannot keep up with every place a person keeps files.
    absolute, never `/`.
 5. **The doctor says which wall is up, and where.** On bubblewrap and
    Seatbelt the sandbox line reads `read confinement: strict-allowlist
-   available; N of M sandboxed projects strict; forged tools, MCP servers,
-   the fast lane and diagnose re-runs stay denylist-only`
+   available; N of M sandboxed projects strict; forged tools always strict;
+   the fast lane and diagnose re-runs stay denylist-only; MCP servers you
+   register run on the host, unsandboxed` (Phase 07 wording; see "Forged
+   tools join the wall")
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
    that cannot enforce it, `read confinement: denylist-only (reads stay
    open but the secret floor)`.
@@ -349,10 +351,12 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   not `unavailable`, as it does for a secret-floor file deleted in that
   window.
 
-- Forged tools (`mcp_client.py`), the fast lane (`serve/fastlane.py`), the
-  `diagnose` re-run (`serve/actions.py`) and MCP servers still get
-  denylist-only profiles. None of them is a project run with a policy to
-  read; each needs its own call on what it must read.
+- The fast lane (`serve/fastlane.py`) and the `diagnose` re-run
+  (`serve/actions.py`) still get denylist-only profiles. Neither is a
+  project run with a policy to read; each needs its own call on what it
+  must read. Forged tools moved to the strict wall in Phase 07 (below).
+  MCP servers the operator registers were never in a sandbox at all: they
+  run on the host as the operator, by design (I5 decides their calls).
 - The worker's prompt teaches the write and network walls, not the read
   wall. A read outside the wall fails as "No such file or directory", which
   the worker sees as a plain missing file (an I12 follow-up).
@@ -502,3 +506,32 @@ test (the same test runs under Seatbelt on a Mac) and `test_g10_never_reads_an_e
 - On Macs, new sandboxed projects read strictly from 2026-11-23. Existing
   ones keep denylist-only reads until the operator runs the doctor's
   command, the same rule as on Linux.
+
+## Forged tools join the wall (Phase 07, 2026-11-23)
+
+Work item 7.1 closed the deferral above for forged tools. Every exchange
+with a forged or seed tool — discovery (`tools/list`, the serve-start warm
+included) and each `tools/call` — and both stages of its promotion trial and
+its dependency install lane now run through one launch path,
+`mcp_client.forged_lane`, with `read_allowlist=()`: the system dirs, the
+detected toolchains (which include `<skep home>/tools/.venvs`, where a
+locked tool's venv lives, read-only) and the lane's own throwaway
+workspace. The tool's approved source is copied into that workspace, so not
+even its installed copy under `<skep home>/tools` is read in place. Egress
+replaced `ALLOW_ALL_NETWORK`: deny-all unless the tool's promotion card
+approved hosts (`ForgedPlugin.approved_hosts`), then pinned to those hosts
+through a FilteringProxy.
+
+What did not move, and why:
+
+- **The fast lane and `diagnose` re-runs** use their own launch paths
+  (`fastlane.py`, `actions.diagnose`), not the forged-tool lane. `diagnose`
+  re-runs a kept worktree and should take the run's recorded wall, as G10
+  does; the fast lane runs a throwaway script. Each is its own change.
+- **Operator-registered MCP servers** (`register_mcp_server`, `/browser`)
+  run on the host, unsandboxed, as the operator. Putting them in a wall is
+  a product decision (Playwright needs its browser, a mail server its
+  credentials), not a profile flag.
+- **The run_code half of the trial** (the dispatched script run that keeps
+  the Queen's role chain, R3-F2) follows the forge project's own strict
+  setting, like any run. The trial's runtime-wall stages are always strict.

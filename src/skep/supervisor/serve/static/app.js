@@ -422,6 +422,26 @@ function scheduleNode(card) {
     s.runs ? el("p", { class: "card-risk" }, el("strong", {}, s.runs)) : null);
 }
 
+// Phase 07 (7.2, I6): a promote_tool card shows what its confirm installs —
+// the bound triple (source digest, lock digest, hosts), the hash-pinned wheels
+// and the full source diff, all computed by the server when it was proposed.
+function forgeNode(card) {
+  const f = card && card.forge;
+  if (!f) return null;
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  if (f.error) return el("div", { class: "card-forge" }, row("cannot install", f.error));
+  const hosts = Array.isArray(f.approved_hosts) && f.approved_hosts.length
+    ? f.approved_hosts.join(", ") : "none (deny-all)";
+  return el("div", { class: "card-forge" },
+    row("source sha256", f.source_sha256),
+    row("lock sha256", f.lock_sha256 || "none (stdlib only)"),
+    row("network", hosts),
+    Array.isArray(f.locked) && f.locked.length ? row("wheels", f.locked.join("\n")) : null,
+    f.diff ? el("details", { class: "card-details" },
+      el("summary", {}, "full source diff"), el("pre", { class: "mono" }, f.diff)) : null);
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3060,6 +3080,7 @@ async function viewChat(main, chatId) {
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       foldItems(card),
       scheduleNode(card),
+      forgeNode(card),
       manifestNode(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk
