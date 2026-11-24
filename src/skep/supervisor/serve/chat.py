@@ -68,13 +68,15 @@ from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
+    ContextWindow,
     LLMProtocol,
     OllamaError,
+    _staged_view,
     chat_num_ctx,
     chat_stream,
     llm_config_view,
     resolve_active_api_key,
-    resolved_num_ctx,
+    resolve_context_window,
     tool_delivery,
 )
 from .settings import ConfigHolder
@@ -1280,6 +1282,37 @@ def skill_index_block(store: RunStore) -> str:
     return "\n".join([_SKILL_INDEX_HEADER, *described, *([", ".join(names)] if names else [])])
 
 
+# Phase 06 (6.2): the seeds the user's message names, as ONE line stored on
+# that user turn. Never in the system prompt: re-ranking the index per turn
+# would change the prompt every turn and void the provider's prompt cache.
+# Stored on the row, every later turn replays the same bytes. Seeds only —
+# the operator's own skills are already described in the index above.
+SKILL_HINT_MAX = 5
+SKILL_HINT_CHARS = 40
+_SKILL_HINT_STOPWORDS = frozenset({"a", "an", "the", "and", "of", "to", "for", "with", "on"})
+
+
+def skill_hint(store: RunStore, content: str) -> str:
+    """A seed matches when every word of its name (stopwords aside) is a word
+    of the message — deterministic, no model. Most words matched first."""
+    from ..seed_skills import SEED_PROVENANCE
+
+    words = set(re.findall(r"[a-z0-9]+", content.lower()))
+    words |= {word[:-1] for word in words if word.endswith("s")}  # pdfs → pdf
+    hits = []
+    for template in store.list_templates():
+        tokens = set(template.name.lower().split("-")) - _SKILL_HINT_STOPWORDS
+        if template.provenance == SEED_PROVENANCE and tokens and tokens <= words:
+            hits.append((len(tokens), template))
+    hits.sort(key=lambda hit: -hit[0])  # stable: name order within a tie
+    shown = [
+        f"{t.name} — {short_description(t.description, SKILL_HINT_CHARS)}" if t.description
+        else t.name
+        for _, t in hits[:SKILL_HINT_MAX]
+    ]  # fmt: skip
+    return f"[Relevant skills: {'; '.join(shown)}]" if shown else ""
+
+
 # v74-F5: ONE "what you can reach" roof — tools by category (F3), skills by
 # name (v53-F7), MCP servers by id — each section naming its detail verb
 # (describe_tools / view_skill / list_mcp_tools), so "what can you reach?"
@@ -1288,18 +1321,49 @@ def skill_index_block(store: RunStore) -> str:
 # index with zero prompt edits.
 _REACH_HEADER = "You can reach:"
 _MCP_INDEX_HEADER = (
-    "Registered MCP servers (call list_mcp_tools with a server_id for that "
-    "server's tools and what policy decides for each):"
+    "Registered MCP servers, with their tools as last listed ('*'=not a read). "
+    "Call a tool with call_mcp_tool; list_mcp_tools with a server_id re-lists "
+    "its tools with descriptions and what policy decides for each (a server "
+    "shown without tools has not been listed yet):"
 )
+# Phase 06 R1 (F1): tool names come from the MCP server itself, so only a
+# plain identifier enters the system prompt, and only so many — the rest are
+# counted and pointed at list_mcp_tools. Bounds the prompt (I9) and keeps a
+# hostile name from speaking as instructions (I8).
+MCP_INDEX_PER_SERVER = 16
+MCP_INDEX_TOTAL = 48
+_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def mcp_index_block(store: RunStore) -> str:
-    from ..mcp_client import load_mcp_servers
+    """Phase 06 (6.2): each server's tool names from the discovery cache —
+    never a tools/list here, so a turn spawns no server process."""
+    from ..mcp_client import cached_tools, index_tool_names, load_mcp_servers
 
     servers = load_mcp_servers(store)
     if not servers:
         return ""
-    lines = [f"- {server_id} ({config.transport})" for server_id, config in servers.items()]
+    lines = []
+    room = MCP_INDEX_TOTAL
+    for server_id, config in servers.items():
+        tools = cached_tools(store, config)
+        if tools is None:
+            lines.append(f"- {server_id} ({config.transport})")
+            continue
+        rows = index_tool_names(config, tools)
+        safe = [
+            name + ("" if read else "*") for name, read in rows if _MCP_TOOL_NAME.fullmatch(name)
+        ]
+        shown = safe[: min(MCP_INDEX_PER_SERVER, room)]
+        room -= len(shown)
+        notes = []
+        if len(safe) > len(shown):
+            notes.append(f"+{len(safe) - len(shown)} more")
+        if len(rows) > len(safe):
+            notes.append(f"{len(rows) - len(safe)} unsafe names hidden")
+        tail = f"({'; '.join(notes)} — list_mcp_tools {server_id})" if notes else ""
+        body = " ".join(part for part in (", ".join(shown), tail) if part) or "(no tools)"
+        lines.append(f"- {server_id} ({config.transport}): {body}")
     return "\n".join([_MCP_INDEX_HEADER, *lines])
 
 
@@ -1519,6 +1583,11 @@ def shown_message(message: Any) -> dict[str, Any]:
     calls carry their args masked (``stream_args``), as the card does; the
     stored row keeps them raw for the transcript the model replays."""
     row: dict[str, Any] = asdict(message)
+    if hint := row.pop("skill_hint"):
+        # R1 (F7): the skill hint is for the model's replay; the user's bubble
+        # (and Resend, which copies it) shows what they typed. R2 (G6): only
+        # the hint the server recorded on the row — never an operator's line.
+        row["content"] = row["content"].removesuffix(f"\n\n{hint}")
     row["tool_calls"] = row["tool_calls"] and [
         {**call, "function": {**(call.get("function") or {}),
                               "arguments": stream_args(_call_args(call))}}
@@ -1826,13 +1895,19 @@ class ChatEngine:
             for t in specs
         ]  # fmt: skip
 
-    def _history_budget(self, system_chars: int, chat: Any = None) -> int:
+    def _history_budget(
+        self, system_chars: int, chat: Any = None, window: ContextWindow | None = None
+    ) -> int:
         """Replay chars that fit beside the fixed floor (v56-F2, ADR 0037).
 
         v73-F1: a recorded provider ceiling is a second, lower wall the
         num_ctx budget never sees — replay AND compaction stay under it."""
-        # v74-F2: a chat pinned to a bigger model budgets like one.
-        window_chars = chat_num_ctx(self.store, getattr(chat, "model", None)) * 4
+        # v74-F2: a chat pinned to a bigger model budgets like one. Phase 06:
+        # the provider-keyed window's replay cap (override > provider-api >
+        # catalog > default), never the 16k fallback for a 200k model
+        if window is None:
+            window = resolve_context_window(self.store, model=getattr(chat, "model", None))
+        window_chars = window.replay_cap * 4
         tools_chars = len(json.dumps(self._advertised_tools(chat)))
         floor = system_chars + tools_chars + RESPONSE_RESERVE_CHARS
         budget = max(MIN_HISTORY_BUDGET_CHARS, window_chars - floor)
@@ -2009,21 +2084,27 @@ class ChatEngine:
         chat = self.store.get_chat(chat_id)
         system = self._system_prompt(chat_id)
         summary = (chat.context_summary or "") if chat else ""
-        budget = self._history_budget(len(system) + len(summary), chat)
+        # R1 (F6): the replay cap the budget uses AND the model's own window —
+        # a 262k model replaying 16k is two numbers, never one (I8). R3 (Neon
+        # R3-1) keyed as Settings reads it; R4 (Sol R4-1): ONE window feeds
+        # both the meter and its budget.
+        window = resolve_context_window(
+            _staged_view(self.store, self.home), model=getattr(chat, "model", None)
+        )
+        budget = self._history_budget(len(system) + len(summary), chat, window)
         replay, dropped = self._replay(chat_id, chat, budget=budget)
         history_chars = sum(len(str(m.get("content") or "")) for m in replay)
         # v74-F4: the floor in parts — "96% at message one" read as "the chat
         # is full" when it meant "the floor is fixed and the window small";
         # the meter now names its parts (I8). Same functions, same numbers.
         tool_surface_chars = len(json.dumps(self._advertised_tools(chat)))
-        model = getattr(chat, "model", None)
-        window_tokens, num_ctx_source = resolved_num_ctx(self.store, model)
         floor_chars = len(system) + len(summary) + tool_surface_chars
-        window_chars = window_tokens * 4
+        window_chars = window.replay_cap * 4
         compacted = dropped > 0 or bool(chat and (chat.compacted_through or 0))
         return {
-            "window_tokens": window_tokens,
-            "num_ctx_source": num_ctx_source,
+            "window_tokens": window.replay_cap,
+            "model_window": window.model_window,
+            "num_ctx_source": window.source,
             "tool_surface_chars": tool_surface_chars,
             "system_prompt_chars": len(system),
             "digest_chars": len(summary),
@@ -4105,8 +4186,13 @@ def add_chat_routes(
             )
         if chat.title == DEFAULT_TITLE and not run_store.chat_messages(chat_id):
             run_store.set_chat_title(chat_id, _title_from(body.content))
+        hint = skill_hint(run_store, body.content)
         run_store.add_chat_message(
-            chat_id, role="user", content=body.content, attachments=body.attachments or None
+            chat_id,
+            role="user",
+            content=f"{body.content}\n\n{hint}" if hint else body.content,
+            attachments=body.attachments or None,
+            skill_hint=hint or None,
         )
         return StreamingResponse(
             _as_sse(

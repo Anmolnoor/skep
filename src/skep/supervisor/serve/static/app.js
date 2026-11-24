@@ -674,6 +674,16 @@ function shortTitle(text, max = 48) {
   return segments.length > 1 ? `${host}/…/${tail}` : `${host}/${tail}`;
 }
 
+// Phase 06 R1 (F6): the model's window and what skep replays of it are two
+// numbers once they differ (a 262k model on a loopback ollama replays 16k) —
+// one number labelled with the window's source read as the model's (I8).
+function windowNote(replayCap, modelWindow, source) {
+  const n = v => Number(v).toLocaleString();
+  return modelWindow && modelWindow !== replayCap
+    ? `replay cap ${n(replayCap)} of a ${n(modelWindow)}-token window (${source})`
+    : `window ${n(replayCap)} (${source})`;
+}
+
 function contextLoadPercent(context) {
   // v56-F3: server truth — chat detail carries what the NEXT turn will send
   // vs the model window. Pre-load (no detail yet) shows a resting sliver.
@@ -936,7 +946,7 @@ async function refreshDockModel() {
     const tile = document.getElementById("topbar-queen-status");
     if (tile && model && llm.default_model) {
       model.textContent = llm.default_model;
-      queenTitleBase = `window ${llm.num_ctx} (${llm.num_ctx_source}) · tools ${llm.tool_delivery}`;
+      queenTitleBase = `${windowNote(llm.num_ctx, llm.model_window, llm.num_ctx_source)} · tools ${llm.tool_delivery}`;
       tile.title = queenTitleBase;
     }
   } catch { /* leave the dock model label blank */ }
@@ -2583,7 +2593,7 @@ async function viewChat(main, chatId) {
     contextPopover.replaceChildren(
       el("div", { class: "context-popover-head" },
         `${percent}% used of ${context.window_tokens.toLocaleString()} tokens`
-        + ` (window: ${context.num_ctx_source})`),
+        + ` (${windowNote(context.window_tokens, context.model_window, context.num_ctx_source)})`),
       el("div", { class: "context-bar" },
         el("span", { class: "context-bar-floor", style: `width:${floorPercent}%` }),
         el("span", {
@@ -5228,7 +5238,7 @@ async function renderAssistantTab(panel) {
     // v74-F2: only an explicit override fills the field; empty = auto, and
     // the placeholder shows what auto currently resolves to.
     value: llm.num_ctx_source === "override" ? String(llm.num_ctx) : "",
-    placeholder: `auto (${llm.num_ctx}${llm.num_ctx_source === "detected" ? ", detected" : ""})`,
+    placeholder: `auto (${windowNote(llm.num_ctx, llm.model_window, llm.num_ctx_source)})`,
   });
   const saveCtx = el("button", { class: "primary" }, "Save context window");
   saveCtx.addEventListener("click", async () => {

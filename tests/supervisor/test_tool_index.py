@@ -9,22 +9,26 @@ the name, mutations still card, deny space stays unreachable (I5/I6).
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Iterator
 
 import pytest
 
 from skep.supervisor import SupervisorConfig
+from skep.supervisor.serve import tools
 from skep.supervisor.serve.tools import (
     CORE_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
     MUTATING_TOOL_NAMES,
     POLICY_LINE_TOOLS,
+    RARE_ADMIN_TOOLS,
     READ_TOOL_NAMES,
     TOOL_CATEGORIES,
     TOOL_INDEX_BLOCK,
     TOOL_SPECS,
     advertised_tool_specs,
+    tool_index_block,
 )
 from skep.supervisor.store import RunStore
 
@@ -73,14 +77,14 @@ def test_a_core_tool_is_name_only_because_its_schema_is_in_the_request() -> None
 def test_a_gloss_that_only_restates_the_name_is_dropped() -> None:
     """delete_note's summary was 'deleting a note' — the model just read that."""
     assert _line_for("delete_note") == "- delete_note*(note_id)"
-    assert _line_for("attach_policy_group") == "- attach_policy_group*(project_id, name)"
+    assert _line_for("reject_memory_proposal") == "- reject_memory_proposal*(proposal_id, reason)"
     # An informative gloss survives.
     assert " — " in _line_for("await_runs")
 
 
 def test_a_wide_arg_list_truncates_and_says_so() -> None:
-    """set_policy lists 14 args; describe_tools has the rest."""
-    line = _line_for("set_policy")
+    """open_pr lists 8 args; describe_tools has the rest."""
+    line = _line_for("open_pr")
     assert line.count(",") == 5  # 6 args shown
     assert "…)" in line  # and the rest declared, not silently dropped
 
@@ -184,16 +188,25 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     is the Queen's only answer to "what agents are running and which are
     governed" (the L1 gate). Its description was cut first, but an index line
     costs ~16 chars even with no gloss, so the floor lands at ~25,055. The pin
-    moves 25KB → 25.1KB, 2.4KB below where v99 found it."""
+    moves 25KB → 25.1KB, 2.4KB below where v99 found it.
+
+    Phase 06 (6.2) paid before asking, and the pin does NOT move: promoting
+    search_web + read_url into the core costs ~2KB of schema, and 39 rare
+    admin verbs (RARE_ADMIN_TOOLS) now index as name*(…) — describe_tools
+    first — which buys it back with zero net growth. Measured, role-less
+    (assistant) chat: 20,822 → 20,818; builder (no hidden tools, the widest
+    core): 24,664 → 24,584; operator: 24,584 → 24,504. All three are pinned
+    now — the builder chat is the heavier floor and was never measured."""
     client = configured_client(config, ollama)
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
-    ollama.script_reply("hello")
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
-    body = ollama.chat_bodies()[0]
-    floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
-    assert floor <= 25_100
-    context = client.get(f"/api/chats/{chat_id}").json()["context"]
-    assert context["floor_chars"] <= 25_100
+    for create in ({}, {"role": "builder"}, {"role": "operator"}):
+        chat_id = client.post("/api/chats", json=create).json()["chat_id"]
+        ollama.script_reply("hello")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        body = ollama.chat_bodies()[-1]
+        floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
+        assert floor <= 25_100, (create, floor)
+        context = client.get(f"/api/chats/{chat_id}").json()["context"]
+        assert context["floor_chars"] <= 25_100, create
 
 
 def test_describe_tools_activates_and_the_next_round_advertises(
@@ -329,3 +342,75 @@ def test_advertised_specs_ride_in_registry_order() -> None:
     # read_only keeps only the read-shaped part.
     read_advertised = {t["function"]["name"] for t in advertised_tool_specs(active, read_only=True)}
     assert read_advertised == (set(CORE_TOOL_NAMES) | set(active)) - MUTATING_TOOL_NAMES
+
+
+def test_search_web_and_read_url_ride_the_core_for_roles_that_may_use_them(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """Phase 06 (6.2): the two web verbs every role may use are core — full
+    schema on turn 1, no describe_tools round-trip. read_url still cards
+    (it is in MUTATING_TOOL_NAMES), so a read-only turn keeps only
+    search_web (I5: advertisement moved, permission did not)."""
+    assert {"search_web", "read_url"} <= CORE_TOOL_NAMES
+    assert "read_url" in MUTATING_TOOL_NAMES
+    client = configured_client(config, ollama)
+    for create in ({}, {"role": "builder"}, {"role": "assistant"}):
+        chat_id = client.post("/api/chats", json=create).json()["chat_id"]
+        ollama.script_reply("hello")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        advertised = {t["function"]["name"] for t in ollama.chat_bodies()[-1]["tools"]}
+        assert {"search_web", "read_url"} <= advertised, create
+    assert _line_for("search_web") == "- search_web"
+    assert _line_for("read_url") == "- read_url*"
+    read_only = {t["function"]["name"] for t in advertised_tool_specs([], read_only=True)}
+    assert "search_web" in read_only and "read_url" not in read_only
+
+
+def test_a_role_that_denies_the_web_is_offered_neither_web_verb(
+    config: SupervisorConfig, ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Role-filtered (P3-6): core never overrides a role's deny — the verbs a
+    role can never use are not in its specs and not in its index."""
+    from skep.supervisor.policy_engine import Layer, LayerRule
+    from skep.supervisor.roles import Role
+
+    original = Role.layer
+
+    def layer(self: Role) -> Layer | None:
+        base = original(self)
+        if self.name != "assistant" or base is None:
+            return base
+        denies = (
+            LayerRule("network", "deny", "no-search", "search", "*"),
+            LayerRule("network", "deny", "no-fetch", "fetch", "*"),
+        )
+        web = {("network", "search"), ("network", "fetch")}
+        kept = tuple(r for r in base.rules if (r.scope, r.action) not in web)
+        return Layer(base.name, base.label, rules=(*denies, *kept))
+
+    monkeypatch.setattr(Role, "layer", layer)
+    monkeypatch.setattr(
+        tools, "_hidden_tools", functools.lru_cache(tools._hidden_tools.__wrapped__)
+    )
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "assistant"}).json()["chat_id"]
+    ollama.script_reply("hello")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+    body = ollama.chat_bodies()[-1]
+    advertised = {t["function"]["name"] for t in body["tools"]}
+    assert not {"search_web", "read_url"} & advertised
+    index = body["messages"][0]["content"].split("Tool index", 1)[1]
+    assert "- search_web" not in index and "- read_url" not in index
+
+
+def test_rare_admin_verbs_index_as_name_only_with_elided_args() -> None:
+    """Out of front-line prominence, never out of reach: a rare admin verb's
+    line is name*(…) and the legend says to describe it first."""
+    assert len(RARE_ADMIN_TOOLS) >= 30
+    assert {t["function"]["name"] for t in TOOL_SPECS} >= RARE_ADMIN_TOOLS
+    assert not RARE_ADMIN_TOOLS & CORE_TOOL_NAMES
+    assert _line_for("set_policy") == "- set_policy*(…)"
+    assert _line_for("policy_registry") == "- policy_registry(…)"
+    assert _line_for("discord_timeout_member") == "- discord_timeout_member*(…)"
+    assert "'(…)'=a rare admin verb" in TOOL_INDEX_BLOCK
+    assert "- set_policy*(" not in tool_index_block(frozenset({"set_policy"}))

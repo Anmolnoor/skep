@@ -1531,7 +1531,7 @@ def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str)
     ``home`` is the supervisor home."""
     from ..codex_login import NO_KEY_REFUSAL, uses_codex_login
     from ..providers import ProviderError
-    from .llm import _save_profile_key, provider_rollback
+    from .llm import _save_profile_key, provider_rollback, refresh_model_ctx
 
     profile = store.get_provider_profile(provider_id)
     if profile is None:
@@ -1545,6 +1545,8 @@ def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str)
         )
     with provider_rollback(store, home):
         _save_profile_key(store, home, _still_probed(store, profile), key)
+    if profile.active:  # R1 (F8): a new key may read a listing the old one could not
+        refresh_model_ctx(store, home, profile.model)
     return {
         "provider_id": provider_id,
         "api_key_set": bool(key),

@@ -675,14 +675,84 @@ _LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
 
 
 def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
-    key = (str(store.db_path), config.server_id)
-    hit = _LISTED.get(key)
-    if hit is not None and hit[0] == config:
-        return hit[1]
+    hit = cached_tools(store, config)
+    return hit if hit is not None else refresh_listed_tools(store, config)
+
+
+def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...] | None:
+    """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
+    spawns a server (the prompt's MCP index reads this every turn)."""
+    hit = _LISTED.get((str(store.db_path), config.server_id))
+    return hit[1] if hit is not None and hit[0] == config else None
+
+
+def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
+    """List ``config``'s tools now and keep them (list_mcp_tools, the startup
+    warm). A failed listing raises and keeps nothing."""
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent)
     tools = tuple(MCPClient(config, runner=runner).list_tools())
-    _LISTED[key] = (config, tools)
+    _LISTED[(str(store.db_path), config.server_id)] = (config, tools)
     return tools
+
+
+# Phase 06 R1 (F3): serve waits at most this long for the startup warm, so
+# turn 1's index names the tools; a server still listing after it is left to
+# finish in the background (the index shows it unlisted meanwhile).
+MCP_WARM_TIMEOUT_SECONDS = 3.0
+
+
+def warm_listed_tools(store: RunStore, timeout: float | None = None) -> list[str]:
+    """Serve startup: list every registered server so turn 1's index names
+    their tools. Never a forged one (``forge-*``): its runtime egress is still
+    open (``_run_forged_sandboxed``), so it runs only when someone asks.
+    Servers list in parallel; returns once all are done or ``timeout`` has
+    passed (default MCP_WARM_TIMEOUT_SECONDS), with the ids cached by then.
+    A server that fails is left uncached."""
+    import threading
+    import time
+
+    servers = {
+        server_id: config
+        for server_id, config in load_mcp_servers(store).items()
+        if not server_id.startswith(FORGED_SERVER_PREFIX)
+    }
+    warmed: set[str] = set()
+
+    def warm(config: MCPServerConfig) -> None:
+        try:
+            refresh_listed_tools(store, config)
+        except Exception:  # unreachable now; list_mcp_tools asks again later
+            return
+        warmed.add(config.server_id)
+
+    threads = [
+        threading.Thread(target=warm, args=(config,), name="skep-mcp-warm", daemon=True)
+        for config in servers.values()
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + (MCP_WARM_TIMEOUT_SECONDS if timeout is None else timeout)
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return [server_id for server_id in servers if server_id in warmed]
+
+
+def index_tool_names(config: MCPServerConfig, tools: tuple[MCPTool, ...]) -> list[tuple[str, bool]]:
+    """(name, is_read) per cached tool for the prompt index, sorted by name so
+    a re-listing in another order renders the same bytes (prompt cache).
+    The scope comes from ``config`` — no store read per tool. A cached tool
+    with no readOnlyHint is exactly what with_server_hints would conclude
+    from this same listing — not a read."""
+    rows = []
+    for tool in tools:
+        hinted = tool if tool.read_only is not None else replace(tool, read_only=False)
+        risk = (
+            classify_browse_action(hinted)
+            if config.scope == "browse"
+            else classify_mcp_risk(hinted)
+        )
+        rows.append((tool.name, risk == "read"))
+    return sorted(rows)
 
 
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:

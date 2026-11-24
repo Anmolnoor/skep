@@ -16,14 +16,17 @@ adapter at this boundary so the rest of chat sees the same message/tool shape.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import dataclasses
 import fcntl
+import ipaddress
 import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast, get_args
 from urllib.parse import urlparse
@@ -64,16 +67,17 @@ LLM_VISION = "llm_vision"
 LLM_NUM_CTX = "llm_num_ctx"
 DEFAULT_NUM_CTX = 16384
 _MIN_NUM_CTX = 1024
-# v74-F2: the model's real context length, detected at config-save time and
-# cached per model. The auto value is capped: window_chars = num_ctx * 4
-# drives how much history is REPLAYED every round, so an uncapped 256k
-# auto-window quietly multiplies per-turn cost and local-ollama VRAM. The
-# operator's explicit LLM_NUM_CTX override goes as high as they like.
-MODEL_CTX_PREFIX = "llm_model_ctx:"
+# v74-F2: the model's real context length, detected at config-save time.
+# Phase 06 (6.1): cached per (provider_id, base_url, model) — the v74 key was
+# the bare model name (``llm_model_ctx:<model>``), so two endpoints serving
+# one slug shared a window. Those rows name no endpoint and are never read.
+# The auto value is capped: window_chars = num_ctx * 4 drives how much
+# history is REPLAYED every round, so an uncapped 256k auto-window quietly
+# multiplies per-turn cost and local-ollama VRAM. The operator's explicit
+# LLM_NUM_CTX override goes as high as they like.
+MODEL_WINDOW_PREFIX = "llm_model_window:"
 AUTO_NUM_CTX_CAP = 65536
-# Current Claude models all carry >= 200k; the Messages API has no
-# per-model context endpoint, so a static floor is the honest answer.
-_ANTHROPIC_CTX_FLOOR = 200_000
+ContextSource = Literal["override", "provider-api", "catalog", "default"]
 # v74-F3: how the chat advertises tools. 'indexed' (default) sends the
 # categorized index in the prompt plus full schemas for the core set and
 # any described-active tools; 'full' restores the whole registry every
@@ -470,7 +474,7 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
 
     migrate_legacy_provider(store, home)
     base_url, model, protocol = assistant_llm(store)
-    num_ctx, num_ctx_source = resolved_num_ctx(store)
+    window = resolve_context_window(store)
     from ..codex_login import uses_codex_login
 
     # v118-F1: on chatgpt.com no API key is in play — the login is (I8).
@@ -483,9 +487,11 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
         "api_key_set": _assistant_key_set(store, home),
         **({"chatgpt_login": chatgpt_login_view()} if codex else {}),
         "vision": store.get_setting(LLM_VISION) is True,
-        "num_ctx": num_ctx,
+        "num_ctx": window.replay_cap,
         # v74-F2: which rule set the window, so the UI and doctor can say (I8).
-        "num_ctx_source": num_ctx_source,
+        "num_ctx_source": window.source,
+        # Phase 06 (6.1): the model's real limit, even where num_ctx is capped
+        "model_window": window.model_window,
         "tool_delivery": tool_delivery(store),
     }
 
@@ -499,24 +505,77 @@ def _valid_ctx(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= _MIN_NUM_CTX
 
 
-def resolved_num_ctx(store: RunStore, model: str | None = None) -> tuple[int, str]:
-    """(window tokens, source) for ``model`` (default: the configured one).
+@dataclasses.dataclass(frozen=True)
+class ContextWindow:
+    """Phase 06 (6.1): the model's real window at its endpoint, apart from
+    what skep replays per turn. ``source`` names what set the window (I8)."""
 
-    v74-F2 resolution order: explicit operator override → detected model
-    context capped at the auto-ceiling → DEFAULT_NUM_CTX. The dial wins;
-    the auto is conservative. v82-F1: a loopback ollama daemon never
-    auto-follows the model — there num_ctx is pre-allocated KV-cache RAM,
-    so even a cached detection from an earlier remote config stays inert.
-    """
+    model_window: int
+    replay_cap: int
+    source: ContextSource
+    max_output: int | None = None
+
+
+def context_cache_key(provider_id: str, base_url: str, model: str) -> str:
+    return MODEL_WINDOW_PREFIX + json.dumps([provider_id, base_url.strip().rstrip("/"), model])
+
+
+def _context_identity(
+    store: RunStore, profile: ProviderProfile | None
+) -> tuple[str, str | None, str | None, LLMProtocol]:
+    """(provider_id, base_url, model, protocol) the window belongs to: the
+    given profile, else the assistant's (the active one, or the legacy
+    settings while none is active — provider_id "")."""
+    if profile is not None:
+        protocol = REGISTRY_PROTOCOLS.get(profile.protocol, DEFAULT_LLM_PROTOCOL)
+        return profile.provider_id, profile.base_url, profile.model, protocol
+    active = store.active_provider_profile()
+    base_url, model, protocol = assistant_llm(store)
+    return (active.provider_id if active else ""), base_url, model, protocol
+
+
+def resolve_context_window(
+    store: RunStore, profile: ProviderProfile | None = None, model: str | None = None
+) -> ContextWindow:
+    """Phase 06 (6.1): THE context-window read — override > provider-api >
+    catalog > default. Reads the store only, never the network, so it is
+    safe on every chat turn. ``profile`` defaults to the assistant's;
+    ``model`` to that profile's (a chat's pinned model passes its own).
+
+    replay_cap is the window capped at AUTO_NUM_CTX_CAP — or, on a loopback
+    ollama, at DEFAULT_NUM_CTX: there num_ctx is pre-allocated KV-cache RAM
+    (v82-F1), so the real max shows in model_window and nothing more is
+    requested. The operator's dial is uncapped, loopback or not."""
     value = store.get_setting(LLM_NUM_CTX)
     if _valid_ctx(value):
-        return int(value), "override"
-    name = model or assistant_llm(store)[1]
-    if isinstance(name, str) and name and not _loopback_ollama(store):
-        detected = store.get_setting(MODEL_CTX_PREFIX + name)
-        if _valid_ctx(detected):
-            return min(int(detected), AUTO_NUM_CTX_CAP), "detected"
-    return DEFAULT_NUM_CTX, "default"
+        return ContextWindow(int(value), int(value), "override")
+    from ..provider_presets import MODEL_CONTEXT_WINDOWS
+
+    provider_id, base_url, default_model, protocol = _context_identity(store, profile)
+    name = model or default_model
+    window, max_output = DEFAULT_NUM_CTX, None
+    source: ContextSource = "default"
+    cached = (
+        store.get_setting(context_cache_key(provider_id, base_url, name))
+        if (base_url and name)
+        else None
+    )
+    if isinstance(cached, dict) and _valid_ctx(cached.get("window")):
+        window, source = int(cached["window"]), "provider-api"
+        max_output = cached.get("max_output") if _valid_ctx(cached.get("max_output")) else None
+    elif name in MODEL_CONTEXT_WINDOWS:
+        # R1 (F4): exact ids only — the anthropic wire carries third-party
+        # presets too, so no protocol-wide 200k guess (I8)
+        window, source = MODEL_CONTEXT_WINDOWS[name], "catalog"
+    loopback = protocol == "ollama" and _is_loopback(base_url)
+    cap = DEFAULT_NUM_CTX if loopback else AUTO_NUM_CTX_CAP
+    return ContextWindow(window, min(window, cap), source, max_output)
+
+
+def resolved_num_ctx(store: RunStore, model: str | None = None) -> tuple[int, str]:
+    """(replay tokens, source) for ``model`` (default: the configured one)."""
+    window = resolve_context_window(store, model=model)
+    return window.replay_cap, window.source
 
 
 def _is_loopback(base_url: Any) -> bool:
@@ -526,20 +585,172 @@ def _is_loopback(base_url: Any) -> bool:
         host = (httpx.URL(base_url).host or "").lower()
     except httpx.InvalidURL:
         return False
-    return host in {"localhost", "::1"} or host.startswith("127.")
-
-
-def _loopback_ollama(store: RunStore) -> bool:
-    """v82-F1: on a local daemon the window is the operator's call, never
-    auto-matched — requesting a 128k+ num_ctx there allocates that much
-    KV cache in RAM and can OOM the machine the Queen runs on."""
-    base_url, _model, protocol = assistant_llm(store)
-    return protocol == "ollama" and _is_loopback(base_url)
+    if host == "localhost":
+        return True
+    try:  # R3 (Sol R2-1): a loopback LITERAL — a DNS name like 127.evil.example is remote
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def chat_num_ctx(store: RunStore, model: str | None = None) -> int:
     """The context window requested from ollama (v56-F1); bounded, defaulted."""
     return resolved_num_ctx(store, model)[0]
+
+
+_WINDOW_FIELDS = ("context_length", "max_model_len", "max_context_length")
+_UNREACHABLE = object()
+
+
+def _http_body(
+    method: str, url: str, *, headers: dict[str, str], json: Any, timeout: float
+) -> tuple[bool, bytes]:
+    """(is an HTTP error, body), read under ONE wall-clock deadline that
+    covers connect, the response headers and the body — R4 (Sol R3-2):
+    httpx's timeout is per read, so a host trickling header bytes kept the
+    worker alive past the deadline (forever, if it never ended them). The
+    async read is cancelled at the deadline and its connection dropped."""
+
+    async def read() -> tuple[bool, bytes]:
+        async with (
+            httpx.AsyncClient(timeout=timeout) as client,
+            client.stream(method, url, headers=headers, json=json) as response,
+        ):
+            if response.is_error:
+                return True, b""
+            return False, b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    # R5 (Sol R5-1): asyncio.run waits on its resolver threads (and the
+    # interpreter joins executor threads at exit), so a slow DNS lookup held
+    # the probe — and shutdown — past the deadline. The loop's executor runs
+    # each lookup on a daemon thread, and the loop closes without waiting.
+    loop = asyncio.new_event_loop()
+    loop.set_default_executor(_DaemonExecutor())
+    try:
+        return loop.run_until_complete(asyncio.wait_for(read(), timeout))
+    except TimeoutError as exc:
+        raise httpx.ReadTimeout("context probe deadline") from exc
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
+    """Each call on its own daemon thread: a lookup still pending at the
+    probe's deadline is abandoned, never joined (not by the loop, not at exit).
+    A ThreadPoolExecutor only because asyncio insists on one; its pool is
+    never used."""
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None  # nothing pooled; a pending daemon lookup is abandoned
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> concurrent.futures.Future[Any]:
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # handed to the awaiting coroutine
+                future.set_exception(exc)
+
+        threading.Thread(target=run, name="skep-ctx-resolve", daemon=True).start()
+        return future
+
+
+def _fetch_json(url: str, api_key: str | None, deadline: float, body: Any = None) -> Any:
+    """The body (a POST of ``body`` when given), None on an HTTP, decoding,
+    URL or JSON error, or _UNREACHABLE when the host did not answer within
+    what is left of ``deadline`` (R1 F10: one budget for every probe, and a
+    host that timed out is not asked again). R2 (G5): a bad gzip body or URL
+    is a miss. R4: the read itself stops at the deadline (``_http_body``)."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _UNREACHABLE
+    try:
+        failed, data = _http_body(
+            "POST" if body is not None else "GET",
+            url,
+            headers=_headers(api_key),
+            json=body,
+            timeout=remaining,
+        )
+    except httpx.TransportError:
+        return _UNREACHABLE
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return None
+    if failed:
+        return None
+    try:
+        return json.loads(data)
+    except ValueError:
+        return None
+
+
+def _rows(body: Any, key: str) -> list[dict[str, Any]]:
+    """R1 (F9): the dict rows under ``key`` — any other shape is no rows."""
+    rows = body.get(key) if isinstance(body, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _lmstudio_window(body: Any, model: str) -> int | None:
+    """R1 (F5): LM Studio's native GET /api/v1/models — a loaded instance's
+    config.context_length (what a request may use) when ``model`` names the
+    instance or its model, else the model's max_context_length."""
+    for row in _rows(body, "models"):
+        instances = _rows(row, "loaded_instances")
+        named = [i for i in instances if i.get("id") == model]
+        if not named and row.get("key") != model:
+            continue
+        for instance in named or instances:
+            config = instance.get("config")
+            n_ctx = config.get("context_length") if isinstance(config, dict) else None
+            if _valid_ctx(n_ctx):
+                return int(n_ctx)
+        top = row.get("max_context_length")
+        return int(top) if _valid_ctx(top) else None
+    return None
+
+
+def _openai_style_window(
+    base_url: str, api_key: str | None, model: str, deadline: float, lmstudio: bool
+) -> tuple[int, int | None] | None:
+    """The model's row in GET <prefix>/models — OpenRouter's context_length
+    (+ top_provider.max_completion_tokens), vLLM's max_model_len — else LM
+    Studio's native GET /api/v1/models, else llama.cpp's GET /props n_ctx.
+
+    R2 (G1, I11): those two live outside the configured prefix, so the key
+    goes there only for a local server whose API sits at the host root (one
+    port on this machine is one server) — the native listing also for an LM
+    Studio preset profile. Elsewhere <base>/tenant/api/v1/models may be
+    another service on the same gateway."""
+    prefix = openai_style_prefix(base_url)
+    root = prefix.removesuffix("/v1")
+    local_root = _is_loopback(base_url) and urlparse(root).path in ("", "/")
+    listing = _fetch_json(f"{prefix}/models", api_key, deadline)
+    if listing is _UNREACHABLE:
+        return None
+    entry = next((r for r in _rows(listing, "data") if r.get("id") == model), {})
+    top = entry.get("top_provider")
+    out = top.get("max_completion_tokens") if isinstance(top, dict) else None
+    for field in _WINDOW_FIELDS:
+        if _valid_ctx(entry.get(field)):
+            return int(entry[field]), (int(out) if _valid_ctx(out) else None)
+    if not (local_root or lmstudio):
+        return None
+    native = _fetch_json(f"{root}/api/v1/models", api_key, deadline)
+    if native is _UNREACHABLE:
+        return None
+    lmstudio_window = _lmstudio_window(native, model)
+    if lmstudio_window is not None:
+        return lmstudio_window, None
+    if not local_root:
+        return None
+    props = _fetch_json(f"{root}/props", api_key, deadline)
+    settings = props.get("default_generation_settings") if isinstance(props, dict) else None
+    n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+    return (int(n_ctx), None) if _valid_ctx(n_ctx) else None
 
 
 def detect_model_ctx(
@@ -548,57 +759,116 @@ def detect_model_ctx(
     *,
     model: str,
     protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
-    timeout: float = 5.0,
-) -> int | None:
-    """The model's real context length, or None — detection never breaks a save.
+    timeout: float = 3.0,
+    lmstudio: bool = False,
+) -> tuple[int, int | None] | None:
+    """(window, max output) from the endpoint's own API, or None — detection
+    never breaks a save; the whole probe is bounded by ``timeout``, wall
+    clock (R2, G3: the probe thread is abandoned at the deadline).
 
     ollama reports it via POST /api/show under an architecture-prefixed
     ``model_info`` key (``llama.context_length``, ``qwen3.context_length``, …);
-    the ``.context_length`` suffix is the stable part. openai-compat and
-    bedrock have no standard endpoint — they fall through to None.
+    the ``.context_length`` suffix is the stable part. OpenAI-style servers
+    answer through their model listing (Phase 06). anthropic and bedrock
+    have no such endpoint — the catalog answers for them.
     """
-    if protocol == "anthropic":
-        return _ANTHROPIC_CTX_FLOOR
-    if protocol != "ollama":
-        # openai-compat and openai-responses (v108-F5) have no such endpoint.
-        return None
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/api/show",
-            headers=_headers(api_key),
-            json={"model": model},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        info = response.json().get("model_info") or {}
-    except (httpx.HTTPError, json.JSONDecodeError, AttributeError):
-        return None
+    deadline = time.monotonic() + timeout
+    found: list[tuple[int, int | None] | None] = []
+
+    def probe() -> None:
+        if protocol in ("openai-compat", "openai-responses"):
+            found.append(_openai_style_window(base_url, api_key, model, deadline, lmstudio))
+        elif protocol == "ollama":
+            found.append(_ollama_window(base_url, api_key, model, deadline))
+
+    worker = threading.Thread(target=probe, name="skep-context-detect", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return found[0] if found else None
+
+
+def _ollama_window(
+    base_url: str, api_key: str | None, model: str, deadline: float
+) -> tuple[int, int | None] | None:
+    body = _fetch_json(f"{base_url.rstrip('/')}/api/show", api_key, deadline, {"model": model})
+    info = body.get("model_info") if isinstance(body, dict) else None
     for key, value in info.items() if isinstance(info, dict) else ():
         if str(key).endswith(".context_length") and _valid_ctx(value):
-            return int(value)
+            return int(value), None
     return None
 
 
-def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
-    """Detect + cache ``model``'s context length. Runs where the model
-    changes (config save, set_assistant_model) — never per turn."""
-    base_url, _model, protocol = assistant_llm(store)
+# R2 (G4): the newest refresh per cache key — an older probe still in flight
+# (the startup one, under a key or protocol since replaced) never publishes.
+_CTX_LOCK = threading.Lock()
+_CTX_GENERATION: dict[str, int] = {}
+
+
+def refresh_model_ctx(
+    store: RunStore, home: Path, model: str, *, live: Callable[[], RunStore] | None = None
+) -> None:
+    """Probe + cache ``model``'s window at the assistant's endpoint. Runs
+    where the profile or model changes (config save, provider use,
+    set_assistant_model) — never per turn. A failed probe drops this
+    identity's row, so the read falls to catalog/default, never stale.
+    R3 (Sol R2-2): published only if the live configuration (``live()`` —
+    the startup probe's staged view re-read — else ``store``) still has the
+    identity and protocol this probe captured."""
+    identity = _context_identity(store, None)
+    provider_id, base_url, _model, protocol = identity
     if not (base_url and model):
         return
-    if protocol == "ollama" and _is_loopback(base_url):
-        return  # v82-F1: local RAM — never probed or auto-matched
     from ..codex_login import uses_codex_login
 
     if uses_codex_login(base_url):
         return  # v118-F1: no context endpoint, and llm-secret never goes there
-    detected = detect_model_ctx(
-        base_url,
-        resolve_active_api_key(store, home, base_url=base_url),
-        model=model,
-        protocol=protocol,
+    key = context_cache_key(provider_id, base_url, model)
+    with _CTX_LOCK:
+        generation = _CTX_GENERATION[key] = _CTX_GENERATION.get(key, 0) + 1
+    active = store.active_provider_profile()
+    # R3 (Sol R3-1): the native-path permission belongs to the endpoint probed
+    lmstudio = (
+        active is not None
+        and active.source == "preset:lmstudio"
+        and active.base_url.rstrip("/") == base_url.rstrip("/")
     )
-    if detected is not None:
-        store.set_setting(MODEL_CTX_PREFIX + model, detected)
+    try:
+        # Phase 05 R1: the key saved for this endpoint, or none (P2)
+        api_key = resolve_active_api_key(store, home, base_url=base_url)
+    except OllamaError:  # R1 (F9): a refused credential (Copilot exchange) is a miss
+        detected = None
+    else:
+        detected = detect_model_ctx(
+            base_url,
+            api_key,
+            model=model,
+            protocol=protocol,
+            lmstudio=lmstudio,
+        )
+    with _CTX_LOCK:
+        if _CTX_GENERATION[key] != generation:
+            return
+        if _context_identity(live() if live else store, None) != identity:
+            return  # the configuration moved while this probe ran
+        if detected is None:
+            store.set_setting(key, None)
+        else:
+            store.set_setting(key, {"window": detected[0], "max_output": detected[1]})
+
+
+def refresh_missing_model_ctx(store: RunStore, home: Path) -> None:
+    """R1 (F8): serve startup probes the active window once when it has no
+    provider-keyed row (an upgraded home has only v74 bare-name rows).
+    R2 (G2): keyed as Settings will read it — the legacy adoption applied in
+    memory (Phase 05's staged view), never written here."""
+    view = _staged_view(store, home)
+    provider_id, base_url, model, _protocol = _context_identity(view, None)
+    if (
+        base_url
+        and model
+        and store.get_setting(context_cache_key(provider_id, base_url, model)) is None
+    ):
+        refresh_model_ctx(view, home, model, live=lambda: _staged_view(store, home))
 
 
 def _headers(api_key: str | None) -> dict[str, str]:
@@ -2103,8 +2373,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             settings[LLM_NUM_CTX] = body.num_ctx or None
         if body.tool_delivery is not None:
             settings[TOOL_DELIVERY_SETTING] = body.tool_delivery
+        provider = (base_url, model, body.protocol, key) != (None, None, None, None)
         try:
-            if (base_url, model, body.protocol, key) != (None, None, None, None):
+            if provider:
                 # a new key, endpoint or protocol is probed before any write
                 # (I8) — outside any snapshot (R2, F5); the knobs land with it
                 save_assistant_llm(
@@ -2132,9 +2403,12 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             raise HTTPException(
                 status_code=500, detail=f"the save failed ({exc}) — {_UNCHANGED}"
             ) from exc
-        if base_url or model:
-            # v74-F2: detection runs where the model changes; failure is silent
-            # here (never breaks a save) and visible in num_ctx_source (I8).
+        bare_clear = key == "" and (base_url, model, body.protocol) == (None, None, None)
+        if provider and not bare_clear:
+            # v74-F2: detection runs where the provider changes — R1 (F8): a
+            # key or protocol too; failure is silent here (never breaks a
+            # save) and visible in num_ctx_source (I8). A bare key clear sends
+            # nothing (Phase 05 R3): there is no new credential to read with.
             current = assistant_llm(run_store)[1]
             if current:
                 refresh_model_ctx(run_store, home, current)
