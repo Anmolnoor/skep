@@ -291,8 +291,17 @@ def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
     retarget after this check can leave one dangling, never widen a read
     (Sol C2-2); without them exec by the linked path is ENOENT."""
     roots = [Path(root) for root in bound]
-    chain = [Path(os.path.abspath(hop)) for hop in _interpreter_chain(Path(sys.executable))]
-    links = dict.fromkeys(p for hop in chain for p in (hop, *hop.parents) if p.is_symlink())
+    system = [Path(root) for root in _SYSTEM_ROOTS]
+    links = dict.fromkeys(
+        path
+        for hop in _interpreter_chain(Path(sys.executable))
+        for path in (hop, *hop.parents)
+        # as walked (C3-1: never a name `..` collapsed into); not one the strict
+        # root already makes (C3-2: a second /bin link makes bwrap refuse)
+        if ".." not in path.parts
+        and not any(path.is_relative_to(root) for root in system)
+        and path.is_symlink()
+    )
     return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
 
 
@@ -304,9 +313,11 @@ def _strict_candidates(
     version link, which a venv's python points through) as a symlink to the
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
-    chain = [Path(os.path.abspath(hop)) for hop in _interpreter_chain(Path(sys.executable))]
+    chain = _interpreter_chain(Path(sys.executable))
     # Sol C-1 (W2): a hop reached through a link is no bind root of its own;
-    # its links are recreated as links only (``_interpreter_links``)
+    # its links are recreated as links only (``_interpreter_links``). C3-1: the
+    # hop as walked, never ``..``-collapsed — a hop is a root only when it is
+    # already its own real path (a ``..`` after a linked dir names another one)
     linked = [hop for hop in chain if hop.resolve() != hop]
     detected = [
         Path(sys.prefix),

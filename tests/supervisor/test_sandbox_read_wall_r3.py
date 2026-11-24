@@ -468,3 +468,37 @@ def test_interpreter_links_are_aliases_never_bind_roots(
     assert pythons / "cpython-3.12" not in candidates
     assert sandbox._interpreter_links([pythons / "cpython-3.12.99"]) == [pythons / "cpython-3.12"]
     assert sandbox._interpreter_links([tmp_path / "elsewhere"]) == []
+
+
+def test_a_dotdot_after_a_linked_dir_never_binds_the_lexical_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C3-1: ``linkdir/../decoy/python3`` walks the link first, so the
+    file really run is ``deep/decoy/python3``; collapsing ``..`` first named
+    an unrelated ``decoy/python3`` that the wall then bound."""
+    real = Path(os.path.realpath(sys.executable))
+    (tmp_path / "deep" / "sub").mkdir(parents=True)
+    (tmp_path / "deep" / "decoy").mkdir()
+    (tmp_path / "deep" / "decoy" / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "decoy").mkdir()
+    (tmp_path / "decoy" / "python3").write_text("unrelated\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "deep" / "sub")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linkdir" / ".." / "decoy" / "python3")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert (tmp_path / "decoy" / "python3").resolve() not in roots
+    assert all(".." not in link.parts for link in sandbox._interpreter_links([tmp_path]))
+
+
+@pytest.mark.skipif(not Path("/bin").is_symlink(), reason="needs a merged-/usr host")
+def test_an_interpreter_through_bin_adds_no_second_bin_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sol C3-2: the strict root already links /bin (relative); an absolute
+    second one makes bwrap refuse the wall."""
+    monkeypatch.setattr(sys, "executable", "/bin/sh")
+    links = sandbox._interpreter_links([Path("/usr")])
+    assert all(not link.is_relative_to(root) for link in links for root in ("/bin", "/usr"))
