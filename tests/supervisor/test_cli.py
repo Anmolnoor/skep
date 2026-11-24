@@ -3061,6 +3061,22 @@ def test_every_parser_group_is_in_the_cli_reference() -> None:
     assert not missing, f"CLI groups absent from docs/cli-reference.md: {missing}"
 
 
+def test_every_console_read_route_is_in_the_cli_reference() -> None:
+    """Phase 10 R1 G2: the review-first console added read-only routes (the
+    run receipt, plus every route serve/console.py declares); each is named
+    in docs/cli-reference.md so the manual covers the operator's REST half."""
+    import re
+
+    root = Path(__file__).parents[2]
+    console = (root / "src/skep/supervisor/serve/console.py").read_text()
+    routes = re.findall(r'@app\.(get|post)\("([^"]+)"\)', console)
+    assert len(routes) >= 5
+    routes.append(("get", "/api/runs/{task_id}/receipt"))
+    doc = (root / "docs" / "cli-reference.md").read_text()
+    missing = [f"{m.upper()} {p}" for m, p in routes if f"`{m.upper()} {p}" not in doc]
+    assert not missing, f"console routes absent from docs/cli-reference.md: {missing}"
+
+
 def test_cli_run_honours_the_stored_sandbox_backend(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -181,6 +181,13 @@ skep review [task_id] [--approve | --deny | --allow-command | --reverify]
   one key — `a` approve, `d` deny, `f` forensics, `p` receipt, `s` skip, `q`
   quit. A key is the same `--approve`/`--deny` above; EOF skips. Off a
   terminal it only lists them and never prompts.
+- The web Inbox and its sidebar badge read one queue,
+  `GET /api/review-queue`: worker gates, standalone chat cards, memory
+  proposals awaiting review and skill drafts awaiting the human gate, grouped
+  by the boundary each crosses, riskiest first, then oldest. A chat card that
+  asks a pending gate's question is listed under that gate, not as a second
+  row. `?detail=false` returns membership and order only (`kind`, `id`,
+  `boundary`, `at`), which is what the badge polls. It only reads.
 - `--approve` applies a completed patch to a `skep/<task_id>` branch, or resumes
   a pending approval. A run with no re-verification record is refused.
 - `--branch NAME` names the landing branch for `--approve` on a completed run;
@@ -407,6 +414,15 @@ skep skill ...
 The skill lifecycle promotes tested learned recipes into the same template
 registry. Use `skep skill --help` for the full subcommand list.
 
+The web Library's Forged Tools read `GET /api/forge/tools`: each forged tool
+as its promotion bound it (source and lock digests, approved hosts, venv
+seal), with two facts re-checked on every read — whether the installed copy
+still hashes to the approved digest (`installed`: `matches`, `differs`,
+`missing`, or `unbound` for one activated before binding) and whether its venv
+still matches its seal (`seal`: `sealed`, `broken`, `missing`, or `none` for a
+stdlib-only tool). The pinned wheels are read from the landed lock, and called
+the approved lock only when it hashes to the bound lock digest. It only reads.
+
 ## Projects and Policy
 
 ```sh
@@ -484,6 +500,15 @@ can write the skep home can rewrite the whole log and its checkpoints, so the
 anchor outside your machine is the head hash where you publish the receipt.
 Both commands only read.
 
+Both have a read-only REST face. `GET /api/ledger/verify` is `ledger verify`
+over the live audit directory (there is no `--path`): the result `--json`
+prints plus `line`, the one-line verdict the console's ledger badge shows; a
+file it cannot read is a 500 naming it. `GET /api/runs/{task_id}/receipt?format=md|json`
+is `proof export` over HTTP, built by the same receipt builder and redactor,
+so its body is the text the CLI prints — `md` (the default, served as
+`text/markdown`) or `json` (`application/json`). An unknown run is a 404 and
+any other format a 422.
+
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
 wins. A repo that is not a project yet needs `--pack` or `--strategy` (for
@@ -521,7 +546,13 @@ back, newest first, with counts per verdict and per note source (`observed`,
 `forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
 (also `GET /api/policy/decisions` and the chat `policy_decisions` tool).
 `--task`/`--engine` (REST: `task_id`/`engine`) keep one run's or one engine's
-rows; a row that predates the key never matches. `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
+rows; a row that predates the key never matches. The console's decision
+search, `GET /api/policy/decisions/search`, narrows the same log on the server
+by `task_id`, `engine`, `actor` (a glob) and `verdict` — `allow`, `ask`,
+`deny` or `note` (an observed or forwarded row, which decides nothing); any
+other verdict is a 400. Rows come newest first, `limit` per page (default
+100), with `next_cursor` for the next page and `total` and the per-verdict
+`summary` counted over every match. It only reads. `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
 `policy approve` locks a template (or a `--file` layer) as the policy
 baseline: it prints the explain table, takes a typed `yes` unless `--yes`,
 and writes `baseline.json`, `baseline.lock` and a row in
@@ -724,6 +755,11 @@ skep ships no OAuth client id for any provider — and stores the access token
 it returns exactly where `set-key` would. A profile on `chatgpt.com` (the
 `openai-codex` preset, v118) uses your ChatGPT plan login (Codex) and takes
 no key: `set-key` and `login` refuse it and point at `codex login`.
+`POST /api/llm/probe` is the web Settings' Test step: the staged probe of
+`POST /api/llm/test` — the candidate's model listing and one 1-token
+completion with its key — plus the model the probe asked and the context
+window a save would give it (`source`: `provider-api`, `catalog` or
+`default`). Nothing is saved, and the key never comes back.
 
 ## Nodes and Ops
 
