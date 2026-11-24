@@ -38,7 +38,7 @@ _PRIVATE_OUTPUT = frozenset({"run_shell", "start_process", "read_process_log"})
 _UNTRUSTED_OUTPUT = frozenset({"read_url", "search_web", "call_mcp_tool"})
 _CHAT_READS = frozenset({"search_chats", "get_chat_messages", "get_chat_context"})
 # W21: a run read carries the worker's own words (its summary, its errors).
-_RUN_READS = frozenset({"get_run", "await_runs"})
+_RUN_READS = frozenset({"get_run", "await_runs", "proof_export", "run_forensics"})
 _MEMORY_READS = frozenset({"list_memory", "search_memory"})
 # W21: rows that carry the bits of the chat that wrote them — result key, id
 # field, ``RunStore.content_taint`` kind. Approved memory is not here: the
@@ -66,6 +66,8 @@ _SOURCES = {
     "delegate_analysis": "read an analyst's answer",
     "get_run": "read a worker's report",
     "await_runs": "read a worker's report",
+    "proof_export": "read a worker's report",
+    "run_forensics": "read a worker's report",
     "list_runs": "read a worker's report",
     "list_memory": "read memory a worker wrote",
     "search_memory": "read memory a worker wrote",

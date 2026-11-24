@@ -362,6 +362,22 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         ["task_id"],
     ),
     _tool(
+        "proof_export",
+        "One run's local receipt as Markdown to attach as evidence (`skep proof "
+        "export`): repo, baseline, patch sha256, G10 and V1, ledger head; a PR "
+        "review run's names the PR, base, head and merge-base. Read-only.",
+        {"task_id": {"type": "string"}},
+        ["task_id"],
+    ),
+    _tool(
+        "run_forensics",
+        "One run's forensics report as Markdown (`skep run forensics`): why it "
+        "failed or looks wrong — transitions, G10/V1, the PR it verified, policy "
+        "trail, worker log tail. Read-only.",
+        {"task_id": {"type": "string"}},
+        ["task_id"],
+    ),
+    _tool(
         "list_approvals",
         "The pending approval queue, with each run's summary — PLUS the last "
         "10 resolved verdicts (recently_resolved: who approved/denied, when, "
@@ -2631,6 +2647,8 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "get_run",
         "list_approvals",
         "await_runs",
+        "proof_export",
+        "run_forensics",
         "dispatch_run",
         "batch_dispatch",
         "delegate_analysis",
@@ -3917,6 +3935,21 @@ def execute_read_tool(
                 "Never dispatch another run to redo, 'stage', or 'commit' finished work."
             )
         return listing
+    if name == "proof_export":
+        # Phase 09 R1: the receipt is evidence the Queen attaches (ADR 0050:
+        # the chat face of `skep proof export`); an unknown id is its 404.
+        from ..ledger_proof import build_receipt, render_receipt
+
+        receipt = build_receipt(
+            store, holder.current.home, holder.current.audit_dir, str(args["task_id"])
+        )
+        return {"task_id": receipt["task_id"], "receipt": render_receipt(receipt, "md")}
+    if name == "run_forensics":
+        # Phase 09 R1: the chat face of `skep run forensics` / GET .../forensics
+        from ..forensics import build_run_forensics, render_forensics
+
+        report = build_run_forensics(store, holder.current.audit_dir, str(args["task_id"]))
+        return {"task_id": report["task_id"], "forensics": render_forensics(report, markdown=True)}
     if name == "get_run":
         run = actions.require_run(store, str(args["task_id"]))
         task_id = str(run["task_id"])

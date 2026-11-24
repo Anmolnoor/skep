@@ -5,7 +5,7 @@ description: review each open Dependabot PR on its exact head with G10 + V1; a c
 
 # Dependabot maintainer
 
-Tools: list_repos, effective_policy, list_prs, refresh_repo, dispatch_run, await_runs, get_run, merge_pr, add_task
+Tools: list_repos, effective_policy, list_prs, refresh_repo, dispatch_run, await_runs, get_run, merge_pr, add_task, proof_export, run_forensics
 
 Run this in a **web** chat, on demand ("follow the dependabot-maintainer
 skill on <repo>"). Every mutating step below is a card the operator
@@ -44,9 +44,9 @@ with `dependabot/`. None: say so and stop.
    an external engine (claude_code, codex, aider) fails a run that leaves no
    patch ("agent produced no workspace patch") before G10 runs, so the PR
    would get no verdict. A run that changes nothing gets the patchless
-   review: G10 applies the PR's base...head diff to the fetched base and
-   re-runs the pinned `verify_command`; V1 reads that diff for deleted,
-   emptied or skipped tests.
+   review: G10 re-runs the pinned `verify_command` on the exact PR head;
+   V1 reads the PR's own diff (merge-base..head) for deleted, emptied,
+   skipped or unreadable tests.
 3. `await_runs task_ids=[<task_id>]`, then `get_run task_id=<task_id>`. It
    is this PR's run only if `ref` is `refs/skep/pr/<N>/head` and
    `reverification.head_commit` is the `head_sha` from 2.1. Read `state`
@@ -58,10 +58,10 @@ with `dependabot/`. None: say so and stop.
 **Green**, only when ALL hold: `state` is `completed`; `confirmed` is true
 and `outcome` is `passed`; `tamper_flags` is empty; `head_commit` is the
 `head_sha` from 2.1. Propose `merge_pr repo=<repo> pr=<N>`. Its card pins
-the head and base G10 confirmed. If the card's head or base differs from
-the verdict's, or it says it is not pinned, tell the operator to deny it.
-If the PR moves after the card, GitHub refuses the merge: say so and start
-again at 2.1.
+the head, base branch and base SHA G10 confirmed; without a clean verdict
+skep refuses the proposal itself. If the card's head or base differs from
+the verdict's, tell the operator to deny it. If the PR or its base moves
+after the card, the merge is refused: say so and start again at 2.1.
 
 **Workflow bump**: a `test_config_changed:.github/workflows/...` flag.
 skep does not verify CI config, so never propose `merge_pr`. Call
@@ -82,13 +82,14 @@ so it waits on the operator's list.
 
 ## 4. Report: one summary for <repo>
 
-You cannot run skep yourself (your shell never runs it), so each line
-names the evidence command for the operator, filled in:
+Attach the evidence itself, not a command for it (both tools only read):
 
 - green: `#<N> <title>: merge card for head <head12> on base <base12>
-  (task <task_id>). Receipt: skep proof export <task_id>`
-- red: `#<N> <title>: NOT merged, <reason> (task <task_id>). Forensics:
-  skep run forensics <task_id> --md`
+  (task <task_id>)`, then `proof_export task_id=<task_id>` and post its
+  Markdown receipt below the line. Its PR row must name #<N>, the
+  `head_sha` from 2.1 and the base; if it does not, say so.
+- red: `#<N> <title>: NOT merged, <reason> (task <task_id>)`, then
+  `run_forensics task_id=<task_id>` and post its Markdown below the line.
 - workflow bump: `#<N> <title>: human review, task added`
 
 ## Nightly report (a prompt schedule)

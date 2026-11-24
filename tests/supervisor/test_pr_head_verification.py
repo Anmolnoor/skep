@@ -1201,3 +1201,56 @@ def test_a_pinned_pair_with_no_merge_base_here_confirms_nothing(
 
     assert outcome.outcome == "unavailable" and not outcome.exit_codes
     assert "no merge-base" in outcome.detail and "refresh_repo pr=7" in outcome.detail
+
+
+# --- 6. the evidence is a read the Queen attaches, not a command it names ------
+
+
+def test_the_queen_reads_the_receipt_and_the_forensics_as_evidence(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Two read tools (no card): `proof_export` and `run_forensics`, the
+    chat faces of `skep proof export` / `skep run forensics`, each carrying
+    the PR tuple — and, being a worker's words, marking the chat untrusted."""
+    from fastapi import HTTPException
+
+    from skep.supervisor.serve.taint import record_tool_taint
+    from skep.supervisor.serve.tools import (
+        MUTATING_TOOL_NAMES,
+        READ_TOOL_NAMES,
+        TOOL_CATEGORIES,
+        execute_read_tool,
+    )
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    _outcome, _record, task_id = _g10(repo, config, head)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        receipt = execute_read_tool(
+            "proof_export", {"task_id": task_id}, store=store, holder=holder
+        )
+        forensics = execute_read_tool(
+            "run_forensics", {"task_id": task_id}, store=store, holder=holder
+        )
+        with pytest.raises(HTTPException):
+            execute_read_tool("proof_export", {"task_id": "nope-123"}, store=store, holder=holder)
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        row = store.add_chat_message(chat_id, role="tool", content="{}")
+        taint = record_tool_taint(
+            store, holder, chat_id, "run_forensics", {"task_id": task_id}, forensics, row
+        )
+    finally:
+        store.close()
+
+    tools = {"proof_export", "run_forensics"}
+    assert tools <= READ_TOOL_NAMES - MUTATING_TOOL_NAMES and tools <= set(TOOL_CATEGORIES["runs"])
+    assert receipt["task_id"] == forensics["task_id"] == task_id
+    markdown = receipt["receipt"]
+    assert markdown.startswith("<details>") and f"{ORIGIN}#7" in markdown
+    assert head in markdown and base in markdown
+    assert (
+        f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {base})" in forensics["forensics"]
+    )
+    assert taint.untrusted is not None

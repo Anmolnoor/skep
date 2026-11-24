@@ -109,16 +109,16 @@ def test_dependabot_routes_workflow_bumps_to_a_human_review_task() -> None:
     assert "never propose `merge_pr`" in bump and "add_task" in bump
 
 
-def test_dependabot_evidence_lines_are_real_cli_commands() -> None:
-    """S14: the receipt on green and the forensics on red, each a command the
-    CLI parses, filled in per task."""
-    from skep.cli import _parser
-
+def test_dependabot_attaches_its_evidence_with_read_tools() -> None:
+    """S14: the receipt on green and the forensics on red, attached by the
+    Queen itself through two read tools (no card), filled in per task."""
     report = _dependabot().split("## 4. Report", 1)[1].split("## Nightly", 1)[0]
-    commands = re.findall(r"(skep (?:proof export|run forensics) <task_id>(?: --md)?)", report)
-    assert commands == ["skep proof export <task_id>", "skep run forensics <task_id> --md"]
-    for command in commands:
-        _parser().parse_args(command.replace("<task_id>", "t-1").split()[1:])
+    calls = re.findall(r"`((?:proof_export|run_forensics) task_id=<task_id>)`", report)
+    assert calls == ["proof_export task_id=<task_id>", "run_forensics task_id=<task_id>"]
+    tools = {"proof_export", "run_forensics"}
+    assert tools <= set(_tools("dependabot-maintainer"))
+    assert tools <= READ_TOOL_NAMES - MUTATING_TOOL_NAMES
+    assert "skep proof export" not in report and "skep run forensics" not in report
 
 
 def test_dependabot_merges_only_behind_the_merge_pr_card() -> None:
