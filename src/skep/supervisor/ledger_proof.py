@@ -327,6 +327,11 @@ def build_receipt(store: RunStore, home: Path, audit_dir: Path, task_id: str) ->
     task_id, identity, g10 = report["task_id"], report["identity"], report["outcome"]["g10"]
     run, reverify = store.get_run(task_id), store.reverification_for(task_id)
     base = (run.base_commit if run else None) or (reverify.base_commit if reverify else None)
+    pr = report["outcome"]["pr"]  # R4 (S5): the dispatch pin when G10 never ran
+    if pr:
+        # Phase 09 R1 (S14/N7): a PR verdict's baseline is the merge-base V1
+        # counted on — the PR head is what was verified, never "baseline".
+        base = pr.get("merge_base") or "merge-base unavailable"  # R2 (S9, N3)
     detail = next(
         (t["detail"] for t in report["outcome"]["transitions"] if t["state"] == "dispatched"),
         None,
@@ -345,6 +350,7 @@ def build_receipt(store: RunStore, home: Path, audit_dir: Path, task_id: str) ->
         "task_id": task_id,
         "repo": identity["repo"],
         "baseline_sha": base or UNKNOWN,
+        "pr": pr or None,
         "patch": _patch(store, task_id),
         "sandbox": {
             "execution_mode": identity["execution_mode"],
@@ -412,6 +418,8 @@ def broken_at(where: dict[str, Any]) -> str:
 
 def render_receipt(receipt: dict[str, Any], fmt: str) -> str:
     """``json`` (sorted, indented) or ``md``: one collapsible block to paste into a PR."""
+    from .forensics import pr_line
+
     if fmt == "json":
         return json.dumps(receipt, indent=2, sort_keys=True)
     g10, ledger, sandbox, patch, baseline = (
@@ -430,7 +438,9 @@ def render_receipt(receipt: dict[str, Any], fmt: str) -> str:
     verdict = "G10 not run" if g10 is None else f"G10 {g10['outcome']}, V1 {g10['v1']}"
     rows = [
         ("repo", _plain(receipt["repo"])),
-        ("baseline", _code(receipt["baseline_sha"])),
+        *([("PR", _plain(pr_line(receipt["pr"])))] if receipt.get("pr") else []),
+        ("baseline (PR merge-base)" if receipt.get("pr") else "baseline",
+         _code(receipt["baseline_sha"])),
         ("patch sha256", f"{_code(patch['sha256'])} (on disk: {_plain(patch['on_disk'])})"),
         ("skep", _plain(receipt["skep_version"])),
         ("sandbox", _plain(f"{sandbox['execution_mode']}, backend {sandbox['backend']}, "

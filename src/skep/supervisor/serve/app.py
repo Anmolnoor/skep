@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from starlette.middleware.base import RequestResponseEndpoint
 
 from skep.worker_contract import Event
@@ -223,6 +223,15 @@ class BranchRequest(BaseModel):
 
     name: str
     from_ref: str | None = None
+
+
+class RepoRefreshRequest(BaseModel):
+    """Body of ``POST /api/repos/{name}/refresh`` (Phase 09 R2, N8a): a PR
+    selector — its number (7, #7) or its URL on the repo's origin. R3 (S18):
+    a JSON integer is taken too (never a bool) and read, as text, by the
+    same strict parser."""
+
+    pr: str | StrictInt | None = None
 
 
 class BranchMergeRequest(BaseModel):
@@ -1021,9 +1030,13 @@ def create_app(
         return merge_branch(holder, name, source=body.source, into=branch, store=run_store)
 
     @app.post("/api/repos/{name:path}/refresh")
-    def post_repo_refresh(name: str) -> dict[str, Any]:
-        """v55-F1: supervisor-side git fetch + fast-forward for a managed clone."""
-        return refresh_repo(holder, name, store=run_store)
+    def post_repo_refresh(name: str, body: RepoRefreshRequest | None = None) -> dict[str, Any]:
+        """v55-F1: supervisor-side git fetch + fast-forward for a managed clone.
+        Phase 09 R2 (N8a, ADR 0050): ``{"pr": N}`` fetches that PR's head and
+        base instead — the same verb chat's refresh_repo pr= and
+        ``skep repo refresh --pr`` call."""
+        pr = None if body is None or body.pr is None else str(body.pr)
+        return refresh_repo(holder, name, store=run_store, pr=pr)
 
     @app.post("/api/workon/preview")
     def preview_workon(body: WorkonRequest) -> dict[str, Any]:

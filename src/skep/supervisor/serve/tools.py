@@ -345,7 +345,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_runs",
-        "Recent runs, newest first: state, verification, summary.",
+        "Recent runs, newest first: state, ref, verification, summary. A PR review "
+        "run also names its PR (owner/name#N) and the head and base G10 verified.",
         {"limit": {"type": "integer", "description": "max runs to return (default 10)"}},
     ),
     _tool(
@@ -357,6 +358,22 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "get_run",
         "One run in detail: state transitions, commands, approvals, verification.",
+        {"task_id": {"type": "string"}},
+        ["task_id"],
+    ),
+    _tool(
+        "proof_export",
+        "One run's local receipt as Markdown to attach as evidence (`skep proof "
+        "export`): repo, baseline, patch sha256, G10 and V1, ledger head; a PR "
+        "review run's names the PR, base, head and merge-base. Read-only.",
+        {"task_id": {"type": "string"}},
+        ["task_id"],
+    ),
+    _tool(
+        "run_forensics",
+        "One run's forensics report as Markdown (`skep run forensics`): why it "
+        "failed or looks wrong — transitions, G10/V1, the PR it verified, policy "
+        "trail, worker log tail. Read-only.",
         {"task_id": {"type": "string"}},
         ["task_id"],
     ),
@@ -548,7 +565,7 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_prs",
         "GitHub pull requests for a registered repo (number, title, state, head "
-        "branch, url, draft flag) — read-only, via gh on the operator's own "
+        "branch, url, draft flag, author login + is_bot) — read-only, via gh on the operator's own "
         "credentials. Honest failure when gh is missing or unauthenticated. Use "
         "before open_pr (does one already exist?) and before merge_pr.",
         {
@@ -1568,7 +1585,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE merging an open GitHub PR (requires user confirmation in the web "
         "UI; messenger channels can never confirm it). The ONLY way a base branch "
         "like main advances — runs gh on the operator's own credentials. `pr` is "
-        "a PR number or URL.",
+        "the PR number or its URL on the repo's origin, never a branch. Refused "
+        "unless G10 cleanly confirmed the PR's head (refresh_repo pr=N, then a "
+        "review run on refs/skep/pr/N/head); merges only that head. Refused if the "
+        "head or base moved, or it has auto-merge or a merge queue (GitHub refuses "
+        "a queue skep could not check); a base "
+        "that moves during the merge itself is reported, not prevented.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "pr": {"type": "string"},
@@ -1582,7 +1604,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation). Nothing is destroyed: the branch and its commits stay, "
         "and a closed PR can be reopened on GitHub. delete_branch=true also "
         "deletes the PR's branch after closing. Runs gh on the operator's own "
-        "credentials, like merge_pr. `pr` is a PR number or URL.",
+        "credentials, like merge_pr. `pr` is the PR number or its URL on the "
+        "repo's origin, never a branch.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "pr": {"type": "string"},
@@ -1723,7 +1746,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the default branch to origin. THE way to bring a registered repo up to "
         "date — workers can never fetch. Use when a branch or commit pushed to "
         "the remote after registration is not visible in repo_state.",
-        {"repo": {"type": "string", "description": "registered repo slug or host path"}},
+        {
+            "repo": {"type": "string", "description": "registered repo slug or host path"},
+            "pr": {
+                "type": "string",
+                "description": "PR number: fetch only its head + base, for a review run "
+                "(dispatch_run ref=refs/skep/pr/<N>/head)",
+            },
+        },
         ["repo"],
     ),
     _tool(
@@ -2034,7 +2064,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 ],
                 "description": (
                     "'note' posts the text each tick; 'script' runs the instructions "
-                    "as a shell command on the supervisor host and posts its output; "
+                    "as a shell command in a sandbox wall on the supervisor host and "
+                    "posts its output (it reads only files the command names, live and "
+                    "read-only); "
                     "'digest' posts a summary of pending approvals/runs/schedules "
                     "(no repo or instructions needed); 'prompt' runs the "
                     "instructions as a read-only Queen turn in this chat; these four "
@@ -2047,7 +2079,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "hosts a worker schedule may reach; this chat's role "
-                "drops any it does not allow",
+                "drops any it does not allow. Also a script schedule's only reachable "
+                "hosts inside its wall (none by default; concrete hosts, no wildcard)",
             },
             "once": {
                 "type": "boolean",
@@ -2618,6 +2651,8 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "get_run",
         "list_approvals",
         "await_runs",
+        "proof_export",
+        "run_forensics",
         "dispatch_run",
         "batch_dispatch",
         "delegate_analysis",
@@ -2907,6 +2942,7 @@ def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
         "task_id": record.task_id,
         "state": record.state,
         "repo": record.repo,
+        "ref": record.ref,  # Phase 09 R1 (N6): which PR head a review ran on
         "summary": record.summary,
         "verification": record.verification_outcome,
         "updated_at": record.updated_at,
@@ -2919,6 +2955,8 @@ def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
         # instead of guessing (field test 2026-07-21).
         view["resumed_as"] = store.resumed_as_for(record.task_id)
         view.update(actions.created_transition_views_for_task(store, record.task_id))
+        if (pr := store.run_pr(record.task_id)) is not None:
+            view["pr"] = f"{pr['repo']}#{pr['number']}"
         # v20-F3: carry the re-verification signal onto the chat run list too.
         view["reverification"] = actions.reverification_summary(
             store.reverification_for(record.task_id)
@@ -3901,6 +3939,21 @@ def execute_read_tool(
                 "Never dispatch another run to redo, 'stage', or 'commit' finished work."
             )
         return listing
+    if name == "proof_export":
+        # Phase 09 R1: the receipt is evidence the Queen attaches (ADR 0050:
+        # the chat face of `skep proof export`); an unknown id is its 404.
+        from ..ledger_proof import build_receipt, render_receipt
+
+        receipt = build_receipt(
+            store, holder.current.home, holder.current.audit_dir, str(args["task_id"])
+        )
+        return {"task_id": receipt["task_id"], "receipt": render_receipt(receipt, "md")}
+    if name == "run_forensics":
+        # Phase 09 R1: the chat face of `skep run forensics` / GET .../forensics
+        from ..forensics import build_run_forensics, render_forensics
+
+        report = build_run_forensics(store, holder.current.audit_dir, str(args["task_id"]))
+        return {"task_id": report["task_id"], "forensics": render_forensics(report, markdown=True)}
     if name == "get_run":
         run = actions.require_run(store, str(args["task_id"]))
         task_id = str(run["task_id"])
@@ -4463,7 +4516,9 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
-def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str | None:
+def landing_card_error(
+    store: RunStore, name: str, args: dict[str, Any], *, merge: dict[str, Any] | None = None
+) -> str | None:
     """ES-F292 (L9, B22): what a land_run / approve_review (landing) confirm
     would refuse, asked when the card is proposed, so no card shows a landing
     it cannot do: the chat branch menu (v81-F4), the branch safety check
@@ -4471,6 +4526,12 @@ def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str 
     None for every other tool and anything the confirm reports itself (an
     unknown run or review, a mid-run gate)."""
     try:
+        if name == "merge_pr":
+            # Phase 09 R1 (D3): no card for a merge its confirm must refuse.
+            from .cards import merge_pin
+
+            pin = merge_pin(store, args) if merge is None else merge  # R3 (S6): one read
+            return f"merge_pr refused: {pin['error']}" if "error" in pin else None
         if name == "open_pr" and not args.get("branch"):
             # ES-F292 follow-up: open_pr lands each run first (land_run).
             ids = args.get("task_ids") or [args.get("task_id")]
@@ -4550,7 +4611,12 @@ def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str
 
 
 def policy_write_preview(
-    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any]
+    store: RunStore,
+    holder: ConfigHolder,
+    name: str,
+    args: dict[str, Any],
+    *,
+    merge: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """P3-5 (V11, ADR 0059 D6): the card fields a policy-write proposal
     carries — ``replay`` (what its confirm would flip among recent decisions)
@@ -4566,7 +4632,7 @@ def policy_write_preview(
     from ..policy_write import PolicyWriteRejected, vet_write
 
     def check() -> dict[str, Any]:
-        landing_error = landing_card_error(store, name, args)
+        landing_error = landing_card_error(store, name, args, merge=merge)
         if landing_error is not None:  # ES-F292: a landing card, B22's lesson too
             raise PolicyWriteRejected(landing_error)
         if name in actions.REMEMBERABLE_TOOLS:
@@ -5818,13 +5884,21 @@ def _execute_mutation(
         # operator just gave. gh failure degrades to an honest tool result.
         from .. import github
 
+        # Phase 09 R1 (D3, I1, I8): exactly the pin the card was proposed
+        # with — a verdict is never looked up at click time.
+        pin = (card or {}).get("merge")
+        if not pin:
+            raise ValueError(
+                "merge refused: this card has no verified PR head pinned from when it was "
+                "proposed — propose merge_pr again"
+            )
+        if "error" in pin:
+            raise ValueError(f"merge refused: {pin['error']}")
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
         merge = github.merge_pull_request(
-            repo=repo_path,
-            pr=str(args["pr"]),
-            strategy=str(args.get("strategy") or "merge"),
+            repo=repo_path, pin=pin, strategy=str(args.get("strategy") or "merge")
         )
-        return {"merged": merge.merged, "detail": merge.detail}
+        return github.merge_record(merge, pin)
     if name == "close_pr":
         # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
         # reopens) — but NOT with delete_branch: deleting the head ref cascade-
@@ -5870,7 +5944,8 @@ def _execute_mutation(
             store=store,
         )
     if name == "refresh_repo":
-        return actions.refresh_repo(holder, str(args["repo"]), store=store)
+        pr = None if args.get("pr") is None else str(args["pr"])
+        return actions.refresh_repo(holder, str(args["repo"]), store=store, pr=pr)
     if name == "create_branch":
         return actions.create_branch(
             holder,
@@ -6128,6 +6203,9 @@ def _execute_mutation(
                 chain=schedule_chain,
                 # v123-F1: repo-less kinds store none; one named here refuses
                 role=None if args.get("role") is None else str(args["role"]),
+                # Phase 09 R1: a script's only egress inside its wall (wall.py)
+                network=[str(h) for h in args.get("network") or []] if caste == "script" else (),
+                skep_home=holder.current.home.parent,  # R3 (N2): a script's inputs
             )
             actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
@@ -6172,6 +6250,7 @@ def _execute_mutation(
                 # v123-F3: its hosts (the role decides each at tick) and its chat
                 network=[str(host) for host in args.get("network") or []],
                 chat_id=chat_id,
+                skep_home=holder.current.home.parent,
             )
         actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)
@@ -6579,6 +6658,21 @@ def _mutation_execution_decision(
     skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
     if skep_self is not None:  # D11: refused at proposal, no card
         return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
+    if name == "propose_schedule" and args.get("caste") == "script":
+        from ..scheduler import script_input_problem, script_network_problem
+
+        if hosts_refused := script_network_problem(list(args.get("network") or [])):
+            # R2 (N1): a `*` host is refused at proposal, no card
+            return AutonomyDecision(
+                verdict="deny", reason="schedule.deny.hosts", detail=hosts_refused
+            )
+        inputs_refused = script_input_problem(
+            str(args.get("instructions") or ""), holder.current.home.parent
+        )
+        if inputs_refused:  # R3 (N2): a masked input is refused at proposal, no card
+            return AutonomyDecision(
+                verdict="deny", reason="schedule.deny.inputs", detail=inputs_refused
+            )
     role_refused = (
         _schedule_role_refusal(store, holder, chat_id, args) if name == "propose_schedule" else None
     )

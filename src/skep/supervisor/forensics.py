@@ -313,6 +313,7 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
         for row in trail
     ) or any(d.get("reason") == "dispatch.auto_allowed.unlocked" for d in dispatch.values())
     reverify = store.reverification_for(task_id)
+    pinned = store.run_pr(task_id)
     report = {
         "task_id": task_id,
         "identity": {
@@ -345,6 +346,13 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 for t in transitions
                 if t["detail"] and any(alarm in t["detail"].lower() for alarm in ALARMS)
             ],
+            # R4 (S5): the PR this run covers — G10's tuple, or the dispatch
+            # pin when no verdict was recorded (merge-base unavailable then).
+            "pr": reverify.pr
+            if reverify is not None and reverify.pr
+            else None
+            if pinned is None
+            else {**pinned, "merge_base": None},
             "heartbeat_gaps": _heartbeat_gaps(
                 _events_path(audit_dir, store, task_id), active=run["state"] in ACTIVE
             ),
@@ -360,6 +368,9 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 "test_counts": reverify.test_counts,
                 "v1": _v1(reverify.tamper_flags, reverify.test_counts),
                 "detail": reverify.detail,
+                # Phase 09 R1 (S14/N7): a PR verdict's repo, number, base,
+                # head and merge-base; None for every other run.
+                "pr": reverify.pr,
             },
         },
         "ledger": _ledger(audit_dir, task_id),
@@ -392,6 +403,21 @@ def _log_tail(path: Path) -> list[str]:
     return lines[-LOG_TAIL_LINES:]
 
 
+def pr_line(pr: dict[str, Any]) -> str:
+    """Phase 09 R1 (S14/N7): the PR a verdict covers, said one way everywhere."""
+    return (
+        f"PR {pr['repo']}#{pr['number']}: head {pr['head_commit']} on {pr['base_branch']} "
+        f"{pr['base_commit']} ({merge_base_text(pr)})"
+    )
+
+
+def merge_base_text(pr: dict[str, Any]) -> str:
+    """R2 (S9, N3): a PR verdict refused before its merge-base was found
+    (``merge_base`` None, or absent on an R1 row) says so."""
+    found = pr.get("merge_base")
+    return f"merge-base {found}" if found else "merge-base unavailable"
+
+
 def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
     """Text (default) or a paste-ready Markdown bug report of the same report."""
 
@@ -420,6 +446,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
     ]
     if g10 is None:
         lines.append(f"{item}G10: no re-verification recorded")
+        if outcome.get("pr"):  # R4 (S5): a PR run that failed before G10
+            lines.append(f"{item}{pr_line(outcome['pr'])}")
     else:
         lines.append(
             f"{item}G10: {g10['outcome']} confirmed={g10['confirmed']} "
@@ -429,6 +457,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
             f"{item}V1: {g10['v1']} tamper_flags={g10['tamper_flags']} "
             f"test_counts={g10['test_counts']}"
         )
+        if g10["pr"]:
+            lines.append(f"{item}{pr_line(g10['pr'])}")
         if g10["detail"]:
             lines.append(f"{item}G10 detail: {g10['detail']}")
     ledger = report["ledger"]

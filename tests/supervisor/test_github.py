@@ -7,6 +7,7 @@ degrade honestly on failure) is proven without auth.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -26,11 +27,14 @@ def _make_runner(
     pr_code: int = 0,
     pr_url: str = "https://github.com/me/repo/pull/7",
     base_missing: bool = False,
+    origin: str = "git@github.com:Me/repo.git",
 ) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[list[str]]]:
     calls: list[list[str]] = []
 
     def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
+        if args[0] == "git" and "remote.origin.url" in args:
+            return _cp(args, 0 if origin else 1, f"{origin}\n" if origin else "")
         if args[0] == "git" and "ls-remote" in args:
             # v60-F2 base probe: a present base answers with a sha line.
             out = "" if base_missing else "abc123\trefs/heads/main\n"
@@ -53,13 +57,30 @@ def test_open_pull_request_success(tmp_path: Path) -> None:
     assert result.url == "https://github.com/me/repo/pull/7"
     # The PR targets the skep branch as head and never pushes to the base directly.
     gh_call = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
-    assert "--head" in gh_call and "skep/abc" in gh_call
-    assert "--base" in gh_call and "main" in gh_call
+    # R3 (S16): the repo named as HOST/OWNER/REPO; R4 (S2): the head is the
+    # bare branch — OWNER:BRANCH is gh's cross-repo (fork) form, and an
+    # org-owned same-repo PR breaks on it.
+    assert gh_call[3:5] == ["--repo", "github.com/me/repo"]
+    assert gh_call[gh_call.index("--head") + 1] == "skep/abc"
+    assert gh_call[gh_call.index("--base") + 1] == "main"
     # v60-F2: the base probe runs before any side effect.
     probe_call = next(c for c in calls if "ls-remote" in c)
     assert probe_call[-2:] == ["origin", "main"]
     push_call = next(c for c in calls if "push" in c)
     assert push_call[-2:] == ["origin", "skep/abc"]  # pushes the branch, not main
+
+
+def test_open_pull_request_on_an_origin_that_is_not_github_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """R3 (S16): no github.com origin, no repo to name to gh — refused
+    before anything is pushed."""
+    run, calls = _make_runner(origin="https://gitlab.com/me/repo.git")
+    result = open_pull_request(
+        repo=tmp_path, branch="skep/abc", base="main", title="t", body="b", runner=run
+    )
+    assert not result.opened and "not a github.com repository" in result.detail
+    assert [c for c in calls if "push" in c or c[0] == "gh"] == []
 
 
 def test_open_pull_request_teaches_when_remote_base_is_missing(tmp_path: Path) -> None:
@@ -112,51 +133,98 @@ def test_pr_body_and_title_carry_evidence() -> None:
     assert default_pr_title("bumped requests", "abc123def").startswith("bumped requests")
 
 
+def _github_repo(tmp_path: Path) -> Path:
+    """Phase 09 R1 (D1): a repo whose origin names a GitHub repo — what gh's
+    ``--repo`` is read from. Nothing ever fetches from it."""
+    repo = tmp_path / "gh-repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "git@github.com:me/repo.git"],
+        check=True,
+    )
+    return repo
+
+
+def _gh_fake(
+    code: int, out: str = "", err: str = "", calls: list[list[str]] | None = None
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """gh answers ``code``; git (the origin lookup) runs for real."""
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[0] != "gh":
+            return subprocess.run(args, **kwargs)  # type: ignore[call-overload,no-any-return]
+        if calls is not None:
+            calls.append(list(args))
+        return _cp(args, code, out, err)
+
+    return run
+
+
 def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
-    """v47-F5: the only base-branch advance — gh pr merge, honest on failure."""
+    """v47-F5: the only base-branch advance, honest on failure.
+    Phase 09 R1 (D3): it merges only a pinned, verified head (R3 D8: via
+    GitHub's REST merge endpoint, pinned to that head's SHA)."""
+    import json
+
     from skep.supervisor.github import merge_pull_request
 
+    pin = {
+        "repo": "me/repo", "number": 7, "base_branch": "main",
+        "base_commit": "b" * 40, "head_commit": "a" * 40,
+    }  # fmt: skip
+    live = {"headRefOid": "a" * 40, "baseRefOid": "b" * 40, "baseRefName": "main"}
     calls: list[list[str]] = []
 
-    def ok(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def gh(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
-        return _cp(args, 0, "merged")
+        if "PUT" in args:  # R3 (D8): the REST merge endpoint, --include
+            body = json.dumps({"merged": True, "sha": "c" * 40})
+            return _cp(args, 0, f"HTTP/2.0 200 OK\nContent-Type: application/json\n\n{body}")
+        if args[1] == "api":  # R2 (D4, D5): no merge queue; the commit's parent
+            answer = {"data": {"repository": {"mergeQueue": None}}, "parents": [{"sha": "b" * 40}]}
+            return _cp(args, 0, json.dumps(answer))
+        return _cp(args, 0, json.dumps({**live, "state": "OPEN"}))
 
-    result = merge_pull_request(repo=tmp_path, pr="7", strategy="squash", runner=ok)
+    result = merge_pull_request(repo=tmp_path, pin=pin, strategy="squash", runner=gh)
     assert result.merged and "7" in result.detail
-    assert calls == [["gh", "pr", "merge", "7", "--squash"]]
+    assert calls[2] == [
+        "gh", "api", "--hostname", "github.com", "--include", "-X", "PUT",
+        "repos/me/repo/pulls/7/merge", "-f", f"sha={'a' * 40}", "-f", "merge_method=squash",
+    ]  # fmt: skip
 
-    def broken(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return _cp(args, 1, "", "not mergeable")
-
-    failed = merge_pull_request(repo=tmp_path, pr="7", runner=broken)
+    broken = _gh_fake(1, "", "not mergeable")
+    failed = merge_pull_request(repo=tmp_path, pin=pin, runner=broken)
     assert not failed.merged and "not mergeable" in failed.detail
     # An unknown strategy never reaches gh.
-    assert not merge_pull_request(repo=tmp_path, pr="7", strategy="yolo", runner=broken).merged
+    assert not merge_pull_request(repo=tmp_path, pin=pin, strategy="yolo", runner=broken).merged
 
 
 def test_close_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
     """v58-F1: close without merging — reversible, honest on failure."""
     from skep.supervisor.github import close_pull_request
 
+    repo = _github_repo(tmp_path)
     calls: list[list[str]] = []
+    ok = _gh_fake(0, "closed", calls=calls)
 
-    def ok(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(args))
-        return _cp(args, 0, "closed")
-
-    result = close_pull_request(repo=tmp_path, pr="7", runner=ok)
+    result = close_pull_request(repo=repo, pr="7", runner=ok)
     assert result.closed and "7" in result.detail
-    assert calls == [["gh", "pr", "close", "7"]]
+    assert calls == [["gh", "pr", "close", "--repo", "github.com/me/repo", "--", "7"]]
 
-    swept = close_pull_request(repo=tmp_path, pr="7", delete_branch=True, runner=ok)
+    swept = close_pull_request(repo=repo, pr="7", delete_branch=True, runner=ok)
     assert swept.closed and "branch" in swept.detail
-    assert calls[-1] == ["gh", "pr", "close", "7", "--delete-branch"]
+    assert calls[-1] == [
+        "gh",
+        "pr",
+        "close",
+        "--repo",
+        "github.com/me/repo",
+        "--delete-branch",
+        "--",
+        "7",
+    ]
 
-    def broken(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return _cp(args, 1, "", "no pull requests found")
-
-    failed = close_pull_request(repo=tmp_path, pr="7", runner=broken)
+    failed = close_pull_request(repo=repo, pr="7", runner=_gh_fake(1, "", "no pull requests found"))
     assert not failed.closed and "no pull requests found" in failed.detail
 
 
@@ -165,21 +233,46 @@ def test_list_pull_requests_parses_json_and_degrades_honestly(tmp_path: Path) ->
     from skep.supervisor.github import list_pull_requests
 
     payload = '[{"number": 7, "title": "fix", "state": "OPEN", "headRefName": "skep/x"}]'
+    repo = _github_repo(tmp_path)
+    calls: list[list[str]] = []
+    ok = _gh_fake(0, payload, calls=calls)
 
-    def ok(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert args[:3] == ["gh", "pr", "list"]
-        return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
-    listed = list_pull_requests(repo=tmp_path, runner=ok)
+    listed = list_pull_requests(repo=repo, runner=ok)
+    assert calls[0][:5] == ["gh", "pr", "list", "--repo", "github.com/me/repo"]
     assert listed.ok is True
     assert listed.prs[0]["number"] == 7
     assert "1 open PR" in listed.detail
 
-    def broken(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="gh: not logged in")
+    broken = _gh_fake(1, "", "gh: not logged in")
 
-    failed = list_pull_requests(repo=tmp_path, runner=broken)
+    failed = list_pull_requests(repo=repo, runner=broken)
     assert failed.ok is False and "not logged in" in failed.detail
 
     bad_state = list_pull_requests(repo=tmp_path, state="weird", runner=ok)
     assert bad_state.ok is False and "unknown state" in bad_state.detail
+
+
+def test_list_pull_requests_names_each_author_and_whether_it_is_a_bot(tmp_path: Path) -> None:
+    """R4 (S9): the author is what tells GitHub's Dependabot from anyone
+    who named a branch dependabot/... — login and is_bot, nothing else."""
+    from skep.supervisor.github import list_pull_requests
+
+    author = {"id": "BOT_1", "is_bot": True, "login": "app/dependabot", "name": ""}
+    payload = json.dumps(
+        [
+            {"number": 7, "headRefName": "dependabot/pip/x", "author": author},
+            {"number": 8, "headRefName": "dependabot/pip/y", "author": {"login": "mallory"}},
+            {"number": 9, "headRefName": "z", "author": None},
+        ]
+    )
+    calls: list[list[str]] = []
+    listed = list_pull_requests(
+        repo=_github_repo(tmp_path), runner=_gh_fake(0, payload, calls=calls)
+    )
+
+    assert "author" in calls[0][calls[0].index("--json") + 1].split(",")
+    assert [pr["author"] for pr in listed.prs] == [
+        {"login": "app/dependabot", "is_bot": True},
+        {"login": "mallory", "is_bot": False},
+        {"login": None, "is_bot": False},
+    ]

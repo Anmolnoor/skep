@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -463,6 +464,76 @@ def _validated_extra(extra: Iterable[Path], skep_home: Path) -> list[Path]:
     return paths
 
 
+# Phase 09 R4 (N1): kernel pseudo filesystems hold live process and device
+# state (/proc/<pid>/environ is the supervisor's env), never an operator file.
+_PSEUDO_ROOTS = ("proc", "sys", "dev")
+
+
+def _pseudo_problem(path: Path) -> str:
+    return (
+        f"input {path} is on a kernel pseudo filesystem (/proc, /sys, /dev): its bytes are "
+        "live process or device state (/proc/<pid>/environ holds the supervisor's env), not "
+        "a file the operator owns. Copy what the script needs into an ordinary file and name "
+        "that"
+    )
+
+
+def open_read_file(path: Path) -> int:
+    """Phase 09 R2 (S7): ``path`` opened read-only as the regular file it
+    names — every component walked without following a link, so a path
+    reached through one refuses, as does a directory, FIFO or device. The
+    caller owns the returned fd. Nothing here reads its bytes, and the wall
+    binds the path, not this fd (R4, SD-1: ADR 0068's "Not defended").
+
+    R4: a relative path or a ``..`` component refuses before anything
+    normalizes it (N4); a path under /proc, /sys or /dev refuses (N1)."""
+    if not os.path.isabs(path) or ".." in Path(path).parts:
+        raise SandboxUnavailableError(
+            f"input {path} must be an absolute path with no '..' component; name the "
+            "file by its real absolute path"
+        )
+    path = Path(os.path.abspath(path))
+    if len(path.parts) > 1 and path.parts[1] in _PSEUDO_ROOTS:
+        raise SandboxUnavailableError(_pseudo_problem(path))
+    if os.path.realpath(path) != str(path):
+        raise SandboxUnavailableError(
+            f"input {path} is reached through a link (to {os.path.realpath(path)}); "
+            "name the real path of the file in the command"
+        )
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            step = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = step
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except OSError as exc:
+        raise SandboxUnavailableError(f"input {path} cannot be opened: {exc.strerror}") from exc
+    finally:
+        os.close(parent)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise SandboxUnavailableError(f"input {path} is not a regular file; name files only")
+    return fd
+
+
+def masked_input_problem(
+    path: Path, *, skep_home: Path, denied: Iterable[Path] | None = None
+) -> str | None:
+    """Phase 09 R3 (N2): why ``path`` cannot be an input — it is a secret-floor
+    mask or under one, judged where both resolve — or None. A copy (bwrap)
+    or a literal grant would hand the run a file every wall hides."""
+    real = Path(path).resolve()
+    masks = secret_paths(skep_home) if denied is None else denied
+    for mask in masks:
+        if _over(Path(mask).resolve(), real):
+            return (
+                f"{path} is under the secret mask {mask}, which every run is denied; "
+                "an input never reopens it. Name a file outside it"
+            )
+    return None
+
+
 def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
     """A written root that is a link becomes a link to its resolved root in
     bwrap's empty root — unless a bound root already holds it (the link is
@@ -500,7 +571,7 @@ _HOMEBREW_VAR = ("/opt/homebrew/var", "/usr/local/var")
 _XCODE_SELECT_LINKS = ("/private/var/select/developer_dir", "/private/var/db/xcode_select_link")
 
 
-def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
+def _seatbelt_read_rules(roots: Iterable[Path], files: Iterable[Path] = ()) -> list[str]:
     """ADR 0068: deny every read, then reopen macOS's system roots, the
     developer dir (the whole Xcode.app: xcrun stats its Info.plist) and
     ``roots``; metadata alone on each one's ancestors, so getcwd/realpath
@@ -510,7 +581,9 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
     without it. A denied path is ENOENT, as under bwrap's empty root — git
     dies on an EPERM ~/.gitconfig, not on a missing one.
     /System/Volumes is closed again last (M4): /System reopened it, with the
-    data volume's entries no firmlink maps back to the root."""
+    data volume's entries no firmlink maps back to the root. ``files`` (S7)
+    reopen as ``(literal …)`` alone: never what a swapped-in dir holds."""
+    files = [Path(path) for path in files]
     allowed = [Path(root) for root in _SEATBELT_SYSTEM_ROOTS]
     for link in _XCODE_SELECT_LINKS:
         if os.path.islink(link):
@@ -524,7 +597,7 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
         for root in allowed
         if root.parts[1:2] == ("private",) and root.parts[2:3] in (("etc",), ("var",), ("tmp",))
     ]
-    named = [*allowed, *links]
+    named = [*allowed, *links, *files]
     ancestors = sorted({parent for root in named for parent in root.parents} - {Path("/")})
 
     rules = [
@@ -535,6 +608,7 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
         ("file-read-metadata", "literal", ancestors),
         ("file-read-metadata", "subpath", links),
         ("file-read*", "subpath", allowed),
+        ("file-read*", "literal", files),
     ):
         if paths:  # an allow with no filter would reopen every path
             filters = " ".join(f'({kind} "{_sbpl_quote(path)}")' for path in paths)
@@ -1075,6 +1149,7 @@ def _bubblewrap_args(
     unmasked: Iterable[Path] = (),
     strict: bool = False,
     aliases: Iterable[Path] = (),
+    read_files: Iterable[Path] = (),
 ) -> list[str]:
     # ADR 0068: ``strict`` starts from bwrap's empty root instead of the
     # host's: the system dirs, then ``readable_roots`` (which the caller has
@@ -1101,7 +1176,11 @@ def _bubblewrap_args(
         args.append("--unshare-net")
     writable_roots = list(writable_roots)
     readable_roots = list(readable_roots)
+    read_files = list(read_files)
     tmp_mountpoints: dict[str, None] = {}
+    for dest in read_files:
+        for mountpoint in _tmp_mountpoints_for_bind(dest.parent):
+            tmp_mountpoints.setdefault(mountpoint, None)
     for root in [*readable_roots, *writable_roots]:
         # an existing non-dir root (a git common dir entry: a file, an
         # fsmonitor socket) needs only its parents — a --dir at a socket's
@@ -1119,6 +1198,8 @@ def _bubblewrap_args(
     for root in writable_roots:
         path = str(Path(root))
         args.extend(["--bind", path, path])
+    for dest in read_files:  # S7, R4 SD-1: the live file, read-only, in place
+        args.extend(["--ro-bind", str(dest), str(dest)])
     for pinned in write_denied:
         # W31: read-only over its writable root (the run's git pin).
         args.extend(["--ro-bind", str(pinned), str(pinned)])
@@ -1127,8 +1208,11 @@ def _bubblewrap_args(
         # ES-F4: after the writable binds, so a mask wins inside one too.
         # /tmp and /run are fresh tmpfs here: their host paths do not exist,
         # except inside a root bound back in (R5: a repo's git dir under /tmp).
-        if denied.parts[1:2] in (("tmp",), ("run",)) and not any(
-            denied.is_relative_to(root) for root in [*readable_roots, *writable_roots]
+        # R3: an input bound there counts too.
+        if (
+            denied.parts[1:2] in (("tmp",), ("run",))
+            and not any(denied.is_relative_to(root) for root in [*readable_roots, *writable_roots])
+            and not any(dest.is_relative_to(denied) for dest in read_files)
         ):
             continue
         args.extend(
@@ -1321,6 +1405,7 @@ def build_profile(
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
+    read_files: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -1366,7 +1451,7 @@ def build_profile(
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
     if read_allowlist is not None:
-        lines += _seatbelt_read_rules([*roots, *read_allowlist])
+        lines += _seatbelt_read_rules([*roots, *read_allowlist], read_files)
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
@@ -1412,6 +1497,7 @@ def write_profile(
     loopback_ports: Iterable[int] = (),
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
+    read_files: Iterable[Path] = (),
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1445,11 +1531,28 @@ def write_profile(
     ``extra_read_paths`` — confines reads to an allowlist: the system dirs,
     ``strict_read_roots`` and the run's own roots. A backend outside
     ``STRICT_READ_BACKENDS`` refuses it rather than run with open reads.
+
+    ``read_files`` (Phase 09 R2, S7): single files a strict run may read,
+    never as roots. Each must be a regular file named by its real path
+    (``open_read_file``) and pass ``extra_read_path_problem`` and
+    ``masked_input_problem``. Both backends grant the live file, read-only,
+    at its own path (R4, SD-1): bubblewrap ``--ro-bind``s it in place,
+    Seatbelt grants its ``(literal …)`` path. The masks still land last.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
     read_allowlist = None if read_allowlist is None else tuple(read_allowlist)
+    read_files = [Path(path) for path in read_files]  # R4 (N4): judged as named, no abspath
     probe = require_usable(backend)
+    if read_files and (read_allowlist is None or probe.backend not in STRICT_READ_BACKENDS):
+        raise SandboxUnavailableError(
+            f"input files are bound one by one on a strict bubblewrap or Seatbelt wall "
+            f"only; the {probe.backend} backend cannot, so this run is refused"
+        )
+    for path in read_files:
+        os.close(open_read_file(path))  # refuses '..', /proc, a link, dir or special file now
+        if problem := extra_read_path_problem(path, skep_home):
+            raise SandboxUnavailableError(f"input {problem}")
     if read_allowlist is not None and probe.backend not in STRICT_READ_BACKENDS:
         raise SandboxUnavailableError(
             f"strict read confinement (ADR 0068) is enforced on bubblewrap and Seatbelt "
@@ -1482,6 +1585,10 @@ def write_profile(
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
+    for path in read_files:  # R3 (N2): before anything is granted
+        masked = masked_input_problem(path, skep_home=skep_home, denied=[*read_denied, *git_masked])
+        if masked:
+            raise SandboxUnavailableError(f"input {masked}")
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
         # linked message file refuses the wall rather than going unmasked (R5, Sol)
@@ -1533,6 +1640,7 @@ def write_profile(
             unmasked=unmasked,
             strict=read_allowlist is not None,
             aliases=aliases,
+            read_files=read_files,
         )
         # After the netshim when there is one (it alone needs the proxy
         # bridge); wrap_command's "--" then ends the step's options.
@@ -1573,6 +1681,7 @@ def write_profile(
             loopback_ports=loopback_ports,
             unmasked=unmasked,
             read_allowlist=strict_roots,
+            read_files=read_files,
         )
     )
     return profile_path

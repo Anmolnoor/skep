@@ -276,6 +276,27 @@ def test_script_schedule_face_is_repo_less_and_needs_a_command(
     assert "shell command" in missing.json()["detail"]
 
 
+def test_a_script_schedule_declares_its_walls_hosts_over_rest(config: SupervisorConfig) -> None:
+    """Phase 09 R1 (S7): the REST face names the hosts a script's wall
+    reaches (its ``network``); a note schedule stores none."""
+    from skep.supervisor.store import RunStore
+
+    client = _client(config)
+    for name, caste in (("brief", "script"), ("hello", "note")):
+        created = client.post(
+            "/api/schedules",
+            json={"name": name, "every": "1d", "instructions": "echo hi", "caste": caste,
+                  "network": ["api.open-meteo.com"]},
+        )  # fmt: skip
+        assert created.status_code == 201, created.text
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_schedule("brief").network == ["api.open-meteo.com"]  # type: ignore[union-attr]
+        assert store.get_schedule("hello").network == []  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
 def test_one_shot_reminder_carries_once_and_start_at(config: SupervisorConfig) -> None:
     """v44-F2: 'remind me tomorrow at 9am' = once + start_at; the row shows
     both and the tick self-disables it after the single fire."""

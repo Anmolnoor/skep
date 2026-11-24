@@ -166,6 +166,8 @@ THREE_FACE_READS: dict[str, str] = {
     "allow / ask / deny table (first-run O1)",
     "presence_view": "`skep agents`, `GET /api/agents` and the chat `list_agents` tool — "
     "which coding agents run here and which skep governs (first-run L1)",
+    "build_run_forensics": "`skep run forensics`, `GET /api/runs/<id>/forensics` and the "
+    "chat `run_forensics` tool read one run's forensics report (Phase 09 R1)",
 }
 THREE_FACE_VERBS: dict[str, str] = {
     "approve_policy_baseline": "`skep policy approve`, `POST /api/policy/baseline/approve` "

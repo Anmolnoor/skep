@@ -384,21 +384,24 @@ def test_script_failure_is_an_honest_health_failure(
         store.close()
 
 
-def test_run_schedule_script_times_out_and_caps_output() -> None:
+def test_run_schedule_script_times_out_and_caps_output(tmp_path: Path) -> None:
+    from functools import partial
+
     from skep.supervisor.scheduler import SCRIPT_OUTPUT_CAP, run_schedule_script
 
-    timed_out, ok = run_schedule_script("sleep 5", timeout_seconds=0.2)
+    run = partial(run_schedule_script, skep_home=tmp_path / "skep")
+    timed_out, ok = run("sleep 5", timeout_seconds=0.2)
     assert ok is False and "timed out" in timed_out
 
-    flood, ok = run_schedule_script("head -c 10000 /dev/zero | tr '\\0' 'a'")
+    flood, ok = run("head -c 10000 /dev/zero | tr '\\0' 'a'")
     assert ok is True
     assert len(flood) <= SCRIPT_OUTPUT_CAP + 20 and flood.endswith("… (truncated)")
 
     # v51-F6: empty success is "" (the tick stays silent — watchdog pattern);
     # an empty FAILURE still says something.
-    silent, ok = run_schedule_script("true")
+    silent, ok = run("true")
     assert ok is True and silent == ""
-    mute_failure, ok = run_schedule_script("exit 3")
+    mute_failure, ok = run("exit 3")
     assert ok is False and mute_failure == "(no output)\n[exit 3]"
 
 

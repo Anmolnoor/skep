@@ -20,6 +20,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -60,6 +61,7 @@ from .sandbox import (
     DENY_ALL_NETWORK,
     STRICT_READS_KEY,
     SandboxUnavailableError,
+    extra_read_path_problem,
     read_allowlist_for,
     resolved_read_allowlist,
     strict_read_roots,
@@ -114,11 +116,17 @@ _RUNNING_GROUPS: set[int] = set()
 _RUNNING_LOCK = threading.Lock()
 
 
-def script_env() -> dict[str, str]:
+def script_env(workspace: Path | None = None) -> dict[str, str]:
     """The environment a script schedule runs with — the scrubbed baseline
-    present in this process, nothing else. The script card lists these
-    names (P4-2), so the card and the run read one function."""
-    return build_worker_env((), baseline=SCRIPT_ENV_BASELINE)
+    present in this process, with HOME and the temp vars in its walled
+    workspace (S7), nothing else; a schedule with hosts adds the proxy
+    vars. The script card lists these names (P4-2), so the card and the run
+    read one function (the card passes no workspace: names only)."""
+    from .sandbox import in_wall_tmp_env
+
+    where = workspace or Path(tempfile.gettempdir())
+    env = build_worker_env((), baseline=SCRIPT_ENV_BASELINE)
+    return {**env, "HOME": str(where), **in_wall_tmp_env(where)}
 
 
 def kill_running_scripts() -> None:
@@ -132,29 +140,109 @@ def kill_running_scripts() -> None:
             os.killpg(group, signal.SIGKILL)
 
 
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def script_inputs(command: str) -> tuple[Path, ...]:
+    """Phase 09 R1 (S7): a script schedule's declared inputs — each absolute,
+    existing, non-link file its command names, as an argument or as the
+    value of a ``NAME=value`` assignment. Never a directory. The card shows
+    the command, so the operator sees every one."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)  # `;` `&&` `|` split
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return ()
+    values = [w.split("=", 1)[1] if _ASSIGNMENT.match(w) else w for w in words]
+    files = [
+        Path(v) for v in values if os.path.isabs(v) and os.path.isfile(v) and not os.path.islink(v)
+    ]
+    return tuple(dict.fromkeys(files))
+
+
+def script_input_problem(command: str, skep_home: Path) -> str | None:
+    """Phase 09 R3 (N2): why a script's declared inputs (``script_inputs``)
+    cannot run — in or over the skep home, at or above the home, or under a
+    secret mask — or None. R4: nor a path with ``..``, under /proc, /sys
+    or /dev, through a link or not a regular file (``sandbox.open_read_file``,
+    which reads no bytes). Every face checks it at creation; the run and the
+    wall check again."""
+    from .sandbox import masked_input_problem, open_read_file
+
+    for path in script_inputs(command):
+        try:
+            os.close(open_read_file(path))
+        except SandboxUnavailableError as exc:
+            return f"a script schedule's {exc}"
+        problem = extra_read_path_problem(path, skep_home) or masked_input_problem(
+            path, skep_home=skep_home
+        )
+        if problem:
+            return f"a script schedule's input {problem}"
+    return None
+
+
 def run_schedule_script(
-    command: str, *, timeout_seconds: float = SCRIPT_TIMEOUT_SECONDS, stdin: str | None = None
+    command: str,
+    *,
+    skep_home: Path,
+    hosts: Sequence[str] = (),
+    timeout_seconds: float = SCRIPT_TIMEOUT_SECONDS,
+    stdin: str | None = None,
 ) -> tuple[str, bool]:
     """Run a script schedule's command via ``sh -c``; (output, succeeded).
 
     ``stdin`` carries a chained schedule's last output (v53-F5) — data into
     an operator-vetted command, never a new command.
 
-    SUPERVISOR-SIDE, with the operator's own filesystem standing — as trusted
-    as the operator's crontab, which is why creation is operator-gated (see
-    the tick branch). Like cron, it gets a minimal env (SCRIPT_ENV_BASELINE),
-    not the daemon's. It runs in its own session, so the timeout kills the
-    whole process group, not just ``sh``. Output is stdout+stderr, read as it
-    streams, trimmed and capped, so a chatty script can flood neither a chat
-    transcript nor the daemon's memory.
+    Phase 09 R1 (S7): inside the strict wall (``wall.walled``, the forged
+    tools' own). Reads: ADR 0068's allowlist plus ``script_inputs``, bound
+    as single files (R2: ``read_files``; the secret masks still land last,
+    and an input in the skep home, or one reached through a link, refuses).
+    Writes: a throwaway workspace, which is also its HOME and TMPDIR.
+    Egress: ``hosts`` (the schedule's ``network``) through a FilteringProxy,
+    none when empty. No backend refuses the run (I12). Creation stays
+    operator-gated (see the tick branch). Like cron, it gets a minimal env
+    (SCRIPT_ENV_BASELINE), not the daemon's.
     """
+    from .wall import walled
+
+    if problem := script_input_problem(command, skep_home):
+        return (f"script refused: {problem}", False)
+    inputs = script_inputs(command)
+    workspace = Path(tempfile.mkdtemp(prefix="skep-script-"))
+    try:
+        with walled(
+            ["/bin/sh", "-c", command],
+            skep_home=skep_home,
+            hosts=tuple(hosts),
+            workspace=workspace,
+            read_files=inputs,  # R2 (S7): bound as files, never as roots
+        ) as (argv, wall_env):
+            env = {**script_env(workspace), **wall_env}
+            return _run_script_process(argv, env, workspace, timeout_seconds, stdin)
+    except SandboxUnavailableError as exc:
+        return (f"script refused: {exc}", False)
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _run_script_process(
+    argv: list[str], env: dict[str, str], cwd: Path, timeout_seconds: float, stdin: str | None
+) -> tuple[str, bool]:
+    """The process half: its own session, so the timeout kills the whole
+    process group, not just ``sh``. Output is stdout+stderr, read as it
+    streams, trimmed and capped, so a chatty script can flood neither a chat
+    transcript nor the daemon's memory."""
     try:
         proc = subprocess.Popen(
-            ["/bin/sh", "-c", command],
+            argv,
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=script_env(),
+            env=env,
+            cwd=cwd,
             start_new_session=True,
         )
     except OSError as exc:
@@ -332,6 +420,17 @@ def next_fire_times(
     return times
 
 
+def script_network_problem(network: Sequence[str]) -> str | None:
+    """Phase 09 R2 (N1): why a script schedule's ``network`` cannot be its
+    wall's hosts — each must be one concrete host, never ``*`` — or None."""
+    from .netproxy import host_entry_problem
+
+    for host in network:
+        if (problem := host_entry_problem(str(host))) is not None:
+            return f"a script schedule's network: {problem}"
+    return None
+
+
 def make_schedule(
     *,
     name: str,
@@ -348,9 +447,20 @@ def make_schedule(
     once: bool = False,
     chain: str | None = None,
     role: str | None = None,
+    skep_home: Path | None = None,
 ) -> ScheduleRecord:
+    """``skep_home`` (the top-level home) lets a script's inputs be checked
+    at creation (R3, N2); every face that creates one passes it."""
     if worker_kind in RETIRED_CASTES:  # v127-F11: refused at creation, every face
         raise ValueError(f"caste {worker_kind!r} is retired: {RETIRED_CASTES[worker_kind]}")
+    if worker_kind == "script" and (problem := script_network_problem(network)):
+        raise ValueError(problem)  # R2 (N1): refused at creation, every face
+    if (
+        worker_kind == "script"
+        and skep_home is not None
+        and (problem := script_input_problem(instructions, skep_home))
+    ):
+        raise ValueError(problem)  # R3 (N2)
     created = now_ts()
     start = _start_slot(start_at)
     return ScheduleRecord(
@@ -1304,7 +1414,12 @@ def run_due(
                     task_id=None,
                     state=SCRIPT_RUNNING_STATE,
                 )
-                output, script_ok = run_schedule_script(schedule.instructions, stdin=chained)
+                output, script_ok = run_schedule_script(
+                    schedule.instructions,
+                    skep_home=config.home.parent,
+                    hosts=tuple(schedule.network),
+                    stdin=chained,
+                )
                 store.record_schedule_output(schedule.name, output)
                 if script_ok and not output:
                     # v51-F6: the watchdog pattern — a healthy check with
@@ -1315,6 +1430,8 @@ def run_due(
                     report = f"[{schedule.name}] {output}" if not script_ok else output
                     _deliver_tick_text(store, schedule, report, notify, script_output=True)
                     blocked_state = "script_ran" if script_ok else "script_failed"
+                    if output.startswith("script refused:"):  # R3 (S10): health says why
+                        blocked_state = f"script_failed: {output[:200]}"
             elif schedule.worker_kind == "prompt":
                 # v83-F5 (ADR 0042): a Queen turn at tick time. Read-only by
                 # construction (mutations refuse, never card — nobody is

@@ -406,16 +406,52 @@ def pin_control_changes(
         or os.path.normpath(path) in pin_paths
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in ("pyproject.toml", "package.json")]
-    hits += _config_changes(repo, patch_path, base, parsed, runner_only=False)
+    try:
+        hits += _config_changes(repo, patch_path, base, parsed, runner_only=False)
+    except ConfigUnreadable:  # R4 (N2): a side that is no regular file steers it
+        hits += parsed
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
+class ConfigUnreadable(ValueError):
+    """R3 (S12): a runner-config side the diff says exists could not be read
+    — never the same as an absent side. ``what`` names the read."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+_ABSENT_MODE = "000000"  # git's raw-diff mode for a side that does not exist
+_FILE_MODES = frozenset({_ABSENT_MODE, "100644", "100755"})
+
+
+def _mode(repo: Path, treeish: str | None, path: str, env: dict[str, str]) -> str:
+    """``path``'s git mode in ``treeish`` (the scratch index when None);
+    ``_ABSENT_MODE`` when it is not there."""
+    args = ("ls-files", "-s") if treeish is None else ("ls-tree", treeish)
+    out = _git_text(repo, *args, "--", path, env=env)
+    if out is None:
+        raise ConfigUnreadable(f"config_mode:{path}")
+    return out.split(maxsplit=1)[0] if out.strip() else _ABSENT_MODE
+
+
 def test_config_changes(
-    repo: Path, patch_path: Path, base: str, changed_files: tuple[str, ...]
+    repo: Path,
+    patch_path: Path,
+    base: str,
+    changed_files: tuple[str, ...],
+    *,
+    head: str | None = None,
+    modes: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[str, ...]:
     """V1 (review R1, F7): the changed files that are test-runner config —
     ``_TEST_CONFIG_GLOBS``, ``.github/workflows/**``, and the runner section
-    of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``."""
+    of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``.
+    ``head`` (Phase 09 R2): read the new side from that commit, not from the
+    patch applied to ``base``. ``modes`` (R3, S12): each path's (old, new)
+    raw-diff modes — a side they say exists that cannot be read raises
+    ``ConfigUnreadable`` instead of comparing as absent."""
     hits = [
         path
         for path in changed_files
@@ -423,27 +459,64 @@ def test_config_changes(
         or path.startswith(".github/workflows/")
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
-    hits += _config_changes(repo, patch_path, base, parsed, runner_only=True)
+    hits += _config_changes(
+        repo, patch_path, base, parsed, runner_only=True, head=head, modes=modes
+    )
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
 def _config_changes(
-    repo: Path, patch_path: Path, base: str, paths: list[str], *, runner_only: bool
+    repo: Path,
+    patch_path: Path,
+    base: str,
+    paths: list[str],
+    *,
+    runner_only: bool,
+    head: str | None = None,
+    modes: dict[str, tuple[str, str]] | None = None,
 ) -> list[str]:
     """``paths`` whose ``_test_config`` differs between ``base`` and the patch
-    applied in a scratch index; every path when the patch does not apply."""
+    applied in a scratch index; every path when the patch does not apply.
+
+    R4 (N2): a side that is a symlink or a gitlink raises
+    ``ConfigUnreadable("config_mode:<path>")`` — ``git show`` of a symlink is
+    its target string, and "a=1" parses as config with no runner in it."""
     if not paths:
         return []
     hits = []
     with tempfile.TemporaryDirectory(prefix="skep-pinctl-") as tmp:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        applied = _git_text(repo, "read-tree", base, env=env) is not None and (
-            _git_text(repo, "apply", "--cached", str(patch_path), env=env) is not None
+        # R5 (Neon): literal pathspecs — `:x/tox.ini` and `?/setup.cfg` are
+        # file names here, never magic or a glob the mode probe would misread.
+        env = {
+            **os.environ,
+            "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+            "GIT_LITERAL_PATHSPECS": "1",
+        }
+        applied = head is not None or (
+            _git_text(repo, "read-tree", base, env=env) is not None
+            and _git_text(
+                repo, "apply", "--cached", "--whitespace=nowarn", str(patch_path), env=env
+            )
+            is not None
         )
         for path in paths:
             name = os.path.basename(path)
+            if (
+                applied
+                and not {
+                    _mode(repo, base, path, env),
+                    _mode(repo, head, path, env),
+                }
+                <= _FILE_MODES
+            ):
+                raise ConfigUnreadable(f"config_mode:{path}")
             before = _git_text(repo, "show", f"{base}:{path}")
-            after = _git_text(repo, "show", f":{path}", env=env)
+            after = _git_text(repo, "show", f"{head or ''}:{path}", env=env)
+            old, new = (modes or {}).get(path, (_ABSENT_MODE, _ABSENT_MODE))
+            if applied and (
+                (before is None and old != _ABSENT_MODE) or (after is None and new != _ABSENT_MODE)
+            ):
+                raise ConfigUnreadable(f"config_show:{path}")
             if not applied or _test_config(name, before, runner_only=runner_only) != _test_config(
                 name, after, runner_only=runner_only
             ):

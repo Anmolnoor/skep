@@ -8,6 +8,7 @@ returns it as-is, the chat layer catches it and shows the model the failure.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -526,11 +527,14 @@ def reverification_summary(reverify: Any) -> dict[str, Any] | None:
     """
     if reverify is None:
         return None
-    return {
+    summary = {
         "outcome": reverify.outcome,
         "confirmed": reverify.confirmed,
         "tamper_flags": list(reverify.tamper_flags),  # V1 (phase-01 1.2)
     }
+    if reverify.pr:  # Phase 09 R1 (N6): the PR head and base this verdict is on
+        summary |= {"head_commit": reverify.head_commit, "base_commit": reverify.base_commit}
+    return summary
 
 
 def tamper_note(reverify: Any) -> str | None:
@@ -1633,16 +1637,50 @@ def use_provider(
 
 
 def refresh_repo(
-    holder: ConfigHolder, repo: str, *, store: RunStore | None = None
+    holder: ConfigHolder, repo: str, *, store: RunStore | None = None, pr: str | None = None
 ) -> dict[str, Any]:
     """Supervisor-side fetch + fast-forward for a registered repo (v55-F1).
 
     Workers are hard-denied remote git (v19-F3) — this verb is the supervisor
     manning that station: remote-tracking refs refresh and the default branch
-    mirrors origin, so dispatch baselines and repo_state reflect reality."""
+    mirrors origin, so dispatch baselines and repo_state reflect reality.
+    ``pr`` (Phase 09, 9.0): fetch only that PR's head and base, for a review
+    run (``github.fetch_pr_head``). R4 (S4): fetch, ref update and stored
+    pin publish under one file lock in the skep home, shared by the CLI and
+    serve, so two refreshes never leave one's refs beside the other's pin."""
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     if not (resolved / ".git").exists():
         raise HTTPException(status_code=404, detail=f"{repo!r} is not a git repository")
+    if pr is not None:
+        from .. import github
+
+        home = holder.current.home
+        home.mkdir(parents=True, exist_ok=True)
+        with open(home / "pr-pin.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # released when the file closes
+            head = github.fetch_pr_head(repo=resolved, pr=pr)
+            if not head.ok or head.pr is None:
+                raise HTTPException(status_code=502, detail=head.detail)
+            if store is not None:  # R1 (D2): the pair a review run is pinned to
+                store.record_pr_fetch(
+                    str(resolved),
+                    pr_repo=head.pr.repo,
+                    number=head.pr.number,
+                    base_branch=head.base_branch,
+                    base_commit=head.base_sha,
+                    head_commit=head.head_sha,
+                )
+        return {
+            "repo": str(resolved),
+            "pr": f"{head.pr.repo}#{head.pr.number}",
+            "base_branch": head.base_branch,
+            "ref": head.ref,
+            "base_sha": head.base_sha,
+            "head_sha": head.head_sha,
+            "detail": head.detail,
+            "next_step": f"dispatch_run ref={head.ref} to review it; G10 then verifies "
+            "base...head with the pinned verify_command, and merge_pr pins that head",
+        }
     try:
         return refresh_clone(resolved)
     except RefreshError as exc:

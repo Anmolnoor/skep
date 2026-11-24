@@ -783,7 +783,11 @@ HIDDEN_YET_CARDS = {
 # A tool added after the freeze has no pre-P3-6 answer; each is held to its
 # nearest sibling instead, cell for cell — offered where it is, deciding as it
 # does (so never looser than a tool the table does freeze).
-POST_FREEZE_TOOLS = {"capture_skill": "create_skill"}  # Phase 08 (8.2)
+POST_FREEZE_TOOLS = {  # each answers exactly as the frozen tool it names
+    "capture_skill": "create_skill",  # Phase 08 (8.2)
+    "proof_export": "get_run",  # Phase 09 R1: run reads, offered and hidden alike
+    "run_forensics": "get_run",
+}
 SURFACE_FLIPS = {
     "web:assistant": {"hidden": 6, "b22:card->deny": 2},
     "web:builder": {"b22:role=": 1},

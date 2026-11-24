@@ -238,6 +238,36 @@ def test_stop_asks_the_running_turn_without_taking_its_lock(config: SupervisorCo
         ollama.stop()
 
 
+def test_resume_takes_an_all_digit_id_prefix_as_the_id_sessions_listed(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/sessions lists each chat by its id's first 8 characters; about one
+    uuid in forty has only digits there, and /resume read it as a list number."""
+    import uuid
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama)
+        harness = _TelegramHarness(config)
+        try:
+            first = _bind(harness, "telegram:42", "42", "groceries")
+            digits = uuid.UUID("12653047-d76b-4f69-ab2d-1714eb80386c")
+            with monkeypatch.context() as patch:
+                patch.setattr("skep.supervisor.store.uuid.uuid4", lambda: digits)
+                second = _bind(harness, "telegram:42", "42", "trip planning")
+            assert second[:8] == "12653047" and _bound(harness.store) == second
+            _plain(harness, "/resume 2", 2)
+            assert _bound(harness.store) == first
+            assert "trip planning" in _plain(harness, "/resume 12653047", 3)
+            assert _bound(harness.store) == second
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
 def test_title_shows_and_renames_the_bound_chat(config: SupervisorConfig) -> None:
     from .fake_ollama import FakeOllama
 

@@ -247,7 +247,7 @@ skep tick [--worker-cmd COMMAND]
 
 ```sh
 skep repo list
-skep repo refresh REPO
+skep repo refresh REPO [--pr NUMBER]
 skep repo push-baseline REPO [--base BRANCH]
 
 skep branch list   REPO
@@ -265,6 +265,40 @@ skep pr close REPO NUMBER [--delete-branch]
 These are the operator's half of the git surface (ADR 0050). They run
 supervisor-side on your own credentials; workers can never reach a remote or
 move a branch, and neither can the Queen's shell.
+
+`skep repo refresh REPO --pr N` fetches only PR #N's head and base into
+`refs/skep/pr/N/` (no branch or remote-tracking ref moves) and records that
+pair. `N` is the PR number (`7`, `#7`) or its URL on the repo's origin;
+anything else is refused before gh runs. A review run dispatched on
+`refs/skep/pr/N/head` is pinned to the recorded pair; when it changes
+nothing, G10 runs the project's pinned `verify_command` on the exact head
+commit, and the V1 test-tamper check reads the PR's own diff
+(merge-base..head). `skep pr merge` (and the
+`merge_pr` card) merges a PR only when that verdict is clean (G10 passed, V1
+found nothing) and there is no override flag. The card pins the verdict's
+head, base branch and base SHA when it is proposed; at merge time the live PR
+is re-read and the merge is refused if any of the three moved (a base that
+advanced needs a fresh review). A PR that would land later is refused before
+anything merges: one with an auto-merge request, or whose base branch GitHub
+says has a merge queue — merge those on GitHub. That queue check is
+best-effort: when skep cannot read the queue setting (a fine-grained token
+without "Merge queues: Read", say) it goes on to the merge, GitHub refuses a
+branch that requires a queue (HTTP 405), and the refusal names the queue skep
+could not rule out.
+The merge itself is GitHub's REST merge endpoint called with the verified head
+SHA (`gh api -X PUT repos/OWNER/NAME/pulls/N/merge -f sha=HEAD`): GitHub
+merges at once or refuses — it never queues and never enables auto-merge —
+and only while the head is still that SHA. skep reads only GitHub's answer:
+merged with a merge commit is a merge skep made; a refusal (HTTP 405/409/422,
+e.g. head moved, merge queue required, already merged) is quoted and nothing
+is claimed; any other answer is "outcome unknown — check GitHub".
+
+GitHub pins only the head atomically. The base branch can still advance in the
+seconds between skep's re-read and GitHub's merge; skep cannot close that
+window. After a merge or squash it reads the merge commit's base-side parent,
+and if that is not the verified base it says so loudly ("merged onto base X but
+verified against Y; re-verify BRANCH") and records it. A rebase merge's commit
+has the PR's own commits as parents, so that comparison is reported as not made.
 
 - `repo list` shows every repo skep can reach: clones and workon directories.
 - `repo refresh` fetches origin and fast-forwards the default branch. Run it
@@ -464,7 +498,9 @@ start at seq 1 from `GENESIS`).
 `proof export` is one run's local receipt — repo, baseline sha, patch
 sha256, skep version, sandbox and read confinement, key relay, policy
 baseline, taint, the G10 command with V1 status and executed test counts,
-the run's decision count and the ledger head hash — as a collapsible Markdown
+the run's decision count and the ledger head hash; a PR review run's receipt
+also carries the PR it verified (repo, number, base branch and SHA, head,
+merge-base), and its baseline is that merge-base — as a collapsible Markdown
 block for a PR (`md`, the default) or JSON. Every string passes the secret
 redactor, URL userinfo stripped. It is not tamper-proof: whoever
 can write the skep home can rewrite the whole log and its checkpoints, so the
