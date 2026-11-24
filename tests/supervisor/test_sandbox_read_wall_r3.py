@@ -345,3 +345,205 @@ def test_the_interpreter_s_whole_link_chain_is_inside_the_wall(
         cwd=work, capture_output=True, text=True, check=False, timeout=60,
     )  # fmt: skip
     assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr
+
+
+@needs_bwrap
+def test_an_interpreter_reached_through_a_linked_dir_runs_in_the_wall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI (Ubuntu): uv's overlay python points at
+    ``~/.local/share/uv/python/cpython-3.12-…/bin/python3.12``, where
+    ``cpython-3.12-…`` is uv's minor-version LINK to the patch dir. With HOME
+    faked (tests do) that toolchain dir is not bound, so only the resolved
+    dir was — the link itself was missing and bwrap's execvp hit ENOENT."""
+    real = Path(os.path.realpath(sys.executable))
+    pythons = tmp_path / "pythons"
+    (pythons / "cpython-3.12.99" / "bin").mkdir(parents=True)
+    (pythons / "cpython-3.12.99" / "bin" / "python3.12").symlink_to(real)
+    (pythons / "cpython-3.12").symlink_to(pythons / "cpython-3.12.99")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    overlay_python = overlay / "bin" / "python"
+    overlay_python.symlink_to(pythons / "cpython-3.12" / "bin" / "python3.12")
+    site = overlay / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    site.mkdir(parents=True)
+    import skep
+
+    (site / "skep.pth").write_text(str(Path(skep.__file__).resolve().parents[1]) + "\n")
+    monkeypatch.setattr(sys, "executable", str(overlay_python))
+    # as on CI: the link's target (the patch dir) is the base prefix, already
+    # bound; the real stdlib stays bound through exec_prefix
+    monkeypatch.setattr(sys, "exec_prefix", sys.base_prefix)
+    monkeypatch.setattr(sys, "base_prefix", str(pythons / "cpython-3.12.99"))
+    work = tmp_path / "work"
+    work.mkdir()
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile", workspace=work, skep_home=tmp_path / "skep", read_allowlist=()
+    )
+    probe = f"{overlay_python} -S -c 'print(1+1)'"
+    proc = subprocess.run(
+        sandbox.wrap_command(["/bin/sh", "-c", probe], profile),
+        cwd=work, capture_output=True, text=True, check=False, timeout=60,
+    )  # fmt: skip
+    assert proc.returncode == 0 and proc.stdout.strip() == "2", proc.stderr
+
+
+def test_a_linked_dir_on_the_interpreter_s_path_never_opens_its_whole_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W2: the link is recreated only when its target is already bound — a
+    linked dir whose target holds more than the interpreter stays closed."""
+    real = Path(os.path.realpath(sys.executable))
+    broad = tmp_path / "broad"
+    (broad / "bin").mkdir(parents=True)
+    (broad / "bin" / "python3.12").symlink_to(real)
+    (broad / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linked").symlink_to(broad)
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linked" / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    # nothing approved covers the link's target, so neither it nor the hop is bound
+    assert broad.resolve() not in roots and (broad / "bin").resolve() not in roots
+
+
+def test_a_linked_interpreter_dir_never_opens_its_whole_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C-1 (W2): a hop that is itself a linked dir is no bind root of its
+    own — its target (here a dir holding more than the interpreter) stays closed."""
+    real = Path(os.path.realpath(sys.executable))
+    broad = tmp_path / "broad"
+    broad.mkdir()
+    (broad / "python3.12").symlink_to(real)
+    (broad / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linkbin").symlink_to(broad)
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linkbin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    assert broad.resolve() not in sandbox.strict_read_roots(tmp_path / "skep")
+
+
+def test_a_plain_interpreter_hop_binds_the_file_not_its_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C2-1: a hop outside a verified env is the interpreter file alone —
+    its bin dir's siblings stay closed."""
+    real = Path(os.path.realpath(sys.executable))
+    plain = tmp_path / "plainbin"
+    plain.mkdir()
+    (plain / "notes.txt").write_text("private\n", encoding="utf-8")
+    shim = plain / "python3"  # a real file, not a link: the chain ends here
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(shim)
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert shim.resolve() in roots and plain.resolve() not in roots
+
+
+def test_interpreter_links_are_aliases_never_bind_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C2-2: uv's minor-version dir link is recreated as a link only — it
+    never enters the bind roots, so a retarget cannot add an unchecked root."""
+    real = Path(os.path.realpath(sys.executable))
+    pythons = tmp_path / "pythons"
+    (pythons / "cpython-3.12.99" / "bin").mkdir(parents=True)
+    (pythons / "cpython-3.12.99" / "bin" / "python3.12").symlink_to(real)
+    (pythons / "cpython-3.12").symlink_to(pythons / "cpython-3.12.99")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(pythons / "cpython-3.12" / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    candidates = sandbox._strict_candidates(tmp_path / "skep", worker_llm_key=False, extra=())
+    assert pythons / "cpython-3.12" not in candidates
+    assert sandbox._interpreter_links([pythons / "cpython-3.12.99"]) == [pythons / "cpython-3.12"]
+    assert sandbox._interpreter_links([tmp_path / "elsewhere"]) == []
+
+
+def test_a_dotdot_after_a_linked_dir_never_binds_the_lexical_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C3-1: ``linkdir/../decoy/python3`` walks the link first, so the
+    file really run is ``deep/decoy/python3``; collapsing ``..`` first named
+    an unrelated ``decoy/python3`` that the wall then bound."""
+    real = Path(os.path.realpath(sys.executable))
+    (tmp_path / "deep" / "sub").mkdir(parents=True)
+    (tmp_path / "deep" / "decoy").mkdir()
+    (tmp_path / "deep" / "decoy" / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "decoy").mkdir()
+    (tmp_path / "decoy" / "python3").write_text("unrelated\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "deep" / "sub")
+    overlay = tmp_path / "overlay"
+    (overlay / "bin").mkdir(parents=True)
+    (overlay / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (overlay / "bin" / "python").symlink_to(tmp_path / "linkdir" / ".." / "decoy" / "python3")
+    monkeypatch.setattr(sys, "executable", str(overlay / "bin" / "python"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert (tmp_path / "decoy" / "python3").resolve() not in roots
+    assert all(".." not in link.parts for link in sandbox._interpreter_links([tmp_path]))
+
+
+@pytest.mark.skipif(not Path("/bin").is_symlink(), reason="needs a merged-/usr host")
+def test_an_interpreter_through_bin_adds_no_second_bin_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sol C3-2: the strict root already links /bin (relative); an absolute
+    second one makes bwrap refuse the wall."""
+    monkeypatch.setattr(sys, "executable", "/bin/sh")
+    links = sandbox._interpreter_links([Path("/usr")])
+    assert all(not link.is_relative_to(root) for link in links for root in ("/bin", "/usr"))
+
+
+@pytest.mark.skipif(not Path("/usr/bin/python3").is_symlink(), reason="needs a /usr link")
+def test_no_alias_lands_under_a_system_mount() -> None:
+    """Sol C4-1: the /usr mount already holds a link like /usr/local/bin/uv;
+    a second, absolute one there makes bwrap refuse the wall."""
+    assert sandbox._alias_links([Path("/usr/bin/python3")], []) == []
+
+
+def test_a_dotdot_path_entry_binds_the_uv_really_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C5-1: PATH ``linkdir/../bin`` finds ``deep/bin/uv`` (the link is
+    walked first); collapsing ``..`` named ``bin/uv`` — here an unrelated dir."""
+    (tmp_path / "deep" / "sub").mkdir(parents=True)
+    (tmp_path / "deep" / "bin").mkdir()
+    uv = tmp_path / "deep" / "bin" / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv.chmod(0o755)
+    (tmp_path / "bin" / "uv").mkdir(parents=True)  # the decoy
+    (tmp_path / "bin" / "uv" / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "deep" / "sub")
+    monkeypatch.setenv("PATH", str(tmp_path / "linkdir" / ".." / "bin"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert uv.resolve() in roots
+    assert (tmp_path / "bin" / "uv").resolve() not in roots
+
+
+def test_a_linked_uv_binds_its_checked_file_and_aliases_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C6-1: ~/.local/bin/uv linked to a versioned file — the bind root is
+    the file that passed the check, never the link (a retarget during the
+    build could not admit a dir); the link name comes back as an alias only."""
+    (tmp_path / "versions").mkdir()
+    real_uv = tmp_path / "versions" / "uv-1.0"
+    real_uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    real_uv.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "uv").symlink_to(real_uv)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    candidates = sandbox._strict_candidates(tmp_path / "skep", worker_llm_key=False, extra=())
+    assert real_uv.resolve() in candidates and tmp_path / "bin" / "uv" not in candidates
+    assert sandbox._found_link(str(tmp_path / "bin" / "uv")) == [tmp_path / "bin" / "uv"]
+    assert sandbox._found_link(str(real_uv)) == []

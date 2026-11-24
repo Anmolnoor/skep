@@ -268,17 +268,60 @@ def _in_place(path: Path, skep_home: Path) -> bool:
 
 
 def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
-    """The env (or bin dir) of each hop in ``executable``'s symlink chain."""
+    """Each hop in ``executable``'s symlink chain: its env when the hop sits in
+    a verified one (``pyvenv.cfg``), else the interpreter file alone — never a
+    plain bin dir and its siblings (Sol C2-1)."""
     hops: list[Path] = []
     current = executable
     for _ in range(limit):
         env = current.parent.parent
-        hops.append(env if (env / "pyvenv.cfg").is_file() else current.parent)
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current)
         if not current.is_symlink():
             break
         target = Path(os.readlink(current))
         current = target if target.is_absolute() else current.parent / target
     return hops
+
+
+def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
+    """The links on the interpreter's path — a hop that is one, or a dir it is
+    reached through (uv's ``cpython-3.12-…`` minor-version link to its patch
+    dir) — whose target a ``bound`` root already holds. bwrap's empty root
+    gets them as links ONLY (``_alias_links``), never as bind roots: a
+    retarget after this check can leave one dangling, never widen a read
+    (Sol C2-2); without them exec by the linked path is ENOENT."""
+    roots = [Path(root) for root in bound]
+    system = [Path(root) for root in _SYSTEM_ROOTS]
+    links = dict.fromkeys(
+        path
+        for hop in _interpreter_chain(Path(sys.executable))
+        for path in (hop, *hop.parents)
+        # as walked (C3-1: never a name `..` collapsed into); not one the strict
+        # root already makes (C3-2: a second /bin link makes bwrap refuse)
+        if ".." not in path.parts
+        and not any(path.is_relative_to(root) for root in system)
+        and path.is_symlink()
+    )
+    return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
+
+
+def _found_file(found: str | None) -> Path | None:
+    """A PATH lookup's hit, resolved once (C5-1: a ``..`` walked, never
+    collapsed) and kept only as the regular file that passed the check — C6-1:
+    never the link, which a retarget during the build could point at a dir."""
+    if found is None:
+        return None
+    real = Path(found).resolve()
+    return real if real.is_file() else None
+
+
+def _found_link(found: str | None) -> list[Path]:
+    """The hit's written name when it is a link (~/.local/bin/uv to a versioned
+    file): bwrap's empty root gets it as an alias only (``_alias_links``)."""
+    if found is None or ".." in Path(found).parts:
+        return []
+    path = Path(os.path.abspath(found))
+    return [path] if path.is_symlink() else []
 
 
 def _strict_candidates(
@@ -289,6 +332,12 @@ def _strict_candidates(
     version link, which a venv's python points through) as a symlink to the
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
+    chain = _interpreter_chain(Path(sys.executable))
+    # Sol C-1 (W2): a hop reached through a link is no bind root of its own;
+    # its links are recreated as links only (``_interpreter_links``). C3-1: the
+    # hop as walked, never ``..``-collapsed — a hop is a root only when it is
+    # already its own real path (a ``..`` after a linked dir names another one)
+    linked = [hop for hop in chain if hop.resolve() != hop]
     detected = [
         Path(sys.prefix),
         Path(sys.base_prefix),
@@ -299,10 +348,10 @@ def _strict_candidates(
         # every env along the interpreter's link chain: CI's `uv run --with`
         # overlay python links to an activated .venv's python, which links on
         # to the base one — an unbound middle hop dangles inside the wall
-        *_interpreter_chain(Path(sys.executable)),
+        *(hop for hop in chain if hop not in linked),
         # the uv binary itself (never its directory): G10's pinned
         # `uv run pytest` needs it wherever it was installed
-        *(Path(found) for found in [shutil.which("uv")] if found),
+        *(uv for uv in [_found_file(shutil.which("uv"))] if uv),
     ]
     toolchains = [
         Path(os.environ.get(env) or home / rel) if env else home / rel
@@ -337,7 +386,11 @@ def _strict_candidates(
             f"recorded extra read root(s) {', '.join(gone)} vanished after dispatch; "
             "refusing to build a narrower wall than the run recorded — re-dispatch the run"
         )
-    detected = [Path(os.path.abspath(root)) for root in detected]
+    # C5-1: a ``..`` is walked through the real dirs, never collapsed first —
+    # after a linked dir it names another path entirely
+    detected = [
+        root.resolve() if ".." in root.parts else Path(os.path.abspath(root)) for root in detected
+    ]
     found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
     # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
     # above makes the bind fail closed instead of narrowing the worker's wall.
@@ -415,7 +468,9 @@ def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
     bwrap's empty root — unless a bound root already holds it (the link is
     there, read-only). ponytail: only a link in a real parent — one under a
     linked parent dir (Fedora Atomic's /home) stays unreachable by that name."""
-    bound = [Path(root) for root in bound]
+    # C4-1: nor under a system mount (/usr/local/bin/uv) — that mount holds the
+    # link already, and a second one there makes bwrap refuse the wall
+    bound = [*map(Path, bound), *map(Path, _SYSTEM_ROOTS)]
     args: list[str] = []
     for path in paths:
         real = path.resolve()
@@ -1447,6 +1502,8 @@ def write_profile(
             else []
         )
         extra_readable += dict.fromkeys(path.resolve() for path in aliases)
+        if read_allowlist is not None:
+            aliases += [*_interpreter_links(extra_readable), *_found_link(shutil.which("uv"))]
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(
