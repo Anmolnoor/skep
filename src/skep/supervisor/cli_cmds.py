@@ -2148,18 +2148,21 @@ def _review_interactive() -> bool:
     return _stdin_is_interactive() and sys.stdout.isatty()
 
 
-def _review_cards(store: RunStore) -> list[_ReviewCard]:
+def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
     """What waits on the operator — the same "action needed" every face pushes
     (``run_terminal_text``): a gated run, an unlanded patch, a G10 disagreement.
     Phase 10 R1 D6 (I13): every run in a waiting state is read, newest first,
-    before anything is limited — an old gate is never off the walk.
+    before anything is limited — an old gate is never off the walk. R3 J7: the
+    walk is the store's runs_awaiting_review (not all history), and ``light``
+    (the badge poll) is task id, label and waiting line only — no patch is
+    opened or hashed, no card text built.
     """
     from .serve.actions import patch_path, tamper_note
     from .serve.run_status import run_terminal_text
 
     cards = []
-    for record in reversed(store.runs_with_states(("pending_approval", "completed"))):
-        notice = run_terminal_text(store, record.task_id, completion_opt_in=False)
+    for record in reversed(store.runs_awaiting_review()):
+        notice = run_terminal_text(store, record.task_id, completion_opt_in=False, light=light)
         if notice is None or notice[1] != "action_needed":
             continue
         reverify = store.reverification_for(record.task_id)
@@ -2173,6 +2176,10 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             label, style = "NOTHING TO RE-VERIFY", "cyan"  # v65: benign, never a scream
         else:
             label, style = "NOT CONFIRMED", "red"
+        if light:
+            shown = _Shown(record.state, None, None)
+            cards.append(_ReviewCard(record.task_id, label, style, notice[0], [], None, shown))
+            continue
         open_review = store.pending_or_enqueue_approval(
             record.task_id, action="apply_patch", reason="", create=False
         )

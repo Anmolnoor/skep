@@ -723,3 +723,50 @@ def test_a_fresh_profile_saves_the_model_its_probe_named(
     )
     assert saved.status_code == 200, saved.text
     assert client.get("/api/llm/config").json()["default_model"] == probed["model"] == "llama3.2"
+
+
+def test_the_badge_poll_reads_no_patch_and_walks_only_runs_that_can_still_wait(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 J7: ?detail=false is membership only — no patch file is opened or
+    hashed, and the walk is a store query over runs that can still need
+    action (an unlanded patch, an open gate, an unanswered disagreement), not
+    every completed run ever recorded."""
+    import builtins
+    from pathlib import Path as _Path
+
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        waiting = _completed(store, tmp_path, "waiting", patch=True, outcome="passed",
+                             confirmed=True, exit_codes=[0])  # fmt: skip
+        landed = _completed(store, tmp_path, "landed", patch=True, outcome="passed",
+                            confirmed=True, exit_codes=[0])  # fmt: skip
+        review = store.enqueue_approval(landed, action="apply_patch", reason="land")
+        store.resolve_approval(review, approved=True, actor="operator")
+        quiet = _completed(store, tmp_path, "quiet", patch=False)
+        walk = [r.task_id for r in store.runs_awaiting_review()]
+    finally:
+        store.close()
+    assert waiting in walk and landed not in walk and quiet not in walk
+    client = serve_client(config)
+    opened: list[str] = []
+    real_open, real_read = builtins.open, _Path.read_bytes
+
+    def watch_open(file: object, *a: object, **kw: object) -> object:
+        if str(file).endswith(".patch"):
+            opened.append(str(file))
+        return real_open(file, *a, **kw)  # type: ignore[call-overload]
+
+    def watch_read(self: _Path) -> bytes:
+        if self.suffix == ".patch":
+            opened.append(str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(builtins, "open", watch_open)
+    monkeypatch.setattr(_Path, "read_bytes", watch_read)
+    monkeypatch.setattr(_Path, "read_text", lambda self, *a, **kw: watch_read(self).decode())
+    light = client.get("/api/review-queue?detail=false").json()
+    assert [i["id"] for i in light["items"]] == [waiting]
+    assert opened == []

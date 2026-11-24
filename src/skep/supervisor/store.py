@@ -1591,6 +1591,30 @@ class RunStore:
         return [RunRecord(*row) for row in rows]
 
     @_locked
+    def runs_awaiting_review(self) -> list[RunRecord]:
+        """Phase 10 R3 J7: the runs `skep review` and the Inbox can still owe
+        a verdict, oldest first — a gated run, or a completed one that has not
+        landed (no approved apply_patch) and holds a patch artifact or an
+        unconfirmed failed re-verification. A superset of run_terminal_text's
+        waiting shapes, so the walk never reads the rest of history."""
+        rows = self._conn.execute(
+            "SELECT task_id, trace_id, repo, ref, workspace, execution_mode, instructions,"
+            " state, summary, verification_outcome, verification_details, worker_version,"
+            " manifest_fingerprint, resume_of, created_at, updated_at, base_commit,"
+            " worker_kind, coding_engine"
+            " FROM runs r WHERE r.state = 'pending_approval'"
+            " OR (r.state = 'completed'"
+            "  AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = r.task_id"
+            "   AND a.action = 'apply_patch' AND a.status = 'approved')"
+            "  AND (EXISTS (SELECT 1 FROM artifacts f WHERE f.task_id = r.task_id"
+            "    AND f.kind = 'patch')"
+            "   OR EXISTS (SELECT 1 FROM reverifications v WHERE v.task_id = r.task_id"
+            "    AND v.outcome = 'failed' AND v.confirmed = 0)))"
+            " ORDER BY created_at",
+        ).fetchall()
+        return [RunRecord(*row) for row in rows]
+
+    @_locked
     def task_ids_with_prefix(self, prefix: str) -> list[str]:
         """v59-F8: resolve a truncated task id — LIKE with escaped wildcards."""
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

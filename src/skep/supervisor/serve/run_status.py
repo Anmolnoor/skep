@@ -166,6 +166,7 @@ def run_terminal_text(
     *,
     audit_dir: Path | None = None,
     completion_opt_in: bool = True,
+    light: bool = False,
 ) -> tuple[str, str] | None:
     """The one honest (line, kind) for a terminal run — None when there is
     nothing the operator must hear (a healthy landed completion without the
@@ -175,7 +176,9 @@ def run_terminal_text(
     waiting-on-you shapes (pending gate, unlanded patch, G10 disagreement,
     crash with a live resume checkpoint), "info" for everything else.
     ``completion_opt_in=False`` ignores the notify_run_completion opt-in:
-    only the shapes the operator must hear regardless."""
+    only the shapes the operator must hear regardless. ``light`` (R3 J7):
+    the same (kind, line) decision without opening the patch — the line names
+    no changed files; for a poll that needs membership only."""
     from .actions import (
         applied_branch_for,
         created_transition_views_for_task,
@@ -262,12 +265,12 @@ def run_terminal_text(
         )
         kind = "action_needed"
     elif unlanded_patch:
-        changed = _changed_file_count(patch)
+        changed = 0 if light else _changed_file_count(patch)
         files = f" ({changed} file{'s' if changed != 1 else ''})" if changed else ""
         # v87-F4: name what changed, right in the call to action — the
         # operator (and the Queen reading history) sees WHAT completed,
         # not just that something did.
-        digest = patch_digest(store, task_id)
+        digest = None if light else patch_digest(store, task_id)
         if changed and digest is not None and digest.get("files"):
             shown = ", ".join(str(entry["path"]) for entry in digest["files"][:3])
             more = ", …" if changed > 3 else ""

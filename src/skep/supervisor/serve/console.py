@@ -274,9 +274,9 @@ def review_queue(
                 mirrored_by=mirrors.get(approval.review_id, []),
             )
         items.append(item)
-    # ponytail: reads every completed run each poll, as `skep review` does;
-    # an indexed "waiting" column if the badge poll ever shows up in a profile.
-    for waiting in _review_cards(store):
+    # R3 J7: the walk is a store query over runs that can still wait; the
+    # badge's poll (detail=False) opens no patch.
+    for waiting in _review_cards(store, light=not detail):
         if waiting.task_id in asked:
             continue
         record = store.get_run(waiting.task_id)
