@@ -760,7 +760,10 @@ before (a card the running turn raised waits for that turn:
 (PR #61) resolves every item once. **Script-schedule card**: command,
 interval, the env names the script gets (`scheduler.script_env`), the next
 three runs (`scheduler.next_fire_times`), the chain walked, what it
-replaces, "runs as you, on this host, unattended, until disabled". **Manifest**
+replaces, "runs as you, on this host, unattended, until disabled" (Phase 09
+R1: plus its `hosts`, the proxy vars when it has any, and "inside the wall:
+besides the system and its toolchains it reads only the files its command
+names, and it reaches only its listed hosts"). **Manifest**
 (`actions.dispatch_manifest`, side-effect-free): hosts, provider hosts,
 deferred asks, shell prefixes, write roots, engine, mode, verify pin, chain,
 taint — recorded on the card; the operator confirming it at the web UI or

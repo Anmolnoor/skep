@@ -331,7 +331,9 @@ def high_tier(
         return _TRIFECTA
     if tool == "propose_schedule":
         if safe.get("caste") == "script":
-            return "a script schedule runs a command as you, on this host, unattended"
+            return (
+                f"a script schedule runs a command as you, on this host, unattended, {SCRIPT_WALL}"
+            )
         if safe.get("chain"):
             return "a chained schedule feeds another schedule's output into this one"
         existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
@@ -625,7 +627,14 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
-SCRIPT_SENTENCE = "runs as you, on this host, unattended, until disabled"
+# Phase 09 R1 (I8): what 9D's wall (wall.py) lets a script schedule do —
+# reads beyond the system and its toolchains: only the files its command
+# names (scheduler.script_inputs); egress: only its `network` hosts.
+SCRIPT_WALL = (
+    "inside the wall: besides the system and its toolchains it reads only the files "
+    "its command names, and it reaches only its listed hosts (none unless listed)"
+)
+SCRIPT_SENTENCE = f"runs as you, on this host, unattended, until disabled, {SCRIPT_WALL}"
 
 
 def schedule_facts(
@@ -643,6 +652,7 @@ def schedule_facts(
     other schedule. With no ``store`` (a resolved card) the chain is the one
     named, not walked."""
     from ..scheduler import next_fire_times, parse_interval, script_env
+    from ..spawner import proxy_env
 
     caste = args.get("caste")
     existing = None if store is None else store.get_schedule(str(args.get("name") or ""))
@@ -651,7 +661,9 @@ def schedule_facts(
     facts: dict[str, Any] = {"name": str(args.get("name") or ""), "caste": caste}
     if caste == "script":
         facts["command"] = str(args.get("instructions") or "")
-        facts["env"] = sorted(script_env())
+        facts["hosts"] = [str(host) for host in args.get("network") or []]
+        # a schedule with hosts reaches them through the wall's proxy vars
+        facts["env"] = sorted({*script_env(), *(proxy_env(0) if facts["hosts"] else ())})
         facts["runs"] = SCRIPT_SENTENCE
     if role_line is not None:
         facts["runs"] = role_line

@@ -54,7 +54,11 @@ def test_a_script_schedule_card_says_what_will_run_and_is_high(
     assert (
         facts["runs"]
         == SCRIPT_SENTENCE
-        == ("runs as you, on this host, unattended, until disabled")
+        == (
+            "runs as you, on this host, unattended, until disabled, inside the wall: "
+            "besides the system and its toolchains it reads only the files its command "
+            "names, and it reaches only its listed hosts (none unless listed)"
+        )
     )
     assert facts["env"] == sorted(script_env())
     assert "SKEP_FAKE_API_TOKEN" not in facts["env"]
@@ -331,3 +335,23 @@ def test_a_chat_created_script_schedule_keeps_the_hosts_it_declares(tmp_path: Pa
     spec = next(t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "propose_schedule")
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
     assert "script schedule" in described and "none by default" in described
+
+
+def test_a_script_card_names_its_hosts_and_the_proxy_env_it_adds(store: RunStore) -> None:
+    from skep.supervisor.spawner import proxy_env
+
+    hosts = ["api.weather.gov", "imap.example.com"]
+    facts = schedule_facts({**SCRIPT, "network": hosts}, store)
+    quiet = schedule_facts(SCRIPT, store)
+
+    assert facts is not None and quiet is not None
+    assert facts["hosts"] == hosts and quiet["hosts"] == []
+    assert facts["env"] == sorted({*script_env(), *proxy_env(0)})
+    assert quiet["env"] == sorted(script_env())
+    assert "inside the wall" in facts["runs"] and "the files its command names" in facts["runs"]
+
+
+def test_the_script_high_line_says_it_runs_inside_the_wall(store: RunStore) -> None:
+    card = card_summary("propose_schedule", SCRIPT, "", store=store)
+    assert card["tier"] == "high"
+    assert "inside the wall" in card["high"] and "hosts" in card["high"]
