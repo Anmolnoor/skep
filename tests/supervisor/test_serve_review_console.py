@@ -1132,3 +1132,32 @@ def test_a_branch_mode_card_lists_only_its_own_repos_landings_on_that_branch(
     assert [r["task_id"] for r in action["card"]["runs"]] == [landed["a"]]
     (row,) = [i for i in client.get("/api/review-queue").json()["items"] if i["id"] == card]
     assert row["task_ids"] == [landed["a"]]
+
+
+def test_an_open_pr_that_opened_nothing_is_a_failed_card_with_its_reason(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """R5-7 (I8): open_pr answers {opened: false, detail} when no PR was made
+    (the empty-remote case is the common one) — the card is recorded failed
+    and says why, never "confirmed" on the outer ok alone."""
+    from skep.supervisor import RunStore
+
+    from .conftest import git
+
+    git(repo, "branch", "feat")
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    card = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "open_pr", "args": {"branch": "feat", "repo": str(repo)}},
+    ).json()
+    reply = client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/confirm").json()
+    assert reply["ok"] is False
+    assert reply["error"].startswith("the PR was not opened: git ls-remote failed")
+    assert reply["result"]["opened"] is False
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        record = store.get_chat_action(card["action_id"])
+        assert record is not None and record.status == "failed"
+    finally:
+        store.close()
