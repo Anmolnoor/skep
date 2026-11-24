@@ -214,7 +214,7 @@ def iter_sse(response: HttpxResponseLike) -> Iterator[tuple[str, dict[str, Any]]
 # Phase 10 10.2: a view of the one registry (serve/commands.py) — usage and
 # help are declared there, for this deck, the web's and the messengers'.
 COMMANDS: dict[str, dict[str, str]] = {
-    row.name: {"usage": row.usage, "desc": row.help} for row in commands_for(CLI)
+    row.name: {"usage": row.usage, "desc": row.help_on(CLI)} for row in commands_for(CLI)
 }
 
 # CLI_ONLY: commands that exist ONLY in the terminal — the web has equivalent
@@ -268,7 +268,7 @@ def _print_help() -> None:
 
     if cli_ui.rich_enabled():
         cli_ui.print_table(
-            ("command", "what it does"), [(r.usage, r.help) for r in commands_for(CLI)]
+            ("command", "what it does"), [(r.usage, r.help_on(CLI)) for r in commands_for(CLI)]
         )
         return
     width = max(len(spec["usage"]) for spec in COMMANDS.values())

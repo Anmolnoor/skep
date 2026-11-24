@@ -49,6 +49,12 @@ class SlashCommand:
     help: str
     surfaces: frozenset[str]
     verb: str | None = None  # the mutation its confirm card proposes, if any
+    # R2 I11: (surface, help) where a surface's truth says more than ``help``
+    surface_help: tuple[tuple[str, str], ...] = ()
+
+    def help_on(self, surface: str) -> str:
+        """The /help line ``surface`` prints for this row."""
+        return dict(self.surface_help).get(surface, self.help)
 
 
 class CommandRefused(Exception):
@@ -56,9 +62,16 @@ class CommandRefused(Exception):
 
 
 def _row(
-    name: str, usage: str, help: str, *surfaces: frozenset[str], verb: str | None = None
+    name: str,
+    usage: str,
+    help: str,
+    *surfaces: frozenset[str],
+    verb: str | None = None,
+    on: dict[str, str] | None = None,
 ) -> SlashCommand:
-    return SlashCommand(name, usage, help, frozenset().union(*surfaces), verb)
+    return SlashCommand(
+        name, usage, help, frozenset().union(*surfaces), verb, tuple((on or {}).items())
+    )
 
 
 # Order is the /help order on every surface.
@@ -184,7 +197,16 @@ REGISTRY: tuple[SlashCommand, ...] = (
         _DESK,
         verb="setup_browser",
     ),
-    _row("status", "/status", "what is running and what waits on you", _ALL),
+    _row(
+        "status",
+        "/status",
+        "what is running and what waits on you",
+        _ALL,
+        on={
+            CLI: "re-print the startup banner — assistant readiness, approvals and cards "
+            "waiting — then what is running and what waits on you"
+        },
+    ),
     _row(
         "model",
         "/model [name] [--scope chat|default]",
@@ -198,6 +220,10 @@ REGISTRY: tuple[SlashCommand, ...] = (
         "stop the turn running here (cards stay, runs keep running)",
         _CLI,
         CHANNELS,
+        on={
+            CLI: "stop this chat's running turn at its next step (from another terminal: "
+            "skep chat --chat <id> --oneshot /stop) — cards stay pending, runs keep running"
+        },
     ),
     _row("exit", "/exit", "leave the REPL — bare exit/quit also work", _CLI),
     _row("replay", "/replay", "print the last 20 messages of this chat", _CLI),
@@ -269,7 +295,9 @@ def web_deck() -> dict[str, Any]:
     rows = commands_for(WEB)
     return {
         "surface": WEB,
-        "commands": [{"name": row.name, "usage": row.usage, "help": row.help} for row in rows],
+        "commands": [
+            {"name": row.name, "usage": row.usage, "help": row.help_on(WEB)} for row in rows
+        ],
         "refusals": refusals,
     }
 

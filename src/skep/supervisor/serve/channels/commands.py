@@ -112,7 +112,10 @@ def _cards(store: Any, chat_id: str | None) -> list[Any]:
 
 def _help(ctx: CommandContext, _args: str) -> Reply:
     lines = ["skep commands (answered here, no model turn):"]
-    lines += [f"/{row.name} — {row.help}" for row in commands_for(ctx.message.channel)]
+    lines += [
+        f"/{row.name} — {row.help_on(ctx.message.channel)}"
+        for row in commands_for(ctx.message.channel)
+    ]
     lines.append("Anything else goes to the Queen.")
     if ctx.message.channel == "slack":  # Slack's client eats an unregistered /word
         lines.append("On Slack, type a leading space: ' /stop', ' /approve'.")
@@ -421,7 +424,7 @@ HANDLERS: dict[str, Handler] = {
 # Phase 10 10.2: the deck is a view of the one registry (serve/commands.py);
 # every channel carries the same rows, so Telegram's stands for all three.
 COMMANDS: dict[str, tuple[str, Handler]] = {
-    row.name: (row.help, HANDLERS[row.name]) for row in commands_for("telegram")
+    row.name: (row.help_on("telegram"), HANDLERS[row.name]) for row in commands_for("telegram")
 }
 # Telegram sends /start when someone first opens the bot.
 ALIASES: dict[str, str] = {"start": "help"}

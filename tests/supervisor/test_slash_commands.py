@@ -103,15 +103,15 @@ def test_the_three_decks_are_views_of_the_registry(config: SupervisorConfig) -> 
     from skep.supervisor.serve.channels.commands import COMMANDS as CHANNEL_DECK
 
     assert {name: (spec["usage"], spec["desc"]) for name, spec in cli_chat.COMMANDS.items()} == {
-        row.name: (row.usage, row.help) for row in commands.commands_for(CLI)
+        row.name: (row.usage, row.help_on(CLI)) for row in commands.commands_for(CLI)
     }
     assert {name: summary for name, (summary, _) in CHANNEL_DECK.items()} == {
-        row.name: row.help for row in commands.commands_for("telegram")
+        row.name: row.help_on("telegram") for row in commands.commands_for("telegram")
     }
     # Phase 10 10.3: the web deck keeps no table of its own — app.js reads its
     # slice over HTTP (test_command_deck pins its executors against that slice).
     assert serve_client(config).get("/api/commands").json()["commands"] == [
-        {"name": row.name, "usage": row.usage, "help": row.help}
+        {"name": row.name, "usage": row.usage, "help": row.help_on(WEB)}
         for row in commands.commands_for(WEB)
     ]
     assert "const COMMANDS" not in (STATIC_DIR / "app.js").read_text()
@@ -287,3 +287,22 @@ def test_skep_chat_help_on_a_terminal_is_the_registry_table(
     for row in commands.commands_for(CLI):
         assert row.name in out
     assert "/sessions" not in out  # a messenger's row, not this deck's
+
+
+def test_skep_chat_help_keeps_its_terminal_detail() -> None:
+    """R2 I11 (O5): moving the deck into the shared registry lost what is
+    true only in a terminal — /status re-prints the startup banner there, and
+    /stop names the cross-terminal command. A row carries per-surface help;
+    every other surface keeps the shared line."""
+    from skep import cli_chat
+
+    status, stop = cli_chat.COMMANDS["status"]["desc"], cli_chat.COMMANDS["stop"]["desc"]
+    assert "re-print the startup banner" in status
+    assert "skep chat --chat <id> --oneshot /stop" in stop
+    web_status = next(r for r in commands.commands_for(WEB) if r.name == "status")
+    assert "banner" not in web_status.help_on(WEB)
+    channel_stop = next(r for r in commands.commands_for("telegram") if r.name == "stop")
+    assert "--oneshot" not in channel_stop.help_on("telegram")
+    for row in commands.REGISTRY:
+        for surface, text in row.surface_help:
+            assert surface in row.surfaces and text.strip(), row.name
