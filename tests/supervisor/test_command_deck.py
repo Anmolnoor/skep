@@ -206,11 +206,12 @@ def test_push_branch_pushes_the_checked_out_branch_never_the_default(
         assert "merge_pr" in refused.value.detail
 
         # F5's twin: the PR guard passes a checked-out feature branch too
-        # (the remoteless probe then fails honestly, never a 400).
+        # (a remoteless repo then fails honestly, never a 400 — Phase 09 R3
+        # S16: it has no GitHub repo to name to gh).
         git(repo, "remote", "remove", "origin")
         result = actions.open_pr_for_branch(holder, store, str(repo), branch="feature-x")
         assert result["opened"] is False
-        assert "ls-remote" in result["detail"]
+        assert "not a github.com repository" in result["detail"]
     finally:
         store.close()
 
