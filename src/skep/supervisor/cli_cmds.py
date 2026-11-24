@@ -149,9 +149,31 @@ def _read_approval_choice() -> str:
         else:
             print()
             return choice.strip().lower() or "s"
+    return _read_line()
+
+
+def _read_line() -> str:
+    """R2 I4 (I7): the no-raw-terminal fallback, under the single key's
+    timeout — no line within it, or EOF, is a skip ("s"), never a wait
+    forever. A stdin without a descriptor (a test's) reads directly."""
     try:
-        return input("> ").strip().lower()
-    except EOFError:
+        fd: int | None = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is not None:
+        import select
+
+        print("> ", end="", flush=True)
+        try:
+            ready, _, _ = select.select([fd], [], [], REVIEW_KEY_TIMEOUT_SECONDS)
+        except (OSError, ValueError):
+            ready = [fd]  # not selectable here: read as before
+        if not ready:
+            print()
+            return "s"
+    try:
+        return input("" if fd is not None else "> ").strip().lower()
+    except (EOFError, OSError):  # a hung-up terminal reads EIO on some systems
         return "s"
 
 

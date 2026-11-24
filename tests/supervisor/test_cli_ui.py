@@ -890,3 +890,22 @@ def test_review_splits_an_empty_patch_at_its_own_line(
     assert _run_cli(home, "review", task_id) == 0
     assert seen["patch"] == "" and seen["head"].endswith("\n")
     assert seen["tail"].startswith("next: skep review")
+
+
+def test_the_line_fallback_skips_on_timeout_and_eof(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2 I4 (I7): a terminal without raw mode reads a line under the same
+    timeout as the single key — silence and EOF both skip."""
+    import os
+    import termios
+
+    def refuse(fd: int) -> Any:
+        raise termios.error(25, "Inappropriate ioctl for device")
+
+    master = _pty_stdin(monkeypatch)
+    monkeypatch.setattr(termios, "tcgetattr", refuse)
+    monkeypatch.setattr(cli_cmds, "REVIEW_KEY_TIMEOUT_SECONDS", 0.2)
+    assert cli_cmds._read_approval_choice() == "s"  # nothing typed: skip
+    os.close(master)  # the terminal hung up: EOF
+    assert cli_cmds._read_approval_choice() == "s"
