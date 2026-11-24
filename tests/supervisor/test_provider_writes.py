@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -327,7 +328,7 @@ def test_a_mirror_write_failure_rolls_the_whole_save_back(
         import skep.profile
 
         monkeypatch.setattr(skep.profile, "run_personal_setup", broken)
-        body = {"base_url": other.base_url, "default_model": "m2", "api_key": "k2"}
+        body = {"base_url": other.base_url, "default_model": "m2", "api_key": "k2", "vision": True}
         failed = client.put("/api/llm/config", json=body)
     finally:
         working.stop()
@@ -426,7 +427,10 @@ def test_the_probe_caps_its_output_and_refuses_an_empty_answer() -> None:
         probe_completion(anthropic.base_url, None, model="c", protocol="anthropic")
         assert ollama.probes[-1]["body"]["options"]["num_predict"] == 1
         assert anthropic.probes[-1]["body"]["max_tokens"] == 1
-        for empty in ([], [{"model": "m", "created_at": "2026-11-23T00:00:00Z"}]):
+        stop = {"model": "m", "message": {"content": ""}, "done": True, "done_reason": "stop"}
+        ollama.probe_reply = [{**stop, "done_reason": "length"}]  # capped mid-thought: generated
+        probe_completion(ollama.base_url, None, model="m", protocol="ollama")
+        for empty in ([], [{"model": "m", "created_at": "2026-11-23T00:00:00Z"}], [stop]):
             ollama.probe_reply = empty
             with pytest.raises(OllamaError, match="no completion"):
                 probe_completion(ollama.base_url, None, model="m", protocol="ollama")
@@ -578,3 +582,464 @@ def test_onboard_rejects_a_pasted_key_before_any_request(tmp_path: Path) -> None
     finally:
         fake.stop()
     assert fake.requests == [] and fake.probes == []
+
+
+# === Phase 05 review R2: one owner per credential, probe what you commit ==========
+
+
+def _raw(sup: Path) -> tuple[list[Any], list[Any]]:
+    """Provider rows and llm_* settings WITH their timestamps: a refused save
+    writes nothing, so not even updated_at moves."""
+    conn = sqlite3.connect(sup / "supervisor.sqlite3")
+    try:
+        return (
+            conn.execute("SELECT * FROM provider_profiles ORDER BY 1").fetchall(),
+            conn.execute("SELECT * FROM settings WHERE key LIKE 'llm_%' ORDER BY 1").fetchall(),
+        )
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def installed(config: SupervisorConfig, tmp_path: Path) -> SupervisorConfig:
+    """``config`` laid out like an install — the supervisor home is
+    ``<personal>/supervisor``, where workers and doctor read it."""
+    return replace(config, home=tmp_path / "home" / "supervisor")
+
+
+def _codex_queen(config: SupervisorConfig) -> None:
+    import os
+
+    from .test_codex_login import write_fake_login
+    from .test_codex_queen_provider import _codex_profile
+
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    with _store(config) as store:
+        store.upsert_provider_profile(_codex_profile())
+        actions.use_provider(store, config.home, provider_id="openai-codex")
+
+
+# --- F2: under the ChatGPT-login Queen a key is saved where it was probed ---------
+
+
+def test_the_workers_key_lands_on_the_endpoint_it_was_probed_against(
+    installed: SupervisorConfig,
+) -> None:
+    """A (llm-secret's owner) → B (activated with its own key) → Codex → a B
+    key: it was probed against B, so it is B's — A's key is never touched."""
+    config = installed
+    from skep.workers.llm_plan import worker_provider_from_home
+
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1", "ka1")
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="b", protocol="ollama", base_url=b.base_url, model="m2"
+            )
+            actions.set_provider_key(store, config.home, provider_id="b", key="kb1")
+            actions.use_provider(store, config.home, provider_id="b")
+        _codex_queen(config)
+        b.api_key = "kb2"  # B's key is rotated
+        saved = client.put("/api/llm/config", json={"api_key": "kb2"})
+        worker = worker_provider_from_home(config.home.parent)
+        cleared = client.put("/api/llm/config", json={"api_key": ""})
+    finally:
+        a.stop()
+        b.stop()
+    assert saved.status_code == 200, saved.text
+    assert "Bearer kb2" in _auths(b) and "Bearer kb2" not in _auths(a)
+    assert worker is not None and worker.api_key == "kb2"
+    assert cleared.status_code == 200, cleared.text
+    files = _files(config.home)
+    assert files["llm-secret-default"] == b"ka1\n" and files["llm-secret"] == b"ka1\n"
+    assert "llm-secret-b" not in files  # the clear took B's key — and only B's
+    with _store(config) as store:
+        assert store.get_setting("llm_secret_endpoint") == a.base_url
+
+
+def test_a_workers_key_without_a_profile_keeps_llm_secrets_owner(
+    config: SupervisorConfig,
+) -> None:
+    """profile.json's endpoint has no registry row: llm-secret is the only
+    place for the key — the endpoint that owned it keeps its key in its own
+    file, and with no profile to keep it in the save is refused."""
+    from skep.profile import run_personal_setup
+
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1", "ka1")
+        _codex_queen(config)
+        run_personal_setup(config.home.parent, provider="ollama", model="m2", endpoint=b.base_url)
+        with _store(config) as store:
+            store.upsert_provider_profile(  # A is now known only by llm-secret
+                ProviderProfile("default", "ollama", "http://127.0.0.1:9", "m1")
+            )
+        refused = client.put("/api/llm/config", json={"api_key": "kb1"})
+        with _store(config) as store:
+            store.upsert_provider_profile(ProviderProfile("a", "ollama", a.base_url, "m1"))
+        saved = client.put("/api/llm/config", json={"api_key": "kb1"})
+        with _store(config) as store:
+            owner = store.get_setting("llm_secret_endpoint")
+        files = _files(config.home)
+        cleared = client.put("/api/llm/config", json={"api_key": ""})
+    finally:
+        a.stop()
+        b.stop()
+    assert refused.status_code == 400 and "no provider profile" in refused.json()["detail"]
+    assert saved.status_code == 200, saved.text
+    assert files["llm-secret"] == b"kb1\n" and files["llm-secret-a"] == b"ka1\n"
+    assert owner == b.base_url
+    assert cleared.status_code == 200, cleared.text  # llm-secret was B's: it goes, owner too
+    assert "llm-secret" not in _files(config.home)
+    with _store(config) as store:
+        assert store.get_setting("llm_secret_endpoint") is None
+
+
+# --- F3: a provider id keeps its endpoint --------------------------------------------
+
+
+def test_re_registering_an_id_for_another_endpoint_is_refused(config: SupervisorConfig) -> None:
+    old = FakeOllama(api_key="ko1", models=["m1"]).start()
+    new = FakeOllama(models=["m2"]).start()
+    try:
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="p", protocol="ollama", base_url=old.base_url, model="m1"
+            )
+            (config.home / "llm-secret-p").write_text("ko1\n")
+            for activate in (False, True):
+                with pytest.raises(ProviderError, match=r"registered for.*own id"):
+                    actions.add_provider(
+                        store,
+                        home=config.home,
+                        activate=activate,
+                        provider_id="p",
+                        protocol="ollama",
+                        base_url=new.base_url,
+                        model="m2",
+                    )
+            kept = store.get_provider_profile("p")
+    finally:
+        old.stop()
+        new.stop()
+    assert kept is not None and kept.base_url == old.base_url
+    assert (config.home / "llm-secret-p").read_text() == "ko1\n"
+    assert _auths(new) == []
+
+
+def test_onboarding_another_endpoint_under_a_taken_id_gets_its_own(tmp_path: Path) -> None:
+    from skep.supervisor.onboard import onboard_model
+
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(models=["m2"]).start()
+    try:
+        with _holder(tmp_path / "home") as (holder, store):
+            (holder.current.home / "llm-secret-ollama").write_text("ka1\n")
+            onboard_model(holder, store, provider="ollama", model="m1", endpoint=a.base_url)
+            onboard_model(holder, store, provider="ollama", model="m2", endpoint=b.base_url)
+            ids = {p.provider_id: p.base_url for p in store.list_provider_profiles()}
+            active = store.active_provider_profile()
+    finally:
+        a.stop()
+        b.stop()
+    assert ids == {"ollama": a.base_url, "ollama-2": b.base_url}
+    assert active is not None and active.provider_id == "ollama-2"
+    assert "Bearer ka1" not in _auths(b)
+
+
+# --- F4 / F8: SKEP_LLM_API_KEY belongs to one endpoint too ---------------------------
+
+
+def test_the_env_key_stays_with_the_endpoint_it_was_used_for(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "ke1")
+    old = FakeOllama(api_key="ke1", models=["m1"]).start()
+    keyless = FakeOllama(models=["m2"]).start()  # passes its probe with no key
+    client = serve_client(config)
+    try:
+        _configured(client, old, "m1")
+        moved = client.put("/api/llm/config", json={"base_url": keyless.base_url})
+        listed = client.get("/api/llm/models")
+    finally:
+        old.stop()
+        keyless.stop()
+    assert moved.status_code == 200 and listed.status_code == 200
+    assert "Bearer ke1" not in _auths(keyless)
+
+
+def test_use_provider_never_hands_the_env_key_to_a_keyless_profile(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "ke1")
+    old = FakeOllama(api_key="ke1", models=["m1"]).start()
+    keyless = FakeOllama(models=["m2"]).start()
+    try:
+        with _store(config) as store:
+            store.set_setting(LLM_BASE_URL, old.base_url)
+            store.upsert_provider_profile(
+                ProviderProfile("default", "ollama", old.base_url, "m1", active=True)
+            )
+            store.upsert_provider_profile(
+                ProviderProfile("other", "ollama", keyless.base_url, "m2")
+            )
+            actions.use_provider(store, config.home, provider_id="other")
+        assert serve_client(config).get("/api/llm/models").status_code == 200
+    finally:
+        old.stop()
+        keyless.stop()
+    assert "Bearer ke1" not in _auths(keyless)
+
+
+# --- F5: a refusal never undoes a save that landed meanwhile -------------------------
+
+
+def test_a_slow_save_never_undoes_one_that_landed_while_it_was_probed(
+    config: SupervisorConfig,
+) -> None:
+    import threading
+
+    a = FakeOllama(models=["m1"]).start()
+    b = FakeOllama(models=["m2"]).start()
+    c = FakeOllama(models=["m3"]).start()
+    slow = FakeOllama(api_key="ks1", models=["m4"], public_listing=True).start()
+    client = serve_client(config)
+    results: list[Any] = []
+
+    def race(key: str, meanwhile: Any) -> None:
+        slow.gate, slow.arrived = threading.Event(), threading.Event()
+        body = {"base_url": slow.base_url, "default_model": "m4", "api_key": key}
+        thread = threading.Thread(
+            target=lambda: results.append(client.put("/api/llm/config", json=body))
+        )
+        thread.start()
+        assert slow.arrived.wait(10)
+        _configured(client, meanwhile, meanwhile.models[0])  # lands mid-probe
+        slow.gate.set()
+        thread.join(10)
+
+    try:
+        _configured(client, a, "m1")
+        race("bad1", b)  # refused after b landed: b stays
+        assert client.get("/api/llm/config").json()["base_url"] == b.base_url
+        race("ks1", c)  # accepted, but what it was staged on moved: a 409
+        view = client.get("/api/llm/config").json()
+    finally:
+        for fake in (a, b, c, slow):
+            fake.stop()
+    assert results[0].status_code == 400 and "401" in results[0].json()["detail"]
+    assert results[1].status_code == 409 and "changed" in results[1].json()["detail"]
+    assert view["base_url"] == c.base_url
+
+
+# --- F6: a refused save on an upgraded home writes nothing, adoption included -------
+
+
+def test_a_refused_save_on_an_upgraded_home_writes_nothing(config: SupervisorConfig) -> None:
+    import time
+
+    fake = FakeOllama(api_key="kc1", models=["glm-5.2", "glm-5.3"]).start()
+    try:
+        with _store(config) as store:
+            store.upsert_provider_profile(
+                ProviderProfile("cloud", "ollama", fake.base_url, "glm-5.2", active=True)
+            )
+            store.set_setting(LLM_BASE_URL, fake.base_url)
+            store.set_setting(LLM_DEFAULT_MODEL, "glm-5.3")
+            store.set_setting(LLM_PROTOCOL, "ollama")
+        before = _raw(config.home), _files(config.home)
+        time.sleep(1.1)  # any write would move an updated_at
+        refused = serve_client(config).put("/api/llm/config", json={"api_key": "bad1"})
+        with _store(config) as store, pytest.raises(ProviderError, match="nothing changed"):
+            # the Queen's model dial (set_assistant_model) — the same write path
+            save_assistant_llm(store, config.home, base_url="http://127.0.0.1:9", model="x")
+        after = _raw(config.home), _files(config.home)
+    finally:
+        fake.stop()
+    assert refused.status_code == 400
+    assert after == before
+
+
+# --- F7: the protocol and credential a save commits are the ones it probed ----------
+
+
+def test_a_protocol_switch_is_probed_before_it_is_saved(config: SupervisorConfig) -> None:
+    fake = FakeOllama(models=["m1"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, fake, "m1")
+        before = _raw(config.home), _files(config.home)
+        refused = client.put("/api/llm/config", json={"protocol": "openai-compat"})
+    finally:
+        fake.stop()
+    assert refused.status_code == 400 and "nothing changed" in refused.json()["detail"]
+    assert (_raw(config.home), _files(config.home)) == before
+
+
+def test_switching_to_an_endpoint_while_clearing_its_key_probes_it_keyless(
+    config: SupervisorConfig,
+) -> None:
+    a = FakeOllama(models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        with _store(config) as store:
+            store.upsert_provider_profile(ProviderProfile("b", "ollama", b.base_url, "m2"))
+        (config.home / "llm-secret-b").write_text("kb1\n")
+        refused = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": ""})
+    finally:
+        a.stop()
+        b.stop()
+    assert refused.status_code == 400 and "401" in refused.json()["detail"]
+    assert "Bearer kb1" not in _auths(b)
+    assert (config.home / "llm-secret-b").read_text() == "kb1\n"
+
+
+# --- F9: a saved key and profile.json say the same thing ------------------------------
+
+
+def test_set_key_on_the_active_profile_clears_profile_jsons_env_too(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = installed
+    from skep import status
+    from skep.profile import load_profile, run_personal_setup
+
+    fake = FakeOllama(api_key="kp1", models=["m1"]).start()
+    monkeypatch.delenv("GONE_KEY", raising=False)
+    personal = config.home.parent
+    try:
+        run_personal_setup(  # what onboard leaves: the operator's env NAME
+            personal, provider="ollama", model="m1", endpoint=fake.base_url, api_key_env="GONE_KEY"
+        )
+        with _store(config) as store:
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    "cloud", "ollama", fake.base_url, "m1", api_key_env="GONE_KEY", active=True
+                )
+            )
+            actions.set_provider_key(store, config.home, provider_id="cloud", key="kp1")
+        payload = status.build_status(personal)
+    finally:
+        fake.stop()
+    assert load_profile(personal).provider.api_key_env is None
+    assert payload["required"]["provider"]["status"] == "ready", payload["required"]["provider"]
+    assert payload["workers"]["coding_worker"]["status"] == "ready"
+
+
+def test_the_workers_saved_key_beats_profile_jsons_old_env_var(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = installed
+    from skep import status
+    from skep.profile import run_personal_setup
+    from skep.workers.llm_plan import _api_key, worker_provider_from_home
+
+    b = FakeOllama(api_key="kb2", models=["m2"]).start()
+    monkeypatch.delenv("GONE_KEY", raising=False)
+    personal = config.home.parent
+    client = serve_client(config)
+    try:
+        _configured(client, b, "m2")
+        _codex_queen(config)
+        run_personal_setup(
+            personal, provider="ollama", model="m2", endpoint=b.base_url, api_key_env="GONE_KEY"
+        )
+        with _store(config) as store:
+            row = store.active_provider_profile()
+            assert row is not None and row.provider_id == "openai-codex"
+            default = store.get_provider_profile("default")
+            assert default is not None
+            store.upsert_provider_profile(replace(default, api_key_env="GONE_KEY"))
+        saved = client.put("/api/llm/config", json={"api_key": "kb2"})
+        worker = worker_provider_from_home(personal)
+        payload = status.build_status(personal)
+    finally:
+        b.stop()
+    assert saved.status_code == 200, saved.text
+    assert worker is not None and _api_key(worker) == "kb2"
+    assert payload["required"]["provider"]["status"] == "ready", payload["required"]["provider"]
+
+
+# --- F10: a pasted GitHub token reaches Copilot only as its exchanged bearer ----------
+
+
+def test_a_pasted_copilot_token_is_exchanged_before_any_probe(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skep.supervisor.providers as providers
+    from skep.supervisor.serve import llm_copilot
+
+    copilot = "https://api.githubcopilot.com"
+
+    def exchange(token: str, **_: Any) -> tuple[str, float]:
+        if token != "ghu_r2ok":  # the old token, and a refused one
+            raise OllamaError("copilot token exchange failed: 401", status=401)
+        return "bearer-r2", 9e9
+
+    sent: list[str | None] = []
+
+    def probes(_home: Path, _store: Any, *, key_for: Any = None, **_kw: Any) -> dict[str, Any]:
+        def _list(profile: ProviderProfile) -> list[str]:
+            sent.append(key_for(profile) if key_for else "own")
+            return ["gpt-5-mini"]
+
+        return {"list_models": _list, "probe": lambda _p: None}
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", exchange)
+    monkeypatch.setattr(providers, "live_probes", probes)
+    local = FakeOllama(models=["m1"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, local, "m1")
+        with _store(config) as store:  # registered, holding an OLD token
+            store.upsert_provider_profile(
+                ProviderProfile("copilot", "openai_compat", copilot, "gpt-5-mini")
+            )
+        (config.home / "llm-secret-copilot").write_text("ghu_r2old\n")
+        body = {"base_url": copilot, "protocol": "openai-compat", "default_model": "gpt-5-mini"}
+        tested = client.post("/api/llm/test", json={**body, "api_key": "ghu_r2ok"}).json()
+        refused = client.put("/api/llm/config", json={**body, "api_key": "ghu_r2bad"})
+        saved = client.put("/api/llm/config", json={**body, "api_key": "ghu_r2ok"})
+    finally:
+        local.stop()
+    assert tested["ok"] is True
+    assert refused.status_code == 400 and "exchange failed" in refused.json()["detail"]
+    assert saved.status_code == 200, saved.text
+    assert sent == ["bearer-r2", "bearer-r2"]  # never the raw token
+    assert (config.home / "llm-secret-copilot").read_text() == "ghu_r2ok\n"
+
+
+# --- F12 / F14: malformed input is a 400, never a 500 ---------------------------------
+
+
+def test_a_malformed_bracketed_host_is_a_400(config: SupervisorConfig) -> None:
+    client = serve_client(config)
+    refused = client.put("/api/llm/config", json={"base_url": "http://[::1", "default_model": "m"})
+    assert refused.status_code == 400 and "base_url" in refused.json()["detail"]
+
+
+def test_an_endpoint_that_lists_no_models_needs_a_model_named(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skep.supervisor.providers as providers
+
+    local = FakeOllama(models=["m1"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, local, "m1")
+    finally:
+        local.stop()
+    monkeypatch.setattr(
+        providers,
+        "live_probes",
+        lambda *_a, **_k: {"list_models": lambda _p: [], "probe": lambda _p: None},
+    )
+    refused = client.put("/api/llm/config", json={"base_url": "http://127.0.0.1:9"})
+    assert refused.status_code == 400 and "lists no models" in refused.json()["detail"]

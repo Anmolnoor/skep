@@ -255,6 +255,13 @@ def onboard_model(
     if not model:
         raise ValueError("name a --model")
     key_env = api_key_env or preset.api_key_env
+    # R2 (F3): the preset's id — unless it is registered for another endpoint,
+    # whose key stays there: then this endpoint gets the first free <id>-N
+    pid = next(
+        c
+        for c in (preset.preset_id, *(f"{preset.preset_id}-{n}" for n in range(2, 1000)))
+        if (held := store.get_provider_profile(c)) is None or held.base_url == base_url.rstrip("/")
+    )
 
     # Phase 05 (5.1): stage the candidate — exactly the profile the switch
     # below writes, with the credential it would resolve — and probe it (the
@@ -267,7 +274,7 @@ def onboard_model(
     # endpoint; workers read this registry profile first, P10).
     candidate = validate_provider_profile(
         ProviderProfile(
-            provider_id=preset.preset_id,
+            provider_id=pid,
             protocol=preset.protocol,
             base_url=base_url,
             model=model,
@@ -296,7 +303,7 @@ def onboard_model(
             if preset.preset_id in ("ollama", "openai-compatible"):
                 add_provider(
                     store,
-                    provider_id=preset.preset_id,
+                    provider_id=pid,
                     protocol=preset.protocol,
                     base_url=base_url,
                     model=model,
@@ -308,13 +315,12 @@ def onboard_model(
                 add_provider(
                     store,
                     preset=preset.preset_id,
+                    provider_id=pid,
                     base_url=base_url,
                     model=model,
                     api_key_env=key_env,
                 )
-            used = use_provider(
-                store, holder.current.home, provider_id=preset.preset_id, probe=False
-            )
+            used = use_provider(store, holder.current.home, provider_id=pid, probe=False)
             # use_provider writes profile.json through with no key env (v19-F9); put
             # the operator's NAME back so doctor and workers read the same truth.
             run_personal_setup(

@@ -6077,7 +6077,9 @@ def _execute_mutation(
             store, holder.current.home, provider_id=str(args["provider_id"]).strip()
         )
     if name == "remove_provider":
-        return actions.remove_provider(store, provider_id=str(args["provider_id"]).strip())
+        return actions.remove_provider(
+            store, holder.current.home, provider_id=str(args["provider_id"]).strip()
+        )
     if name == "set_tts_provider":
         # v53-F6 (ADR 0031): config-gated channel infrastructure; the result
         # names the egress truth so the transcript records what was chosen.

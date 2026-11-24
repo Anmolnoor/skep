@@ -220,7 +220,7 @@ def test_a_non_size_400_names_the_body_and_never_shrinks(
 
 
 def test_a_provider_or_model_change_clears_the_ceiling(
-    config: SupervisorConfig, ollama: FakeOllama
+    config: SupervisorConfig, ollama: FakeOllama, accept_probes: list[str]
 ) -> None:
     """ES-F13 (B86): a ceiling measures ONE provider+model, and nothing ever
     cleared it — a later halving could only lower it (lane M1-21)."""
@@ -251,7 +251,9 @@ def test_a_provider_or_model_change_clears_the_ceiling(
         store.set_chat_model(pinned, None)
         assert ceilings() == (None, 9000)
         measure()
-        # A new provider (URL or protocol) re-measures every chat.
+        # A new provider (URL or protocol) re-measures every chat. (Phase 05 R2:
+        # a protocol switch is probed first — the fake speaks only ollama, so
+        # the probe is stubbed; test_provider_writes covers the probe itself.)
         client.put("/api/llm/config", json={"protocol": "openai-compat"})
         assert ceilings() == (None, None)
         measure()

@@ -449,3 +449,21 @@ def test_doctor_names_a_remote_profile_left_without_a_key(
     assert "https://ollama.com" in lines[0]
     store_provider_api_key(supervisor_home, "openrouter", "sk-own")
     assert keyless(build_status(tmp_path)["advisories"]) == []
+
+
+def test_every_face_s_remove_leaves_no_key_behind(tmp_path: Path) -> None:
+    """Phase 05 R2 (I11, ADR 0050): the shared remove deletes the profile's
+    key file — CLI, chat tool and REST alike — so a re-add of the same id
+    for another endpoint never inherits the old key."""
+    from skep.supervisor.serve.actions import remove_provider
+
+    supervisor_home = tmp_path / "supervisor"
+    supervisor_home.mkdir()
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    try:
+        store.upsert_provider_profile(_profile(provider_id="gone"))
+        store_provider_api_key(supervisor_home, "gone", "sk-old")
+        remove_provider(store, supervisor_home, provider_id="gone")
+    finally:
+        store.close()
+    assert not provider_secret_path(supervisor_home, "gone").exists()
