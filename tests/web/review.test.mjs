@@ -373,29 +373,30 @@ test("run detail's forensics section loads once, on first open", async () => {
   assert.match(section.textContent, /G10 & V1/);
 });
 
-test("Inbox: gates sort riskiest boundary first, then oldest; the warning shows on the row", async () => {
+test("Inbox: gates render in the queue's order, grouped by wall; the warning shows on the row", async () => {
   const { app } = stableApp("#/inbox");
   app.header = () => {};
-  const approvals = [
-    { ...GATE, review_id: "a", boundary: "host-shell", requested_at: "2026-11-24T08:00:00Z", reverification_warning: undefined },
-    { ...GATE, review_id: "b", boundary: "patch-landing", requested_at: "2026-11-24T09:00:00Z" },
-    { ...GATE, review_id: "c", boundary: "tainted-dispatch", requested_at: "2026-11-24T11:00:00Z", reverification_warning: undefined },
-    { ...GATE, review_id: "d", boundary: undefined, requested_at: "2026-11-24T07:00:00Z", reverification_warning: undefined },
+  // Phase 10 R1 (E2): the server orders the one queue (riskiest wall, then oldest).
+  const gate = (id, boundary, warning) => ({ kind: "gate", id, boundary, at: "2026-11-24T08:00:00Z", task_id: GATE.task_id, action: GATE.action, reason: GATE.reason, warning });
+  const items = [
+    gate("c", "tainted-dispatch"), gate("b", "patch-landing", GATE.reverification_warning),
+    gate("a", "host-shell"), gate("d", undefined),
   ];
-  app.api = async (method, path) => (path === "/api/approvals" ? { approvals } : { cards: [], approvals: [] });
+  app.api = async (method, path) => (path === "/api/review-queue" ? { items, count: items.length } : {});
   const focused = trackFocus(app);
   const main = app.el("main");
   await app.viewInbox(main);
   const rows = main.querySelectorAll(".review-item");
-  assert.deepEqual(rows.map(r => r.getAttribute("href")), ["#/review/c", "#/review/b", "#/review/a", "#/review/d"]);
+  const links = main.querySelectorAll(".inbox-open");
+  assert.deepEqual(links.map(r => r.getAttribute("href")), ["#/review/c", "#/review/b", "#/review/a", "#/review/d"]);
   assert.deepEqual(texts(main, "inbox-group"), ["tainted-dispatch", "patch-landing", "host-shell", "other"]);
   assert.match(rows[1].querySelector(".review-warning").textContent, /^⚠ test-tamper guard/);
   assert.equal(rows[1].querySelector(".thread-dot").className, "thread-dot bad");
   // The first row has focus; j / k walk the rows and remember where the operator was.
-  assert.equal(focused.at(-1), rows[0]);
+  assert.equal(focused.at(-1), links[0]);
   const list = main.querySelector(".inbox-list");
-  list.listeners.keydown[0]({ key: "j", target: rows[0], preventDefault() {} });
-  assert.equal(focused.at(-1), rows[1]);
+  list.listeners.keydown[0]({ key: "j", target: links[0], preventDefault() {} });
+  assert.equal(focused.at(-1), links[1]);
   const again = app.el("main");
   await app.viewInbox(again);
   assert.equal(focused.at(-1).getAttribute("href"), "#/review/b");

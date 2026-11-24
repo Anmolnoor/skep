@@ -142,3 +142,100 @@ def test_decision_search_by_task_and_engine_answers_in_under_five_seconds(
     assert time.monotonic() - started < 5.0
     assert found["total"] == 100
     assert all(r["task_id"] == "task-8" and r["engine"] == "codex" for r in found["rows"])
+
+
+# ---------- E2: one review queue, for the Inbox and its badge ----------
+
+
+def _seed_queue(config: SupervisorConfig, tmp_path: Path) -> dict[str, str]:
+    """A mirrored apply_patch gate, a loose shell gate, a standalone card, a
+    land_run card that mirrors the patch gate, a tainted memory proposal, a
+    captured skill draft, a tested learned skill and a rejected one."""
+    from skep.supervisor import RunStore, mint_task
+    from skep.supervisor.skills import DRAFT, REJECTED, TESTED, SkillCandidate
+    from skep.supervisor.templates import WorkflowTemplate
+
+    store = RunStore(config.db_path)
+    try:
+        chat = store.create_chat(title="gated", model=None)
+        tasks = []
+        for state in ("completed", "pending_approval"):
+            task = mint_task(workspace=tmp_path / state, instructions=f"a {state} run")
+            store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+            store.transition(task.task_id, state)
+            tasks.append(task.task_id)
+        patch = store.enqueue_approval(tasks[0], action="apply_patch", reason="land it")
+        gate = store.enqueue_approval(tasks[1], action="network.fetch", reason="pypi.org")
+        store.add_chat_action(
+            chat.chat_id, tool="approve_review", args={"review_id": patch}, source="gate"
+        )
+        store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": tasks[0]})
+        card = store.add_chat_action(chat.chat_id, tool="read_url", args={"url": "https://x.dev"})
+        memory = store.create_memory_proposal(
+            memory_class="project_fact", content="uses uv", actor="queen", taint=("untrusted",)
+        )
+
+        def skill(name: str, status: str, provenance: str, at: str) -> None:
+            template = WorkflowTemplate(name=name, instructions="# do it", provenance=provenance)
+            store.add_candidate(
+                SkillCandidate(
+                    name=name,
+                    signature=name,
+                    status=status,
+                    template=template,
+                    source_task_ids=("chat:abc",),
+                    occurrences=1,
+                    created_at=at,
+                    taint=("untrusted",) if provenance == "captured" else (),
+                )
+            )
+
+        skill("captured-one", DRAFT, "captured", "2026-11-20T10:00:00Z")
+        skill("learned-one", TESTED, "learned", "2026-11-20T11:00:00Z")
+        skill("gone", REJECTED, "learned", "2026-11-20T12:00:00Z")
+    finally:
+        store.close()
+    return {"patch": patch, "gate": gate, "card": card, "memory": memory.proposal_id}
+
+
+def test_review_queue_lists_each_waiting_thing_once_riskiest_boundary_first(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    client = serve_client(config)
+    ids = _seed_queue(config, tmp_path)
+    queue = client.get("/api/review-queue").json()
+    got = [(item["kind"], item["id"]) for item in queue["items"]]
+    # The two chat cards mirroring the patch gate are the gate, once (I8).
+    assert got == [
+        ("gate", ids["patch"]),  # patch-landing
+        ("gate", ids["gate"]),  # network-egress
+        ("card", ids["card"]),  # network-egress, newer
+        ("skill", "captured-one"),  # policy-change, oldest first
+        ("skill", "learned-one"),
+        ("memory", ids["memory"]),
+    ]
+    assert queue["count"] == 6
+    patch, gate, card, captured, learned, memory = queue["items"]
+    assert patch["boundary"] == "patch-landing"
+    assert [m["tool"] for m in patch["mirrored_by"]] == ["approve_review", "land_run"]
+    assert "could not re-verify" in patch["warning"] or "never re-verified" in patch["warning"]
+    assert gate["boundary"] == "network-egress" and gate["action"] == "network.fetch"
+    assert card["boundary"] == "network-egress" and card["source"] == "assistant"
+    assert card["headline"].startswith("read_url")
+    assert memory["boundary"] == "policy-change" and "outside content" in memory["taint"]
+    assert captured["approvable"] is True and captured["taint"].startswith("⚠ tainted")
+    assert learned["approvable"] is True and learned["taint"] is None
+
+
+def test_review_queue_count_only_is_the_same_membership_the_list_has(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    client = serve_client(config)
+    _seed_queue(config, tmp_path)
+    full = client.get("/api/review-queue").json()
+    light = client.get("/api/review-queue?detail=false").json()
+    assert light["count"] == full["count"] == len(light["items"])
+    assert [(i["kind"], i["id"]) for i in light["items"]] == [
+        (i["kind"], i["id"]) for i in full["items"]
+    ]
+    assert set(light["items"][0]) == {"kind", "id", "boundary", "at"}  # nothing costly

@@ -1855,3 +1855,11 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
   padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft);
 }
 .project-walls-row .grow { flex: 1 1 16rem; min-width: 0; }
+/* Phase 10 R1 (E2): an Inbox row — its title is the link, its verdicts are
+   buttons; banners and actions sit in the text column and wrap on a phone. */
+.review-row > small, .review-row > .banner, .review-row > .inbox-actions { grid-column: 2; }
+.review-row > .banner { margin: var(--space-1) 0 0; font-size: var(--text-sm); }
+.inbox-open { color: var(--text-strong); overflow-wrap: anywhere; }
+.inbox-open:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-radius: var(--radius-sm); }
+.inbox-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: var(--space-1); }
+.inbox-elsewhere { font-size: var(--text-sm); }

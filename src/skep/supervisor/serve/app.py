@@ -1436,7 +1436,6 @@ def create_app(
     add_notes_tasks_routes(app, run_store=run_store)
     add_memory_routes(app, run_store=run_store)
     add_llm_routes(app, run_store=run_store, home=config.home)
-    add_console_routes(app, holder=holder)  # Phase 10 R1: the console's reads
     chat_engine = add_chat_routes(
         app,
         run_store=run_store,
@@ -1446,6 +1445,8 @@ def create_app(
         get_run_repeat_delay_seconds=chat_get_run_repeat_delay_seconds,
         sleep=chat_sleep,
     )
+    # Phase 10 R1: the review console's reads (one queue, ledger, forge, probe).
+    add_console_routes(app, holder=holder, run_store=run_store, engine=chat_engine)
     # v26-F4: signature-authenticated Slack webhooks over the same engine.
     # v130-F6: the live status line only where channels run for real.
     add_slack_routes(

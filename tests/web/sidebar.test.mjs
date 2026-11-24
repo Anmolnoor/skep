@@ -118,23 +118,28 @@ test("thread search filters rows client-side and survives a re-render", () => {
   assert.deepEqual(hidden(), ["#/chat/pwa manifest", "#/chat/new one"]);
 });
 
-// ---------- H1: the Inbox ----------
+// ---------- H1: the Inbox (Phase 10 R1: the badge counts the one review queue) ----------
 
-const emptyInbox = { cards: [], approvals: [] };
-const fullInbox = {
-  cards: [{ action_id: "a1", chat_id: "c1", chat_title: "flaky monitor", tool: "dispatch_run", source: "assistant", created_at: "2026-11-17T10:00:00Z" }],
-  approvals: [{ review_id: "r1", task_id: "abcdef1234567890", action: "apply_patch", reason: "land it", requested_at: "2026-11-17T10:00:00Z" }],
+const emptyQueue = { items: [], count: 0 };
+const fullQueue = {
+  items: [
+    { kind: "gate", id: "r1", boundary: "patch-landing", at: "2026-11-17T10:00:00Z" },
+    { kind: "card", id: "a1", boundary: "network-egress", at: "2026-11-17T10:00:00Z" },
+  ],
+  count: 2,
 };
 
-test("refreshSidebar draws the threads and counts the Inbox on its badge", async () => {
+test("refreshSidebar draws the threads and counts the review queue on its badge", async () => {
   const { app, list } = withSidebar();
   const badge = app.document.getElementById("inbox-badge");
-  app.api = async (method, path) => (path === "/api/chats" ? { chats: [chat("only")] } : fullInbox);
+  const asked = [];
+  app.api = async (method, path) => { asked.push(path); return path === "/api/chats" ? { chats: [chat("only")] } : fullQueue; };
   await app.refreshSidebar();
+  assert.deepEqual(asked, ["/api/chats", "/api/review-queue?detail=false"]);
   assert.deepEqual(rowText(list), ["only"]);
   assert.equal(badge.textContent, "2");
   assert.equal(badge.classList.contains("hidden"), false);
-  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : emptyInbox);
+  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : emptyQueue);
   await app.refreshSidebar();
   assert.equal(badge.classList.contains("hidden"), true);
 });
@@ -143,47 +148,24 @@ test("an open Inbox redraws when what it counts changes, and only then", async (
   const { app } = withSidebar("#/inbox");
   let routed = 0;
   app.route = () => { routed += 1; };
-  let inbox = emptyInbox;
-  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : inbox);
+  let queue = emptyQueue;
+  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : queue);
   await app.refreshSidebar(); // first sight: nothing to compare with
   await app.refreshSidebar();
   assert.equal(routed, 0);
-  inbox = fullInbox;
+  queue = fullQueue;
   await app.refreshSidebar();
   assert.equal(routed, 1);
-});
-
-test("Inbox view: the review queue comes first, each gate opening its review; cards link to their thread", async () => {
-  const { app } = withSidebar("#/inbox");
-  app.header = () => {};
-  // Phase 10 10.1: gates come from /api/approvals (the full record, mirrored ones too).
-  app.api = async (method, path) => (path === "/api/approvals" ? { approvals: fullInbox.approvals } : fullInbox);
-  const main = app.el("main");
-  await app.viewInbox(main);
-  const items = main.querySelectorAll(".inbox-item");
-  assert.deepEqual(items.map(i => i.getAttribute("href")), ["#/review/r1", "#/chat/c1"]);
-  assert.deepEqual(texts(main, "inbox-title"), ["apply_patch · run abcdef12", "dispatch_run"]);
-  assert.match(items[0].querySelector("small").textContent, /^land it · /);
-  assert.match(items[1].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
-  assert.equal(main.querySelectorAll("button").length, 0); // read-only (I6): the verdict is on the review page
 });
 
 test("Inbox view: an untitled thread reads as the sidebar names it", async () => {
   const { app } = withSidebar("#/inbox");
   app.header = () => {};
-  app.api = async () => ({ cards: [{ ...fullInbox.cards[0], chat_title: "" }], approvals: [] });
+  const card = { kind: "card", id: "a1", boundary: null, at: "2026-11-17T10:00:00Z", chat_id: "c1", chat_title: "", tool: "dispatch_run", source: "assistant", headline: "dispatch_run" };
+  app.api = async () => ({ items: [card], count: 1 });
   const main = app.el("main");
   await app.viewInbox(main);
   assert.match(main.querySelector(".inbox-item").querySelector("small").textContent, /^New Chat · /);
-});
-
-test("Inbox view: nothing waiting says so", async () => {
-  const { app } = withSidebar("#/inbox");
-  app.header = () => {};
-  app.api = async () => emptyInbox;
-  const main = app.el("main");
-  await app.viewInbox(main);
-  assert.equal(main.textContent, "Nothing is waiting on you.");
 });
 
 test("H1-G9: a bare-URL or very long title is shortened for display only", () => {
