@@ -270,6 +270,22 @@ def test_unattended_turns_are_never_offered_the_tools_they_refuse(
         home.store.close()
 
 
+def test_the_scheduled_menu_is_exactly_these_store_reads() -> None:
+    """Phase 09 R2 (S12): pinned by name. get_run reads a run's patch and
+    draft files and list_repos walks checkout dirs — neither is a store
+    read, so neither is on it."""
+    from skep.supervisor.serve.chat import SCHEDULED_TURN_TOOLS
+
+    pinned = {
+        "list_runs", "await_runs", "list_approvals",
+        "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
+        "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
+        "list_schedules", "list_projects",
+        "describe_tools", "ask_clarifying_question",
+    }  # fmt: skip
+    assert pinned == SCHEDULED_TURN_TOOLS
+
+
 def test_a_scheduled_turn_is_offered_store_reads_only(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:

@@ -58,9 +58,11 @@ the store writes". That left `list_prs` (GitHub, with the operator's
 login), `repo_state` / `git_diff` / `git_log` (checkouts on disk) and
 `list_mcp_tools` (starts an MCP server) on a scheduled turn's menu. A
 scheduled turn now holds a named allowlist, `chat.SCHEDULED_TURN_TOOLS`:
-runs (`list_runs`, `get_run`, `await_runs`), `list_approvals`, chats,
-notes, tasks, memory, `list_schedules`, `list_repos`, `list_projects`, plus
-`describe_tools` and `ask_clarifying_question`, which read nothing. Both
+runs (`list_runs`, `await_runs`), `list_approvals`, chats, notes, tasks,
+memory, `list_schedules`, `list_projects`, plus `describe_tools` and
+`ask_clarifying_question`, which read nothing. `get_run` (it reads a run's
+patch and draft files) and `list_repos` (it walks checkout dirs) were on
+the R1 list and left it in Phase 09 R2: neither is a store read. Both
 layers hold it: nothing else is advertised (schemas, the prompt's tool
 index, `describe_tools` answers), and a call to anything else is refused
 unexecuted, written as a `decisions.jsonl` row and included in the
