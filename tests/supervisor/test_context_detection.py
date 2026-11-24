@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -268,7 +269,6 @@ def _recorded(
 ) -> tuple[list[str], list[float]]:
     """(every URL the probe asks, each one's timeout) — each answered 404,
     no network. With ``clock``, each request costs one second of it."""
-    import contextlib
 
     import httpx
 
@@ -285,9 +285,7 @@ def _recorded(
     monkeypatch.setattr(httpx, "get", lambda url, **kw: answer("GET", url, **kw))
     monkeypatch.setattr(httpx, "post", lambda url, **kw: answer("POST", url, **kw))
     monkeypatch.setattr(
-        httpx,
-        "stream",
-        lambda method, url, **kw: contextlib.nullcontext(answer(method, url, **kw)),
+        llm, "_http_body", lambda method, url, **kw: (answer(method, url, **kw).is_error, b"")
     )
     return asked, timeouts
 
@@ -316,7 +314,7 @@ def test_one_deadline_covers_every_probe_and_a_dead_host_stops_them(
         raise httpx.ConnectTimeout("timed out")
 
     monkeypatch.setattr(httpx, "get", lambda url, **kw: dead("GET", url, **kw))
-    monkeypatch.setattr(httpx, "stream", dead)
+    monkeypatch.setattr(llm, "_http_body", dead)
     assert llm.detect_model_ctx(local, None, model="m1", protocol="openai-compat") is None
     assert dead_asked == [f"{local}/v1/models"]
 
@@ -579,3 +577,89 @@ def test_a_probe_whose_configuration_changed_never_publishes(
     store.set_setting(key, {"window": 131072, "max_output": None})
     refresh_model_ctx(store, tmp_path, "m")
     assert store.get_setting(key) == {"window": 131072, "max_output": None}
+
+
+def test_a_host_that_trickles_headers_never_holds_the_probe_past_its_deadline() -> None:
+    """R4 (Sol R3-2): one HEADER byte every 40 ms reset httpx's per-read
+    timeout, so the worker lived ~1 s past a 0.3 s deadline (forever, for a
+    host that never ends its headers). The read is cancelled at the deadline."""
+    import socket
+    import threading
+    import time
+
+    server = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+    served = threading.Event()
+
+    def trickle() -> None:
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            conn.recv(65536)
+            for byte in b"HTTP/1.1 200 OK\r\nX-Slow: " + b"a" * 200:
+                if stop.is_set():
+                    break
+                try:
+                    conn.sendall(bytes([byte]))
+                except OSError:
+                    break
+                time.sleep(0.04)
+        served.set()
+
+    threading.Thread(target=trickle, daemon=True).start()
+    url = f"http://127.0.0.1:{server.getsockname()[1]}/v1/models"
+    try:
+        began = time.monotonic()
+        assert llm._fetch_json(url, None, time.monotonic() + 0.3) is llm._UNREACHABLE
+        assert time.monotonic() - began < 0.6  # the CALLING thread itself returned
+        assert served.wait(1.0)  # and the connection was dropped, not left trickling
+    finally:
+        stop.set()
+        server.close()
+
+
+def test_the_meter_and_its_budget_read_one_window(store: RunStore) -> None:
+    """R4 (Sol R4-1): context_view's budget_chars comes from the same window
+    the meter shows — an explicit window feeds _history_budget unchanged."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve.chat import RESPONSE_RESERVE_CHARS, ChatEngine
+
+    engine = SimpleNamespace(store=store, _advertised_tools=lambda _chat: [])
+    window = ContextWindow(32768, 32768, "provider-api")
+    floor = 1000 + len("[]") + RESPONSE_RESERVE_CHARS
+    got = ChatEngine._history_budget(engine, 1000, None, window)  # type: ignore[arg-type]
+    assert got == 32768 * 4 - floor
+
+
+def test_a_slow_dns_lookup_never_holds_the_probe_or_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R5 (Sol R5-1): asyncio.run waited on its resolver thread (and the
+    interpreter joins executor threads at exit), so a 2 s DNS lookup held a
+    0.3 s probe — and shutdown — well past the deadline. The pending lookup
+    runs on a daemon thread nothing waits for."""
+    import socket
+    import threading
+    import time
+
+    release = threading.Event()
+    real = socket.getaddrinfo
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        release.wait(2.0)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    try:
+        began = time.monotonic()
+        got = llm._fetch_json("http://slow-dns.invalid/v1/models", None, time.monotonic() + 0.3)
+        assert got is llm._UNREACHABLE and time.monotonic() - began < 0.6
+        blockers = [
+            t for t in threading.enumerate()
+            if t is not threading.main_thread() and not t.daemon and t.is_alive()
+            and "asyncio" in t.name
+        ]  # fmt: skip
+        assert blockers == []  # nothing an interpreter exit would join
+    finally:
+        release.set()

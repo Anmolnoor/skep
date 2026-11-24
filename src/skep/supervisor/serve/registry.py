@@ -1769,13 +1769,15 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/providers/{provider_id}/activate")
     def activate_provider_route(provider_id: str) -> dict[str, Any]:
-        from ..providers import ProviderError
+        from ..providers import ProviderConflict, ProviderError
         from . import actions
 
         if run_store.get_provider_profile(provider_id) is None:
             raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
         try:
             return actions.use_provider(run_store, holder.current.home, provider_id=provider_id)
+        except ProviderConflict as exc:  # R3 (H2): it changed while it was probed
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ProviderError as exc:  # Phase 05 R1: a refused probe — nothing changed
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1795,7 +1797,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         # ADR 0019's exception, extended per profile by ADR 0051). Empty
         # clears. The value never appears in sqlite or any GET. Phase 05 R1:
         # the shared verb probes a new key against its endpoint first.
-        from ..providers import ProviderError
+        from ..providers import ProviderConflict, ProviderError
         from . import actions
 
         if run_store.get_provider_profile(provider_id) is None:
@@ -1804,6 +1806,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
             return actions.set_provider_key(
                 run_store, holder.current.home, provider_id=provider_id, key=body.api_key
             )
+        except ProviderConflict as exc:  # R3 (H2): it changed while the key was probed
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
