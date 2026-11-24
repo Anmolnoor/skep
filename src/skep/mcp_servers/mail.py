@@ -32,6 +32,7 @@ import json
 import os
 import smtplib
 import socket
+import ssl
 import sys
 import urllib.parse
 from email.message import EmailMessage
@@ -170,6 +171,7 @@ def list_recent(arguments: dict[str, Any]) -> dict[str, Any]:
     with imaplib.IMAP4_SSL(
         os.environ["SKEP_MAIL_IMAP_HOST"],
         int(os.environ.get("SKEP_MAIL_IMAP_PORT") or 993),
+        ssl_context=ssl.create_default_context(),  # R2 (S6): verified, never the stdlib default
     ) as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
         imap.select(mailbox, readonly=True)
@@ -202,6 +204,7 @@ def read_message(arguments: dict[str, Any]) -> dict[str, Any]:
     with imaplib.IMAP4_SSL(
         os.environ["SKEP_MAIL_IMAP_HOST"],
         int(os.environ.get("SKEP_MAIL_IMAP_PORT") or 993),
+        ssl_context=ssl.create_default_context(),  # R2 (S6): verified, never the stdlib default
     ) as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
         imap.select(mailbox, readonly=True)
@@ -238,6 +241,7 @@ def send_message(arguments: dict[str, Any]) -> dict[str, Any]:
     with smtplib.SMTP_SSL(
         os.environ["SKEP_MAIL_SMTP_HOST"],
         int(os.environ.get("SKEP_MAIL_SMTP_PORT") or 465),
+        context=ssl.create_default_context(),  # R2 (S6): certificate and name checked
     ) as smtp:
         smtp.login(os.environ["SKEP_MAIL_USER"], password)
         smtp.send_message(message)
@@ -314,7 +318,7 @@ class _ProxiedIMAP4_SSL(imaplib.IMAP4_SSL):
 
     def __init__(self, host: str, port: int, *, proxy: str) -> None:
         self._proxy = proxy
-        super().__init__(host, port)
+        super().__init__(host, port, ssl_context=ssl.create_default_context())
 
     def _create_socket(self, timeout: float | None = None) -> socket.socket:
         sock = proxy_tunnel(self._proxy, self.host, self.port, timeout)
@@ -340,7 +344,9 @@ def digest(count: int, mailbox: str = "INBOX") -> str:
     )
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     connect = (
-        imaplib.IMAP4_SSL(host, port) if not proxy else _ProxiedIMAP4_SSL(host, port, proxy=proxy)
+        imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context())
+        if not proxy
+        else _ProxiedIMAP4_SSL(host, port, proxy=proxy)
     )
     with connect as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
