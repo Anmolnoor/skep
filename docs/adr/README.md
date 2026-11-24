@@ -62,6 +62,7 @@ touches.
 | [0049](0049-caste-registry.md) | The caste roster is a registry, not five dict literals (v101) |
 | [0050](0050-one-verb-three-faces.md) | One verb, three faces: the operator's surface is never the narrow half (v104) |
 | [0051](0051-provider-shelf.md) | The provider shelf: presets, per-profile keys, no borrowed identity (v108) |
+| [0058](0058-acp-engine.md) | The ACP engine: the adapter in the sandbox, skep's governor outside it deciding every ask (Phase 04) |
 | [0059](0059-policy-v3.md) | Policy v3: one decide(), layer-aware ceilings, scoped grants (edge sweep; P3-1 implemented) |
 | [0060](0060-serve-readopts-workers.md) | Serve re-adopts a live worker after a restart (edge sweep D2) |
 | [0061](0061-unlocked-mode.md) | Unlocked mode on policy v3: a zero-ask project as one step inside decide() |

@@ -492,7 +492,13 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
             detail=f"action {action_id!r} is already being confirmed — its result "
             "lands in this chat when it finishes",
         )
-    return HTTPException(status_code=409, detail=f"action {action_id!r} already {status}")
+    result = action.result if action is not None else None
+    note = result.get("note") if isinstance(result, dict) else None
+    # E2: the winner's own words ("the engine already answered no: …"), when it left some
+    return HTTPException(
+        status_code=409,
+        detail=f"action {action_id!r} already {status}" + (f": {note}" if note else ""),
+    )
 
 
 def blocking_cards(store: RunStore, chat_id: str) -> list[ChatActionRecord]:
@@ -4224,6 +4230,18 @@ def add_chat_routes(
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
+        if (
+            confirm
+            and action.tool == actions.ACP_PERMISSION_TOOL
+            and actions.acp_permission_expired(action.args)
+        ):
+            # A5 (I6): the run's engine has denied this ask, or is about to —
+            # a confirm past the card's deadline never claims it.
+            actions.expire_acp_permission(run_store, action_id, "auto-denied: card timed out")
+            raise HTTPException(
+                status_code=409,
+                detail="this ask timed out and was denied (I6) — the agent was told no",
+            )
         if confirm or gate_mirror:
             # ES-F1 (B15): the same claim as verdict_events — a double /land
             # confirm ran land_run twice.
@@ -4231,6 +4249,11 @@ def add_chat_routes(
                 raise card_taken(run_store, action_id)
             tool = action.tool if confirm else "deny_review"
             args = action.args if confirm else {"review_id": str(action.args.get("review_id", ""))}
+            if action.tool == actions.ACP_PERMISSION_TOOL:  # ADR 0058: the engine's ask, no review
+                tool, args = (
+                    action.tool,
+                    {**action.args, "answer": "allow" if confirm else "reject"},
+                )
             status = "confirmed" if confirm else "denied"
             try:
                 result = execute_mutation(
@@ -4268,7 +4291,12 @@ def add_chat_routes(
                 raise
             if confirm and status == "confirmed":
                 status = executed_status(payload)
-            run_store.resolve_chat_action(action_id, status=status, result=payload, claimed=True)
+            try:
+                run_store.resolve_chat_action(
+                    action_id, status=status, result=payload, claimed=True
+                )
+            except ValueError:  # E2: the ACP engine settled it first — its answer stands
+                raise card_taken(run_store, action_id) from None
         else:
             payload = {"ok": False, "denied": True, "note": "the operator canceled this command"}
             try:

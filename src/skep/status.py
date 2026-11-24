@@ -813,11 +813,21 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             if shadowed:
                 umbrellas.append(f"{project_id} ({bound_path}) contains: {', '.join(shadowed)}")
                 umbrella_ids.append(project_id)
+        from .supervisor.scheduler import PAUSED_STATE
+
+        paused_prefix = f"{PAUSED_STATE}: "
+        healths = store.list_schedule_health()
         disabled = [
             f"{health.name} ({health.disabled_reason})"
-            for health in store.list_schedule_health()
-            if health.disabled_reason
+            for health in healths
+            if health.disabled_reason and not health.disabled_reason.startswith(paused_prefix)
         ]
+        # Phase 04 4.2: an external-engine schedule a gate paused, with its fix
+        paused = sorted(
+            f"{health.name}: {(health.disabled_reason or '').removeprefix(paused_prefix)}"
+            for health in healths
+            if not health.enabled and (health.disabled_reason or "").startswith(paused_prefix)
+        )
         # v127-F4: skipped on a dead worker-provider key, never auto-disabled
         provider_blocked = sorted(
             schedule.name
@@ -846,6 +856,11 @@ def _repo_registry_advisories(home: Path) -> list[str]:
         advisories.append(
             f"{len(disabled)} schedule(s) are auto-disabled after repeated failures: "
             f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
+        )
+    if paused:
+        advisories.append(
+            f"{len(paused)} schedule(s) on an external coding engine are paused until all five "
+            f"external-engine gates hold: {'; '.join(paused)}"
         )
     if provider_blocked:
         advisories.append(

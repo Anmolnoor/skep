@@ -243,6 +243,8 @@ def boundary(
         return "in-sandbox-locked", remedy if gate.action == "shell.run" else None
     if tool == "propose_schedule" and args.get("caste") == "script":
         return "host-shell", None
+    if tool == "acp_permission":  # ADR 0058: the ask is inside the run's sandbox
+        return ("network-egress" if args.get("scope") == "network" else "in-sandbox-locked"), None
     return _BOUNDARY.get(tool), None
 
 
@@ -460,6 +462,10 @@ def headline(tool: str, args: dict[str, Any], *, limit: int | None = 160) -> str
             if len(reason) > 160:
                 reason = f"{reason[:157]}…"
             return f"{tool} — {reason}"
+    if tool == "acp_permission":  # ADR 0058: what the run's agent asked, in skep's words
+        asked = " ".join(str(args.get(k) or "") for k in ("scope", "action", "value")).strip()
+        asked = asked or str(args.get("title") or "")
+        return f"{tool} — {asked}" if asked else tool
     if tool == "call_mcp_tool":
         # L16: which tool, on which server, with what — an amount is the point
         rendered = f"{args.get('server_id')}:{args.get('tool')}"
@@ -577,6 +583,11 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
     if tool == "deny_review":
         return None  # refusing applies nothing
+    if tool == "acp_permission":
+        return (
+            "lets this run's ACP agent do it once, inside its sandbox — the patch still "
+            "lands only through your approval"
+        )
     reason = str(args.get("reason") or "")
     if tool == "approve_review" and reason and not reason.startswith("land "):
         # L9: a worker gate, not a landing (landing reasons read 'land "…"')

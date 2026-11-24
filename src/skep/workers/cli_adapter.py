@@ -68,6 +68,9 @@ class AdapterSpec:
     # runs only where the spawner marked the launch as inside skep's sandbox
     # (SKEP_SANDBOX) — codex with its own sandbox off, aider and pi with none.
     requires_sandbox: bool = False
+    # ADR 0058: the agent's stdin/stdout are this worker's own — the ACP
+    # engine's wire to skep's governor outside the sandbox — never captured.
+    inherit_stdio: bool = False
 
     def command_from_env(self) -> list[str]:
         raw = os.environ.get(self.command_env, "")
@@ -167,6 +170,7 @@ def _run(
     purpose: str,
     heartbeat_seconds: float = _HEARTBEAT_SECONDS,
     shown: list[str] | None = None,
+    inherit_stdio: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], CommandRecord]:
     # v126-F5 (review): ``shown`` is the argv as recorded, when the real one
     # carries text the record must not keep (the memory block).
@@ -187,8 +191,15 @@ def _run(
     beater.start()
     try:
         proc = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout
+            argv,
+            cwd=cwd,
+            stdout=None if inherit_stdio else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=timeout,
         )
+        proc.stdout = proc.stdout or ""
     except FileNotFoundError as exc:
         proc = subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
@@ -317,6 +328,7 @@ def _execute(
         stream=stream,
         purpose="agent",
         shown=spec.build_argv(spec.command_from_env(), prompt + marker),
+        inherit_stdio=spec.inherit_stdio,
     )
     changed_files = _changed_files(workspace, timeout=timeout)
 

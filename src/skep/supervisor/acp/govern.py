@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -54,6 +54,31 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+Ring = Literal["advisory", "hard"]
+# (item, the cwd the frame names, ring, toolCallId, client_side, a fetch's URL) -> the row
+EngineDecide = Callable[
+    [tuple[str, str, str], str, Ring, str | None, bool, str | None], dict[str, Any]
+]
+
+
+@dataclass
+class EngineBinding:
+    """ADR 0058 (Phase 04 4.1): the dispatched run a governor answers for.
+
+    Set only by ``skep.workers.acp``, the supervisor-side engine, whose
+    ``decide`` is bound to the run (task, repo, role, worktree, network —
+    never what the adapter claims) and may decide ``sandboxed`` because
+    dispatch put the adapter behind the wall. The standalone ``skep acp
+    govern`` face (an IDE on the bare host) has none: ``policy_decide``,
+    never sandboxed."""
+
+    decide: EngineDecide
+    repo: str  # the run's repo: what every row names, never an adapter's cwd
+    blame: dict[str, str]  # Phase 02 (I13): task_id, engine, caste on every row
+    # json(request id) -> who answered a forwarded ask, when not the human
+    answered_by: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class Governor:
     """One governed agent process: session state plus the handlers that decide."""
@@ -68,6 +93,7 @@ class Governor:
     home: str = ""
     client: str = "client"
     session: Session = field(default_factory=Session)
+    engine: EngineBinding | None = None
 
     def __post_init__(self) -> None:
         if self.repo_override:
@@ -105,8 +131,16 @@ class Governor:
             _say(line)
 
     def _decide(
-        self, item: tuple[str, str, str], cwd: str, ring: Literal["advisory", "hard"] = "advisory"
+        self,
+        item: tuple[str, str, str],
+        cwd: str,
+        ring: Ring = "advisory",
+        tool_call_id: str | None = None,
+        client_side: bool = False,
+        url: str | None = None,
     ) -> dict[str, Any]:
+        if self.engine is not None:
+            return self.engine.decide(item, cwd, ring, tool_call_id, client_side, url)
         if self.holder is None or self.store is None:
             raise RuntimeError(self.store_error or "no store")
         scope, action, value = item
@@ -128,13 +162,25 @@ class Governor:
         if call.get("status") not in _RAN or tid in self.session.asked:
             return None  # observed means "ran unasked"; an asked call has its decision rows
         pr = probe(call, self.session)
-        if isinstance(pr, Decided) and self.session.mark_observed(tid):
-            for scope, action, value in pr.items:
-                policy_note(
-                    self.audit_dir, source="observed", actor=self.actor, repo=pr.cwd,
-                    scope=scope, action=action, value=value, agent=self.agent,
-                    session_id=params.get("sessionId"), tool_call_id=tid,
-                )  # fmt: skip
+        if not isinstance(pr, Decided) and self.engine is None:
+            return None  # ADR 0054's face records the calls it can map (its goldens)
+        if not self.session.mark_observed(tid):
+            return None
+        # Phase 04 R1 (A8, I8): in a dispatched run, a call skep has no rule
+        # for (an ordinary read, a search) ran unasked all the same — one row
+        # with what the agent called it and the run's blame, never silence.
+        items: tuple[tuple[str | None, str | None, str | None], ...] = (
+            pr.items if isinstance(pr, Decided) else ((None, None, call.get("title")),)
+        )
+        meta = {} if isinstance(pr, Decided) else {"kind": call.get("kind"), "note": pr.reason}
+        cwd = pr.cwd if isinstance(pr, Decided) else self.session.cwd
+        for scope, action, value in items:
+            policy_note(
+                self.audit_dir, source="observed", actor=self.actor,
+                repo=self.engine.repo if self.engine else cwd,
+                scope=scope, action=action, value=value, agent=self.agent,
+                session_id=params.get("sessionId"), tool_call_id=tid, **meta, **self._blame,
+            )  # fmt: skip
         return None
 
     def _permission(self, msg: dict[str, Any]) -> Reply | Forward:
@@ -155,7 +201,7 @@ class Governor:
                 note = pr.reason
             else:
                 cwd, item = pr.cwd, pr.items[0]
-                records = [self._decide(i, cwd) for i in pr.items]
+                records = [self._decide(i, cwd, tool_call_id=tid, url=pr.url) for i in pr.items]
                 if any(r["verdict"] == "deny" for r in records):
                     if "reject_once" in kinds:
                         return _selected(kinds["reject_once"])
@@ -180,18 +226,31 @@ class Governor:
                 oid = outcome.get("optionId")
                 chosen = str((by_id.get(oid) if isinstance(oid, str) else None) or oid)
             scope, action, value = item or (None, None, None)
+            actor = f"human@{self.client}"
+            if self.engine is not None:
+                actor = self.engine.answered_by.pop(json.dumps(msg.get("id")), actor)
             policy_note(
-                self.audit_dir, source="forwarded", actor=f"human@{self.client}",
-                repo=cwd or None, scope=scope, action=action, value=value, agent=self.agent,
+                self.audit_dir, source="forwarded", actor=actor,
+                repo=self.engine.repo if self.engine else cwd or None,
+                scope=scope, action=action, value=value, agent=self.agent,
                 session_id=params.get("sessionId"), tool_call_id=tid, request_id=msg.get("id"),
-                outcome=chosen, note=note,
+                outcome=chosen, note=note, **self._blame,
             )  # fmt: skip
 
         return Forward(answered)
 
+    @property
+    def _blame(self) -> dict[str, str]:
+        return self.engine.blame if self.engine is not None else {}
+
     def _terminal(self, msg: dict[str, Any]) -> Reply | None:
+        # ADR 0058: the engine's client runs no terminal, so the frame is
+        # decided and refused whatever it advertised (a host process is
+        # outside the wall).
         params = _dict(msg.get("params"))
-        if not (self.session.protocol_version == 1 and self.session.client_terminal):
+        if self.engine is None and not (
+            self.session.protocol_version == 1 and self.session.client_terminal
+        ):
             return None  # A1: the hard ring is v1 only
         try:
             command = shlex.join([params["command"], *map(str, params.get("args") or [])])
@@ -201,7 +260,9 @@ class Governor:
 
     def _write(self, msg: dict[str, Any]) -> Reply | None:
         params = _dict(msg.get("params"))
-        if not (self.session.protocol_version == 1 and self.session.client_fs_write):
+        if self.engine is None and not (
+            self.session.protocol_version == 1 and self.session.client_fs_write
+        ):
             return None
         try:
             value = workspace_value(params["path"], self.session.cwd)
@@ -211,8 +272,8 @@ class Governor:
 
     def _ring(self, item: tuple[str, str, str], cwd: str) -> Reply | None:
         # A10: the hard ring has no human hop — only allow passes through.
-        record = self._decide(item, cwd, ring="hard")
-        if record["verdict"] == "allow":
+        record = self._decide(item, cwd, ring="hard", client_side=True)
+        if record["verdict"] == "allow" and self.engine is None:
             return None
         reason = f"{record['verdict']} by {record.get('decided_by') or record['rule_id']}"
         if record["verdict"] != "deny":
@@ -378,20 +439,7 @@ def doctor(argv: list[str], *, home: Path) -> int:
     print(f"agent: {info.get('name') or name} {info.get('version') or '?'}")
     print(f"protocol: ACP v{init.get('protocolVersion')}")
     print(f"preset: {preset}")
-    modes = _dict(new.get("modes"))
-    ids = [m.get("id") for m in modes.get("availableModes") or [] if isinstance(m, dict)]
-    current = modes.get("currentModeId")
-    if not ids:
-        option = next(
-            (
-                o
-                for o in new.get("configOptions") or []
-                if isinstance(o, dict) and (o.get("configId") or o.get("id")) == "mode"
-            ),
-            {},
-        )
-        ids = [o.get("value") for o in option.get("options") or [] if isinstance(o, dict)]
-        current = option.get("currentValue")
+    ids, current, _ = session_modes(new)
     marked = [f"{m} (default)" if m == current else str(m) for m in ids]
     print(f"modes: {', '.join(marked) or 'none advertised'}")
     print(
@@ -404,6 +452,25 @@ def doctor(argv: list[str], *, home: Path) -> int:
             "until the client sets an asking mode"
         )
     return 0
+
+
+def session_modes(new: dict[str, Any]) -> tuple[list[Any], Any, bool]:
+    """``(mode ids, current mode, via config option)`` from a session/new
+    result: v1 ``modes``, else v2's ``configOptions`` entry ``mode``."""
+    modes = _dict(new.get("modes"))
+    ids = [m.get("id") for m in modes.get("availableModes") or [] if isinstance(m, dict)]
+    if ids:
+        return ids, modes.get("currentModeId"), False
+    option = next(
+        (
+            o
+            for o in new.get("configOptions") or []
+            if isinstance(o, dict) and (o.get("configId") or o.get("id")) == "mode"
+        ),
+        {},
+    )
+    ids = [o.get("value") for o in option.get("options") or [] if isinstance(o, dict)]
+    return ids, option.get("currentValue"), True
 
 
 def _ask(

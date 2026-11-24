@@ -4580,6 +4580,10 @@ def _execute_mutation(
     chat_id: str | None = None,
     preanswered: dict[str, Any] | None = None,
 ) -> Any:
+    if name == actions.ACP_PERMISSION_TOOL:
+        # ADR 0058 D3: nothing runs here — the waiting ACP engine reads the
+        # card's verdict (confirmed / denied) and answers its agent.
+        return {"answer": args.get("answer", "allow"), "task_id": args.get("task_id")}
     if name == "search_web":
         # P4-1: a taint card the operator confirmed (chat.py cards search_web
         # only for a taint ask) — the human's OK answers the ask; a deny that
@@ -4815,6 +4819,7 @@ def _execute_mutation(
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
             preanswered=preanswered,  # D23: the manifest its card showed
+            chat_id=chat_id,  # E4: the run's ACP asks card here
         )
         return {
             "task_id": task_id,
@@ -4943,6 +4948,7 @@ def _execute_mutation(
                 deferred_asks=_human_answers(store, chat_id),
                 chat_taint=chat_taint_bits(store, chat_id),
                 preanswered=member_manifest,
+                chat_id=chat_id,  # E4
             )
             for entry, member_manifest in zip(entries, approved, strict=False)
         ]
@@ -5155,6 +5161,7 @@ def _execute_mutation(
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
             preanswered=preanswered,  # D23: the manifest its card showed
+            chat_id=chat_id,  # E4
         )
         forge.save_plugin(
             store,
@@ -5763,6 +5770,7 @@ def _execute_mutation(
             engine=None if args.get("engine") is None else str(args["engine"]),
             chat_taint=chat_taint_bits(store, chat_id),
             preanswered=preanswered,
+            chat_id=chat_id,  # E4: the run's ACP asks card in this chat
         )
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —

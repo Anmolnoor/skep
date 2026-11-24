@@ -403,12 +403,19 @@ CHANNEL_CHATS: set[str] = set()
 
 
 def load_stack(
-    holder: ConfigHolder, store: RunStore, *, repo: str | None = None, chat: str | None = None
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str | None = None,
+    chat: str | None = None,
+    binding: tuple[str, str] | None = None,
 ) -> Stack:
     """The stack for one request. With a repo, the run policy a dispatch
     there would run under; a repo that resolves to no run policy keeps the
     operator lane and says why (I8). An ambiguous repo name raises the
-    registry's HTTPException, as ``why`` always has."""
+    registry's HTTPException, as ``why`` always has. ``binding`` (Phase 04
+    R1, A3): a dispatched run's own project binding, tried first — a run
+    bound by template name is invisible to the repo lookup (W10)."""
     from .policy_layers import baseline_guard
     from .serve.actions import _project_summary, _repo_project_for_view, _resolve_for_view
     from .serve.fileio import operator_roots
@@ -430,7 +437,7 @@ def load_stack(
     )
     if not repo:
         return stack
-    resolved_repo, candidates, project_row = _repo_project_for_view(holder, store, repo)
+    resolved_repo, candidates, project_row = _repo_project_for_view(holder, store, repo, binding)
     project = _project_summary(project_row)
     # B123: a shell line is judged from the repo the arg names (a slug is
     # not a path under the process cwd, v87-F1).
@@ -740,7 +747,10 @@ def decide(
     every face can ask what read_url asks (V1).
 
     ``sandboxed`` (ADR 0061) is a fact about the request: a worker inside
-    the sandbox walls raised it (only the worker-gate auto-answer says so).
+    the sandbox walls raised it. Two callers say so: the worker-gate
+    auto-answer, and the ACP engine's governor (ADR 0058,
+    ``actions.acp_engine_decide``) for an adapter dispatch launched behind
+    the wall — that governor runs outside it.
     On an unlocked project's run lane, the default asks of such a shell
     request — unmatched, or a catch-all ``*`` ask — are answered ``allow``
     (never a network host, D42) labelled
@@ -748,7 +758,8 @@ def decide(
     and before the role, the delegation cap and taint, which all still
     apply — except a role's catch-all ``*`` ask, which that allow answers
     like a human's grant (D46), for the run's role and every delegator.
-    REST, the CLI, the hook and ACP never pass it."""
+    REST, the CLI, the hook and the standalone ``skep acp govern`` (an IDE's
+    agent on the bare host) never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
