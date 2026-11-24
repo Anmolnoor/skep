@@ -15,7 +15,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..profile import load_profile, profile_path
-from .serve.llm import LLM_BASE_URL
 from .store import RunStore
 
 _AUX_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(?::\d{1,5})?$")
@@ -59,6 +58,10 @@ def configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
     """``host:port`` of every configured LLM endpoint (profile.json + sqlite
     settings + the active registry profile + a local one routing may pick on a
     host already listed)."""
+    # Lazy: serve/llm.py loads httpx (and, through it, rich) for every
+    # ``skep`` start that reaches this module — 10.3 keeps that off the CLI.
+    from .serve.llm import LLM_BASE_URL
+
     hosts: list[str] = []
     profile = profile_path(home)
     if profile.is_file():

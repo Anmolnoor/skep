@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,18 @@ ANSI = "\x1b["
 class _Tty(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+def test_importing_the_cli_loads_neither_httpx_nor_rich() -> None:
+    """Every ``skep`` start pays for what ``skep.cli`` imports: httpx came in
+    through provider_hosts -> serve/llm.py for one setting-key constant, and
+    httpx loads its own CLI (rich) when rich is installed — ~30 ms on every
+    command. Both now load only when a command uses them."""
+    code = "import sys, skep.cli; print(sorted({'httpx', 'rich'} & set(sys.modules)))"
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert out.strip() == "[]"
 
 
 def test_rich_only_on_a_terminal_without_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
