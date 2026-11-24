@@ -1161,3 +1161,43 @@ def test_the_receipt_and_forensics_carry_the_verified_pr_tuple(
     assert f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {fork})" in render_forensics(
         report, markdown=False
     )
+
+
+# --- 5. the failure paths say what happened and move nothing --------------------
+
+
+@pytest.mark.parametrize(
+    ("number", "drop_pull_ref", "needle"),
+    [(8, False, "gh answered PR #8"), (7, True, "git fetch failed")],
+)
+def test_a_pr_fetch_that_cannot_complete_moves_nothing(
+    repo: Path, tmp_path: Path, number: int, drop_pull_ref: bool, needle: str
+) -> None:
+    clone, base, head = _origin_with_pr(repo, tmp_path)
+    if drop_pull_ref:
+        git(repo, "update-ref", "-d", "refs/pull/7/head")
+    answer = {**_answer(base, head), "number": number}
+
+    fetched = github.fetch_pr_head(repo=clone, pr="7", runner=_gh(answer, []))
+
+    assert not fetched.ok and needle in fetched.detail
+    assert not git(clone, "for-each-ref", "refs/skep").stdout
+
+
+def test_a_pinned_pair_with_no_merge_base_here_confirms_nothing(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    _seed(repo)
+    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task_id = _review_run(store, repo, head, "f" * 40)  # a base this clone lacks
+        outcome = reverify_run(
+            store=store, task_id=task_id, worker_outcome="passed", repo=repo, ref=PR_REF,
+            config=config, changed_files=(), verify_command=PIN,
+        )  # fmt: skip
+    finally:
+        store.close()
+
+    assert outcome.outcome == "unavailable" and not outcome.exit_codes
+    assert "no merge-base" in outcome.detail and "refresh_repo pr=7" in outcome.detail
