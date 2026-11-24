@@ -1661,9 +1661,14 @@ def test_rest_refresh_takes_the_same_pr_selector_as_chat_and_cli(
     client = serve_client(config)
 
     fetched = client.post(f"/api/repos/{repo}/refresh", json={"pr": "#7"})
+    number = client.post(f"/api/repos/{repo}/refresh", json={"pr": 7})  # R3 (S18)
+    flag = client.post(f"/api/repos/{repo}/refresh", json={"pr": True})
 
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["ref"] == PR_REF and calls[0]["pr"] == "#7"
+    assert number.status_code == 200, number.text
+    assert calls[1]["pr"] == "7"  # the same strict parser reads it, as text
+    assert flag.status_code == 422 and len(calls) == 2  # a bool is no PR number
     (spec,) = [t for t in TOOL_SPECS if t["function"]["name"] == "refresh_repo"]
     assert "pr" in spec["function"]["parameters"]["properties"]
     assert _parser().parse_args(["repo", "refresh", "x", "--pr", "7"]).pr == "7"
