@@ -305,6 +305,16 @@ def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
     return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
 
 
+def _found_file(found: str | None) -> Path | None:
+    """A PATH lookup's hit as written — resolved instead when it holds a
+    ``..`` (C5-1) — and only if it really is a regular file."""
+    if found is None:
+        return None
+    path = Path(found)
+    path = path.resolve() if ".." in path.parts else Path(os.path.abspath(path))
+    return path if path.resolve().is_file() else None
+
+
 def _strict_candidates(
     skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
 ) -> list[Path]:
@@ -332,7 +342,7 @@ def _strict_candidates(
         *(hop for hop in chain if hop not in linked),
         # the uv binary itself (never its directory): G10's pinned
         # `uv run pytest` needs it wherever it was installed
-        *(Path(found) for found in [shutil.which("uv")] if found),
+        *(uv for uv in [_found_file(shutil.which("uv"))] if uv),
     ]
     toolchains = [
         Path(os.environ.get(env) or home / rel) if env else home / rel
@@ -367,7 +377,11 @@ def _strict_candidates(
             f"recorded extra read root(s) {', '.join(gone)} vanished after dispatch; "
             "refusing to build a narrower wall than the run recorded — re-dispatch the run"
         )
-    detected = [Path(os.path.abspath(root)) for root in detected]
+    # C5-1: a ``..`` is walked through the real dirs, never collapsed first —
+    # after a linked dir it names another path entirely
+    detected = [
+        root.resolve() if ".." in root.parts else Path(os.path.abspath(root)) for root in detected
+    ]
     found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
     # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
     # above makes the bind fail closed instead of narrowing the worker's wall.

@@ -509,3 +509,22 @@ def test_no_alias_lands_under_a_system_mount() -> None:
     """Sol C4-1: the /usr mount already holds a link like /usr/local/bin/uv;
     a second, absolute one there makes bwrap refuse the wall."""
     assert sandbox._alias_links([Path("/usr/bin/python3")], []) == []
+
+
+def test_a_dotdot_path_entry_binds_the_uv_really_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C5-1: PATH ``linkdir/../bin`` finds ``deep/bin/uv`` (the link is
+    walked first); collapsing ``..`` named ``bin/uv`` — here an unrelated dir."""
+    (tmp_path / "deep" / "sub").mkdir(parents=True)
+    (tmp_path / "deep" / "bin").mkdir()
+    uv = tmp_path / "deep" / "bin" / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv.chmod(0o755)
+    (tmp_path / "bin" / "uv").mkdir(parents=True)  # the decoy
+    (tmp_path / "bin" / "uv" / "notes.txt").write_text("private\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "deep" / "sub")
+    monkeypatch.setenv("PATH", str(tmp_path / "linkdir" / ".." / "bin"))
+    roots = sandbox.strict_read_roots(tmp_path / "skep")
+    assert uv.resolve() in roots
+    assert (tmp_path / "bin" / "uv").resolve() not in roots
