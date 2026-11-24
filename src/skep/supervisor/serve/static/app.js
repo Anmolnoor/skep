@@ -3841,6 +3841,8 @@ async function viewRunDetail(main, taskId) {
       act(isBatch ? `Approve all ${batchCommands.length} commands` : "Approve", "primary", async () => {
         const result = await api("POST", `/api/approvals/${await ensureReview()}/approve`, {});
         if (result.resumed_as) location.hash = `#/runs/${result.resumed_as}`;
+        // Phase 10 R1 D8: the landing's warning (G10 could not vouch) is said.
+        else if (result.warning) flash("bad", `patch applied on ${result.branch} — ⚠ ${result.warning}`);
         else flash("ok", `patch applied on ${result.branch}`);
       }),
       act("Deny", "danger", async () => {

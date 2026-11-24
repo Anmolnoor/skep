@@ -1415,6 +1415,17 @@ def create_app(
         """Phase 02 2.2: the `skep run forensics --json` report (ADR 0050)."""
         return build_run_forensics(run_store, holder.current.audit_dir, task_id)
 
+    @app.get("/api/runs/{task_id}/receipt")
+    def run_receipt(task_id: str, format: Literal["md", "json"] = "md") -> PlainTextResponse:
+        """Phase 10 R1 D8: `skep proof export` over HTTP — read-only, built by
+        the same receipt builder (redact_export applies); the bytes the CLI
+        prints, md to paste into a PR or json. An unknown run is a 404."""
+        from ..ledger_proof import build_receipt, render_receipt
+
+        receipt = build_receipt(run_store, holder.current.home, holder.current.audit_dir, task_id)
+        media = "text/markdown" if format == "md" else "application/json"
+        return PlainTextResponse(render_receipt(receipt, format), media_type=media)
+
     @app.get("/api/runs/{task_id}/events")
     def run_events(task_id: str, stream: int = 0) -> Any:
         _require_run(task_id)

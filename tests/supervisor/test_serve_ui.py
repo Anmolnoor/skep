@@ -1915,6 +1915,53 @@ def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
     assert guards == fetches == 2
 
 
+def test_the_receipt_endpoint_is_the_cli_receipt_read_only_and_redacted(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """Phase 10 R1 D8: GET /api/runs/<id>/receipt is `skep proof export` over
+    HTTP — the same builder, so redact_export applies — token-gated and
+    read-only; md (the PR paste) or json."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.ledger_proof import build_receipt
+
+    from .conftest import serve_client
+    from .test_forensics import _run
+
+    task_id = _run(config, tmp_path, state="completed")
+    store = RunStore(config.db_path)
+    try:
+        store.record_reverification(
+            task_id,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=["git clone https://usr9:pw7x@git.example/r"],
+            exit_codes=[0],
+            detail="ok [command from the project's pinned verify_command]",
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    md = client.get(f"/api/runs/{task_id}/receipt")
+    assert md.status_code == 200
+    assert md.headers["content-type"].startswith("text/markdown")
+    assert md.text.startswith("<details>") and task_id in md.text
+    as_json = client.get(f"/api/runs/{task_id}/receipt?format=json")
+    data = as_json.json()
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        expected = build_receipt(store, config.home, config.audit_dir, task_id)
+    finally:
+        store.close()
+    assert data == expected | {"exported_at": data["exported_at"]}
+    for out in (md.text, as_json.text):
+        assert "git.example/r" in out
+        assert "usr9" not in out and "pw7x" not in out
+    assert client.get("/api/runs/no-such-run/receipt").status_code == 404
+    assert client.get(f"/api/runs/{task_id}/receipt?format=pdf").status_code == 422
+    assert TestClient(create_app(config)).get(f"/api/runs/{task_id}/receipt").status_code == 401
+
+
 def test_diff_syntax_colour_is_tokens_that_clear_aa_and_never_inner_html() -> None:
     """Phase 10 R1 D2: the diff's offline syntax colour is five :root tokens,
     each AA on every surface a diff is painted on, so a light theme overrides

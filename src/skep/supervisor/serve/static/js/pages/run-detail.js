@@ -14,7 +14,7 @@ import { api } from "../api.js";
 import { el, notFound } from "../dom.js";
 import { renderDiff } from "../diff.js";
 import { reviewQueue } from "./inbox.js";
-import { copyText, flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
+import { flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
 
 // Where G10's command came from (I2): the pin, the weaker fallback, or no record.
 const COMMANDS_SOURCE = {
@@ -76,12 +76,32 @@ function ledgerLine(ledger) {
   return el("p", { class: "note mono" }, `Ledger ${status}: ${head}${unchained}`);
 }
 
+// Phase 10 R1 D8: the receipt itself (GET /api/runs/<id>/receipt, the bytes
+// `skep proof export` prints), copied — and "copied" only once the clipboard
+// took it. A refused or absent clipboard shows it to select instead, as one
+// text node.
+async function copyReceipt(taskId, slot) {
+  let text;
+  try { text = await api("GET", `/api/runs/${taskId}/receipt?format=md`); }
+  catch (e) { flash("bad", `receipt unavailable: ${e.message}`); return; }
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard?.writeText) throw new Error("no clipboard on this page");
+    await clipboard.writeText(text);
+    flash("ok", "receipt copied");
+  } catch {
+    slot.replaceChildren(el("pre", { class: "log receipt-text", tabindex: "0" }, text));
+    flash("bad", "the clipboard refused — the receipt is shown below to select and copy");
+  }
+}
+
 // The whole report, as read-only panels. report = GET /api/runs/<id>/forensics.
 export function forensicsPanel(report) {
   const { identity = {}, outcome = {} } = report;
   const taint = identity.taint && identity.taint !== "unknown"; // forensics' "none recorded"
   const trail = report.policy_trail || [];
   const log = report.worker?.log_tail || [];
+  const receiptSlot = el("div", {});
   return el("div", { class: "forensics" },
     taint ? el("p", { class: "banner warn", role: "alert" },
       `TAINTED — this run's chat carried tainted content (${identity.taint}).`) : null,
@@ -105,11 +125,10 @@ export function forensicsPanel(report) {
       el("summary", {}, `Worker log tail · ${log.length} lines`),
       log.length ? el("pre", { class: "log" }, log.join("\n")) : el("p", { class: "note" }, "No worker log.")),
     el("p", { class: "actions" },
-      el("button", {
-        type: "button", class: "ghost",
-        onclick: () => { copyText(`skep proof export ${report.task_id}`); flash("ok", "receipt command copied"); },
-      }, "Copy receipt command"),
-      el("span", { class: "note mono" }, ` skep proof export ${report.task_id}`)));
+      el("button", { type: "button", class: "ghost", onclick: () => copyReceipt(report.task_id, receiptSlot) },
+        "Copy receipt"),
+      el("span", { class: "note mono" }, ` or: skep proof export ${report.task_id}`)),
+    receiptSlot);
 }
 
 // Phase 10 R1 D7: route() stamps the view container on every navigation. A
@@ -200,9 +219,11 @@ export async function viewReview(main, reviewId) {
         const result = await api("POST", `/api/approvals/${reviewId}/${path}`, body);
         if (!live()) return; // the verdict stands; the page the operator left does not redraw
         if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
-        outcome.replaceChildren(el("p", { class: "flash ok" }, done(result)),
+        outcome.replaceChildren(...[el("p", { class: "flash ok" }, done(result)),
+          // D8: a landing G10 could not vouch for says so where it landed.
+          result.warning ? el("p", { class: "banner warn", role: "alert" }, `⚠ ${result.warning}`) : null,
           el("a", { class: "home-link", href: next ? `#/review/${next.review_id}` : "#/inbox" },
-            next ? "Next in the queue →" : "Back to the Inbox →"));
+            next ? "Next in the queue →" : "Back to the Inbox →")].filter(Boolean));
         outcome.querySelector("a").focus();
       } catch (e) {
         flash("bad", e.message);

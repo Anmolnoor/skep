@@ -205,3 +205,54 @@ test("the chat's worker block counts a replayed command once", async () => {
   made[0].onmessage(command); // the browser reconnected; the server replayed
   assert.deepEqual(texts(log, "worker-activity-row-summary"), ["ran 1 command"]);
 });
+
+// ---------- D8: the receipt itself, copied honestly; approve's warning shown ----------
+
+const RECEIPT = "<details>\n<summary>skep verifiable local receipt · t1</summary>\n</details>";
+
+function receiptPanel(app, clipboard) {
+  const asked = [];
+  app.api = async (method, path) => { asked.push(path); return RECEIPT; };
+  app.navigator = clipboard === undefined ? undefined : { clipboard };
+  const node = app.forensicsPanel(report(g10()));
+  const button = node.querySelectorAll("button").find(b => b.textContent === "Copy receipt");
+  return { node, button, asked };
+}
+
+test("Copy receipt copies the receipt text and says so only once the clipboard took it", async () => {
+  const app = loadApp();
+  const written = [];
+  const { node, button, asked } = receiptPanel(app, { writeText: async text => { written.push(text); } });
+  assert.ok(button, "the button copies the receipt, not a command");
+  assert.match(node.textContent, /skep proof export t1/); // the CLI twin stays named
+  await button.click();
+  assert.deepEqual(asked, ["/api/runs/t1/receipt?format=md"]);
+  assert.deepEqual(written, [RECEIPT]);
+  assert.deepEqual(app.flashes, [["ok", "receipt copied"]]);
+});
+
+test("a refused or missing clipboard shows the receipt to select — never a false 'copied'", async () => {
+  for (const clipboard of [{ writeText: async () => { throw new Error("denied"); } }, undefined]) {
+    const app = loadApp();
+    const { node, button } = receiptPanel(app, clipboard);
+    await button.click();
+    assert.ok(!app.flashes.some(([kind]) => kind === "ok"), app.flashes);
+    const pre = node.querySelector(".receipt-text");
+    assert.ok(pre, "the receipt is shown");
+    assert.equal(pre.tagName, "PRE");
+    assert.equal(pre.children.length, 1);
+    assert.equal(pre.children[0].nodeType, 3);
+    assert.equal(pre.textContent, RECEIPT);
+  }
+});
+
+test("an approve that lands with a warning shows the warning", async () => {
+  const app = loadApp();
+  const main = app.el("main");
+  reviewReads(app, main, { post: () => ({ branch: "skep/t1", warning: "G10 could not re-verify this patch" }) });
+  await app.viewReview(main, "r1");
+  await main.querySelector(".review-verdict").querySelectorAll("button")[0].click();
+  assert.match(main.textContent, /Approved — patch applied on skep\/t1\./);
+  const alerts = main.querySelectorAll(".banner").filter(b => b.getAttribute("role") === "alert").map(b => b.textContent);
+  assert.ok(alerts.includes("⚠ G10 could not re-verify this patch"), alerts);
+});
