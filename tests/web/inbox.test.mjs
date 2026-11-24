@@ -13,7 +13,8 @@ const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => s
 
 const AT = "2026-11-24T08:00:00Z";
 const GATE = { kind: "gate", id: "r1", boundary: "network-egress", at: AT, task_id: "abcdef1234567890", action: "network.fetch", reason: "pypi.org", warning: null, tamper: null, stale_base: null, taint: null, mirrored_by: [], inline_approve: true };
-const PATCH = { ...GATE, id: "r2", boundary: "patch-landing", action: "apply_patch", reason: "land it" };
+// SD-2b: a landing's evidence is its diff, which no row shows — never inline (console.py)
+const PATCH = { ...GATE, id: "r2", boundary: "patch-landing", action: "apply_patch", reason: "land it", inline_approve: false };
 const CARD = { kind: "card", id: "a1", boundary: "network-egress", at: AT, chat_id: "c1", chat_title: "flaky monitor", tool: "read_url", source: "assistant", headline: "read_url — https://x.dev", risk: null, tamper: null, taint: null, high: null };
 const MEMORY = { kind: "memory", id: "m1", boundary: "policy-change", at: AT, memory_class: "project_fact", content: "uses uv", taint: null, inline_approve: true };
 const SKILL = { kind: "skill", id: "learned-one", boundary: "policy-change", at: AT, status: "tested", provenance: "learned", description: "learned procedure: x", source: "t1", approvable: true, taint: null };
@@ -155,15 +156,14 @@ test("a memory deny needs a reason: cancelling the prompt sends nothing", async 
   assert.deepEqual(posts(calls), []);
 });
 
-test("a patch-landing row with a G10 or V1 warning goes to its review page — no inline approve", async () => {
-  // the server's inline_approvable says false for both (console.py)
-  const warned = { ...PATCH, warning: "the supervisor could not re-verify this run", inline_approve: false };
-  const tampered = { ...PATCH, id: "r3", tamper: "test-tamper guard: tests deleted", inline_approve: false };
-  const { rows } = await render([PATCH, warned, tampered]);
-  assert.ok(button(rows[0], "Approve"));
-  for (const [row, id] of [[rows[1], "r2"], [rows[2], "r3"]]) {
+test("SD-2b: every patch-landing gate — clean, warned or tampered — is reviewed on its page, never approved inline", async () => {
+  const warned = { ...PATCH, id: "r3", warning: "the supervisor could not re-verify this run" };
+  const tampered = { ...PATCH, id: "r4", tamper: "test-tamper guard: tests deleted" };
+  const { rows } = await render([PATCH, warned, tampered, GATE]);
+  assert.ok(button(rows[3], "Approve")); // a non-landing gate whose row is its whole evidence still is
+  for (const [row, id] of [[rows[0], "r2"], [rows[1], "r3"], [rows[2], "r4"]]) {
     assert.equal(button(row, "Approve"), undefined);
-    const review = row.querySelectorAll("a").find(a => a.textContent === "Review →");
+    const review = row.querySelectorAll("a").find(a => a.textContent === "Review the diff →");
     assert.equal(review.getAttribute("href"), `#/review/${id}`);
     assert.ok(button(row, "Deny"));
   }

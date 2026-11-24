@@ -191,8 +191,9 @@ skep review [task_id] [--approve | --deny | --allow-command | --reverify]
   asks a pending gate's question is listed under that gate, not as a second
   row. `?detail=false` returns membership and order only (`kind`, `id`,
   `boundary`, `at`), which is what the badge polls. It only reads. The Inbox
-  approves inline only a worker gate or a memory proposal, whose whole
-  evidence its row shows; a chat card is approved in its thread (a landing or
+  approves inline only a worker gate that lands nothing or a memory proposal,
+  whose whole evidence its row shows; a landing gate is reviewed on its page
+  (the diff, G10 and V1), a chat card is approved in its thread (a landing or
   PR card there lists each run with its G10 warning and V1 tamper) and a
   skill in the Library. Every item but a run can be denied from its row.
 - `--approve` applies a completed patch to a `skep/<task_id>` branch, or resumes
