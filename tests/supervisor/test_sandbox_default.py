@@ -116,7 +116,9 @@ def test_doctor_names_projects_still_in_the_workspace(tmp_path: Path) -> None:
         store.close()
     # Phase 05 5.2: a Projects-needing-upgrade line, one per project
     upgrades = {u["project_id"]: u for u in build_status(home)["project_upgrades"]}
-    assert "--execution-mode sandbox" in upgrades["old"]["command"]
+    # no repo binding: an instruction, not a command with a `<repo>` that fails
+    assert upgrades["old"]["command"] is None
+    assert "--execution-mode sandbox" in upgrades["old"]["instruction"]
     assert "sandbox" not in upgrades.get("new", {"needs": []})["needs"]
 
 

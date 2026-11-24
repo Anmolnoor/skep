@@ -108,7 +108,11 @@ def test_second_activation_flips_the_single_active_flag(config: SupervisorConfig
     assert client.get("/api/llm/config").json()["default_model"] == "gpt-5-mini"
 
 
-def test_cli_add_use_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_add_use_remove(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the staged probe (review R1 D3) has its own test: no real api.z.ai here
+    monkeypatch.setattr("skep.supervisor.cli_cmds._probe_refusal", lambda *a, **k: None)
     # build_config() appends /supervisor: tmp_path plays the personal ~/.skep.
     home = tmp_path
     db_path = tmp_path / "supervisor" / "supervisor.sqlite3"

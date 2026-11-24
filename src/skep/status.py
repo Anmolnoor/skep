@@ -5,9 +5,7 @@ import os
 import shlex
 import shutil
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +26,23 @@ def build_status(
     provider_timeout: float = 1.0,
     now: datetime | None = None,
     offline: bool = False,
+) -> dict[str, Any]:
+    from contextlib import nullcontext
+
+    from .supervisor.serve.llm_copilot import no_exchange
+
+    # Phase 05 review R1 (I8): --offline dials nothing, the Copilot token
+    # exchange behind the worker credential and the relay summary included
+    with no_exchange() if offline else nullcontext():
+        return _build_status(home, env, provider_timeout, now, offline)
+
+
+def _build_status(
+    home: Path,
+    env: Mapping[str, str] | None,
+    provider_timeout: float,
+    now: datetime | None,
+    offline: bool,
 ) -> dict[str, Any]:
     env = os.environ if env is None else env
     home = Path(home)
@@ -79,13 +94,10 @@ def build_status(
         "queen_id": profile.queen_id,
     }
     required["storage"] = _storage_check(home)
-    required["provider"] = _provider_check(profile, env, provider_timeout, offline=offline)
+    worker = worker_provider_check(home, provider_timeout, offline=offline)
+    required["provider"] = _provider_check(profile, env, worker, offline=offline)
     payload = _status_payload(
-        home,
-        profile,
-        required,
-        sandbox=_sandbox_check(home),
-        coding_worker=worker_provider_check(home, provider_timeout, offline=offline),
+        home, profile, required, sandbox=_sandbox_check(home), coding_worker=worker
     )
     payload["advisories"] = (
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
@@ -739,6 +751,10 @@ def _project_upgrades(home: Path, *, strict_backend: bool) -> list[dict[str, Any
     for project in sorted(projects, key=lambda p: p.project_id):
         policy = project.policy
         repo = next((b.value for b in project.bindings if b.kind == "repo_path"), None)
+        slug = next((b.value for b in project.bindings if b.kind == "repo_slug"), None)
+        managed = home / "repos" / slug if slug else None
+        if repo is None and managed is not None and managed.is_dir():
+            repo = str(managed.resolve())  # review R1 D4: the managed clone, by path
         mode = policy.get("default_execution_mode")
         fixes: dict[str, tuple[str, str]] = {}  # need -> (flag, why)
         if mode == "workspace":
@@ -756,17 +772,22 @@ def _project_upgrades(home: Path, *, strict_backend: bool) -> list[dict[str, Any
             )
         if not fixes:
             continue
-        repo_arg = shlex.quote(repo) if repo else "<repo>"
         flags = " ".join(flag for flag, _ in fixes.values())
-        upgrades.append(
-            {
-                "project_id": project.project_id,
-                "needs": list(fixes),
-                "why": "; ".join(why for _, why in fixes.values()),
-                "command": f"skep project setup {repo_arg} "
-                f"--project-id {shlex.quote(project.project_id)} {flags}",
-            }
-        )
+        tail = f"--project-id {shlex.quote(project.project_id)} {flags}"
+        upgrade: dict[str, Any] = {
+            "project_id": project.project_id,
+            "needs": list(fixes),
+            "why": "; ".join(why for _, why in fixes.values()),
+            "command": f"skep project setup {shlex.quote(repo)} {tail}" if repo else None,
+        }
+        if repo is None:
+            # review R1 D4 (I9): no checkout to name — say so, not a `<repo>` that fails
+            where = f"its managed clone {managed} is missing" if managed else "no repo binding"
+            upgrade["instruction"] = (
+                f"no checkout found ({where}): clone or locate the repo, then run "
+                f"`skep project setup` on that folder with {tail}"
+            )
+        upgrades.append(upgrade)
     return upgrades
 
 
@@ -963,7 +984,8 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     lines.extend(["", "Projects needing upgrade:"])
     upgrades = status.get("project_upgrades", [])
     for upgrade in upgrades:
-        lines.append(f"- {upgrade['project_id']}: {upgrade['command']}  # {upgrade['why']}")
+        fix = upgrade["command"] or upgrade["instruction"]
+        lines.append(f"- {upgrade['project_id']}: {fix}  # {upgrade['why']}")
     if not upgrades:
         lines.append("- none")
 
@@ -1208,6 +1230,9 @@ def _status_payload(
 ) -> dict[str, Any]:
     # Phase 05 5.2: a probe --offline skipped does not fail the run; its line says so (I8)
     required_ready = all(check.get("status") in {"ready", "skipped"} for check in required.values())
+    # review R1 (I8): a worker whose key the provider refuses fails health;
+    # `unavailable` (no worker provider at all, a mock home) does not
+    required_ready = required_ready and (coding_worker or {}).get("status") != "blocked"
     provider = profile.provider.to_dict() if profile else {}
     sandbox = sandbox or {}
     upgrades = _project_upgrades(
@@ -1282,7 +1307,7 @@ def _storage_check(home: Path) -> dict[str, Any]:
 def _provider_check(
     profile: PersonalProfile,
     env: Mapping[str, str],
-    timeout: float,
+    worker: Mapping[str, Any],
     *,
     offline: bool = False,
 ) -> dict[str, Any]:
@@ -1329,7 +1354,17 @@ def _provider_check(
 
     if offline:
         return {"status": "skipped", "detail": "skipped (--offline): the endpoint was not probed"}
-    return _probe_provider_endpoint(provider.name, provider.endpoint, timeout)
+    # review R1 (I8): ready means the authenticated 1-token completion
+    # answered (worker_provider_check) — an unauthenticated GET of the model
+    # list passed a dead key on ollama.com
+    if worker.get("status") == "ready":
+        return {"status": "ready", "detail": f"the model answered a completion: {worker['label']}"}
+    next_step = {
+        "auth": "the key was refused — store a working one (`skep provider set-key <id>`, "
+        "or the env var the profile names), then run skep doctor again",
+        "unreachable": "check the endpoint is up and reachable, then run skep doctor again",
+    }.get(worker.get("kind", ""), "fix the provider configuration, then run skep doctor again")
+    return {"status": "blocked", "detail": str(worker.get("label")), "next_step": next_step}
 
 
 def _sandbox_check(home: Path) -> dict[str, Any]:
@@ -1402,32 +1437,6 @@ def _sandboxed_projects(home: Path) -> dict[str, bool]:
         }
     finally:
         store.close()
-
-
-def _probe_provider_endpoint(provider: str, endpoint: str, timeout: float) -> dict[str, Any]:
-    target = endpoint.rstrip("/")
-    if provider == "ollama":
-        target = f"{target}/api/tags"
-
-    request = urllib.request.Request(target, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if 200 <= response.status < 300:
-                return {
-                    "status": "ready",
-                    "detail": "Provider endpoint responded successfully.",
-                }
-            return {
-                "status": "blocked",
-                "detail": f"Provider endpoint returned HTTP {response.status}.",
-                "next_step": "check provider endpoint and model settings",
-            }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "status": "blocked",
-            "detail": f"Provider endpoint check failed: {exc.__class__.__name__}.",
-            "next_step": "check provider endpoint and credentials",
-        }
 
 
 def _format_check(name: str, check: Mapping[str, Any]) -> str:

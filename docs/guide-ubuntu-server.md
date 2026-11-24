@@ -15,7 +15,9 @@
      it, and the section 7 unit passes `systemd-analyze --user verify`. The Tailscale steps
      are marked "(not run as written)": they were checked only against `tailscale serve
      --help` (Tailscale 1.104) and a request to a loopback `skep serve` carrying a tailnet
-     Host header. -->
+     Host header. Re-checked on Fedora 45 (systemd 262): the section 7 unit, written to a
+     temp dir, passes `systemd-analyze --user verify` with no warnings, and `dnf info
+     bubblewrap` confirms the Fedora package name; Tailscale still not run. -->
 
 This guide is for someone who wants skep on a machine that never sleeps, such
 as a home lab VM or a small server, so schedules fire on time and you can reach

@@ -184,3 +184,85 @@ def test_a_missing_bwrap_names_the_install_command(
     assert "sudo dnf install bubblewrap" in check["next_step"]
     report = status.format_doctor_report({"overall": "blocked", "sandbox": check})
     assert "Next step: install bubblewrap" in report
+
+
+def test_a_key_the_completion_refuses_fails_health(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R1 D1: ollama.com lists models to anyone and 401s the chat — the
+    listing-only probe said `Health: pass` above `coding_worker: blocked`."""
+    from tests.supervisor.fake_ollama import FakeOllama
+
+    fake = FakeOllama(api_key="sk-good", public_listing=True).start()
+    try:
+        monkeypatch.setenv("SKEP_R1_KEY", "sk-dead")
+        setup = ["--home", str(home), "setup", "--personal", "--provider", "ollama"]
+        main([*setup, "--model", "llama3.2", "--endpoint", fake.base_url,
+              "--api-key-env", "SKEP_R1_KEY"])  # fmt: skip
+        capsys.readouterr()
+        assert main(["--home", str(home), "doctor"]) == 1
+        out = capsys.readouterr().out
+        assert "Health: fail" in out and "Skep: blocked" in out
+        assert "- provider: blocked" in out and "401" in out
+        assert "sk-dead" not in out
+        # --offline dials nothing, so it cannot say the key is dead
+        assert main(["--home", str(home), "doctor", "--offline"]) == 0
+        # a working key passes
+        monkeypatch.setenv("SKEP_R1_KEY", "sk-good")
+        assert main(["--home", str(home), "doctor"]) == 0
+        assert "Health: pass" in capsys.readouterr().out
+    finally:
+        fake.stop()
+
+
+def test_offline_never_exchanges_a_copilot_token(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R1 D2: the worker credential and the relay summary resolve a
+    Copilot key by EXCHANGING it at api.github.com — not under --offline."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor.serve import llm_copilot
+
+    calls: list[str] = []
+
+    def exchange(token: str, **_: object) -> tuple[str, float]:
+        calls.append(token)
+        return "bearer", 9e9
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", exchange)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghu_offline_token")
+    run_personal_setup(
+        home, provider="openai-compat", model="gpt-5-mini",
+        endpoint="https://api.githubcopilot.com", api_key_env="GITHUB_TOKEN",
+    )  # fmt: skip
+    payload = status.build_status(home, offline=True)
+    assert calls == []
+    assert payload["workers"]["coding_worker"]["status"] == "skipped"
+    assert payload["provider_key_relay"]["relayed"] is True
+
+
+def test_a_slug_bound_project_names_its_managed_checkout(home: Path, tmp_path: Path) -> None:
+    """Review R1 D4: a repo_slug binding printed a literal `<repo>`."""
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        for project_id in ("cloned", "gone"):
+            store.add_project_policy(
+                project_id=project_id, name=project_id, strategy="trusted_local_dev",
+                phase="build", policy={**SANDBOXED, "verify_command": ""},
+            )  # fmt: skip
+            store.add_project_binding(
+                project_id=project_id, binding_kind="repo_slug", binding_value=project_id
+            )
+    finally:
+        store.close()
+    (home / "repos" / "cloned").mkdir(parents=True)
+    ups = _upgrades(home)
+    checkout = home / "repos" / "cloned"
+    assert ups["cloned"]["command"] == (
+        f"skep project setup {checkout} --project-id cloned --verify-command '<your test command>'"
+    )
+    assert ups["gone"]["command"] is None
+    instruction = str(ups["gone"]["instruction"])
+    assert "<repo>" not in instruction and "repos/gone" in instruction
+    report = status.format_doctor_report(status.build_status(home, offline=True))
+    assert "- gone: no checkout" in report

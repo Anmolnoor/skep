@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 
@@ -29,6 +32,19 @@ _REFRESH_SKEW_SECONDS = 60.0
 
 _lock = threading.Lock()
 _cache: dict[str, tuple[str, float]] = {}  # github token -> (bearer, expires_at)
+_offline: ContextVar[bool] = ContextVar("copilot_offline", default=False)
+
+
+@contextmanager
+def no_exchange() -> Iterator[None]:
+    """Phase 05 review R1 (I8): ``skep doctor --offline`` dials nothing — in
+    this block a credential resolves to the GitHub token itself (its
+    presence is what an offline check can know) and is never exchanged."""
+    reset = _offline.set(True)
+    try:
+        yield
+    finally:
+        _offline.reset(reset)
 
 
 def exchange_copilot_token(github_token: str, *, timeout: float = 10.0) -> tuple[str, float]:
@@ -60,6 +76,8 @@ def exchange_copilot_token(github_token: str, *, timeout: float = 10.0) -> tuple
 def resolve_copilot_bearer(github_token: str) -> str:
     """The cached short-lived bearer for this GitHub token, re-exchanged
     when within the refresh skew of its expiry."""
+    if _offline.get():
+        return github_token  # never dialed under no_exchange()
     now = time.time()
     with _lock:
         cached = _cache.get(github_token)

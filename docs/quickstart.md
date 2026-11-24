@@ -53,9 +53,10 @@ The report has three sections, and the command exits 0 only when Health
 passes:
 
 - **Health: pass** (or **fail**): the profile, storage and provider checks,
-  the coding worker, each engine, approvals and memory. The coding worker line
-  sends the model one live completion, so a key the provider refuses (HTTP
-  401/403) fails here instead of on your first run.
+  the coding worker, each engine, approvals and memory. The provider and
+  coding worker lines send the model one authenticated live completion, not
+  just a model-list request (ollama.com lists models to anyone), so a key the
+  provider refuses (HTTP 401/403) fails Health here instead of your first run.
 - **Security posture**: the sandbox and how it confines reads, the provider
   key relay, and the policy baseline lock. On Linux without bubblewrap the
   sandbox line says `bwrap was not found on PATH` and gives the install
@@ -65,9 +66,11 @@ passes:
   `skep project setup …` line that fixes it. Run that line as printed. If it
   ends in `--verify-command '<your test command>'`, skep found no test entry
   point in the repository, so replace the placeholder with your own command.
+  A project bound by name to a managed clone gets that clone's path; when no
+  checkout can be found, the line says so and what to run once you have one.
 
-`skep doctor --offline` makes no network call; the provider lines then say
-`skipped (--offline)`. `skep doctor --json` prints the same report as JSON.
+`skep doctor --offline` makes no network call (not even the GitHub Copilot
+token exchange); the provider lines then say `skipped (--offline)`. `skep doctor --json` prints the same report as JSON.
 
 ## 2. Run a task
 

@@ -155,7 +155,11 @@ def test_chat_speaks_with_the_active_profiles_key(
     assert auth == "Bearer sk-profile-key"
 
 
-def test_worker_bootstrap_uses_the_active_profiles_key(tmp_path: Path) -> None:
+def test_worker_bootstrap_uses_the_active_profiles_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the staged probe (review R1 D3) has its own test: no real api.z.ai here
+    monkeypatch.setattr("skep.supervisor.cli_cmds._probe_refusal", lambda *a, **k: None)
     personal = tmp_path
     supervisor_home = personal / "supervisor"
     assert (
@@ -185,6 +189,8 @@ def test_worker_bootstrap_uses_the_active_profiles_key(tmp_path: Path) -> None:
 def test_cli_set_key_reads_stdin_not_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # the staged probe (review R1 D3) has its own test: no real api.deepseek.com here
+    monkeypatch.setattr("skep.supervisor.cli_cmds._probe_refusal", lambda *a, **k: None)
     cmd_provider_add(
         argparse.Namespace(
             home=tmp_path,
