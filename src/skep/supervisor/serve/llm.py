@@ -20,6 +20,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import dataclasses
+import fcntl
 import ipaddress
 import json
 import os
@@ -126,8 +127,11 @@ def store_api_key(home: Path, value: str) -> None:
         path.unlink(missing_ok=True)
         return
     home.mkdir(parents=True, exist_ok=True)
-    path.write_text(value + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    # R8: written whole or not at all — a reader never sees a partial key
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(value + "\n", encoding="utf-8")
+    staged.chmod(0o600)
+    os.replace(staged, path)
 
 
 # v108-F4: per-profile keys. One llm-secret could not serve a multi-provider
@@ -311,12 +315,20 @@ def pin_legacy_key(store: RunStore, home: Path) -> None:
                 store.set_setting(marker, owner)
 
 
+def _read_secret(home: Path) -> str:
+    """llm-secret's value, "" when absent — R7 (Sol R7-1): a clear deleting
+    it between a check and the read is an absent key, never an error."""
+    try:
+        return (home / SECRET_FILE).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
 def _legacy_values(home: Path) -> tuple[tuple[str, str | None], ...]:
     """(owner marker, key) of SKEP_LLM_API_KEY, then of llm-secret — R3
     (H1): each has its own owner; the env key first, as it always shadowed
     the file."""
-    path = home / SECRET_FILE
-    held = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    held = _read_secret(home)
     return (
         (LLM_ENV_KEY_ENDPOINT, os.environ.get(SECRET_ENV, "").strip() or None),
         (LLM_SECRET_ENDPOINT, held or None),
@@ -335,9 +347,14 @@ def legacy_api_key(
     the first one saved's (pin_legacy_key)."""
     want = endpoint.strip().rstrip("/")
     owners = (want, "") if unowned else (want,)
-    for marker, key in _legacy_values(home):
-        if key and legacy_key_endpoint(home, store, marker) in owners:
-            return key
+    # R9 (Sol R9-1): the owner and the key are read as one consistent pair,
+    # holding the writers' lock every commit holds throughout — a write (or
+    # an A→B→A pair of them) can no longer land between the two reads. The
+    # caller's probe runs after, outside the lock.
+    with provider_lock(home, shared=True):
+        for marker, key in _legacy_values(home):
+            if key and legacy_key_endpoint(home, store, marker) in owners:
+                return key
     return None
 
 
@@ -1732,9 +1749,53 @@ _ROLLBACK_SETTINGS = (
     LLM_ENV_KEY_ENDPOINT,  # R4 (Sol R4-2): pin_legacy_key writes it too
 )
 # Phase 05 R2 (F5): provider commits are serialized; a save stages and probes
-# outside this lock. ponytail: one in-process lock — the CLI committing beside
-# serve is another process, which only the staged-state re-check sees.
+# outside this lock. R10 (Sol R10-1): ``provider_lock`` adds a file lock in
+# the supervisor home, so the CLI committing beside serve serializes too.
 _PROVIDER_WRITES = threading.RLock()
+PROVIDER_LOCK_FILE = ".provider-writes.lock"
+_HELD: dict[str, Any] = {"fd": None}
+
+
+@contextlib.contextmanager
+def provider_lock(home: Path | None, *, shared: bool = False) -> Iterator[bool]:
+    """THE provider-writes lock: this process's reentrant lock, plus a flock
+    on ``<home>/.provider-writes.lock`` taken by the outermost holder that
+    names ``home`` (the supervisor home) — so ``skep provider set-key`` in
+    its own process and serve never interleave a legacy-key commit with a
+    read. Yields whether this process holds the file lock. A commit takes
+    it exclusive and creates the file; a ``shared`` read creates it too
+    wherever the home is writable — every supervisor process: serve, the CLI
+    (R11: an upgraded home had none, and a read before the first commit went
+    unlocked) — else joins it read-only. Only a sandboxed worker, reading its
+    read-only snapshot of the home once, can find neither and reads under
+    the in-process lock (it still needs its own key when the relay is off).
+    ``home`` None: the in-process lock only."""
+    with _PROVIDER_WRITES:
+        took = False
+        if _HELD["fd"] is None and home is not None:
+            path = home / PROVIDER_LOCK_FILE
+            try:
+                home.mkdir(parents=True, exist_ok=True)
+                fd: int | None = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError:
+                if not shared:
+                    raise
+                try:
+                    fd = os.open(path, os.O_RDONLY)
+                except OSError:
+                    fd = None
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                _HELD["fd"], took = fd, True
+        try:
+            yield _HELD["fd"] is not None
+        finally:
+            if took:
+                fcntl.flock(_HELD["fd"], fcntl.LOCK_UN)
+                os.close(_HELD["fd"])
+                _HELD["fd"] = None
+
+
 ProviderState = tuple[list[Any], dict[str, Any], dict[Path, bytes]]
 
 
@@ -1803,7 +1864,7 @@ def provider_rollback(
     moved, ProviderConflict, and nothing is written."""
     from ..providers import ProviderConflict
 
-    with _PROVIDER_WRITES:
+    with provider_lock(home):
         state = provider_state(store, home)
         if expect is not None and state != expect:
             raise ProviderConflict(
@@ -1909,14 +1970,48 @@ def _committed_key(
 
 
 def _env_key_for(home: Path, target: str, store: RunStore) -> str | None:
-    """SKEP_LLM_API_KEY when ``target`` owns it — clearing a saved key never
-    clears the environment's."""
+    """SKEP_LLM_API_KEY when ``target`` owns it — or owns it once saved: an
+    unowned one is the first endpoint saved's (pin_legacy_key; R5, Sol
+    R5-1). Clearing a saved key never clears the environment's."""
     marker, key = _legacy_values(home)[0]
     owner = legacy_key_endpoint(home, store, marker)
-    return key if key and owner == target.strip().rstrip("/") else None
+    return key if key and owner in (target.strip().rstrip("/"), "") else None
 
 
 def save_assistant_llm(
+    store: RunStore,
+    home: Path,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    protocol: LLMProtocol | None = None,
+    api_key: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> None:
+    """``_save_assistant_llm`` — R6 (Sol R6-1): while a legacy key is still
+    unowned, resolving it, probing with it and pinning it are ONE step under
+    the writers' lock, so a concurrent writer can never pin it to A while B
+    is being probed with it. An owned key keeps the probe outside the lock."""
+    # R7 (Sol R6-1): decided HOLDING the lock — another save's temporary
+    # owner (pinned, then rolled back) exists only inside its locked commit
+    with provider_lock(home):
+        unowned = any(
+            key and legacy_key_endpoint(home, store, marker) == ""
+            for marker, key in _legacy_values(home)
+        )
+        if unowned:  # resolve, probe and pin as one step
+            _save_assistant_llm(
+                store, home, base_url=base_url, model=model, protocol=protocol,
+                api_key=api_key, settings=settings,
+            )  # fmt: skip
+            return
+    _save_assistant_llm(
+        store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
+        settings=settings,
+    )  # fmt: skip
+
+
+def _save_assistant_llm(
     store: RunStore,
     home: Path,
     *,
@@ -2083,12 +2178,21 @@ def _probe_workers_key(
 
 def _write_legacy(store: RunStore, home: Path, endpoint: str, value: str) -> None:
     """llm-secret := ``value``, owned by ``endpoint``; empty clears the key
-    and its owner marker together (R2, F2: a cleared key left it stale)."""
-    store_api_key(home, value)
+    and its owner marker together (R2, F2: a cleared key left it stale).
+
+    R8 (Sol R8-1): a save probing outside the lock may read this mid-write,
+    so a key is never visible without its real owner — the old key goes
+    first, then the owner moves, then the new key lands (atomically)."""
     if value and endpoint:
-        store.set_setting(LLM_SECRET_ENDPOINT, endpoint)
+        if store.get_setting(LLM_SECRET_ENDPOINT) != endpoint:
+            store_api_key(home, "")  # another owner's key never meets the new owner
+            store.set_setting(LLM_SECRET_ENDPOINT, endpoint)
+        store_api_key(home, value)
     else:
+        store_api_key(home, "")  # the key goes before its owner does
         store.delete_setting(LLM_SECRET_ENDPOINT)
+        if value:  # a key no endpoint owns yet (the first one saved claims it)
+            store_api_key(home, value)
 
 
 def _keep_legacy_owner(store: RunStore, home: Path, endpoint: str) -> bool:
@@ -2097,8 +2201,7 @@ def _keep_legacy_owner(store: RunStore, home: Path, endpoint: str) -> bool:
     Zero; a file it already has wins). False when that endpoint has no
     profile to keep it in."""
     owner = legacy_key_endpoint(home, store)
-    path = home / SECRET_FILE
-    held = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    held = _read_secret(home)
     if not (held and owner and owner != endpoint):
         return True
     holder = _registered_for(store, owner)

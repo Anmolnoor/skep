@@ -7,6 +7,7 @@ scans tests)."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -267,7 +268,6 @@ def test_a_key_with_nowhere_to_go_is_refused(config: SupervisorConfig) -> None:
 def test_the_workers_key_is_probed_while_the_queen_is_on_the_chatgpt_login(
     config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
 
     from .test_codex_login import write_fake_login
     from .test_codex_queen_provider import _codex_profile
@@ -608,7 +608,6 @@ def installed(config: SupervisorConfig, tmp_path: Path) -> SupervisorConfig:
 
 
 def _codex_queen(config: SupervisorConfig) -> None:
-    import os
 
     from .test_codex_login import write_fake_login
     from .test_codex_queen_provider import _codex_profile
@@ -1443,3 +1442,212 @@ def test_a_profile_named_env_key_wins_before_a_stale_legacy_token(
     finally:
         a.stop()
     assert worker is not None and worker.profile.api_key_env == "COP_TOKEN"
+
+
+def test_clearing_on_the_first_endpoint_probes_with_the_unowned_env_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5 (Sol R5-1): an unowned SKEP_LLM_API_KEY is inherited by the first
+    endpoint saved (pin_legacy_key), so a save there that clears the file key
+    probes with it — the same switch without the clear already did."""
+    from skep.supervisor.serve import llm
+
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u1")
+    with _store(config) as store:
+        profile = ProviderProfile("w", "openai_compat", "https://w.example", "m")
+        got = llm._committed_key(store, config.home, "https://w.example", profile, False, "")
+    assert got == "env-u1"
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_a_save_that_may_claim_an_unowned_key_holds_the_writers_lock(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, owned: bool
+) -> None:
+    """R6 (Sol R6-1): resolving an unowned env key, probing with it and
+    pinning it are one step — a concurrent writer cannot pin it to A while B
+    is being probed with it. An owned key keeps the probe outside the lock."""
+    from skep.supervisor.serve import llm
+    from skep.supervisor.serve.llm import LLM_ENV_KEY_ENDPOINT
+
+    held: list[bool] = []
+
+    def probe(*_a: Any, **_k: Any) -> str:
+        held.append(llm._PROVIDER_WRITES._is_owned())  # type: ignore[attr-defined]
+        raise ProviderError("refused — nothing changed")
+
+    monkeypatch.setattr(llm, "_probe_or_refuse", probe)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u2")
+    with _store(config) as store:
+        store.upsert_provider_profile(
+            ProviderProfile("a", "openai_compat", "https://a.example", "m", active=True)
+        )
+        if owned:
+            store.set_setting(LLM_ENV_KEY_ENDPOINT, "https://a.example")
+        with pytest.raises(ProviderError):
+            llm.save_assistant_llm(store, config.home, base_url="https://b.example", api_key="")
+    assert held == [not owned]
+
+
+def test_ownership_is_read_under_the_writers_lock(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7 (Sol R6-1): the unowned/owned decision is made holding the lock, so
+    it never sees another save's temporary owner (pinned, then rolled back)."""
+    from skep.supervisor.serve import llm
+
+    held: list[bool] = []
+    real = llm.legacy_key_endpoint
+
+    def spy(*a: Any, **k: Any) -> str:
+        held.append(llm._PROVIDER_WRITES._is_owned())  # type: ignore[attr-defined]
+        return real(*a, **k)
+
+    monkeypatch.setattr(llm, "legacy_key_endpoint", spy)
+    monkeypatch.setattr(llm, "_save_assistant_llm", lambda *a, **k: None)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u3")
+    with _store(config) as store:
+        llm.save_assistant_llm(store, config.home, model="m")
+    assert held and all(held)
+
+
+def test_a_legacy_file_removed_mid_read_is_no_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7 (Sol R7-1): a concurrent clear deleting llm-secret between the
+    existence check and the read is an absent key, not FileNotFoundError."""
+    from skep.supervisor.serve import llm
+
+    secret = config.home / "llm-secret"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("gone1\n")
+    real_read = Path.read_text
+
+    def vanish(self: Path, *a: Any, **k: Any) -> str:
+        if self == secret:
+            raise FileNotFoundError(str(self))
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", vanish)
+    assert llm._legacy_values(config.home)[1] == (llm.LLM_SECRET_ENDPOINT, None)
+
+
+@pytest.mark.parametrize("before", [None, "ka-old"])
+def test_a_reader_mid_write_never_sees_a_key_without_its_owner(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, before: str | None
+) -> None:
+    """R8 (Sol R8-1): a save probing outside the lock reads the legacy state
+    while another save's commit writes it. llm-secret was written before its
+    owner, so in between it looked unowned — and an unowned key goes to the
+    endpoint being saved. Owner first, key last (atomically): a reader only
+    ever sees a key with its real owner, or no key."""
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    seen: list[str | None] = []
+    with _store(config) as store:
+        if before is not None:  # B's old key, being replaced by A's
+            llm._write_legacy(store, config.home, "https://b.example", before)
+
+        def look() -> None:
+            seen.append(llm.legacy_api_key(config.home, "https://c.example", store, unowned=True))
+            got_b = llm.legacy_api_key(config.home, "https://b.example", store)
+            assert got_b in (None, before), "B must never receive A's key"
+
+        for name in ("set_setting", "delete_setting"):
+            real = getattr(store, name)
+
+            def wrapped(*a: Any, _real: Any = real, **k: Any) -> Any:
+                out = _real(*a, **k)
+                look()
+                return out
+
+            monkeypatch.setattr(store, name, wrapped)
+        real_store = llm.store_api_key
+
+        def store_key(home: Path, value: str) -> None:
+            real_store(home, value)
+            look()
+
+        monkeypatch.setattr(llm, "store_api_key", store_key)
+        llm._write_legacy(store, config.home, "https://a.example", "ka-new")
+        look()
+    assert seen and all(got is None for got in seen)  # C never gets anyone's key
+
+
+def test_legacy_keys_are_read_under_the_writers_lock(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9 (Sol R9-1): an A→B→A pair of commits between a reader's reads let
+    B's key pass both owner checks for A. The owner and the key are read
+    holding the writers' lock (commits hold it throughout); the probe that
+    follows runs outside it."""
+    from skep.supervisor.serve import llm
+
+    held: list[bool] = []
+    real = llm._read_secret
+
+    def spy(home: Path) -> str:
+        held.append(llm._PROVIDER_WRITES._is_owned())  # type: ignore[attr-defined]
+        return real(home)
+
+    monkeypatch.setattr(llm, "_read_secret", spy)
+    config.home.mkdir(parents=True, exist_ok=True)
+    with _store(config) as store:
+        llm.legacy_api_key(config.home, "https://a.example", store)
+    assert held and all(held)
+
+
+def test_a_commit_in_another_process_holds_off_the_legacy_read(config: SupervisorConfig) -> None:
+    """R10 (Sol R10-1): `skep provider set-key` runs in its own process, so a
+    process-local lock let serve pair the old key with the new owner. The
+    provider lock is also a file lock in the supervisor home: a read waits
+    for the other process's commit."""
+    import subprocess
+    import sys
+    import time
+
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import sys, time\nfrom pathlib import Path\n"
+            "from skep.supervisor.serve.llm import provider_lock\n"
+            "with provider_lock(Path(sys.argv[1])):\n"
+            "    print('held', flush=True)\n    time.sleep(1.0)\n"
+        ), str(config.home)],
+        stdout=subprocess.PIPE, text=True,
+    )  # fmt: skip
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        began = time.monotonic()
+        with _store(config) as store:
+            llm.legacy_api_key(config.home, "https://a.example", store)
+        assert time.monotonic() - began >= 0.5  # it waited for the other process
+    finally:
+        holder.wait(10)
+
+
+def test_a_legacy_read_takes_the_file_lock_even_before_any_commit(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R11 (Sol R11-1): on an upgraded home with no lock file yet, the
+    shared read went unlocked and a first cross-process commit raced it. A
+    supervisor process's read creates the lock file and holds it shared."""
+    from skep.supervisor.serve import llm
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-r11")
+    held: list[bool] = []
+    real = llm._legacy_values
+
+    def spy(home: Path) -> Any:
+        held.append(llm._HELD["fd"] is not None)
+        return real(home)
+
+    monkeypatch.setattr(llm, "_legacy_values", spy)
+    with _store(config) as store:
+        store.set_setting(llm.LLM_ENV_KEY_ENDPOINT, "https://a.example")
+        assert not (config.home / llm.PROVIDER_LOCK_FILE).exists()
+        assert llm.legacy_api_key(config.home, "https://a.example", store) == "env-r11"
+    assert (config.home / llm.PROVIDER_LOCK_FILE).exists() and held == [True]
