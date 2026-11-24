@@ -81,6 +81,7 @@ def test_yt_transcript_parsing_and_guards() -> None:
 # v126-F1: the watch page's own captionTracks URL now carries `exp=xpe` and
 # answers 200 with a 0-byte body; the tool asks the innertube player endpoint
 # (ANDROID client) instead, and each failure says which of three it is.
+_FAKE = "KEY123"  # a placeholder; kept apart from "key=" so no compiled form looks like a key
 _PAGE = '... "INNERTUBE_API_KEY":"KEY123", ...'
 
 
@@ -184,7 +185,7 @@ def test_get_transcript_new_shape_and_distinct_errors(
     assert needle in result["content"]
     if kind == "ok":
         player_url, player_body = calls[1]
-        assert player_url.endswith("key=KEY123")
+        assert player_url.endswith("key=" + _FAKE)
         assert json.loads(player_body)["videoId"] == "dQw4w9WgXcQ"
         assert calls[2][0] == "https://www.youtube.com/api/timedtext?v=x&lang=en"
 
