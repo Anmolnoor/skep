@@ -1526,6 +1526,46 @@ def test_an_early_refusal_records_no_merge_base_and_every_export_says_so(
     assert "(merge-base unavailable)" in forensics["forensics"]
 
 
+def test_two_opens_of_a_pre_phase_09_store_both_migrate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (S10, N4): the Phase 09 columns are added under BEGIN IMMEDIATE
+    and re-checked under the lock — an open that waited while another
+    migrated never fails with ``duplicate column name``."""
+    import sqlite3
+    from contextlib import closing
+
+    db = tmp_path / "supervisor.sqlite3"
+    RunStore(db).close()
+    with closing(sqlite3.connect(db)) as conn:
+        for table, column in (
+            ("reverifications", "head_commit"), ("reverifications", "pr_json"),
+            ("runs", "pr_json"),
+        ):  # fmt: skip
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        conn.commit()
+    begin = RunStore._begin_immediate
+    raced: list[bool] = []
+
+    def the_other_open_migrates_first(self: RunStore) -> None:
+        if not raced:
+            raced.append(True)
+            monkeypatch.setattr(RunStore, "_begin_immediate", begin)
+            RunStore(db).close()  # it won the write lock and finished
+        begin(self)
+
+    monkeypatch.setattr(RunStore, "_begin_immediate", the_other_open_migrates_first)
+    RunStore(db).close()
+    monkeypatch.undo()
+
+    assert raced, "the Phase 09 columns were added without taking the write lock"
+    with closing(sqlite3.connect(db)) as conn:
+        for table in ("reverifications", "runs"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            assert "pr_json" in columns
+        assert "head_commit" in {r[1] for r in conn.execute("PRAGMA table_info(reverifications)")}
+
+
 # --- 6. the evidence is a read the Queen attaches, not a command it names ------
 
 

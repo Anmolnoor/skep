@@ -1162,6 +1162,23 @@ class RunStore:
             return False
         return True
 
+    def _add_columns_locked(self, table: str, columns: dict[str, str]) -> None:
+        """Phase 09 R2 (S10, N4): add ``columns`` (name -> type) to ``table``
+        under the database's write lock, re-checking ``PRAGMA table_info``
+        under it — two opens of an older store both saw them missing, and
+        the second ALTER failed with ``duplicate column name`` (the Phase 08
+        taint migration's pattern, review R3-2). A current store stays
+        write-free."""
+        pragma = f"PRAGMA table_info({table})"
+        if set(columns) <= {row[1] for row in self._conn.execute(pragma)}:
+            return
+        with self._conn:
+            self._begin_immediate()
+            present = {row[1] for row in self._conn.execute(pragma)}
+            for name, kind in columns.items():
+                if name not in present:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+
     def _migrate(self, *, rebuild_chat_fts: bool = False) -> None:
         """Add columns introduced after a table first shipped (CREATE IF NOT EXISTS
         never alters an existing table). Idempotent: each ADD is guarded by a
@@ -1182,10 +1199,8 @@ class RunStore:
             )
         if "test_counts_json" not in reverify_columns:
             self._conn.execute("ALTER TABLE reverifications ADD COLUMN test_counts_json TEXT")
-        if "head_commit" not in reverify_columns:
-            self._conn.execute("ALTER TABLE reverifications ADD COLUMN head_commit TEXT")
-        if "pr_json" not in reverify_columns:
-            self._conn.execute("ALTER TABLE reverifications ADD COLUMN pr_json TEXT")
+        # Phase 09: the PR head G10 verified and that verdict's PR tuple.
+        self._add_columns_locked("reverifications", {"head_commit": "TEXT", "pr_json": "TEXT"})
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1299,9 +1314,8 @@ class RunStore:
         if "follow_up" not in run_columns:
             # ES-F242 (D18): a run-finish follow-up survives a serve restart.
             self._conn.execute("ALTER TABLE runs ADD COLUMN follow_up TEXT")
-        if "pr_json" not in run_columns:
-            # Phase 09 R1 (D2): the PR pair a review run was pinned to.
-            self._conn.execute("ALTER TABLE runs ADD COLUMN pr_json TEXT")
+        # Phase 09 R1 (D2): the PR pair a review run was pinned to.
+        self._add_columns_locked("runs", {"pr_json": "TEXT"})
         chat_message_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(chat_messages)")
         }
