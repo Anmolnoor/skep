@@ -1553,10 +1553,12 @@ _SECRET_ARG_KEY = re.compile(
 # Phase 09 R1 (S8, ADR 0042): ALL a scheduled prompt turn may call — store
 # reads, named. Anything else is off its menu: list_prs reads GitHub as you,
 # repo_state/git_* read checkouts, list_mcp_tools starts a server; R2 (S12):
-# get_run reads patch/draft files, list_repos walks checkout dirs.
+# get_run reads patch/draft files, list_repos walks checkout dirs; R3 (S11):
+# await_runs blocks and probes patch files, and list_runs/list_approvals
+# run as SCHEDULED_PROJECTIONS (store rows, no event logs, files or git).
 SCHEDULED_TURN_TOOLS: frozenset[str] = frozenset(
     {
-        "list_runs", "await_runs", "list_approvals",
+        "list_runs", "list_approvals",
         "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
         "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
         "list_schedules", "list_projects",
@@ -1568,6 +1570,69 @@ SCHEDULED_STORE_ONLY_REFUSAL = (
     "reads only (runs, approvals, chats, notes, tasks, memory, schedules). "
     "Say what you would check; the user can ask for it in a live chat."
 )
+
+
+SCHEDULED_PROJECTIONS: frozenset[str] = frozenset({"list_runs", "list_approvals"})
+_PROJECTION_NOTE = (
+    "a scheduled turn's view: store rows only (no event logs, patch files or git), "
+    "so unlanded patches and live gate details are not shown here"
+)
+
+
+def _stored_run_row(store: Any, record: Any) -> dict[str, Any]:
+    """A run as its store row says — what ``_run_view`` shows minus every
+    disk probe."""
+    return {
+        "task_id": record.task_id,
+        "state": record.state,
+        "repo": record.repo,
+        "ref": record.ref,
+        "summary": record.summary,
+        "verification": record.verification_outcome,
+        "updated_at": record.updated_at,
+        "resume_of": record.resume_of,
+        "resumed_as": store.resumed_as_for(record.task_id),
+        "reverification": actions.reverification_summary(store.reverification_for(record.task_id)),
+        "applied_branch": actions.applied_branch_for(store, record.task_id),
+    }
+
+
+def scheduled_read(name: str, args: dict[str, Any], *, store: Any) -> dict[str, Any]:
+    """Phase 09 R3 (S11): a scheduled turn's ``list_runs`` / ``list_approvals``
+    (SCHEDULED_PROJECTIONS) from store rows alone — the attended tools open
+    worker event logs, probe patch files and may run git."""
+    if name == "list_runs":
+        limit = min(int(args.get("limit") or 10), 50)
+        runs = [_stored_run_row(store, record) for record in store.recent_runs(limit)]
+        return {"runs": runs, "note": _PROJECTION_NOTE}
+    approvals = []
+    for approval in store.pending_approvals():
+        record = store.get_run(approval.task_id)
+        approvals.append(
+            {
+                "review_id": approval.review_id,
+                "task_id": approval.task_id,
+                "action": approval.action,
+                "reason": approval.reason,
+                "requested_at": approval.requested_at,
+                "run": None if record is None else _stored_run_row(store, record),
+            }
+        )
+    resolved = [
+        {
+            "review_id": a.review_id,
+            "task_id": a.task_id,
+            "action": a.action,
+            "status": a.status,
+            "resolved_by": a.resolved_by,
+            "decided_by": a.decided_by,
+            "landing_branch": a.landing_branch,
+            "resolved_at": a.resolved_at,
+            "resumed_as": store.resumed_as_for(a.task_id),
+        }
+        for a in store.resolved_approvals()
+    ]
+    return {"approvals": approvals, "recently_resolved": resolved, "note": _PROJECTION_NOTE}
 
 
 def off_menu(*, read_only: bool, unattended: bool) -> frozenset[str]:
@@ -3077,9 +3142,21 @@ class ChatEngine:
                         ):
                             self.sleep(self.get_run_repeat_delay_seconds)
                         try:
-                            result = execute_read_tool(
-                                name, args, store=self.store, holder=self.holder, chat_id=chat_id
-                            )
+                            if (  # S11; a role-hidden tool still gets its refusal below
+                                read_only
+                                and unattended
+                                and name in SCHEDULED_PROJECTIONS
+                                and name not in self._hidden(self.store.get_chat(chat_id))
+                            ):
+                                result = scheduled_read(name, args, store=self.store)
+                            else:
+                                result = execute_read_tool(
+                                    name,
+                                    args,
+                                    store=self.store,
+                                    holder=self.holder,
+                                    chat_id=chat_id,
+                                )
                             ran = True
                         except HTTPException as exc:
                             result = {"error": str(exc.detail)}

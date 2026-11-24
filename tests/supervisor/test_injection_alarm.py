@@ -277,7 +277,7 @@ def test_the_scheduled_menu_is_exactly_these_store_reads() -> None:
     from skep.supervisor.serve.chat import SCHEDULED_TURN_TOOLS
 
     pinned = {
-        "list_runs", "await_runs", "list_approvals",
+        "list_runs", "list_approvals",
         "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
         "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
         "list_schedules", "list_projects",
