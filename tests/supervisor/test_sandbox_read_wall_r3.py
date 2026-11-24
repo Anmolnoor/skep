@@ -528,3 +528,22 @@ def test_a_dotdot_path_entry_binds_the_uv_really_found(
     roots = sandbox.strict_read_roots(tmp_path / "skep")
     assert uv.resolve() in roots
     assert (tmp_path / "bin" / "uv").resolve() not in roots
+
+
+def test_a_linked_uv_binds_its_checked_file_and_aliases_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol C6-1: ~/.local/bin/uv linked to a versioned file — the bind root is
+    the file that passed the check, never the link (a retarget during the
+    build could not admit a dir); the link name comes back as an alias only."""
+    (tmp_path / "versions").mkdir()
+    real_uv = tmp_path / "versions" / "uv-1.0"
+    real_uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    real_uv.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "uv").symlink_to(real_uv)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    candidates = sandbox._strict_candidates(tmp_path / "skep", worker_llm_key=False, extra=())
+    assert real_uv.resolve() in candidates and tmp_path / "bin" / "uv" not in candidates
+    assert sandbox._found_link(str(tmp_path / "bin" / "uv")) == [tmp_path / "bin" / "uv"]
+    assert sandbox._found_link(str(real_uv)) == []

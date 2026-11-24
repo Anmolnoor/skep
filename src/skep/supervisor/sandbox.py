@@ -306,13 +306,22 @@ def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
 
 
 def _found_file(found: str | None) -> Path | None:
-    """A PATH lookup's hit as written — resolved instead when it holds a
-    ``..`` (C5-1) — and only if it really is a regular file."""
+    """A PATH lookup's hit, resolved once (C5-1: a ``..`` walked, never
+    collapsed) and kept only as the regular file that passed the check — C6-1:
+    never the link, which a retarget during the build could point at a dir."""
     if found is None:
         return None
-    path = Path(found)
-    path = path.resolve() if ".." in path.parts else Path(os.path.abspath(path))
-    return path if path.resolve().is_file() else None
+    real = Path(found).resolve()
+    return real if real.is_file() else None
+
+
+def _found_link(found: str | None) -> list[Path]:
+    """The hit's written name when it is a link (~/.local/bin/uv to a versioned
+    file): bwrap's empty root gets it as an alias only (``_alias_links``)."""
+    if found is None or ".." in Path(found).parts:
+        return []
+    path = Path(os.path.abspath(found))
+    return [path] if path.is_symlink() else []
 
 
 def _strict_candidates(
@@ -1494,7 +1503,7 @@ def write_profile(
         )
         extra_readable += dict.fromkeys(path.resolve() for path in aliases)
         if read_allowlist is not None:
-            aliases += _interpreter_links(extra_readable)
+            aliases += [*_interpreter_links(extra_readable), *_found_link(shutil.which("uv"))]
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(
