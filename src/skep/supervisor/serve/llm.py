@@ -2058,6 +2058,7 @@ def save_assistant_llm(
     protocol: LLMProtocol | None = None,
     api_key: str | None = None,
     settings: dict[str, Any] | None = None,
+    tested: dict[str, Any] | None = None,
 ) -> None:
     """``_save_assistant_llm`` — R6 (Sol R6-1): while a legacy key is still
     unowned, resolving it, probing with it and pinning it are ONE step under
@@ -2073,12 +2074,12 @@ def save_assistant_llm(
         if unowned:  # resolve, probe and pin as one step
             _save_assistant_llm(
                 store, home, base_url=base_url, model=model, protocol=protocol,
-                api_key=api_key, settings=settings,
+                api_key=api_key, settings=settings, tested=tested,
             )  # fmt: skip
             return
     _save_assistant_llm(
         store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
-        settings=settings,
+        settings=settings, tested=tested,
     )  # fmt: skip
 
 
@@ -2091,6 +2092,7 @@ def _save_assistant_llm(
     protocol: LLMProtocol | None = None,
     api_key: str | None = None,
     settings: dict[str, Any] | None = None,
+    tested: dict[str, Any] | None = None,
 ) -> None:
     """Phase 05 (5.1): THE write of the assistant's provider/model — Web
     Settings and the Queen's model dial land here, ``use_provider`` (CLI
@@ -2116,13 +2118,20 @@ def _save_assistant_llm(
     ProviderError (ProviderConflict when staged-on state moved), having
     written nothing."""
     from ..codex_login import uses_codex_login
-    from ..providers import ProviderError, migrate_legacy_provider, provider_host
+    from ..providers import ProviderConflict, ProviderError, migrate_legacy_provider, provider_host
 
     if base_url and provider_host(base_url) is None:
         raise ProviderError(f"base_url must be a valid http(s) URL, got {base_url!r}")
     staged = provider_state(store, home)
     view = _staged_view(store, home)  # P9/F6: adopted for staging, written only on commit
     plan = _stage(view, base_url=base_url, model=model, protocol=protocol, api_key=api_key)
+    if tested is not None and _staged_endpoint(plan) != tested:
+        # R4 K6 / R5 item 8: Save writes only the endpoint its Test resolved —
+        # checked on the one plan this save probes and commits
+        raise ProviderConflict(
+            f"this save would go to {plan.target}, not the {tested.get('base_url')} the test "
+            "reached: test again. Nothing was saved"
+        )
     target, wire, active, same, saved_model = (
         plan.target,
         plan.wire,
@@ -2514,19 +2523,6 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if body.tool_delivery is not None:
             settings[TOOL_DELIVERY_SETTING] = body.tool_delivery
         provider = (base_url, model, body.protocol, key) != (None, None, None, None)
-        if body.tested is not None:
-            # R4 K6: Save writes only the endpoint its Test resolved
-            plan = _stage(
-                _staged_view(run_store, home),
-                base_url=base_url, model=model, protocol=body.protocol, api_key=key,
-            )  # fmt: skip
-            if _staged_endpoint(plan) != body.tested:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"this save would go to {plan.target}, not the "
-                    f"{body.tested.get('base_url')} the test reached: test again. "
-                    "Nothing was saved",
-                )
         try:
             if provider:
                 # a new key, endpoint or protocol is probed before any write
@@ -2539,6 +2535,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
                     protocol=body.protocol,
                     api_key=key,
                     settings=settings,
+                    tested=body.tested,
                 )
             else:
                 with provider_rollback(run_store, home):
