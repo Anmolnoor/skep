@@ -1838,3 +1838,20 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
 .forensics h3 { font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
 .forensics-section summary { cursor: pointer; }
 .not-found h2 { margin: 0 0 6px; }
+/* Phase 10 R1 (E1): the decision ledger's search, its verify badge, and a
+   project's walls. Tokens only; every row wraps at phone width. */
+.ledger-row { margin: 0 0 var(--space-2); }
+.ledger-badge { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.ledger-badge.loud {
+  font-size: var(--text-sm); font-weight: 600; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--bad); border-radius: var(--radius-sm);
+}
+.decision-filters { flex-wrap: wrap; align-items: flex-end; }
+.decision-filters .field { min-width: 9rem; flex: 1 1 9rem; }
+.decision-older { margin: var(--space-2) 0; }
+.policy-baseline-sha { overflow-wrap: anywhere; }
+.project-walls-row {
+  display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); align-items: center;
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft);
+}
+.project-walls-row .grow { flex: 1 1 16rem; min-width: 0; }

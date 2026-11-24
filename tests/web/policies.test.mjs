@@ -60,6 +60,8 @@ const GROUPS = {
 };
 const PROJECTS = { projects: [{ project_id: "app", name: "app", bindings: [{ kind: "repo_path", value: "/r/app" }] }] };
 
+const LEDGER_VALID = { status: "VALID", chained: 3, checkpoints_missing: 0, break: null, line: "VALID: 3 chained rows, head seq 3 sha256 abc" };
+
 // One stub table per test: path prefix → response (or a function of the path).
 function withPolicies(routes = {}) {
   const app = loadApp();
@@ -72,7 +74,8 @@ function withPolicies(routes = {}) {
     "GET /api/projects": PROJECTS,
     "GET /api/policy-groups": GROUPS,
     "GET /api/policy/rules": { rules: [], operator_rules: [] },
-    "GET /api/policy/decisions": { rows: [], total: 0, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0 } },
+    "GET /api/policy/decisions/search": { rows: [], total: 0, next_cursor: null, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0 } },
+    "GET /api/ledger/verify": LEDGER_VALID,
     "GET /api/policy": POLICY,
     "GET /api/schedules": { schedules: [] },
     "GET /api/repos/": { keys: [], scopes: {} },
@@ -196,7 +199,7 @@ test("Now: View as offers the baseline, each role and each template, and re-read
   await flush();
   const select = panel(main).querySelector(".policy-view-as");
   const values = select.children.map(o => o.getAttribute("value"));
-  assert.deepEqual(values, ["baseline", "role:builder", "role:assistant", "assistant", "builder", "operator"]);
+  assert.deepEqual(values, ["baseline", "role:builder", "role:assistant", "assistant", "builder", "operator", "project:app"]);
   select.value = "role:assistant";
   await Promise.all(select.listeners.change.map(fn => fn()));
   await flush();
@@ -367,23 +370,21 @@ test("Decisions: summary counts, newest-first rows, a verdict filter, and an emp
     { at: "2026-11-18T07:00:00Z", actor: "hook", scope: "shell", action: "run", value: "ls", source: "observed", verdict: "allow", decided_by: "x" },
   ];
   const { main, app } = withPolicies({
-    "GET /api/policy/decisions": { rows, total: 4, summary: { allow: 1, deny: 1, require_approval: 1, observed: 1, forwarded: 0, delegated: 0 } },
+    "GET /api/policy/decisions/search": { rows, total: 4, next_cursor: null, summary: { allow: 1, deny: 1, require_approval: 1, observed: 1, forwarded: 0, delegated: 0 } },
   });
   await app.viewPolicies(main, "decisions");
   await flush();
   const dec = panel(main);
   assert.match(dec.querySelector(".policy-summary").textContent, /1 allowed · 1 asked · 1 denied · 1 observed/);
-  assert.match(dec.querySelector(".policy-summary").textContent, /from the last two log files/);
-  const rowText = () => dec.querySelectorAll(".policy-decision").filter(r => !r.classList.contains("hidden")).map(r => r.textContent);
+  assert.match(dec.querySelector(".policy-summary").textContent, /4 matches in the last two log files/);
+  const rowText = () => dec.querySelectorAll(".policy-decision").map(r => r.textContent);
   assert.equal(rowText().length, 4);
   assert.match(rowText()[0], /rm -rf/);
   assert.match(rowText()[2], /asks first/);
   assert.match(rowText()[3], /observed/);
-  const tabs = dec.querySelectorAll(".filter-tab");
-  assert.deepEqual(tabs.map(t => t.textContent), ["All4", "Allowed1", "Asked1", "Denied1", "Notes1"]);
-  await tabs[3].click();
-  assert.deepEqual(rowText().length, 1);
-  assert.match(rowText()[0], /denied/);
+  // The verdict filter is the server's (decisions_search), never a client window.
+  const verdict = dec.querySelector(".decision-verdict");
+  assert.deepEqual(verdict.children.map(o => o.getAttribute("value")), ["", "allow", "ask", "deny", "note"]);
 
   const empty = withPolicies();
   await empty.app.viewPolicies(empty.main, "decisions");
@@ -396,7 +397,7 @@ test("Decisions: an alarm delivery row is a note, never a verdict (v121-F2)", as
     { at: "2026-11-18T10:00:00Z", actor: "queen", scope: "queen", action: "alarm", value: "mail-summary", source: "alarm", decided_by: "queen/unattended", alarm_delivered: true },
   ];
   const { main, app } = withPolicies({
-    "GET /api/policy/decisions": { rows, total: 1, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0, alarm: 1 } },
+    "GET /api/policy/decisions/search": { rows, total: 1, next_cursor: null, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0, alarm: 1 } },
   });
   await app.viewPolicies(main, "decisions");
   await flush();
@@ -515,4 +516,162 @@ test("Defaults: the engine switch keeps its confirm", async () => {
   await button.click();
   assert.match(asked, /Route shell through policy engine v2\?/);
   assert.ok(!calls.some(([m]) => m === "PUT"));
+});
+
+// ---------- Phase 10 R1 (E1): the searchable ledger, its verify badge, the project walls ----------
+
+test("Decisions: task id, engine, actor and verdict go to the server; Older pages on with its cursor", async () => {
+  const row = (value, extra = {}) => ({ at: "2026-11-18T10:00:00Z", actor: "acp:codex", scope: "shell", action: "run", value, verdict: "allow", task_id: "t1", engine: "codex", ...extra });
+  const { main, app, calls } = withPolicies({
+    "GET /api/policy/decisions/search": path => (path.includes("cursor=")
+      ? { rows: [row("older one")], total: 2, next_cursor: null, summary: { allow: 2, deny: 0, require_approval: 0 } }
+      : { rows: [row("newest one")], total: 2, next_cursor: 1, summary: { allow: 2, deny: 0, require_approval: 0 } }),
+  });
+  await app.viewPolicies(main, "decisions");
+  await flush();
+  const dec = panel(main);
+  assert.equal(calls.filter(([, p]) => p.startsWith("/api/policy/decisions/search")).length, 1);
+  dec.querySelector(".decision-task").value = "t1";
+  dec.querySelector(".decision-engine").value = "codex";
+  dec.querySelector(".decision-actor").value = "acp:*";
+  dec.querySelector(".decision-verdict").value = "deny";
+  await dec.querySelector(".decision-search").click();
+  await flush();
+  const searched = calls.filter(([, p]) => p.startsWith("/api/policy/decisions/search")).at(-1)[1];
+  assert.equal(searched, "/api/policy/decisions/search?task_id=t1&engine=codex&actor=acp%3A*&verdict=deny&limit=100");
+  assert.match(dec.querySelector(".policy-decision").textContent, /t1/);
+  assert.match(dec.querySelector(".policy-decision").textContent, /codex/);
+  // Older: the same filters, the server's cursor, rows appended — never a refetch of page one.
+  const older = dec.querySelector(".decision-older");
+  assert.equal(older.hidden, false);
+  await older.click();
+  await flush();
+  assert.equal(calls.at(-1)[1], "/api/policy/decisions/search?task_id=t1&engine=codex&actor=acp%3A*&verdict=deny&limit=100&cursor=1");
+  assert.deepEqual(dec.querySelectorAll(".policy-decision").map(r => /newest|older/.exec(r.textContent)[0]), ["newest", "older"]);
+  assert.equal(older.hidden, true);
+});
+
+test("Decisions: the ledger badge — VALID quiet, degraded a warning, BROKEN loud with file:line; re-read on every search", async () => {
+  const badge = async (verify) => {
+    const ctx = withPolicies({ "GET /api/ledger/verify": verify });
+    await ctx.app.viewPolicies(ctx.main, "decisions");
+    await flush();
+    return ctx;
+  };
+  const ok = await badge(LEDGER_VALID);
+  const okBadge = panel(ok.main).querySelector(".ledger-badge");
+  assert.ok(okBadge.classList.contains("tone-ok"));
+  assert.match(okBadge.textContent, /Ledger verified · VALID: 3 chained rows/);
+  await panel(ok.main).querySelector(".decision-search").click();
+  await flush();
+  assert.equal(ok.calls.filter(([, p]) => p === "/api/ledger/verify").length, 2);
+
+  const degraded = await badge({ ...LEDGER_VALID, checkpoints_missing: 2, line: "VALID: 3 chained rows (2 checkpoints due were never kept: coverage degraded)" });
+  const warn = panel(degraded.main).querySelector(".ledger-badge");
+  assert.ok(warn.classList.contains("tone-warn"));
+  assert.match(warn.textContent, /coverage degraded/);
+
+  const broken = await badge({ status: "BROKEN", chained: 1, checkpoints_missing: 0, break: { file: "/h/decisions.jsonl", line: 2, reason: "hash mismatch" }, line: "BROKEN at /h/decisions.jsonl:2: hash mismatch" });
+  const loud = panel(broken.main).querySelector(".ledger-badge");
+  assert.ok(loud.classList.contains("tone-bad") && loud.classList.contains("loud"));
+  assert.equal(loud.getAttribute("role"), "alert");
+  assert.match(loud.textContent, /Ledger BROKEN at \/h\/decisions\.jsonl:2: hash mismatch/);
+
+  const failed = await badge(() => { throw new Error("500"); });
+  assert.match(panel(failed.main).querySelector(".ledger-badge").textContent, /could not be verified: 500/);
+});
+
+test("Now: the locked baseline shows its full sha256", async () => {
+  const { main, app } = withPolicies();
+  await app.viewPolicies(main);
+  await flush();
+  const sha = panel(main).querySelector(".policy-baseline-sha");
+  assert.equal(sha.textContent, `sha256 ${"a".repeat(64)}`);
+});
+
+const RSOP_APP = {
+  scopes: {
+    shell: [
+      { action: "run", pattern: "uv sync", rule_id: "shell:uv sync", verdict: "allow" },
+      { action: "run", pattern: "*", rule_id: "shell:ask", verdict: "require_approval" },
+    ],
+    network: [{ action: "connect", pattern: "evil.example", rule_id: "net:deny", verdict: "deny" }],
+  },
+  keys: [
+    { key: "default_execution_mode", value: "workspace", source_layer: "global", source_name: null, overridden: [] },
+    { key: "strict_read_confinement", value: null, source_layer: null, source_name: null, overridden: [] },
+    { key: "unlocked", value: false, source_layer: "project", source_name: "app", overridden: [] },
+  ],
+};
+const APP_PROJECT = { project_id: "app", name: "app", strategy: "trusted_local_dev", phase: "build", bindings: [{ kind: "repo_path", value: "/r/app" }], policy: { verify_command: "pytest -q", unlocked: false } };
+
+async function viewAsApp(routes = {}) {
+  const ctx = withPolicies({
+    "GET /api/repos/%2Fr%2Fapp/rsop": RSOP_APP,
+    "GET /api/projects/app": APP_PROJECT,
+    "POST /api/projects": {},
+    ...routes,
+  });
+  await ctx.app.viewPolicies(ctx.main);
+  await flush();
+  const select = panel(ctx.main).querySelector(".policy-view-as");
+  select.value = "project:app";
+  await Promise.all(select.listeners.change.map(fn => fn()));
+  await flush();
+  return ctx;
+}
+
+test("Now: View as a project shows its resolved policy (RSoP) — an ask never under Allowed — and the floor", async () => {
+  const { main, calls } = await viewAsApp();
+  assert.ok(calls.some(([, p]) => p === "/api/repos/%2Fr%2Fapp/rsop"));
+  const cols = panel(main).querySelectorAll(".policy-col");
+  assert.match(cols[0].textContent, /uv sync/);
+  assert.doesNotMatch(cols[0].textContent, /anything/);
+  assert.match(cols[1].textContent, /run anything/);
+  assert.match(cols[2].textContent, /evil\.example/);
+  assert.match(panel(main).querySelector(".policy-floor").textContent, /Always denied/);
+  assert.match(panel(main).textContent, /What a run in \/r\/app gets now/);
+});
+
+test("Now: a project's sandbox, strict reads and unlocked controls show the value and its layer, confirm, then POST /api/projects", async () => {
+  const { main, app, calls } = await viewAsApp();
+  const walls = panel(main).querySelector(".project-walls");
+  assert.match(walls.textContent, /Where runs execute.*workspace.*global/s);
+  assert.match(walls.textContent, /Strict read confinement.*off.*not configured/s);
+  assert.match(walls.textContent, /Unlocked.*off.*project:app/s);
+  const button = label => walls.querySelectorAll("button").find(b => b.textContent === label);
+  // A cancelled confirm writes nothing — nothing flips silently.
+  let asked = [];
+  app.confirm = text => { asked.push(text); return false; };
+  await button("Unlock…").click();
+  await flush();
+  assert.equal(calls.filter(([m]) => m === "POST").length, 0);
+  assert.match(asked[0], /Unlock app\?/);
+  assert.match(asked[0], /G10-confirmed patch lands/);
+  // Confirmed: the same project write the effective editor makes, one key changed.
+  app.confirm = text => { asked.push(text); return true; };
+  await button("Turn on strict reads").click();
+  await flush();
+  const [, path, body] = calls.filter(([m]) => m === "POST").at(-1);
+  assert.equal(path, "/api/projects");
+  assert.deepEqual(JSON.parse(JSON.stringify(body.policy)), { verify_command: "pytest -q", unlocked: false, strict_read_confinement: true });
+  assert.equal(body.project_id, "app");
+  assert.match(app.flashes.at(-1)[1], /app: strict_read_confinement off → on/);
+  // The execution mode is a choice of three, confirmed the same way.
+  walls.querySelector(".project-walls-mode").value = "sandbox";
+  await button("Change").click();
+  await flush();
+  assert.equal(calls.filter(([m]) => m === "POST").at(-1)[2].policy.default_execution_mode, "sandbox");
+  assert.match(asked.at(-1), /workspace → sandbox/);
+});
+
+test("Now: a refused unlock (the server's guard) says why and saves nothing else", async () => {
+  const { main, app } = await viewAsApp({
+    "POST /api/projects": () => { throw new Error("unlocked=true needs a pinned verify_command"); },
+  });
+  app.confirm = () => true;
+  const walls = panel(main).querySelector(".project-walls");
+  await walls.querySelectorAll("button").find(b => b.textContent === "Unlock…").click();
+  await flush();
+  assert.deepEqual(app.flashes.at(-1), ["bad", "unlocked=true needs a pinned verify_command"]);
 });

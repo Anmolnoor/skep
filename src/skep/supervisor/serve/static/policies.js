@@ -176,15 +176,23 @@ async function renderNowTab(panel) {
     api("GET", "/api/schedules").catch(() => ({ schedules: [] })),
   ]);
   const status = baselineStatus(baseline);
+  // Phase 10 R1 (E1): a project with a repo is viewable as what its runs get.
+  const bound = projects.filter(projectRepoBinding);
   const viewAs = el("select", { class: "policy-view-as", "aria-label": "view the policy as" },
     el("option", { value: "baseline" }, "the locked baseline"),
     ...(roles.roles || []).map(r => el("option", { value: `role:${r.name}` }, `role: ${r.name}`)),
-    ...POLICY_TEMPLATES.map(t => el("option", { value: t }, `template: ${t}`)));
+    ...POLICY_TEMPLATES.map(t => el("option", { value: t }, `template: ${t}`)),
+    ...bound.map(p => el("option", { value: `project:${p.project_id}` }, `project: ${p.name}`)));
   viewAs.value = "baseline";
   const table = el("div", { class: "policy-now-table" });
   const renderTable = async () => {
     table.replaceChildren(policyNote("loading…"));
     try {
+      const picked = bound.find(p => `project:${p.project_id}` === viewAs.value);
+      if (picked) {
+        table.replaceChildren(...await projectNowView(picked, renderTable));
+        return;
+      }
       const view = await api("GET", `/api/policy/explain?subject=${encodeURIComponent(viewAs.value)}`);
       table.replaceChildren(...[
         view.kind !== "baseline" && view.note ? el("p", { class: "field-help" }, view.note) : null,
@@ -202,11 +210,112 @@ async function renderNowTab(panel) {
         status.setup ? [" ", el("a", { href: "#/setup" }, "Lock it in Setup →")] : null),
       baseline.state === "tampered" && baseline.diff?.length
         ? el("ul", { class: "policy-diff mono" }, baseline.diff.map(d => el("li", {}, d))) : null,
+      // Phase 10 R1 (E1): the lock's digest, whole — what a receipt quotes.
+      baseline.sha256 ? el("p", { class: "note mono policy-baseline-sha" }, `sha256 ${baseline.sha256}`) : null,
       el("p", { class: "note" }, `New chats open as the ${roles.default} role.`)),
     el("div", { class: "row policy-view-row" }, el("label", {}, "View as"), viewAs),
     table,
     testAnAction(scopes, projects, roles, schedules));
   await renderTable();
+}
+
+// ---- Phase 10 R1 (E1): one project, resolved — and its three walls ----
+
+// The RSoP's scope rules as the three columns: require_approval reads "ask",
+// so an ask never sits under Allowed (I8). The floor is skep's own, the same
+// for every project.
+async function projectNowView(project, rerender) {
+  const repo = projectRepoBinding(project).value;
+  const [rsop, explained] = await Promise.all([
+    api("GET", `/api/repos/${encodeURIComponent(repo)}/rsop`),
+    api("GET", "/api/policy/explain?subject=baseline"),
+  ]);
+  const rules = Object.entries(rsop.scopes || {}).flatMap(([scope, list]) => list.map(rule =>
+    ({ ...rule, scope, verdict: rule.verdict === "require_approval" ? "ask" : rule.verdict })));
+  return [
+    el("p", { class: "field-help" }, `What a run in ${repo} gets now: every layer resolved (the RSoP), its rules by verdict.`),
+    ruleColumns(rules),
+    floorBlock(explained.floor || []),
+    projectWalls(project, rsop, rerender),
+  ];
+}
+
+const WALLS = [
+  {
+    key: "default_execution_mode", label: "Where runs execute",
+    help: "sandbox: the walls are real (I12); workspace: the worktree on this host; ask: each run asks.",
+  },
+  {
+    key: "strict_read_confinement", label: "Strict read confinement",
+    help: "A sandboxed run reads an allowlist (toolchains, the worktree, extra_read_paths), not the whole disk (ADR 0068).",
+  },
+  {
+    key: "unlocked", label: "Unlocked",
+    help: "Zero-ask, opt-in (ADR 0061): needs a pinned verify_command, a usable sandbox and an approved baseline.",
+  },
+];
+
+const onOff = value => (value === true ? "on" : "off");
+
+// Each control shows the resolved value and the layer that set it; a change
+// is confirmed first, then written through the one project write that exists
+// (POST /api/projects, the effective editor's save) — the server's guards
+// (unlocked_block_reason) still decide. Nothing flips without a click and a yes.
+function projectWalls(project, rsop, rerender) {
+  const byKey = new Map((rsop.keys || []).map(k => [k.key, k]));
+  const decided = entry => (entry?.source_layer
+    ? layerName(entry.source_layer, entry.source_name) : "not configured at any layer");
+  const save = async (key, before, after, consequence) => {
+    if (!window.confirm(`${consequence}\n\n${project.name}: ${key} ${before} → ${after}. `
+      + "Saved as this project's own setting (POST /api/projects, the Projects & groups save).")) return;
+    try {
+      const fresh = await api("GET", `/api/projects/${encodeURIComponent(project.project_id)}`);
+      const value = key === "default_execution_mode" ? after : after === "on";
+      await api("POST", "/api/projects", { ...fresh, policy: { ...(fresh.policy || {}), [key]: value } });
+      flash("ok", `${project.name}: ${key} ${before} → ${after} — the next run resolves it`);
+      await rerender();
+    } catch (e) { flash("bad", e.message); }
+  };
+  const rows = WALLS.map(({ key, label, help }) => {
+    const entry = byKey.get(key);
+    const control = el("div", { class: "row" });
+    if (key === "default_execution_mode") {
+      const current = entry?.value || "ask";
+      const mode = el("select", { class: "project-walls-mode", "aria-label": label },
+        ["sandbox", "workspace", "ask"].map(m => el("option", { value: m }, m)));
+      mode.value = current;
+      const change = el("button", { type: "button", class: "ghost" }, "Change");
+      change.addEventListener("click", () => mode.value !== current && save(key, current, mode.value,
+        mode.value === "sandbox" ? `Run ${project.name}'s workers in the sandbox?`
+          : `Run ${project.name}'s workers ${mode.value === "workspace" ? "on this host, in the worktree, outside the sandbox" : "only after each run asks"}?`));
+      control.append(mode, change);
+    } else {
+      const now = onOff(entry?.value);
+      const next = now === "on" ? "off" : "on";
+      const word = key === "unlocked"
+        ? (next === "on" ? "Unlock…" : "Lock")
+        : `Turn ${next} strict reads`;
+      const consequence = key === "unlocked"
+        ? (next === "on"
+          ? `Unlock ${project.name}? Inside the sandbox, decide() answers a worker's default command asks, `
+            + "dispatch runs without a card, and a G10-confirmed patch lands on a skep/ branch with no approval."
+          : `Lock ${project.name}? Its runs ask again and every patch waits for your approval.`)
+        : (next === "on"
+          ? `Confine ${project.name}'s sandboxed reads to an allowlist?`
+          : `Let ${project.name}'s sandboxed runs read the whole disk again (secret masks still apply)?`);
+      const button = el("button", { type: "button", class: key === "unlocked" && next === "on" ? "danger ghost" : "ghost" }, word);
+      button.addEventListener("click", () => save(key, now, next, consequence));
+      control.append(button);
+    }
+    return el("div", { class: "project-walls-row" },
+      el("div", { class: "grow" },
+        el("div", {}, el("strong", {}, label), " ",
+          el("span", { class: "mono" }, key === "default_execution_mode" ? entry?.value || "ask" : onOff(entry?.value)),
+          " · ", el("span", { class: "chip tone-info" }, decided(entry))),
+        el("p", { class: "field-help" }, help)),
+      control);
+  });
+  return policySection(`${project.name}: its walls`, true, el("div", { class: "project-walls stack" }, rows));
 }
 
 // The why box: one question, both answers (workers + the Queen), the rule named.
@@ -296,45 +405,102 @@ function testAnAction(scopes, projects, roles, schedules, preset = {}) {
 
 // ---- Decisions: what did skep decide? ----
 
+// Phase 10 R1 (E1): the ledger's verify badge — `skep ledger verify`, read
+// live on every search. VALID is quiet; degraded coverage warns; a break is
+// loud and names its file and line (I8: an alarm only for a real failure).
+async function ledgerBadge(badge) {
+  try {
+    const v = await api("GET", "/api/ledger/verify");
+    const tone = v.status !== "VALID" ? "bad" : v.checkpoints_missing ? "warn" : "ok";
+    badge.className = `ledger-badge chip tone-${tone}${tone === "bad" ? " loud" : ""}`;
+    if (tone === "bad") badge.setAttribute("role", "alert");
+    else badge.removeAttribute("role");
+    badge.replaceChildren(tone === "bad" ? `Ledger ${v.line}` : `Ledger verified · ${v.line}`);
+  } catch (e) {
+    badge.className = "ledger-badge chip tone-warn";
+    badge.replaceChildren(`The decision ledger could not be verified: ${e.message}`);
+  }
+}
+
+const DECISION_VERDICTS = [["", "any verdict"], ["allow", "allowed"], ["ask", "asks first"], ["deny", "denied"], ["note", "notes"]];
+
+// Phase 10 R1 (E1): decisions.jsonl searched on the server — task id, engine,
+// actor (a glob) and verdict narrow it there, a page of 100 at a time; Older
+// asks for the next page with the server's cursor, never a client window.
 async function renderDecisionsTab(panel) {
-  const { rows, total, summary } = await api("GET", "/api/policy/decisions?limit=200");
   const kindOf = row => (POLICY_NOTE_SOURCES.includes(row.source) ? "note"
     : row.verdict === "require_approval" ? "ask" : row.verdict);
-  const counts = [
-    `${summary.allow} allowed`, `${summary.require_approval} asked`, `${summary.deny} denied`,
-    ...POLICY_NOTE_SOURCES.filter(s => summary[s]).map(s => `${summary[s]} ${s}`),
-  ].join(" · ");
-  panel.append(el("p", { class: "policy-summary" }, counts,
-    // v121-F4: the read window is the newest rotated log file + the live one.
-    el("span", { class: "note" }, total > rows.length
-      ? ` — the newest ${rows.length} of ${total} in the last two log files shown`
-      : " — from the last two log files")));
-  if (!rows.length) {
-    panel.append(el("p", { class: "empty-state" },
-      "Nothing decided yet. Every policy decision skep records (decisions.jsonl in the audit "
-      + "trail) shows here, newest first."));
-    return;
-  }
-  const nodes = rows.map(row => {
+  const input = (cls, placeholder, label) => el("input", { class: `mono ${cls}`, placeholder, "aria-label": label });
+  const task = input("decision-task", "task id", "task id");
+  const engine = input("decision-engine", "codex, claude_code…", "engine");
+  const actor = input("decision-actor", "acp:* or human@*", "actor (a glob)");
+  const verdict = el("select", { class: "decision-verdict", "aria-label": "verdict" },
+    DECISION_VERDICTS.map(([value, label]) => el("option", { value }, label)));
+  const search = el("button", { type: "button", class: "primary decision-search" }, "Search");
+  const older = el("button", { type: "button", class: "ghost decision-older" }, "Older →");
+  const badge = el("span", { class: "ledger-badge chip" }, "verifying the ledger…");
+  const summaryLine = el("p", { class: "policy-summary" });
+  const list = el("div", { class: "policy-decisions" });
+  const emptyNote = el("p", { class: "empty-state hidden" });
+  let query = "";
+  let cursor = null;
+  const rowNode = (row) => {
     const kind = kindOf(row);
     return el("div", { class: "policy-decision searchable", "data-kind": kind },
       el("span", { class: `policy-verdict verdict-${kind}` }, kind === "note" ? row.source : verdictWord(row.verdict)),
       el("span", { class: "note", title: fmtTs(row.at) }, relativeTime(row.at)),
       el("span", { class: "mono" }, row.actor || "-"),
       el("span", {}, `${row.scope} ${row.action} `, el("code", { class: "mono" }, row.value)),
+      row.task_id || row.engine
+        ? el("small", { class: "mono note" }, [row.task_id && `run ${row.task_id}`, row.engine].filter(Boolean).join(" · "))
+        : null,
       el("small", { class: "note", title: row.rule_id || "" }, row.decided_by || ""));
+  };
+  const load = async (more) => {
+    const page = await api("GET", `/api/policy/decisions/search?${query}${more ? `&cursor=${cursor}` : ""}`);
+    if (!more) {
+      const s = page.summary;
+      summaryLine.replaceChildren([
+        `${s.allow} allowed`, `${s.require_approval} asked`, `${s.deny} denied`,
+        ...POLICY_NOTE_SOURCES.filter(src => s[src]).map(src => `${s[src]} ${src}`),
+      ].join(" · "),
+      // v121-F4: the read window is the newest rotated log file + the live one.
+      el("span", { class: "note" }, ` — ${page.total} match${page.total === 1 ? "" : "es"} in the last two log files`));
+      list.replaceChildren();
+    }
+    list.append(...page.rows.map(rowNode));
+    cursor = page.next_cursor;
+    older.hidden = cursor === null || cursor === undefined;
+    const filtered = query.split("&").length > 1;
+    emptyNote.textContent = filtered ? "No decision matches these filters."
+      : "Nothing decided yet. Every policy decision skep records (decisions.jsonl in the audit "
+        + "trail) shows here, newest first.";
+    emptyNote.classList.toggle("hidden", list.children.length > 0);
+  };
+  const run = async () => {
+    const params = new URLSearchParams();
+    for (const [key, node] of [["task_id", task], ["engine", engine], ["actor", actor], ["verdict", verdict]]) {
+      if (node.value.trim()) params.set(key, node.value.trim());
+    }
+    params.set("limit", "100");
+    query = params.toString();
+    try { await Promise.all([load(false), ledgerBadge(badge)]); } catch (e) { flash("bad", e.message); }
+  };
+  search.addEventListener("click", run);
+  for (const node of [task, engine, actor]) {
+    node.addEventListener("keydown", (event) => { if (event.key === "Enter") run(); });
+  }
+  older.addEventListener("click", async () => {
+    try { await load(true); } catch (e) { flash("bad", e.message); }
   });
-  const filters = [
-    { key: "all", label: "All" }, { key: "allow", label: "Allowed" },
-    { key: "ask", label: "Asked" }, { key: "deny", label: "Denied" }, { key: "note", label: "Notes" },
-  ];
-  const tally = Object.fromEntries(filters.map(f => [f.key,
-    f.key === "all" ? nodes.length : nodes.filter(n => n.getAttribute("data-kind") === f.key).length]));
   panel.append(
-    buildFilterBar(filters, tally, (key) => {
-      for (const node of nodes) node.classList.toggle("hidden", key !== "all" && node.getAttribute("data-kind") !== key);
-    }),
-    el("div", { class: "policy-decisions" }, nodes));
+    el("div", { class: "row ledger-row" }, badge),
+    el("div", { class: "row decision-filters" },
+      policyField("run", task, null), policyField("engine", engine, null),
+      policyField("actor", actor, null), policyField("verdict", verdict, null),
+      el("div", { class: "field" }, el("label", {}, " "), search)),
+    summaryLine, emptyNote, list, older);
+  await run();
 }
 
 // ---- Standing grants: what runs without asking me? ----

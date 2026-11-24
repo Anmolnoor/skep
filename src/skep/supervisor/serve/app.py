@@ -103,6 +103,7 @@ from .chat import (
     add_chat_routes,
     run_completion_turn,
 )
+from .console import add_console_routes
 from .jobs import Dispatcher
 from .llm import add_llm_routes
 from .memory import add_memory_routes
@@ -1435,6 +1436,7 @@ def create_app(
     add_notes_tasks_routes(app, run_store=run_store)
     add_memory_routes(app, run_store=run_store)
     add_llm_routes(app, run_store=run_store, home=config.home)
+    add_console_routes(app, holder=holder)  # Phase 10 R1: the console's reads
     chat_engine = add_chat_routes(
         app,
         run_store=run_store,
