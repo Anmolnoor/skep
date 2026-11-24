@@ -266,3 +266,63 @@ def test_a_slug_bound_project_names_its_managed_checkout(home: Path, tmp_path: P
     assert "<repo>" not in instruction and "repos/gone" in instruction
     report = status.format_doctor_report(status.build_status(home, offline=True))
     assert "- gone: no checkout" in report
+
+
+def test_a_key_the_provider_echoes_never_reaches_doctor(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R2 F1: the worker probe printed the provider's words, so an
+    upstream quoting the key back ("Incorrect API key provided: ...") put it
+    into `skep doctor` text and JSON."""
+    from skep.profile import run_personal_setup
+    from tests.supervisor.fake_openai import FakeOpenAI
+
+    fake = FakeOpenAI(api_key="good1", models=["gpt"])
+    fake.echo_key = fake.public_listing = True
+    fake.start()
+    monkeypatch.setenv("SKEP_R2_KEY", "sk-leak9")
+    try:
+        run_personal_setup(
+            home, provider="openai-compat", model="gpt", endpoint=fake.base_url,
+            api_key_env="SKEP_R2_KEY",
+        )  # fmt: skip
+        assert main(["--home", str(home), "doctor"]) == 1
+        text = capsys.readouterr().out
+        main(["--home", str(home), "doctor", "--json"])
+        payload = capsys.readouterr().out
+    finally:
+        fake.stop()
+    assert "401" in text and "401" in payload
+    assert "sk-leak9" not in text + payload
+
+
+def test_a_refused_copilot_exchange_is_blocked_health_not_a_crash(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 F11: the registry-first worker read let the exchange's
+    OllamaError escape — doctor crashed, the relay planner skipped its
+    config-error handling. Now it is a blocked worker, classified by status."""
+    from skep.supervisor.provider_relay import relay_plan
+    from skep.supervisor.providers import ProviderProfile
+    from skep.supervisor.serve import llm_copilot
+    from skep.supervisor.serve.llm import OllamaError
+
+    def refused(_token: str, **_: object) -> tuple[str, float]:
+        raise OllamaError("copilot token exchange failed: 401 from api.github.com", status=401)
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", refused)
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        store.upsert_provider_profile(
+            ProviderProfile(
+                "copilot", "openai_compat", "https://api.githubcopilot.com", "gpt-5-mini",
+                active=True,
+            )
+        )  # fmt: skip
+    finally:
+        store.close()
+    (home / "supervisor" / "llm-secret-copilot").write_text("ghu_r2dead\n")
+    worker = status.build_status(home)["workers"]["coding_worker"]
+    assert (worker["status"], worker["kind"], worker["http_status"]) == ("blocked", "auth", 401)
+    plan, why = relay_plan(home)
+    assert plan is None and "401" in why

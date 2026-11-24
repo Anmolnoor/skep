@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import urllib.parse
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, get_args
 
@@ -37,6 +37,17 @@ class LlmPlanError(Exception):
     """
 
     raw_content: str | None = None
+
+
+class LlmUpstreamError(LlmPlanError):
+    """Phase 05 R2 (F11): resolving the worker's credential needed an upstream
+    call that failed — a refused Copilot token exchange. ``status`` is its
+    HTTP status (None: no answer), so doctor and the scheduler classify it
+    like a refused completion instead of crashing on the OllamaError."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -153,9 +164,13 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     # fall back to that secret to authenticate. v108-F4: the active registry
     # profile's own key file outranks the legacy secret when the endpoints match.
     # v119-F1: the legacy secret only for the endpoint it was saved for.
-    api_key = None
-    if not provider.api_key_env:
-        api_key = _worker_key(home, provider.endpoint or "")
+    # R2 (F9): a registry profile for this endpoint is the truth — its key,
+    # not an env var profile.json still names after the key replaced it.
+    registered, api_key = _worker_key(home, provider.endpoint or "")
+    if registered:
+        provider = replace(provider, api_key_env=None)
+    elif provider.api_key_env:
+        api_key = None
     return WorkerProvider(profile=provider, api_key=api_key)
 
 
@@ -175,34 +190,42 @@ def _refuse_queen_only(endpoint: str) -> None:
         )
 
 
-def _worker_key(personal_home: Path, endpoint: str) -> str | None:
-    """v108-F4: the active registry profile's per-profile credential — only
-    while the profile's endpoint matches the one this worker will dial (a
-    diverged config must not leak another provider's key onto its URL) —
-    else the legacy secret, only for the endpoint it was saved for (v119-F1)."""
-    from skep.supervisor.serve.llm import (
-        legacy_api_key,
-        resolve_provider_api_key,
-        worker_key_profile,
-    )
+def _worker_key(personal_home: Path, endpoint: str) -> tuple[bool, str | None]:
+    """(registered, key). v108-F4: the active registry profile's per-profile
+    credential — only while the profile's endpoint matches the one this
+    worker will dial (a diverged config must not leak another provider's key
+    onto its URL) — else the legacy secret, only for the endpoint it was
+    saved for (v119-F1)."""
+    from skep.supervisor.serve.llm import legacy_api_key, worker_key_profile
 
     supervisor_home = personal_home / "supervisor"
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
-        return legacy_api_key(supervisor_home, endpoint)
+        return False, legacy_api_key(supervisor_home, endpoint)
     store = RunStore(db_path, readonly=True)
     try:
         active = worker_key_profile(store, endpoint)
         if active is None:
-            return legacy_api_key(supervisor_home, endpoint, store)
-        return resolve_provider_api_key(supervisor_home, active, store)
+            return False, legacy_api_key(supervisor_home, endpoint, store)
+        return True, _profile_key(supervisor_home, active, store)
     finally:
         store.close()
 
 
+def _profile_key(supervisor_home: Path, profile: Any, store: RunStore) -> str | None:
+    """A registry profile's credential, under the worker's error contract
+    (R2, F11): a refused Copilot exchange is an LlmUpstreamError."""
+    from skep.supervisor.serve.llm import resolve_provider_api_key
+
+    try:
+        return resolve_provider_api_key(supervisor_home, profile, store)
+    except OllamaError as exc:
+        raise LlmUpstreamError(str(exc), status=exc.status) from exc
+
+
 def _registry_provider_from_home(home: Path) -> WorkerProvider | None:
     from skep.supervisor.codex_login import uses_codex_login
-    from skep.supervisor.serve.llm import REGISTRY_PROTOCOLS, resolve_provider_api_key
+    from skep.supervisor.serve.llm import REGISTRY_PROTOCOLS
 
     supervisor_home = home / "supervisor"
     db_path = supervisor_home / "supervisor.sqlite3"
@@ -219,7 +242,7 @@ def _registry_provider_from_home(home: Path) -> WorkerProvider | None:
             return None
         # the credential chat and the probe resolve: named env var → own key
         # file → llm-secret, the last only for the endpoint it was saved for
-        api_key = resolve_provider_api_key(supervisor_home, active, store)
+        api_key = _profile_key(supervisor_home, active, store)
     finally:
         store.close()
     return WorkerProvider(
@@ -248,11 +271,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         if not isinstance(model, str) or not model.strip():
             return None
         _refuse_queen_only(base_url)
-        from skep.supervisor.serve.llm import (
-            legacy_api_key,
-            resolve_provider_api_key,
-            worker_key_profile,
-        )
+        from skep.supervisor.serve.llm import legacy_api_key, worker_key_profile
 
         # v108-F4: the active registry profile's own credential — but only while
         # the saved settings still point at that profile's endpoint (a manual
@@ -260,7 +279,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         api_key = legacy_api_key(supervisor_home, base_url, store)
         active = worker_key_profile(store, base_url)
         if active is not None:
-            api_key = resolve_provider_api_key(supervisor_home, active, store)
+            api_key = _profile_key(supervisor_home, active, store)
     finally:
         store.close()
     known = get_args(LLMProtocol)
@@ -387,7 +406,7 @@ def _api_key(provider: WorkerProvider) -> str | None:
         try:
             return resolve_copilot_bearer(value)
         except OllamaError as exc:
-            raise LlmPlanError(str(exc)) from exc
+            raise LlmUpstreamError(str(exc), status=exc.status) from exc
     return value
 
 

@@ -1376,7 +1376,9 @@ def add_provider(
     Phase 05 R1: ``activate`` (with the supervisor ``home``) stages the
     profile and probes it with the credential it will use BEFORE the row is
     written; a refused one raises and writes nothing. Registering alone
-    sends nothing anywhere, so it is not probed."""
+    sends nothing anywhere, so it is not probed. R2 (F3): an existing id
+    keeps its endpoint — its key belongs there — so another base_url under
+    it is refused."""
     from ..providers import ProviderError, ProviderProfile, validate_provider_profile
 
     if preset:
@@ -1422,11 +1424,20 @@ def add_provider(
             api_key_env=api_key_env,
             source=source,
         )
+    staged = validate_provider_profile(profile)
+    held = store.get_provider_profile(staged.provider_id)
+    if held is not None and held.base_url != staged.base_url:
+        # R2 (F3): its saved key and key env belong to the endpoint it has
+        raise ProviderError(
+            f"provider {staged.provider_id!r} is registered for {held.base_url}, and its key "
+            f"belongs there — register {staged.base_url} under its own id "
+            f"(e.g. {staged.provider_id}-2)"
+        )
     if not activate:
         return _registered(store, profile, preset)
     if home is None:
         raise ProviderError("activating a provider needs the supervisor home")
-    _probe_profile(store, home, validate_provider_profile(profile))
+    _probe_profile(store, home, staged)
     from .llm import provider_rollback
 
     with provider_rollback(store, home):
@@ -1456,7 +1467,7 @@ def _probe_profile(
     ChatGPT-login profile is checked for a usable login instead (I9)."""
     from ..codex_login import uses_codex_login
     from ..providers import ProviderError, check_provider_health, live_probes
-    from .llm import OllamaError, _codex_login_key
+    from .llm import OllamaError, _codex_login_key, wire_key
 
     if not kept:
         previous = store.active_provider_profile()
@@ -1471,16 +1482,13 @@ def _probe_profile(
         except OllamaError as exc:
             raise ProviderError(f"{exc} — nothing changed: {kept}") from exc
         return
-    from ..providers import provider_host
-    from .llm_copilot import COPILOT_HOST, resolve_copilot_bearer
-
-    def _candidate(p: Any) -> str | None:
-        # a Copilot GitHub token works only once exchanged, as at run time
-        if key and provider_host(p.base_url) == COPILOT_HOST:
-            return resolve_copilot_bearer(key)
-        return key
-
-    probes = live_probes(home, store, key_for=_candidate if key is not None else None, timeout=15.0)
+    # a Copilot GitHub token works only once exchanged, as at run time
+    probes = live_probes(
+        home,
+        store,
+        key_for=(lambda p: wire_key(p.base_url, key)) if key is not None else None,
+        timeout=15.0,
+    )
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     health = check_provider_health(profile, now=now, **probes)
     if not health.ok:
