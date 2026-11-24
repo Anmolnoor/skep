@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import ipaddress
 import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast, get_args
 from urllib.parse import urlparse
@@ -522,7 +523,12 @@ def _is_loopback(base_url: Any) -> bool:
         host = (httpx.URL(base_url).host or "").lower()
     except httpx.InvalidURL:
         return False
-    return host in {"localhost", "::1"} or host.startswith("127.")
+    if host == "localhost":
+        return True
+    try:  # R3 (Sol R2-1): a loopback LITERAL — a DNS name like 127.evil.example is remote
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def chat_num_ctx(store: RunStore, model: str | None = None) -> int:
@@ -685,12 +691,18 @@ _CTX_LOCK = threading.Lock()
 _CTX_GENERATION: dict[str, int] = {}
 
 
-def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
+def refresh_model_ctx(
+    store: RunStore, home: Path, model: str, *, live: Callable[[], RunStore] | None = None
+) -> None:
     """Probe + cache ``model``'s window at the assistant's endpoint. Runs
     where the profile or model changes (config save, provider use,
     set_assistant_model) — never per turn. A failed probe drops this
-    identity's row, so the read falls to catalog/default, never stale."""
-    provider_id, base_url, _model, protocol = _context_identity(store, None)
+    identity's row, so the read falls to catalog/default, never stale.
+    R3 (Sol R2-2): published only if the live configuration (``live()`` —
+    the startup probe's staged view re-read — else ``store``) still has the
+    identity and protocol this probe captured."""
+    identity = _context_identity(store, None)
+    provider_id, base_url, _model, protocol = identity
     if not (base_url and model):
         return
     from ..codex_login import uses_codex_login
@@ -701,6 +713,12 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
     with _CTX_LOCK:
         generation = _CTX_GENERATION[key] = _CTX_GENERATION.get(key, 0) + 1
     active = store.active_provider_profile()
+    # R3 (Sol R3-1): the native-path permission belongs to the endpoint probed
+    lmstudio = (
+        active is not None
+        and active.source == "preset:lmstudio"
+        and active.base_url.rstrip("/") == base_url.rstrip("/")
+    )
     try:
         # Phase 05 R1: the key saved for this endpoint, or none (P2)
         api_key = resolve_active_api_key(store, home, base_url=base_url)
@@ -712,11 +730,13 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
             api_key,
             model=model,
             protocol=protocol,
-            lmstudio=active is not None and active.source == "preset:lmstudio",
+            lmstudio=lmstudio,
         )
     with _CTX_LOCK:
         if _CTX_GENERATION[key] != generation:
             return
+        if _context_identity(live() if live else store, None) != identity:
+            return  # the configuration moved while this probe ran
         if detected is None:
             store.set_setting(key, None)
         else:
@@ -735,7 +755,7 @@ def refresh_missing_model_ctx(store: RunStore, home: Path) -> None:
         and model
         and store.get_setting(context_cache_key(provider_id, base_url, model)) is None
     ):
-        refresh_model_ctx(view, home, model)
+        refresh_model_ctx(view, home, model, live=lambda: _staged_view(store, home))
 
 
 def _headers(api_key: str | None) -> dict[str, str]:

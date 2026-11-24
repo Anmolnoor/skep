@@ -192,9 +192,9 @@ def refreshes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = llm.refresh_model_ctx
 
-    def spy(store: RunStore, home: object, model: str) -> None:
+    def spy(store: RunStore, home: object, model: str, **kw: object) -> None:
         calls.append(model)
-        real(store, home, model)  # type: ignore[arg-type]
+        real(store, home, model, **kw)  # type: ignore[arg-type]
 
     monkeypatch.setattr(llm, "refresh_model_ctx", spy)
     return calls

@@ -513,3 +513,69 @@ def test_the_chat_replay_budget_follows_the_detected_window(store: RunStore) -> 
     assert ChatEngine._history_budget(engine, 1000) == DEFAULT_NUM_CTX * 4 - floor  # type: ignore[arg-type]
     store.set_setting(context_cache_key("or", profile.base_url, "big-model"), {"window": 200_000})
     assert ChatEngine._history_budget(engine, 1000) == AUTO_NUM_CTX_CAP * 4 - floor  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "loopback"),
+    [
+        ("http://127.0.0.1:1234/v1", True),
+        ("http://localhost:8080", True),
+        ("http://[::1]:8080", True),
+        ("https://127.evil.example/v1", False),  # a DNS name, not a loopback literal
+        ("https://localhost.evil.example", False),
+    ],
+)
+def test_loopback_means_a_loopback_literal_or_localhost(base_url: str, loopback: bool) -> None:
+    """Phase 06 R3 (Sol R2-1): a host merely named 127.* is remote — it must
+    never get the outside-prefix probes (and their bearer)."""
+    assert llm._is_loopback(base_url) is loopback
+
+
+def test_lmstudio_permission_follows_the_probed_endpoint(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 06 R3 (Sol R3-1): the native-path permission comes from the same
+    profile as the endpoint probed — an LM Studio preset active elsewhere
+    never opens /api/v1/models for another endpoint's bearer."""
+    seen: list[bool] = []
+
+    def fake_detect(base_url: str, api_key: object, **kw: object) -> None:
+        seen.append(bool(kw["lmstudio"]))
+
+    monkeypatch.setattr(llm, "detect_model_ctx", fake_detect)
+    store.upsert_provider_profile(
+        ProviderProfile(
+            "lm", "openai_compat", "http://10.0.0.5:1234/v1", "m", source="preset:lmstudio"
+        )
+    )
+    _profile(store, "other", "https://gw.example/tenant/v1", "m")  # active
+    monkeypatch.setattr(
+        llm,
+        "_context_identity",
+        lambda *_a: ("other", "https://gw.example/tenant/v1", "m", "openai-compat"),
+    )
+    monkeypatch.setattr(store, "active_provider_profile", lambda: store.get_provider_profile("lm"))
+    refresh_model_ctx(store, tmp_path, "m")
+    assert seen == [False]
+
+
+def test_a_probe_whose_configuration_changed_never_publishes(
+    store: RunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 06 R3 (Sol R2-2): a probe captured under the old protocol that
+    finishes after a save changed it is dropped, not cached over the new."""
+    profile = _profile(store, "p", "http://127.0.0.1:9/v1", "m", protocol="ollama")
+    key = context_cache_key("p", profile.base_url, "m")
+
+    def fake_detect(*_a: object, **_k: object) -> tuple[int, None]:
+        # the operator switches the protocol while this probe is in flight
+        store.upsert_provider_profile(
+            ProviderProfile("p", "openai_compat", profile.base_url, "m", active=True)
+        )
+        store.set_setting("llm_protocol", "openai-compat")
+        return 8192, None
+
+    monkeypatch.setattr(llm, "detect_model_ctx", fake_detect)
+    store.set_setting(key, {"window": 131072, "max_output": None})
+    refresh_model_ctx(store, tmp_path, "m")
+    assert store.get_setting(key) == {"window": 131072, "max_output": None}
