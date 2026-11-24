@@ -166,14 +166,17 @@ function applyChatSearch() {
 let lastInbox = null;
 
 export async function refreshSidebar() {
-  const [{ chats }, inbox] = await Promise.all([api("GET", "/api/chats"), api("GET", "/api/inbox")]);
+  // Phase 10 R1 (E2): the badge counts the Inbox's own queue — membership and
+  // order only (detail=false), the same items the open Inbox lists.
+  const [{ chats }, queue] = await Promise.all([
+    api("GET", "/api/chats"), api("GET", "/api/review-queue?detail=false")]);
   renderThreads(chats);
-  const waiting = inbox.cards.length + inbox.approvals.length;
+  const waiting = queue.count;
   const badge = document.getElementById("inbox-badge");
   badge.textContent = String(waiting);
   badge.classList.toggle("hidden", waiting === 0);
   // What the badge counts, the open Inbox shows (the v56-F6 rule).
-  const key = JSON.stringify(inbox);
+  const key = JSON.stringify(queue.items);
   if (lastInbox !== null && key !== lastInbox && location.hash === "#/inbox") route();
   lastInbox = key;
 }

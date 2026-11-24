@@ -1853,3 +1853,48 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
 .forensics h3 { font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
 .forensics-section summary { cursor: pointer; }
 .not-found h2 { margin: 0 0 6px; }
+/* Phase 10 R1 (E1): the decision ledger's search, its verify badge, and a
+   project's walls. Tokens only; every row wraps at phone width. */
+.ledger-row { margin: 0 0 var(--space-2); }
+.ledger-badge { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.ledger-badge.loud {
+  font-size: var(--text-sm); font-weight: 600; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--bad); border-radius: var(--radius-sm);
+}
+.decision-filters { flex-wrap: wrap; align-items: flex-end; }
+.decision-filters .field { min-width: 9rem; flex: 1 1 9rem; }
+.decision-older { margin: var(--space-2) 0; }
+.policy-baseline-sha { overflow-wrap: anywhere; }
+.project-walls-row {
+  display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); align-items: center;
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft);
+}
+.project-walls-row .grow { flex: 1 1 16rem; min-width: 0; }
+/* Phase 10 R1 (E2): an Inbox row — its title is the link, its verdicts are
+   buttons; banners and actions sit in the text column and wrap on a phone. */
+.review-row > small, .review-row > .banner, .review-row > .inbox-actions { grid-column: 2; }
+.review-row > .banner { margin: var(--space-1) 0 0; font-size: var(--text-sm); }
+.inbox-open { color: var(--text-strong); overflow-wrap: anywhere; }
+.inbox-open:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-radius: var(--radius-sm); }
+.inbox-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-top: var(--space-1); }
+.inbox-elsewhere { font-size: var(--text-sm); }
+/* Phase 10 R1 (E3): a captured SKILL.md in full, a forged tool's binding. */
+.capture-md, .forge-pins pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22rem; overflow-y: auto;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3); font-size: var(--text-sm); margin: var(--space-2) 0;
+}
+.capture-accept { align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); }
+.forge-digest { overflow-wrap: anywhere; font-size: var(--text-sm); margin: var(--space-1) 0; }
+.forge-card .chip { margin: 0 var(--space-1) var(--space-1) 0; white-space: normal; overflow-wrap: anywhere; }
+/* Phase 10 R1 (E4): the staged probe's verdict and the provider shelf. */
+.probe-result { margin: var(--space-2) 0 0; overflow-wrap: anywhere; }
+.probe-result.tone-ok { color: var(--ok); }
+.probe-result.tone-warn { color: var(--warn); }
+.probe-result.tone-bad { color: var(--bad); }
+.provider-shelf { margin-top: var(--space-3); }
+.provider-shelf-title { margin: 0 0 var(--space-1); }
+.provider-row { padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft); }
+.provider-row .row { flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.provider-where { overflow-wrap: anywhere; margin: var(--space-1) 0; }
+.provider-row .chip { white-space: normal; overflow-wrap: anywhere; }
