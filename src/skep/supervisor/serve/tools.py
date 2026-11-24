@@ -5888,13 +5888,7 @@ def _execute_mutation(
         merge = github.merge_pull_request(
             repo=repo_path, pin=pin, strategy=str(args.get("strategy") or "merge")
         )
-        return {
-            "merged": merge.merged,
-            "detail": merge.detail,
-            "head_commit": pin["head_commit"],
-            "base_commit": pin["base_commit"],
-            "landed_base": merge.landed_base,  # R2 (D4): the base it actually landed on
-        }
+        return github.merge_record(merge, pin)
     if name == "close_pr":
         # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
         # reopens) — but NOT with delete_branch: deleting the head ref cascade-

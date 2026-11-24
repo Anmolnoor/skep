@@ -3157,6 +3157,7 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
     from . import github
     from .roles import ROLE_LESS_CHAT_ROLE
     from .serve.cards import merge_line, merge_pin
+    from .serve.chat import executed_status
 
     repo = _pr_repo(args)
     if isinstance(repo, int):
@@ -3190,18 +3191,11 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
         )
         store.claim_chat_action(action_id)
         result = github.merge_pull_request(repo=repo, pin=pin, strategy=args.method)
+        record = {**github.merge_record(result, pin), "actor": actor}
         store.resolve_chat_action(
             action_id,
-            status="confirmed" if result.merged else "failed",
-            result={
-                "ok": result.merged,
-                "merged": result.merged,
-                "detail": result.detail,
-                "head_commit": pin["head_commit"],
-                "base_commit": pin["base_commit"],
-                "landed_base": result.landed_base,
-                "actor": actor,
-            },
+            status=executed_status(record),  # R3 (S8): the chat card's own mapping
+            result=record,
             claimed=True,
         )
     finally:

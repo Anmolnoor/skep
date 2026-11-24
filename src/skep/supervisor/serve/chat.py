@@ -3591,7 +3591,10 @@ class ChatEngine:
                     "memory_id": item.memory_id,
                     "note": "approved on its card — active in future prompts",
                 }
-            payload: dict[str, Any] = {"ok": True, "result": result}
+            # R3 (S8, I8): merge_pr's result says whether it merged — a merge
+            # that did not happen is a failed card (github.merge_record).
+            ok = result.get("ok") is not False if tool == "merge_pr" else True
+            payload: dict[str, Any] = {"ok": ok, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
             # is a session-provenance rule on the SAME learned list the
             # always-tier writes to, so resolve() composes it unchanged and

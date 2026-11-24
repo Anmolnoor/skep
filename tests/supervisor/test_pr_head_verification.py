@@ -12,6 +12,7 @@ import json
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1189,7 +1190,7 @@ def _merge_gh(
     queue: Any = None,
     landed_on: str = "b" * 40,
     api_code: int = 0,
-    graphql: Any = None,
+    graphql: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> github.Runner:
     """gh as GitHub answers: the PR now (``live``), the base branch's merge
     queue (``queue``), the REST merge endpoint (``merge_status`` and its
@@ -1584,6 +1585,59 @@ def test_skep_pr_merge_records_the_decision_before_gh_and_the_outcome_after(
     assert after is not None and after.status == "confirmed"
     assert after.result is not None and after.result["merged"] is True
     assert after.result["landed_base"] == "b" * 40
+
+
+@pytest.mark.parametrize("merged", [True, False], ids=["merged", "not-merged"])
+def test_chat_and_cli_record_a_merge_outcome_the_same_way(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, merged: bool
+) -> None:
+    """R3 (S8, I8): a merge that did not happen is a FAILED card in chat, as
+    it is a failed row from `skep pr merge` — one outcome→status mapping."""
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
+
+    from .test_cli import _registered_clone
+
+    home = tmp_path / "home"
+    clone = _registered_clone(home, repo)
+    git(clone, "remote", "set-url", "origin", ORIGIN_URL)
+    config = build_config(home, None)
+    _verdict(config, clone)
+    said = "merged acme/widget#7" if merged else "refused by GitHub (HTTP 409): moved"
+    landed = "b" * 40 if merged else None
+    monkeypatch.setattr(
+        github, "merge_pull_request", lambda **_: github.MergeResult(merged, said, landed)
+    )
+    assert main(["--home", str(home), "pr", "merge", "fixture", "7"]) == (0 if merged else 1)
+    store = RunStore(config.db_path)
+    try:
+        (cli,) = [a for c in store.list_chats() for a in store.chat_actions(c.chat_id)]
+        store.set_setting(LLM_BASE_URL, "http://127.0.0.1:9")  # the continuation never runs
+        store.set_setting(LLM_DEFAULT_MODEL, "m")
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(store=store, holder=holder),
+            home=config.home,
+        )  # fmt: skip
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        action_id = store.add_chat_action(
+            chat_id, tool="merge_pr", args={"repo": str(clone), "pr": "7"},
+            card={"merge": cli.card["merge"] if cli.card else {}},
+        )  # fmt: skip
+        engine.verdict_events(chat_id, store.get_chat(chat_id), action_id, confirm=True)
+        chat = store.get_chat_action(action_id)
+        cli = store.get_chat_action(cli.action_id) or cli
+    finally:
+        store.close()
+
+    status = "confirmed" if merged else "failed"
+    assert chat is not None and chat.status == status and cli.status == status
+    assert chat.result is not None and cli.result is not None
+    assert chat.result["ok"] is merged and chat.result["result"]["merged"] is merged
+    shown = {k: v for k, v in cli.result.items() if k != "actor"}
+    assert chat.result["result"] == shown
 
 
 # --- 4. the PR tuple rides every face that reads the run (N6, S14/N7) ----------

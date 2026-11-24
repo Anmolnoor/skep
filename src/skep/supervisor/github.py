@@ -534,6 +534,20 @@ def merge_pull_request(
     return MergeResult(True, f"{done}, onto the verified base {base}", landed_on)
 
 
+def merge_record(result: MergeResult, pin: dict[str, Any]) -> dict[str, Any]:
+    """R3 (S8, I8): what one merge leaves on its merge_pr row — the same on
+    every face (chat card, `skep pr merge`). ``ok`` is whether it merged:
+    a merge that did not happen is a failed row, never a confirmed one."""
+    return {
+        "ok": result.merged,
+        "merged": result.merged,
+        "detail": result.detail,
+        "head_commit": pin["head_commit"],
+        "base_commit": pin["base_commit"],
+        "landed_base": result.landed_base,  # R2 (D4): the base it actually landed on
+    }
+
+
 def close_pull_request(
     *,
     repo: Path,
