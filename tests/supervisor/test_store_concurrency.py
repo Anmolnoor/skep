@@ -84,3 +84,25 @@ def test_two_connections_can_both_write(tmp_path: Path) -> None:
     finally:
         a.close()
         b.close()
+
+
+def test_supersede_approval_claimed_moves_only_an_applying_review(tmp_path: Path) -> None:
+    """R4 K3: claimed=True withdraws an applying (claimed) review in one
+    conditional update and clears its owner; it never touches a pending one,
+    and the default (claimed=False) never touches an applying one."""
+
+    store = RunStore(tmp_path / "s.db")
+    try:
+        task = mint_task(workspace=tmp_path / "w", instructions="x")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+        review = store.enqueue_approval(task.task_id, action="apply_patch", reason="land")
+        assert not store.supersede_approval(review, actor="t", note="n", claimed=True)
+        assert store.claim_approval(review)
+        assert not store.supersede_approval(review, actor="t", note="n")
+        assert store.supersede_approval(review, actor="t", note="refused", claimed=True)
+        record = store.get_approval(review)
+        assert record is not None and record.status == "superseded"
+        assert record.resolution_note == "refused"
+        assert store.approval_claim_owner(review) is None
+    finally:
+        store.close()

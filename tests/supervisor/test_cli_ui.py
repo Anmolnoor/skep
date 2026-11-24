@@ -746,6 +746,68 @@ def test_interactive_approve_rebinds_the_patch_after_claiming_the_review(
         store.close()
 
 
+def test_a_minted_review_refused_after_its_claim_is_never_pending_in_between(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 K3: a review minted for this verdict goes applying → superseded in
+    one update; it is never handed back to pending, where another surface
+    could approve it, before it is withdrawn."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    claim = RunStore.claim_approval
+
+    def claim_then_rewrite(self: RunStore, review_id: str, **kw: Any) -> bool:
+        won = claim(self, review_id, **kw)
+        patch.write_text(patch.read_text() + "+sneaked = 1\n")
+        return won
+
+    def never_unclaimed(self: RunStore, review_id: str) -> None:
+        raise AssertionError(f"{review_id} was handed back to pending")
+
+    monkeypatch.setattr(RunStore, "claim_approval", claim_then_rewrite)
+    monkeypatch.setattr(RunStore, "unclaim_approval", never_unclaimed)
+    _interactive(monkeypatch, ["a"])
+    assert _run_cli(home, "review") == 2
+    assert "the patch changed since you read it" in capsys.readouterr().err
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        (minted,) = store.approvals_for(task_id)
+        assert minted.status == "superseded"
+        assert store.approval_claim_owner(minted.review_id) is None
+    finally:
+        store.close()
+
+
+def test_a_minted_review_whose_deny_is_refused_is_superseded_not_pending(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 K3: the deny path mints a review too; when the deny itself is
+    refused, that review is withdrawn (superseded) — never left pending."""
+    from fastapi import HTTPException
+
+    from skep.supervisor.serve import actions
+
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+
+    def refused(*_a: Any, **_k: Any) -> None:
+        raise HTTPException(status_code=409, detail="a landing holds this review")
+
+    monkeypatch.setattr(actions, "deny_approval", refused)
+    _interactive(monkeypatch, ["d"])
+    assert _run_cli(home, "review") == 2
+    assert "a landing holds this review" in capsys.readouterr().err
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        (minted,) = store.approvals_for(task_id)
+        assert minted.status == "superseded"
+        assert "a landing holds this review" in (minted.resolution_note or "")
+        assert store.pending_approvals() == []
+    finally:
+        store.close()
+
+
 def test_interactive_resume_claims_the_shown_gate_only(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

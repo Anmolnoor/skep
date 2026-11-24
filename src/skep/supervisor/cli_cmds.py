@@ -1696,8 +1696,9 @@ def cmd_review(args: argparse.Namespace) -> int:
                 return _stale_err(record, stale, audit_dir)
 
         if args.deny:
+            minted = False
             if shown is not None:
-                review_id, _minted = _shown_review(store, record, shown)
+                review_id, minted = _shown_review(store, record, shown)
                 if review_id is None:
                     return _stale_err(record, _RECORDED_SINCE, audit_dir)
             else:
@@ -1706,11 +1707,17 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
             from fastapi import HTTPException
 
-            from .serve.actions import deny_approval
+            from .serve import actions as serve_actions
 
             try:
-                deny_approval(store, review_id, actor, args.note)
+                serve_actions.deny_approval(store, review_id, actor, args.note)
             except HTTPException as exc:  # W27c: a resume or landing holds it
+                if minted:  # R4 K3: minted for this deny — withdrawn, never pending
+                    store.supersede_approval(
+                        review_id,
+                        actor="skep review",
+                        note=f"minted for a verdict refused: {exc.detail}",
+                    )
                 return _err(
                     str(exc.detail),
                     state=record.state,
@@ -2135,11 +2142,15 @@ def _claim_shown(
         f"task {task_id} is gone" if record is None else _moved_since_shown(store, record, shown)
     )
     if moved is not None:
-        store.unclaim_approval(review_id)
-        if minted:
+        if minted:  # R4 K3: from the owned claim straight to superseded
             store.supersede_approval(
-                review_id, actor="skep review", note=f"minted for a verdict refused: {moved}"
+                review_id,
+                actor="skep review",
+                note=f"minted for a verdict refused: {moved}",
+                claimed=True,
             )
+        else:
+            store.unclaim_approval(review_id)
     return moved
 
 

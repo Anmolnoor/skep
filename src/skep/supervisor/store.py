@@ -1940,15 +1940,19 @@ class RunStore:
             return self.enqueue_approval(task_id, action=action, reason=reason)
 
     @_locked
-    def supersede_approval(self, review_id: str, *, actor: str, note: str) -> bool:
+    def supersede_approval(
+        self, review_id: str, *, actor: str, note: str, claimed: bool = False
+    ) -> bool:
         """Phase 10 R3 J4: withdraw a review minted for one verdict that was
         then refused — 'superseded', with why: never left pending for nobody,
         and never a 'denied' (which would read as a human's answer, v128-F7,
-        and reject a gated run, v48-F3). Only from 'pending'."""
+        and reject a gated run, v48-F3). From 'pending' — or, R4 K3, with
+        ``claimed`` from the caller's own 'applying' claim, in this one
+        update, so the review is never pending in between."""
         cursor = self._conn.execute(
             "UPDATE approvals SET status = 'superseded', resolved_at = ?, resolved_by = ?,"
-            " resolution_note = ? WHERE review_id = ? AND status = 'pending'",
-            (_now(), actor, note, review_id),
+            " resolution_note = ?, claim_owner = NULL WHERE review_id = ? AND status = ?",
+            (_now(), actor, note, review_id, "applying" if claimed else "pending"),
         )
         self._conn.commit()
         return cursor.rowcount == 1
