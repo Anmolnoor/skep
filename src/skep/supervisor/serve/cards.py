@@ -632,7 +632,8 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
 # names (scheduler.script_inputs); egress: only its `network` hosts.
 SCRIPT_WALL = (
     "inside the wall: besides the system and its toolchains it reads only the files "
-    "its command names, and it reaches only its listed hosts (none unless listed)"
+    "its command names, and it reaches only its listed hosts (none unless listed); "
+    "on Linux each file it names is a copy taken at launch, 16 MiB each, 64 MiB in all"
 )
 SCRIPT_SENTENCE = f"runs as you, on this host, unattended, until disabled, {SCRIPT_WALL}"
 
