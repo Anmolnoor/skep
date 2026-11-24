@@ -307,12 +307,20 @@ def pin_legacy_key(store: RunStore, home: Path) -> None:
                 store.set_setting(marker, owner)
 
 
+def _read_secret(home: Path) -> str:
+    """llm-secret's value, "" when absent — R7 (Sol R7-1): a clear deleting
+    it between a check and the read is an absent key, never an error."""
+    try:
+        return (home / SECRET_FILE).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
 def _legacy_values(home: Path) -> tuple[tuple[str, str | None], ...]:
     """(owner marker, key) of SKEP_LLM_API_KEY, then of llm-secret — R3
     (H1): each has its own owner; the env key first, as it always shadowed
     the file."""
-    path = home / SECRET_FILE
-    held = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    held = _read_secret(home)
     return (
         (LLM_ENV_KEY_ENDPOINT, os.environ.get(SECRET_ENV, "").strip() or None),
         (LLM_SECRET_ENDPOINT, held or None),
@@ -1661,15 +1669,23 @@ def save_assistant_llm(
     unowned, resolving it, probing with it and pinning it are ONE step under
     the writers' lock, so a concurrent writer can never pin it to A while B
     is being probed with it. An owned key keeps the probe outside the lock."""
-    unowned = any(
-        key and legacy_key_endpoint(home, store, marker) == ""
-        for marker, key in _legacy_values(home)
-    )
-    with _PROVIDER_WRITES if unowned else contextlib.nullcontext():
-        _save_assistant_llm(
-            store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
-            settings=settings,
-        )  # fmt: skip
+    # R7 (Sol R6-1): decided HOLDING the lock — another save's temporary
+    # owner (pinned, then rolled back) exists only inside its locked commit
+    with _PROVIDER_WRITES:
+        unowned = any(
+            key and legacy_key_endpoint(home, store, marker) == ""
+            for marker, key in _legacy_values(home)
+        )
+        if unowned:  # resolve, probe and pin as one step
+            _save_assistant_llm(
+                store, home, base_url=base_url, model=model, protocol=protocol,
+                api_key=api_key, settings=settings,
+            )  # fmt: skip
+            return
+    _save_assistant_llm(
+        store, home, base_url=base_url, model=model, protocol=protocol, api_key=api_key,
+        settings=settings,
+    )  # fmt: skip
 
 
 def _save_assistant_llm(
@@ -1853,8 +1869,7 @@ def _keep_legacy_owner(store: RunStore, home: Path, endpoint: str) -> bool:
     Zero; a file it already has wins). False when that endpoint has no
     profile to keep it in."""
     owner = legacy_key_endpoint(home, store)
-    path = home / SECRET_FILE
-    held = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    held = _read_secret(home)
     if not (held and owner and owner != endpoint):
         return True
     holder = _registered_for(store, owner)

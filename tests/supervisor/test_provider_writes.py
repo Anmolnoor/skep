@@ -1487,3 +1487,46 @@ def test_a_save_that_may_claim_an_unowned_key_holds_the_writers_lock(
         with pytest.raises(ProviderError):
             llm.save_assistant_llm(store, config.home, base_url="https://b.example", api_key="")
     assert held == [not owned]
+
+
+def test_ownership_is_read_under_the_writers_lock(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7 (Sol R6-1): the unowned/owned decision is made holding the lock, so
+    it never sees another save's temporary owner (pinned, then rolled back)."""
+    from skep.supervisor.serve import llm
+
+    held: list[bool] = []
+    real = llm.legacy_key_endpoint
+
+    def spy(*a: Any, **k: Any) -> str:
+        held.append(llm._PROVIDER_WRITES._is_owned())  # type: ignore[attr-defined]
+        return real(*a, **k)
+
+    monkeypatch.setattr(llm, "legacy_key_endpoint", spy)
+    monkeypatch.setattr(llm, "_save_assistant_llm", lambda *a, **k: None)
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "env-u3")
+    with _store(config) as store:
+        llm.save_assistant_llm(store, config.home, model="m")
+    assert held and all(held)
+
+
+def test_a_legacy_file_removed_mid_read_is_no_key(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7 (Sol R7-1): a concurrent clear deleting llm-secret between the
+    existence check and the read is an absent key, not FileNotFoundError."""
+    from skep.supervisor.serve import llm
+
+    secret = config.home / "llm-secret"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("gone1\n")
+    real_read = Path.read_text
+
+    def vanish(self: Path, *a: Any, **k: Any) -> str:
+        if self == secret:
+            raise FileNotFoundError(str(self))
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", vanish)
+    assert llm._legacy_values(config.home)[1] == (llm.LLM_SECRET_ENDPOINT, None)
