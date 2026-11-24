@@ -47,7 +47,8 @@ export function parseDiff(text) {
     } else if (line.startsWith("+++ ") && file) {
       file.newPath = strip(line.slice(4).split("\t")[0]);
     } else if (!file) continue;
-    else if (line.startsWith("\\ ")) file.lines.push({ kind: "meta", text: line }); // "\ No newline at end of file"
+    // "\ No newline at end of file" — R6-3: doubled ("\\ No …") in a non-UTF-8 patch's display
+    else if (line.startsWith("\\")) file.lines.push({ kind: "meta", text: line });
     else if (line.startsWith("new file mode ")) { file.status = "added"; file.newMode = line.slice(14); }
     else if (line.startsWith("deleted file mode ")) { file.status = "deleted"; file.oldMode = line.slice(18); }
     else if (line.startsWith("old mode ")) file.oldMode = line.slice(9);

@@ -1658,8 +1658,10 @@ def cmd_review(args: argparse.Namespace) -> int:
             patch_text = None
             patch_at = -1  # R2 I5: where the patch sits in lines (it may be "")
             if patch_path is not None and patch_path.is_file():
-                # R5-5: invalid bytes stay distinct on screen (\xe8 vs \xe9)
-                patch_text = patch_path.read_text(encoding="utf-8", errors="backslashreplace")
+                from .serve.actions import display_patch
+
+                # R5-5 / R6-3: a byte and its \xNN spelling never read the same
+                patch_text = display_patch(patch_path.read_bytes())
                 lines.append("")
                 patch_at = len(lines)
                 lines.append(patch_text)
@@ -2172,7 +2174,7 @@ def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
     (the badge poll) is task id, label and waiting line only — no patch is
     opened or hashed, no card text built.
     """
-    from .serve.actions import patch_path, tamper_note
+    from .serve.actions import display_patch, patch_path, tamper_note
     from .serve.run_status import run_terminal_text
 
     cards = []
@@ -2237,7 +2239,7 @@ def _review_cards(store: RunStore, *, light: bool = False) -> list[_ReviewCard]:
                 style,
                 notice[0],
                 lines,
-                None if raw is None else raw.decode("utf-8", errors="backslashreplace"),
+                None if raw is None else display_patch(raw),
                 _Shown(
                     record.state,
                     open_review,

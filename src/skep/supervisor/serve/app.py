@@ -49,6 +49,7 @@ from .actions import (
     deny_approval,
     diagnose_run,
     dispatch_manifest,
+    display_patch,
     effective_policy_view,
     land_run,
     landing_reason,
@@ -1464,7 +1465,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="no patch artifact for this run")
         try:  # R4 K5 / R5-5: non-UTF-8 bytes shown reversibly (\xe9), never a 500
             raw = Path(patch).read_bytes()
-            return PlainTextResponse(raw.decode("utf-8", errors="backslashreplace"))
+            return PlainTextResponse(display_patch(raw))
         except OSError as exc:
             raise HTTPException(
                 status_code=409, detail=f"patch unreadable: {exc.strerror or exc}"
