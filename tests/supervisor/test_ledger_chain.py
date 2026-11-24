@@ -816,3 +816,33 @@ def test_review_r2_a_pre_chain_row_is_v1_by_a_missing_or_integer_v_only(
     odd.write_text(f'{{"value": "old", "v": {version}}}\n{chained}')
     result = verify_ledger(path=odd)
     assert result["status"] == "BROKEN" and result["break"]["line"] == 1
+
+
+def test_review_r2_verify_walks_the_live_file_as_long_as_it_was_under_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F2): a checkpoint-boundary row (and its checkpoint) appended
+    after the snapshot, or an in-flight partial line, is past the walk —
+    never "coverage degraded" or a false BROKEN on a healthy log."""
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_EVERY", 2)
+    for n in range(3):
+        log_decision(tmp_path, {"n": n})
+    walk_generations = ledger_proof._generations
+
+    def mid_write() -> None:
+        with _live(tmp_path).open("a") as handle:
+            handle.write('{"v": 2, "seq"')
+
+    appends = [lambda: log_decision(tmp_path, {"n": 3}), mid_write]  # seq 4 + checkpoint
+
+    def append_between(*args: Any) -> Any:
+        appends.pop(0)()
+        return walk_generations(*args)
+
+    monkeypatch.setattr(ledger_proof, "_generations", append_between)
+    first = verify_ledger(tmp_path)
+    assert first["status"] == "VALID", first["break"]
+    assert (first["head"]["seq"], first["checkpoints_missing"]) == (3, 0)
+    second = verify_ledger(tmp_path)
+    assert second["status"] == "VALID", second["break"]
+    assert (second["head"]["seq"], second["checkpoints_missing"]) == (4, 0)

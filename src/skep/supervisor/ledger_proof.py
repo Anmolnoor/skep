@@ -216,8 +216,9 @@ def verify_ledger(
 ) -> dict[str, Any]:
     """``VALID`` or ``BROKEN`` with the first break's file, line and reason.
 
-    The audit dir's log: the live file is opened, and the generations
-    listed, under a shared flock (released before the walk) — a rotation
+    The audit dir's log: the live file is opened and sized, and the
+    generations listed, under a shared flock (released before the walk;
+    rows appended after it are past the snapshot) — a rotation
     only ever adds a generation, so a rotation mid-walk is never a false
     break. The chain must start at seq 1 from GENESIS (no generation is
     ever deleted), and every ``chain.sqlite3`` checkpoint must match its
@@ -236,10 +237,13 @@ def verify_ledger(
     live = audit_dir / "policy" / "decisions.jsonl"
     checkpoints: dict[int, str] | str = {}
     handle: IO[bytes] | None = None
+    size = 0
     with _shared_lock(live.parent / "decisions.lock"):
         generations = _rotated_generations(live)
         with suppress(FileNotFoundError):
             handle = live.open("rb")
+            # Review R2 (F2): the size in the same snapshot as the checkpoints
+            size = os.fstat(handle.fileno()).st_size
         try:
             checkpoints = _checkpoints(live.parent / CHAIN_DB)
         except sqlite3.DatabaseError as exc:
@@ -249,7 +253,7 @@ def verify_ledger(
             checkpoints if isinstance(checkpoints, dict) else {}, str(live), generations
         )
         if handle is not None and broken is None:
-            broken = walk.file(live, handle, os.fstat(handle.fileno()).st_size)
+            broken = walk.file(live, handle, size)
     finally:
         if handle is not None:
             handle.close()
