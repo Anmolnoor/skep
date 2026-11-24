@@ -781,3 +781,38 @@ def test_review_r1_missing_checkpoints_read_as_degraded_on_every_face(
     assert "3 checkpoints were never kept" in text
     markdown = render_receipt(_receipt(config, landed), "md")
     assert "VALID" in markdown and "3 checkpoints were never kept" in markdown
+
+
+def test_review_r2_a_chained_row_with_its_keys_reordered_is_a_break(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2 (F1): same content, other bytes — not the row skep wrote,
+    even where its checkpoint (seq 2) still matches its hash."""
+    monkeypatch.setattr(policy_v3, "CHECKPOINT_EVERY", 2)
+    for n in range(4):
+        log_decision(tmp_path, {"value": f"row {n}", "n": n})
+    lines = _lines(_live(tmp_path))
+    row = json.loads(lines[1])
+    lines[1] = json.dumps(dict(reversed(row.items())))
+    assert json.loads(lines[1]) == row
+    _live(tmp_path).write_text("".join(f"{x}\n" for x in lines))
+    copy = tmp_path / "copy.jsonl"
+    shutil.copy(_live(tmp_path), copy)
+    for result in (verify_ledger(tmp_path), verify_ledger(path=copy)):
+        assert result["status"] == "BROKEN"
+        assert result["break"]["line"] == 2 and "bytes" in result["break"]["reason"]
+
+
+@pytest.mark.parametrize("version", ["null", "true", "1.0"])
+def test_review_r2_a_pre_chain_row_is_v1_by_a_missing_or_integer_v_only(
+    tmp_path: Path, version: str
+) -> None:
+    """Review R2 (F1): ``"v": null``, ``true`` or ``1.0`` is not an old v1 row."""
+    chained = "".join(f"{x}\n" for x in _lines(_chain(tmp_path)))
+    odd = tmp_path / "odd.jsonl"
+    for first in ('{"value": "old", "v": 1}', '{"value": "old"}'):
+        odd.write_text(f"{first}\n{chained}")
+        assert verify_ledger(path=odd)["status"] == "VALID", first
+    odd.write_text(f'{{"value": "old", "v": {version}}}\n{chained}')
+    result = verify_ledger(path=odd)
+    assert result["status"] == "BROKEN" and result["break"]["line"] == 1
