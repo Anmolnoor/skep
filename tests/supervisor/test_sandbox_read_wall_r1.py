@@ -555,7 +555,7 @@ def test_the_doctor_counts_strict_projects_and_names_the_denylist_lanes(
     check = status._sandbox_check(tmp_path)
     assert "strict-allowlist available" in check["detail"]
     assert "1 of 2 sandboxed projects strict" in check["detail"]
-    for lane in ("forged tools", "MCP servers", "fast lane", "diagnose"):
+    for lane in ("forged tools", "script schedules", "MCP servers", "fast lane", "diagnose"):
         assert lane in check["detail"], lane
     assert check["strict_projects"] == 1 and check["sandboxed_projects"] == 2
 

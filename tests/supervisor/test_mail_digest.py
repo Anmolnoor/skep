@@ -70,6 +70,81 @@ def imap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> type[FakeIMAP]:
     return FakeIMAP
 
 
+def test_a_declared_password_file_is_read_when_none_is_inline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """S7: inside the wall the skep home's mail-secret is masked, so a script
+    schedule names its own password file (a declared input)."""
+    (tmp_path / "pw").write_text("pw-from-file\n")
+    monkeypatch.delenv("SKEP_MAIL_PASSWORD", raising=False)
+    monkeypatch.setenv("SKEP_MAIL_PASSWORD_FILE", str(tmp_path / "pw"))
+    assert mail.resolve_password() == "pw-from-file"
+    monkeypatch.setenv("SKEP_MAIL_PASSWORD", "inline")
+    assert mail.resolve_password() == "inline"
+
+
+@pytest.fixture
+def connect_proxy() -> Any:
+    """A one-shot CONNECT proxy: records the request line, answers ``reply``."""
+    import socket
+    import threading
+
+    seen: dict[str, Any] = {"reply": b"HTTP/1.1 200 Connection established\r\n\r\n"}
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def serve() -> None:
+        conn, _ = server.accept()
+        with conn:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(1024)
+            seen["request"] = data.decode()
+            conn.sendall(seen["reply"])
+            conn.recv(1024)
+
+    threading.Thread(target=serve, daemon=True).start()
+    seen["url"] = f"http://127.0.0.1:{server.getsockname()[1]}"
+    yield seen
+    server.close()
+
+
+def test_imap_tunnels_through_the_walls_proxy(connect_proxy: Any) -> None:
+    sock = mail.proxy_tunnel(connect_proxy["url"], "imap.example.test", 993, 5)
+    sock.close()
+    assert connect_proxy["request"].startswith(
+        "CONNECT imap.example.test:993 HTTP/1.1\r\nHost: imap.example.test:993\r\n"
+    )
+
+
+def test_a_proxy_refusal_is_a_named_error(connect_proxy: Any) -> None:
+    connect_proxy["reply"] = b"HTTP/1.1 403 Forbidden: not in this run's hosts\r\n\r\n"
+    with pytest.raises(OSError, match=r"refused CONNECT imap\.example\.test:993: HTTP/1\.1 403"):
+        mail.proxy_tunnel(connect_proxy["url"], "imap.example.test", 993, 5)
+
+
+def test_the_proxied_client_runs_tls_inside_the_tunnel(connect_proxy: Any) -> None:
+    with pytest.raises(OSError):  # the fake proxy speaks no TLS: the handshake reached it
+        mail._ProxiedIMAP4_SSL("imap.example.test", 993, proxy=connect_proxy["url"])
+    assert connect_proxy["request"].startswith("CONNECT imap.example.test:993 HTTP/1.1")
+
+
+def test_the_digest_dials_through_the_proxy_the_wall_names(
+    imap: type[FakeIMAP], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxied: list[tuple[str, int, str]] = []
+
+    class Proxied(FakeIMAP):
+        def __init__(self, host: str, port: int, *, proxy: str) -> None:
+            proxied.append((host, port, proxy))
+            super().__init__(host, port)
+
+    monkeypatch.setattr(mail, "_ProxiedIMAP4_SSL", Proxied)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    imap.messages = [_raw("a@example.test", "s", "b")]
+    assert "a@example.test" in mail.digest(1)
+    assert proxied == [("imap.example.test", 993, "http://127.0.0.1:9")]
+
+
 def test_n_blocks_newest_first_headers_at_column_0_body_quoted(imap: type[FakeIMAP]) -> None:
     imap.messages = [
         _raw(f"sender{i}@example.test", f"subject {i}", f"line one {i}\nline two") for i in range(7)
@@ -226,17 +301,26 @@ def test_the_documented_command_runs_as_a_script_schedule_and_the_alarm_parses_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The setup doc's line, through ``run_schedule_script`` itself (the
-    scrubbed env): config inline, the password found through HOME."""
+    scrubbed env, the wall): config inline, the password from the file the
+    command names. The fake imaplib's dir is let in beside the declared
+    inputs (a dir is never one), so the wall stays the real one."""
+    from skep.supervisor import scheduler
+
     fake = tmp_path / "fake"
     fake.mkdir()
     (fake / "imaplib.py").write_text(textwrap.dedent(_FAKE_IMAPLIB), encoding="utf-8")
-    home = tmp_path / "home"
-    (home / ".skep" / "supervisor").mkdir(parents=True)
-    (home / ".skep" / "supervisor" / "mail-secret").write_text("pw-from-home\n")
-    monkeypatch.setenv("HOME", str(home))
+    password = tmp_path / "mail-password"
+    password.write_text("pw-from-home\n")
+    declared = scheduler.script_inputs
+    monkeypatch.setattr(scheduler, "script_inputs", lambda c: (*declared(c), fake))
     monkeypatch.setenv("SKEP_MAIL_PASSWORD", "never-inherited")  # scrubbed away
-    command = documented_mail_command().replace("/abs/path/to/python", sys.executable)
-    output, ok = run_schedule_script(f"PYTHONPATH={fake} {command}")
+    command = (
+        documented_mail_command()
+        .replace("/abs/path/to/python", sys.executable)
+        .replace("/abs/path/to/mail-password", str(password))
+    )
+    assert scheduler.script_inputs(command)[0] == password  # declared by the command
+    output, ok = run_schedule_script(f"PYTHONPATH={fake} {command}", skep_home=tmp_path / "skep")
     assert ok, output
     assert mail_senders(output) == [f"sender{i}@example.test" for i in (6, 5, 4, 3, 2)]
 

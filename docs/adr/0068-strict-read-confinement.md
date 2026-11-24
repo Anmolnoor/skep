@@ -138,8 +138,9 @@ readable. A denylist cannot keep up with every place a person keeps files.
    absolute, never `/`.
 5. **The doctor says which wall is up, and where.** On bubblewrap and
    Seatbelt the sandbox line reads `read confinement: strict-allowlist
-   available; N of M sandboxed projects strict; forged tools always strict;
-   the fast lane and diagnose re-runs stay denylist-only; MCP servers you
+   available; N of M sandboxed projects strict; forged tools and script
+   schedules always strict; the fast lane and diagnose re-runs stay
+   denylist-only; MCP servers you
    register run on the host, unsandboxed` (Phase 07 wording; see "Forged
    tools join the wall")
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
@@ -591,3 +592,39 @@ the trial, with the previous tool's bytes restored if the publish fails.
   or marker. Every lock line for that project must pin that version with no
   marker, so the card's pin is what installs. A resolver (`packaging`) is
   not a skep dependency.
+
+## Script schedules join the wall (Phase 09 R1)
+
+A `script` schedule ran supervisor-side with the operator's whole
+filesystem and unrestricted egress: its scrubbed env removed keys, not
+reach. The morning-ritual skill made that concrete — a mail, calendar and
+weather fetcher whose output a Queen turn then reads. Since Phase 09 R1
+`scheduler.run_schedule_script` runs every script through `wall.walled`,
+the launch path `forged_lane` now shares, so the two cannot drift:
+
+- **Reads:** the strict allowlist (`read_allowlist`), plus the script's
+  declared inputs (`scheduler.script_inputs`): each absolute, existing,
+  non-link file its command names, as an argument or as a `NAME=value`
+  value. Never a directory. Each is judged by `extra_read_path_problem`
+  first, so one in or over the skep home, at or above `$HOME`, or on `/etc`
+  refuses the run (`script refused: …`). The secret masks still land last.
+  The card shows the command, so the operator sees every input.
+- **Writes:** a throwaway workspace (its `HOME`, `TMPDIR`), deleted after
+  the run.
+- **Egress:** the schedule's `network` hosts through a FilteringProxy, none
+  by default. The REST face and `skep schedule add --network` set it.
+  IMAP has no proxy support, so `skep.mcp_servers.mail`'s digest tunnels
+  through the proxy with one CONNECT (`HTTPS_PROXY`); TLS still runs end to
+  end with the mail host.
+- **No backend refuses the run** (`script refused: no usable sandbox
+  backend …`), a health failure like any other (I12).
+
+What a walled script still does (I8): it runs as the operator, on this
+host; it reads every file its command names and every world-readable file
+the strict allowlist opens; it sends what it reads to the hosts it names,
+which is its job — the proxy checks host names, not content. skep's own
+secrets are out of reach, so a script that needs a password reads it from a
+file of its own, outside the skep home, named in its command
+(`SKEP_MAIL_PASSWORD_FILE`). An existing script that read `$HOME` or used
+the network now fails until its command names those files and its schedule
+names those hosts.

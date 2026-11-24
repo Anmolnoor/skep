@@ -1925,6 +1925,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     instructions=body.instructions,
                     interval_seconds=interval,
                     worker_kind=body.caste,
+                    # S7: a script's wall reaches these hosts only (none by default)
+                    network=body.network if body.caste == "script" else (),
                     once=body.once,
                     start_at=body.start_at,
                     chain=body.chain,

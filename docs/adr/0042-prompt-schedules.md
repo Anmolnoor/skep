@@ -50,3 +50,21 @@ through the same channel funnel as note ticks.
   narrowing recorded here, not a bug.
 - A future loosening (e.g. pre-listed URLs reviewed at
   propose_schedule card time) must amend this ADR explicitly.
+
+## Amendment: an allowlist, not a denylist (Phase 09 R1)
+
+"Store-reads-only" was enforced as "every read tool but `search_web` and
+the store writes". That left `list_prs` (GitHub, with the operator's
+login), `repo_state` / `git_diff` / `git_log` (checkouts on disk) and
+`list_mcp_tools` (starts an MCP server) on a scheduled turn's menu. A
+scheduled turn now holds a named allowlist, `chat.SCHEDULED_TURN_TOOLS`:
+runs (`list_runs`, `get_run`, `await_runs`), `list_approvals`, chats,
+notes, tasks, memory, `list_schedules`, `list_repos`, `list_projects`, plus
+`describe_tools` and `ask_clarifying_question`, which read nothing. Both
+layers hold it: nothing else is advertised (schemas, the prompt's tool
+index, `describe_tools` answers), and a call to anything else is refused
+unexecuted, written as a `decisions.jsonl` row and included in the
+schedule's one alarm line (v121-F2). `search_web`, `read_url` and
+`call_mcp_tool` refuse exactly as before. A run-finished follow-up turn
+(unattended, not read-only) keeps its menu: it may propose, and every
+proposal is a card.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -151,7 +152,29 @@ def test_the_schedules_api_answers_400_for_a_garbage_start_at(
 # -- script schedules (B111 B117 B118 B120) -----------------------------------
 
 
-def test_a_script_runs_with_a_clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture()
+def skep_home(tmp_path: Path) -> Path:
+    (tmp_path / "skep" / "supervisor").mkdir(parents=True)
+    return tmp_path / "skep"
+
+
+@pytest.fixture()
+def unwalled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The process half alone, for proofs that watch a host file (a wall
+    lets a script write only its own workspace); the wall itself is proven
+    in test_script_schedule_wall.py."""
+    import contextlib
+
+    from skep.supervisor import wall
+
+    @contextlib.contextmanager
+    def passthrough(argv: list[str], **_kwargs: Any) -> Iterator[tuple[list[str], dict[str, str]]]:
+        yield argv, {}
+
+    monkeypatch.setattr(wall, "walled", passthrough)
+
+
+def test_a_script_runs_with_a_clean_env(monkeypatch: pytest.MonkeyPatch, skep_home: Path) -> None:
     """ES B111: scripts got the daemon's whole env — every serve.env key — and
     their output goes to a chat and on to the model provider."""
     from skep.supervisor.scheduler import run_schedule_script
@@ -162,14 +185,14 @@ def test_a_script_runs_with_a_clean_env(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("SKEP_HOME", "/somewhere")
     monkeypatch.setenv("LANG", "C.UTF-8")
     monkeypatch.setenv("TZ", "UTC")
-    output, ok = run_schedule_script("env")
+    output, ok = run_schedule_script("env", skep_home=skep_home)
     assert ok is True
     assert "CANARY" not in output and "SKEP_HOME" not in output
     names = {line.split("=", 1)[0] for line in output.splitlines()}
     assert {"PATH", "HOME", "LANG", "TZ"} <= names
 
 
-def test_script_output_is_capped_while_it_streams() -> None:
+def test_script_output_is_capped_while_it_streams(skep_home: Path) -> None:
     """ES B117: 600 MB of output took serve from 77 MB to 1.84 GB RSS —
     `subprocess.run(capture_output=True)` buffered it all, then capped."""
     import subprocess
@@ -179,7 +202,8 @@ def test_script_output_is_capped_while_it_streams() -> None:
         "import resource\n"
         "from skep.supervisor.scheduler import run_schedule_script\n"
         "before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
-        "out, ok = run_schedule_script(\"head -c 150000000 /dev/zero | tr '\\\\0' a\")\n"
+        "out, ok = run_schedule_script(\"head -c 150000000 /dev/zero | tr '\\\\0' a\", "
+        f"skep_home=__import__('pathlib').Path({str(skep_home)!r}))\n"
         "after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
         "scale = 1 if sys.platform != 'darwin' else 1024\n"
         "print(ok, len(out), (after - before) // scale)\n"
@@ -196,7 +220,8 @@ def test_script_output_is_capped_while_it_streams() -> None:
     assert int(grew_kb) < 30_000, f"peak RSS grew {grew_kb} kB for a capped script"
 
 
-def test_a_timed_out_script_takes_its_children_with_it(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("unwalled")
+def test_a_timed_out_script_takes_its_children_with_it(tmp_path: Path, skep_home: Path) -> None:
     """ES B118: the timeout killed only `sh`; a backgrounded loop kept writing.
     The partial output survives too (it was discarded)."""
     import time
@@ -206,6 +231,7 @@ def test_a_timed_out_script_takes_its_children_with_it(tmp_path: Path) -> None:
     marker = tmp_path / "orphan.txt"
     output, ok = run_schedule_script(
         f"echo BEFORE-TIMEOUT; (while :; do date >> {marker}; sleep 0.05; done) & sleep 30",
+        skep_home=skep_home,
         timeout_seconds=0.5,
     )
     assert ok is False and "timed out after 0.5s" in output and "BEFORE-TIMEOUT" in output
@@ -215,7 +241,8 @@ def test_a_timed_out_script_takes_its_children_with_it(tmp_path: Path) -> None:
     assert marker.stat().st_size == size, "the backgrounded child outlived the timeout"
 
 
-def test_shutdown_kills_a_running_script_group(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("unwalled")
+def test_shutdown_kills_a_running_script_group(tmp_path: Path, skep_home: Path) -> None:
     """ES B120: a restart orphaned the in-flight script (it finished with no
     supervisor). Stopping the ticker kills the running script's group."""
     import threading
@@ -227,7 +254,10 @@ def test_shutdown_kills_a_running_script_group(tmp_path: Path) -> None:
     done: list[tuple[str, bool]] = []
     worker = threading.Thread(
         target=lambda: done.append(
-            run_schedule_script(f"(while :; do date >> {marker}; sleep 0.05; done) & sleep 30")
+            run_schedule_script(
+                f"(while :; do date >> {marker}; sleep 0.05; done) & sleep 30",
+                skep_home=skep_home,
+            )
         )
     )
     worker.start()
@@ -285,11 +315,13 @@ def test_a_script_interrupted_by_a_restart_fires_at_its_next_slot(
     assert reconcile_interrupted_scripts(store) == []
 
 
-def test_a_script_that_closes_its_output_still_hits_the_deadline() -> None:
+def test_a_script_that_closes_its_output_still_hits_the_deadline(skep_home: Path) -> None:
     """ES B118: EOF on the pipe is not the end of the script."""
     from skep.supervisor.scheduler import run_schedule_script
 
-    output, ok = run_schedule_script("exec >/dev/null 2>&1; sleep 30", timeout_seconds=0.5)
+    output, ok = run_schedule_script(
+        "exec >/dev/null 2>&1; sleep 30", skep_home=skep_home, timeout_seconds=0.5
+    )
     assert ok is False and output == "script timed out after 0.5s"
 
 
@@ -327,12 +359,12 @@ def test_serve_start_reconciles_interrupted_scripts(
     assert not ticker.is_alive()
 
 
-def test_a_script_that_never_stops_talking_is_capped_and_timed_out() -> None:
+def test_a_script_that_never_stops_talking_is_capped_and_timed_out(skep_home: Path) -> None:
     """ES B117: a `yes`-shaped script is drained and dropped past the cap
     until its deadline, never buffered."""
     from skep.supervisor.scheduler import SCRIPT_OUTPUT_CAP, run_schedule_script
 
-    output, ok = run_schedule_script("yes", timeout_seconds=0.3)
+    output, ok = run_schedule_script("yes", skep_home=skep_home, timeout_seconds=0.3)
     assert ok is False and output.endswith("script timed out after 0.3s")
     assert "… (truncated)" in output and len(output) < SCRIPT_OUTPUT_CAP + 80
 

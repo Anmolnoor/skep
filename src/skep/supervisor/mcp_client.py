@@ -734,55 +734,22 @@ def forged_lane(
     ``hosts`` is empty, else pinned to them through a FilteringProxy (D1) —
     never allow-all. No backend → refuse (fail closed, I12)."""
     import contextlib
-    import os
-    import shutil
     import subprocess
-    import tempfile
-    from pathlib import Path
 
     from . import sandbox
-    from .netproxy import FilteringProxy, control_plane_ports
-    from .spawner import proxy_env
+    from .wall import walled
 
     probe = sandbox.availability()
     if not probe.usable:
         raise MCPError(f"the forged-tool lane needs a usable sandbox backend ({probe.reason})")
     with contextlib.ExitStack() as stack:
-        proxy = None
-        if hosts:
-            socket_path = None
-            if probe.backend == "bubblewrap":  # the netns reaches the proxy over a unix socket
-                from .dispatch import proxy_socket_root
-
-                socket_dir = tempfile.mkdtemp(prefix="skep-fx-", dir=proxy_socket_root())
-                stack.callback(shutil.rmtree, socket_dir, ignore_errors=True)
-                socket_path = str(Path(socket_dir) / "p.sock")
-            proxy = FilteringProxy(
-                hosts,
-                unix_socket_path=socket_path,
-                denied_loopback_ports=control_plane_ports(skep_home / "supervisor"),
-            ).start()
-            stack.callback(proxy.stop)
         try:
-            profile = sandbox.write_profile(
-                workspace / "sandbox.profile",
-                workspace=workspace,
-                extra_writable=writable,
-                network=(
-                    sandbox.NetworkPolicy(allow=tuple(hosts)) if hosts else sandbox.DENY_ALL_NETWORK
-                ),
-                proxy_port=None if proxy is None else proxy.port,
-                unix_socket_path=None if proxy is None else proxy.unix_socket_path,
-                skep_home=skep_home,
-                read_allowlist=(),
-            )
-            wrapped = sandbox.wrap_command(argv, profile)
-        except (sandbox.SandboxUnavailableError, sandbox.SandboxAllowlistUnsupported) as exc:
+            wrapped, env = stack.enter_context(
+                walled(argv, skep_home=skep_home, hosts=hosts, workspace=workspace,
+                       writable=writable)
+            )  # fmt: skip
+        except sandbox.SandboxUnavailableError as exc:
             raise MCPError(f"the forged-tool lane could not build its wall: {exc}") from exc
-        env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
-        env.update(HOME=str(workspace), **sandbox.in_wall_tmp_env(workspace))
-        if proxy is not None:
-            env.update(proxy_env(proxy.port))
         try:
             return subprocess.run(
                 wrapped,

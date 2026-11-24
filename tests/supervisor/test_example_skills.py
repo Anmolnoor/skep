@@ -20,6 +20,7 @@ from types import ModuleType
 
 import pytest
 
+from skep.supervisor import sandbox
 from skep.supervisor.reverify import pytest_counts, static_tamper_flags
 from skep.supervisor.serve.chat import off_menu
 from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES, READ_TOOL_NAMES
@@ -55,6 +56,69 @@ def test_example_skill_loads_through_the_skill_md_loader(name: str) -> None:
 
 def test_the_morning_prompt_step_uses_only_tools_an_unattended_tick_offers() -> None:
     assert not set(_tools("morning-ritual")) & off_menu(read_only=True, unattended=True)
+
+
+def test_the_dependabot_nightly_report_calls_only_scheduled_turn_tools() -> None:
+    """S8: the nightly prompt schedule names store reads only — no list_prs."""
+    from skep.supervisor.serve.chat import SCHEDULED_TURN_TOOLS
+
+    text = (SKILLS / "dependabot-maintainer" / "SKILL.md").read_text(encoding="utf-8")
+    nightly = text[text.index("## Nightly report") :]
+    instructions = nightly[
+        nightly.index('instructions="') : nightly.index('"\n', nightly.index('instructions="') + 14)
+    ]
+    named = {w for w in re.findall(r"[a-z_]+", instructions)} & (
+        READ_TOOL_NAMES | MUTATING_TOOL_NAMES
+    )
+    assert named == {"list_runs"} and named <= SCHEDULED_TURN_TOOLS
+
+
+def _dependabot() -> str:
+    return (SKILLS / "dependabot-maintainer" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_dependabot_preflight_checks_every_precondition() -> None:
+    """S15: registration, a project, the pinned verify, sandbox, strict reads
+    and unlocked — not the verify pin alone."""
+    preflight = _dependabot().split("## 0. Preflight", 1)[1].split("## 1.", 1)[0]
+    for needed in (
+        "list_repos",
+        "`project` is set",
+        "(worker-nominated fallback)",
+        "`execution_mode` is `sandbox`",
+        "policy_provenance.strict_read_confinement.value",
+        "policy_provenance.unlocked.value",
+    ):
+        assert needed in preflight, needed
+
+
+def test_dependabot_reviews_with_the_builtin_engine_on_the_exact_head() -> None:
+    """N8/N6: engine=builtin (an external engine fails a patchless run before
+    G10), and the run is matched by ref + reverification head_commit."""
+    text = _dependabot()
+    assert "ref=refs/skep/pr/<N>/head execution_mode=sandbox engine=builtin" in text
+    assert "agent produced no workspace patch" in text
+    assert "`ref` is `refs/skep/pr/<N>/head`" in text
+    assert "`reverification.head_commit` is the `head_sha` from 2.1" in text
+    assert "`state` is `failed` and `reverification` is null" in text
+
+
+def test_dependabot_routes_workflow_bumps_to_a_human_review_task() -> None:
+    """S15: a .github/workflows bump never gets a merge card."""
+    bump = _dependabot().split("**Workflow bump**", 1)[1].split("**Red**", 1)[0]
+    assert "never propose `merge_pr`" in bump and "add_task" in bump
+
+
+def test_dependabot_evidence_lines_are_real_cli_commands() -> None:
+    """S14: the receipt on green and the forensics on red, each a command the
+    CLI parses, filled in per task."""
+    from skep.cli import _parser
+
+    report = _dependabot().split("## 4. Report", 1)[1].split("## Nightly", 1)[0]
+    commands = re.findall(r"(skep (?:proof export|run forensics) <task_id>(?: --md)?)", report)
+    assert commands == ["skep proof export <task_id>", "skep run forensics <task_id> --md"]
+    for command in commands:
+        _parser().parse_args(command.replace("<task_id>", "t-1").split()[1:])
 
 
 def test_dependabot_merges_only_behind_the_merge_pr_card() -> None:
@@ -132,6 +196,36 @@ def test_fetch_brief_prints_labeled_sections_mail_last(
     assert urls and urls[0].startswith("https://api.open-meteo.com/") and "49.28" in urls[0]
 
 
+@pytest.mark.parametrize("where", ["nan,0", "inf,0", "91,0", "0,-180.5", "1", "1,2,3", "a,b"])
+def test_fetch_brief_refuses_a_coordinate_outside_the_globe(
+    where: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N11: a non-finite or out-of-range LAT,LON never reaches the URL."""
+    module = _fetch_brief()
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *a, **k: pytest.fail("fetched"))
+    with pytest.raises(ValueError, match="LAT,LON"):
+        module.weather(where)
+
+
+def test_fetch_brief_caps_the_weather_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N11: the answer is read at most 512 KiB + 1 (calendar.py's cap)."""
+    from skep.mcp_servers import calendar
+
+    module = _fetch_brief()
+    asked: list[object] = []
+
+    class Huge(_Response):
+        def read(self, *args: object) -> bytes:
+            asked.extend(args)
+            return b" " * (int(str(args[0])) if args else 10**7)
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *a, **k: Huge())
+    with pytest.raises(ValueError, match="512 KiB"):
+        module.weather("49.28,-123.12")
+    assert module.WEATHER_CAP_BYTES == calendar._FETCH_CAP_BYTES
+    assert asked == [module.WEATHER_CAP_BYTES + 1]
+
+
 def test_fetch_brief_says_which_source_failed_and_exits_1(
     brief_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -153,21 +247,42 @@ def test_fetch_brief_needs_a_source() -> None:
     assert exc.value.code == 2
 
 
-def test_fetch_brief_runs_as_a_script_with_a_scrubbed_env(brief_home: Path) -> None:
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(brief_home),
-        "SKEP_CALENDAR_ICS": str(brief_home / "cal.ics"),
-    }
-    done = subprocess.run(
-        [sys.executable, str(SKILLS / "morning-ritual" / "fetch_brief.py"), "--calendar-days", "1"],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
+@pytest.mark.skipif(
+    sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
+    reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
+)
+def test_fetch_brief_runs_inside_the_script_wall(brief_home: Path) -> None:
+    """S7: the documented shape through the real script lane. The .ics the
+    command names is read; with no hosts declared the weather cannot leave."""
+    from skep.supervisor.scheduler import run_schedule_script
+
+    script = SKILLS / "morning-ritual" / "fetch_brief.py"
+    output, ok = run_schedule_script(
+        f"SKEP_CALENDAR_ICS={brief_home / 'cal.ics'} {sys.executable} {script} "
+        "--weather 49.28,-123.12 --calendar-days 1",
+        skep_home=brief_home / ".skep",
     )
-    assert done.returncode == 0, done.stderr
-    assert "## Calendar" in done.stdout and "— standup" in done.stdout
+    assert ok is False, output  # the weather section failed: no network
+    assert "## Calendar" in output and "— standup" in output
+    assert "## Weather\n(unavailable: URLError" in output
+
+
+def test_the_morning_brief_declares_its_inputs_and_hosts() -> None:
+    """S7: the skill's command names its files (declared inputs, none in the
+    skep home) and its schedule names the hosts the script contacts."""
+    from skep.supervisor.scheduler import script_inputs
+
+    text = (SKILLS / "morning-ritual" / "SKILL.md").read_text(encoding="utf-8")
+    (network,) = re.findall(r"network=(\[[^\]]*\])", text)
+    (command,) = re.findall(r'instructions="([^"]+)"', text)
+    imap = re.search(r"SKEP_MAIL_IMAP_HOST=(\S+)", command)
+    assert imap is not None and json.loads(network) == ["api.open-meteo.com", imap.group(1)]
+    assert "SKEP_MAIL_PASSWORD_FILE=/abs/path/" in command and ".skep" not in command
+    real = command.replace(
+        "/abs/path/to/examples/skills/morning-ritual/fetch_brief.py",
+        str(SKILLS / "morning-ritual" / "fetch_brief.py"),
+    )
+    assert SKILLS / "morning-ritual" / "fetch_brief.py" in script_inputs(real)
 
 
 # -- 9.1: seed-dependabot-fixture.sh --------------------------------------------
@@ -230,12 +345,110 @@ def test_seed_refuses_a_directory_it_did_not_make(tmp_path: Path, fakes: dict[st
     assert sorted(p.name for p in target.iterdir()) == ["notes.txt"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["me/real-app", "-R/fixture", "me/my fixture", "me/x;fixture", "me/fixture/x", "/fixture"],
+)
 def test_seed_refuses_a_github_repo_not_named_fixture(
-    tmp_path: Path, fakes: dict[str, str]
+    tmp_path: Path, fakes: dict[str, str], name: str
 ) -> None:
-    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/real-app")
+    """S9: OWNER/NAME by a strict pattern — never an option-shaped `-R/...`."""
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", name)
     assert done.returncode == 2 and "'fixture' in NAME" in done.stderr
     assert not (tmp_path / "fx").exists()
+
+
+def _remote_with(fakes: dict[str, str], tmp_path: Path, *, branch: str, tag: bool = False) -> str:
+    """A bare 'GitHub' remote holding someone's real work on ``branch``."""
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", "-b", branch, str(other)], check=True)
+    (other / "app.py").write_text("print('real')\n")
+    subprocess.run(["git", "-C", str(other), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(other), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "real"],
+        check=True,
+        env=fakes,
+    )  # fmt: skip
+    remote = fakes["FAKE_GH_REMOTE"]
+    subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+    ref = "refs/tags/v1" if tag else f"refs/heads/{branch}"
+    subprocess.run(["git", "-C", str(other), "push", "-q", remote, f"HEAD:{ref}"], check=True)
+    return _git(Path(remote), "rev-parse", ref)
+
+
+@pytest.mark.parametrize(("branch", "tag"), [("trunk", False), ("main", True)])
+def test_github_mode_refuses_a_non_empty_remote_with_no_fixture_main(
+    tmp_path: Path, fakes: dict[str, str], branch: str, tag: bool
+) -> None:
+    """S9: another default branch, or tags alone, is someone's repo — refused
+    whole, even though no `main` exists to be overwritten."""
+    before = _remote_with(fakes, tmp_path, branch=branch, tag=tag)
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/dependabot-fixture")
+    assert done.returncode == 2 and "not this fixture's" in done.stderr, done.stderr
+    remote = Path(fakes["FAKE_GH_REMOTE"])
+    refs = _git(remote, "for-each-ref", "--format=%(refname) %(objectname)")
+    assert refs == f"{'refs/tags/v1' if tag else 'refs/heads/' + branch} {before}"
+    assert not Path(fakes["FAKE_GH_LOG"]).exists()
+
+
+def test_github_mode_refuses_when_the_remote_cannot_be_probed(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """S9: a failed ls-remote is not an empty remote."""
+    done = _seed(fakes, str(tmp_path / "fx"), "--github", "me/dependabot-fixture")
+    assert done.returncode == 2 and "cannot list" in done.stderr, done.stderr
+    assert not Path(fakes["FAKE_GH_REMOTE"]).exists()
+
+
+def test_every_push_is_leased_to_what_the_probe_saw(tmp_path: Path, fakes: dict[str, str]) -> None:
+    """S9: a fixture branch that moves between the probe and the push is not
+    overwritten (--force-with-lease=<ref>:<seen>, atomic): the run fails."""
+    import shutil
+
+    subprocess.run(["git", "init", "-q", "--bare", fakes["FAKE_GH_REMOTE"]], check=True)
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target), "--github", "me/dependabot-fixture").returncode == 0
+    remote = Path(fakes["FAKE_GH_REMOTE"])
+    main = _git(remote, "rev-parse", "main")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" push "*) "$REAL_GIT" --git-dir="$FAKE_GH_REMOTE" '
+        'update-ref "refs/heads/$RACE_BRANCH" "$RACE_SHA" ;; esac\n'
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    raced = {
+        **fakes,
+        "PATH": f"{shim}{os.pathsep}{fakes['PATH']}",
+        "REAL_GIT": str(shutil.which("git")),
+        "RACE_BRANCH": SHAPES["a"],
+        "RACE_SHA": main,
+    }
+    done = _seed(raced, str(target), "--github", "me/dependabot-fixture")
+    assert done.returncode != 0
+    assert "stale info" in done.stderr or "rejected" in done.stderr, done.stderr
+    assert _git(remote, "rev-parse", SHAPES["a"]) == main  # the racer's value stands
+
+
+def test_move_head_pushes_only_to_the_fixtures_own_remote(
+    tmp_path: Path, fakes: dict[str, str]
+) -> None:
+    """S9/N9: --move-head checks the checkout's origin is exactly the
+    disposable remote this run names, and that remote's main is the fixture's."""
+    target = tmp_path / "fx"
+    assert _seed(fakes, str(target)).returncode == 0
+    elsewhere = tmp_path / "elsewhere.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(target / "origin.git"), str(elsewhere)],
+                   check=True)  # fmt: skip
+    before = _git(elsewhere, "rev-parse", SHAPES["d"])
+    _git(target / "repo", "remote", "set-url", "origin", str(elsewhere))
+
+    done = _seed(fakes, str(target), "--move-head")
+    assert done.returncode == 2 and "not the fixture's remote" in done.stderr, done.stderr
+    assert _git(elsewhere, "rev-parse", SHAPES["d"]) == before
 
 
 def test_seed_builds_the_four_shapes_idempotently(tmp_path: Path, fakes: dict[str, str]) -> None:

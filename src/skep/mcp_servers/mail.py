@@ -10,8 +10,11 @@ Config (environment):
   SKEP_MAIL_SMTP_HOST  SMTP server (required for send), port SKEP_MAIL_SMTP_PORT (465)
   SKEP_MAIL_USER       login (also the default From)
   SKEP_MAIL_FROM       From override
-  SKEP_MAIL_PASSWORD   password; when unset, read from <SKEP_HOME>/supervisor/mail-secret
-                       (0600, the llm-secret pattern — never SQLite, never an argument)
+  SKEP_MAIL_PASSWORD   password; when unset, read from SKEP_MAIL_PASSWORD_FILE, else from
+                       <SKEP_HOME>/supervisor/mail-secret (0600, the llm-secret pattern —
+                       never SQLite, never an argument). A script schedule runs walled,
+                       where the skep home is masked: it names SKEP_MAIL_PASSWORD_FILE.
+  HTTPS_PROXY          set by a script schedule's wall: the digest tunnels IMAP through it
 
 Run: python -m skep.mcp_servers.mail
      python -m skep.mcp_servers.mail --digest N   (v122-F4: print the newest N
@@ -28,7 +31,9 @@ import imaplib
 import json
 import os
 import smtplib
+import socket
 import sys
+import urllib.parse
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -101,7 +106,8 @@ def resolve_password() -> str | None:
     env = os.environ.get("SKEP_MAIL_PASSWORD", "").strip()
     if env:
         return env
-    secret = _home() / "supervisor" / "mail-secret"
+    named = os.environ.get("SKEP_MAIL_PASSWORD_FILE", "").strip()
+    secret = Path(named) if named else _home() / "supervisor" / "mail-secret"
     if not secret.is_file():
         return None
     return secret.read_text(encoding="utf-8").strip() or None
@@ -280,6 +286,42 @@ def _digest_block(raw: bytes) -> str:
         )
 
 
+def proxy_tunnel(proxy: str, host: str, port: int, timeout: float | None) -> socket.socket:
+    """Phase 09 R1 (S7): a script schedule runs walled, and its one way out is
+    the FilteringProxy its HTTPS_PROXY names, which still admits only the
+    schedule's hosts. IMAP has no proxy support, so open one CONNECT tunnel."""
+    where = urllib.parse.urlsplit(proxy)
+    sock = socket.create_connection((where.hostname or "127.0.0.1", where.port or 80), timeout)
+    try:
+        sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+        reply = b""
+        while b"\r\n\r\n" not in reply and len(reply) < 8192:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            reply += chunk
+        status = reply.split(b"\r\n", 1)[0].decode("latin-1")
+        if status.split(" ")[1:2] != ["200"]:
+            raise OSError(f"the proxy refused CONNECT {host}:{port}: {status or 'no reply'}")
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+class _ProxiedIMAP4_SSL(imaplib.IMAP4_SSL):
+    """IMAP4_SSL over ``proxy_tunnel``; TLS still runs end to end with the host."""
+
+    def __init__(self, host: str, port: int, *, proxy: str) -> None:
+        self._proxy = proxy
+        super().__init__(host, port)
+
+    def _create_socket(self, timeout: float | None = None) -> socket.socket:
+        sock = proxy_tunnel(self._proxy, self.host, self.port, timeout)
+        wrapped: socket.socket = self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+        return wrapped
+
+
 def digest(count: int, mailbox: str = "INBOX") -> str:
     """The newest ``count`` messages as blocks the v121 injection alarm
     parses: a ``---`` line, then ``From:``/``Subject:``/``Date:`` at column
@@ -289,13 +331,18 @@ def digest(count: int, mailbox: str = "INBOX") -> str:
     password = resolve_password()
     if password is None:
         raise ValueError(
-            "no mail password: write ~/.skep/supervisor/mail-secret (0600) — a script "
-            "schedule finds it through HOME"
+            "no mail password: a script schedule names a 0600 file outside ~/.skep "
+            "inline (SKEP_MAIL_PASSWORD_FILE=/abs/path); elsewhere ~/.skep/supervisor/mail-secret"
         )
-    with imaplib.IMAP4_SSL(
+    host, port = (
         os.environ["SKEP_MAIL_IMAP_HOST"],
         int(os.environ.get("SKEP_MAIL_IMAP_PORT") or 993),
-    ) as imap:
+    )
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    connect = (
+        imaplib.IMAP4_SSL(host, port) if not proxy else _ProxiedIMAP4_SSL(host, port, proxy=proxy)
+    )
+    with connect as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
         imap.select(mailbox, readonly=True)
         _status, data = imap.uid("search", "ALL")
@@ -353,8 +400,8 @@ def _digest_main(count: int) -> None:
         sys.exit(2)
     except (imaplib.IMAP4.error, OSError) as exc:
         print(
-            f"mail pull failed: {_one_line(exc)} — check SKEP_MAIL_IMAP_HOST/PORT, "
-            "SKEP_MAIL_USER and ~/.skep/supervisor/mail-secret",
+            f"mail pull failed: {_one_line(exc)} — check SKEP_MAIL_IMAP_HOST/PORT (and that "
+            "the schedule's hosts name it), SKEP_MAIL_USER and the password file",
             file=sys.stderr,
         )
         sys.exit(2)

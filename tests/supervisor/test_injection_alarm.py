@@ -270,6 +270,80 @@ def test_unattended_turns_are_never_offered_the_tools_they_refuse(
         home.store.close()
 
 
+def test_a_scheduled_turn_is_offered_store_reads_only(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """Phase 09 R1 (S8): a scheduled turn's menu is an allowlist, not "every
+    read but a few": list_prs (GitHub, as you), repo_state/git_* (checkouts)
+    and list_mcp_tools (starts a server) are never offered — by schema, by
+    the prompt's index, or by describe_tools."""
+    from skep.supervisor.serve.chat import SCHEDULED_TURN_TOOLS, off_menu
+    from skep.supervisor.serve.llm import TOOL_DELIVERY_SETTING
+    from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES, READ_TOOL_NAMES
+
+    reaching = {"list_prs", "repo_state", "git_diff", "git_log", "list_mcp_tools", "search_web"}
+    assert SCHEDULED_TURN_TOOLS <= READ_TOOL_NAMES and not SCHEDULED_TURN_TOOLS & reaching
+    hidden = off_menu(read_only=True, unattended=True)
+    assert hidden == (READ_TOOL_NAMES | MUTATING_TOOL_NAMES) - SCHEDULED_TURN_TOOLS
+    home = Home(config, ollama, bound=False)
+    engine = ChatEngine(store=home.store, holder=home.holder, runner=home.runner, home=config.home)
+    try:
+        chat = home.store.get_chat(home.chat_id)
+        home.store.set_setting(TOOL_DELIVERY_SETTING, "full")
+        scheduled = {
+            t["function"]["name"]
+            for t in engine._advertised_tools(chat, read_only=True, unattended=True)
+        }
+        assert scheduled and scheduled <= SCHEDULED_TURN_TOOLS
+        assert "list_prs" in {
+            t["function"]["name"] for t in engine._advertised_tools(chat, read_only=True)
+        }  # a live /btw keeps it
+        home.store.set_setting(TOOL_DELIVERY_SETTING, "indexed")
+        assert "list_prs" not in engine._system_prompt(home.chat_id, hidden)
+        assert "list_prs" in engine._system_prompt(home.chat_id)
+    finally:
+        home.store.close()
+
+
+def test_a_scheduled_turn_refuses_a_network_read_and_alarms(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    wire: dict[str, list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 09 R1 (S8): the executor holds the same allowlist. A list_prs
+    the planted digest asks for never runs (no GitHub call), its refusal
+    teaches, and it is one decisions row in the alarm with the rest."""
+    from skep.supervisor.serve import actions
+
+    github: list[str] = []
+    monkeypatch.setattr(actions, "list_prs_view", lambda *a, **k: github.append("called"))
+    home = Home(config, ollama, bound=True)
+    try:
+        ollama.script_tool_calls(
+            ("list_prs", {"repo": "skep"}),
+            ("describe_tools", {"names": ["list_prs", "list_runs"]}),
+            ("list_runs", {}),
+        )
+        ollama.script_reply("two mails summarized")
+        _reply, ok = home.tick()
+        assert ok is True and github == []
+        tools = {
+            m.tool_name: json.loads(m.content)
+            for m in home.store.chat_messages(home.chat_id)
+            if m.role == "tool"
+        }
+        assert "store reads only" in tools["list_prs"]["error"]
+        assert [t["name"] for t in tools["describe_tools"]["tools"]] == ["list_runs"]
+        assert "runs" in tools["list_runs"]  # a store read still runs
+        (row,) = [r for r in home.rows() if r.get("alarm")]
+        assert row["tool"] == "list_prs" and row["rule_id"] == "unattended_blocked"
+        (line,) = wire["pushed"]
+        assert "list_prs" in line and "Queen gate (layer 2)" in line
+    finally:
+        home.store.close()
+
+
 def test_the_alarm_line_is_built_from_rows_and_block_start_headers() -> None:
     rows = [
         {"tool": "add_note", "arg_head": '{"content": "x"}'},
