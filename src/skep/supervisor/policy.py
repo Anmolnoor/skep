@@ -411,11 +411,18 @@ def pin_control_changes(
 
 
 def test_config_changes(
-    repo: Path, patch_path: Path, base: str, changed_files: tuple[str, ...]
+    repo: Path,
+    patch_path: Path,
+    base: str,
+    changed_files: tuple[str, ...],
+    *,
+    head: str | None = None,
 ) -> tuple[str, ...]:
     """V1 (review R1, F7): the changed files that are test-runner config —
     ``_TEST_CONFIG_GLOBS``, ``.github/workflows/**``, and the runner section
-    of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``."""
+    of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``.
+    ``head`` (Phase 09 R2): read the new side from that commit, not from the
+    patch applied to ``base``."""
     hits = [
         path
         for path in changed_files
@@ -423,12 +430,18 @@ def test_config_changes(
         or path.startswith(".github/workflows/")
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
-    hits += _config_changes(repo, patch_path, base, parsed, runner_only=True)
+    hits += _config_changes(repo, patch_path, base, parsed, runner_only=True, head=head)
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
 def _config_changes(
-    repo: Path, patch_path: Path, base: str, paths: list[str], *, runner_only: bool
+    repo: Path,
+    patch_path: Path,
+    base: str,
+    paths: list[str],
+    *,
+    runner_only: bool,
+    head: str | None = None,
 ) -> list[str]:
     """``paths`` whose ``_test_config`` differs between ``base`` and the patch
     applied in a scratch index; every path when the patch does not apply."""
@@ -437,13 +450,17 @@ def _config_changes(
     hits = []
     with tempfile.TemporaryDirectory(prefix="skep-pinctl-") as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        applied = _git_text(repo, "read-tree", base, env=env) is not None and (
-            _git_text(repo, "apply", "--cached", str(patch_path), env=env) is not None
+        applied = head is not None or (
+            _git_text(repo, "read-tree", base, env=env) is not None
+            and _git_text(
+                repo, "apply", "--cached", "--whitespace=nowarn", str(patch_path), env=env
+            )
+            is not None
         )
         for path in paths:
             name = os.path.basename(path)
             before = _git_text(repo, "show", f"{base}:{path}")
-            after = _git_text(repo, "show", f":{path}", env=env)
+            after = _git_text(repo, "show", f"{head or ''}:{path}", env=env)
             if not applied or _test_config(name, before, runner_only=runner_only) != _test_config(
                 name, after, runner_only=runner_only
             ):

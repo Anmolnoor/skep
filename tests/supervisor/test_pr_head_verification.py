@@ -515,6 +515,95 @@ def test_v1_reads_a_diff_git_would_call_binary(
     assert "skip_marker_added:tests/test_app.py" in record.tamper_flags
 
 
+def test_apply_whitespace_error_never_makes_a_skipping_pr_clean(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R2 (S5, N2): Neon's case — `apply.whitespace=error` made V1's scratch
+    `git apply --cached` fail on a PR whose added skip line ends in a space,
+    and the verdict came back passed, confirmed, no flags. V1 now reads the
+    PR from the object DB, and the merge is refused."""
+    _seed(repo)
+    _github_origin(repo)
+    git(repo, "config", "apply.whitespace", "error")
+    skipped = "import pytest\n" + TESTS.replace(
+        "def test_value", "@pytest.mark.skip   \ndef test_value", 1
+    )
+    _base, head = _pr(repo, {"tests/test_app.py": skipped})
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")  # V1 alone
+
+    assert outcome.outcome == "tampered", outcome.detail
+    assert "skip_marker_added:tests/test_app.py" in record.tamper_flags
+    assert record.confirmed is False
+    _card, _summary, refused = _propose(config, {"repo": str(repo), "pr": "7"})
+    assert refused is not None and "merge" in refused
+
+
+def test_v1_flags_a_binary_test_blob_without_a_skip_marker(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R2 (S5): a test file V1 cannot read as text is never clean, whether
+    or not a marker shows through."""
+    _seed(repo)
+    _base, head = _pr(repo, {"tests/test_app.py": "\x00\x01" + TESTS})
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")
+
+    assert outcome.outcome == "tampered", outcome.detail
+    assert record.tamper_flags == ("test_file_uninspectable:tests/test_app.py",)
+
+
+def test_a_git_read_v1_needs_that_fails_is_a_flag_never_clean(repo: Path) -> None:
+    """R2 (S5, N2): every git read V1 depends on checks its exit status."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    seed = _seed(repo)
+    patch = repo.parent / "pr.diff"
+    patch.write_text("diff --git a/tests/x b/tests/x\n", encoding="utf-8")
+
+    missing = "f" * 40
+    assert static_tamper_flags(repo, patch, seed, head=missing) == ["tamper_check_failed:diff"]
+    assert static_tamper_flags(repo, patch, missing) == ["tamper_check_failed:read_tree"]
+
+
+def test_a_patch_v1_cannot_apply_on_a_passing_rerun_is_flagged(repo: Path) -> None:
+    """R2 (S5): a patch run whose re-run passed but whose patch V1 cannot
+    apply to its scratch index is unconfirmed — never silently clean. A
+    re-run that already failed keeps its own verdict."""
+    from skep.supervisor.reverify import ReverifyOutcome, _v1_verdict
+
+    seed = _seed(repo)
+    patch = repo.parent / "stale.diff"
+    patch.write_text(
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n-def nothing():\n+def other():\n"
+        "     return 1\n",
+        encoding="utf-8",
+    )
+    passed = ReverifyOutcome("passed", [PIN], [0], "ok")
+
+    verdict = _v1_verdict(passed, repo, patch, seed)
+    failed = _v1_verdict(replace(passed, outcome="failed"), repo, patch, seed)
+
+    assert verdict.outcome == "tampered"
+    assert verdict.tamper_flags == ("tamper_check_failed:apply_failed",)
+    assert failed.outcome == "failed" and failed.tamper_flags == ()
+
+
+def test_a_patch_with_trailing_whitespace_is_still_read_by_v1(repo: Path) -> None:
+    """R2 (S5): V1's scratch apply passes --whitespace=nowarn, so the repo's
+    apply.whitespace setting never turns a skip marker into "clean"."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    seed = _seed(repo)
+    git(repo, "config", "apply.whitespace", "error")
+    (repo / "tests" / "test_app.py").write_text("import pytest  \n" + SKIPPED, "utf-8")
+    patch = repo.parent / "skip.diff"
+    patch.write_bytes(git(repo, "diff").stdout.encode())
+    git(repo, "checkout", "--", ".")
+
+    assert "skip_marker_added:tests/test_app.py" in static_tamper_flags(repo, patch, seed)
+
+
 def test_a_breaking_pr_fails_g10(repo: Path, config: SupervisorConfig) -> None:
     _seed(repo)
     _base, head = _pr(repo, {"app.py": "def value():\n    return 2\n"})

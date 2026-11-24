@@ -63,9 +63,9 @@ _REVERIFY_TIMEOUT_SECONDS = 300.0
 # V1 (phase-01 1.3): what the guard can and cannot see, said on every verdict.
 V1_SCOPE = (
     "V1 detects deleted or emptied test files, test paths it cannot read as text "
-    "(a symlink or submodule) or whose mode changed, added skip/xfail markers, "
-    "test-config edits and drops in the executed test count; it cannot prove an "
-    "edited assertion is still strong"
+    "(a symlink, a submodule, binary test code) or whose mode changed, added "
+    "skip/xfail markers, test-config edits and drops in the executed test count; "
+    "it cannot prove an edited assertion is still strong"
 )
 
 
@@ -210,6 +210,11 @@ _SKIP_MARKER = re.compile(
 )
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
 _REGULAR_MODES = ("100644", "100755")  # a blob V1 can read; 120000/160000 it cannot
+# R2 (S5): test code V1 must read as text; a binary fixture (.bin, .png) is data.
+_SOURCE_SUFFIXES = frozenset(
+    {".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java",
+     ".kt", ".cs", ".php", ".swift", ".c", ".cc", ".cpp", ".h"}
+)  # fmt: skip
 
 
 def _is_test_file(path: str) -> bool:
@@ -222,7 +227,25 @@ def _is_test_file(path: str) -> bool:
     )
 
 
-def static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
+def _is_text(blob: bytes) -> bool:
+    try:
+        blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in blob
+
+
+class _UnreadableForV1(Exception):
+    """R2 (S5, N2): a git read V1 needs failed — ``what`` names it."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+def static_tamper_flags(
+    repo: Path, patch_path: Path, base: str, head: str | None = None
+) -> list[str]:
     """V1: what the patch does to the tests, read by the supervisor from the
     patch artifact applied to ``base`` in a scratch index (never the worker's
     claim). Test-config edits are the test-runner files alone, compared
@@ -230,19 +253,23 @@ def static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
     a dependency bump, a vite.config or a setup.py edit is the landing gate's
     concern (pin-control), not test tampering.
 
+    ``head`` (Phase 09 R2, S5/N2): a PR head — ``base..head`` is read
+    straight from the object DB, nothing is applied, so no ``apply.*``
+    setting can turn the PR into "nothing changed".
+
     Review R1 (F5): paths are read NUL-delimited and blobs as bytes, so a
     quoted path or a binary fixture can't hide a deletion or crash the
-    verdict; anything git or a parser raises is a flag, never an escape."""
+    verdict; anything git or a parser raises is a flag, never an escape —
+    and so is a git read that exits non-zero (R2)."""
     try:
-        return _static_tamper_flags(repo, patch_path, base)
+        return _static_tamper_flags(repo, patch_path, base, head)
+    except _UnreadableForV1 as exc:
+        return [f"tamper_check_failed:{exc.what}"]
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return [f"tamper_check_failed:{type(exc).__name__}"]
 
 
-def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
-    changed = patch_paths(repo, patch_path)
-    if not changed:
-        return []
+def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | None) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="skep-v1-") as tmp:
         # Literal pathspecs: a test path with `*` or `[` names itself only.
         env = {
@@ -251,24 +278,35 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
             "GIT_LITERAL_PATHSPECS": "1",
         }
 
-        def git(*args: str) -> subprocess.CompletedProcess[bytes]:
-            return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+        def git(what: str, *args: str) -> bytes:
+            done = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+            if done.returncode:
+                raise _UnreadableForV1(what)
+            return done.stdout
 
-        if (
-            git("read-tree", base).returncode
-            or git("apply", "--cached", str(patch_path)).returncode
-        ):
-            # the re-run already says the patch does not apply
-            return [
-                f"test_config_changed:{p}"
-                for p in test_config_changes(repo, patch_path, base, changed)
-            ]
+        if head is None:
+            git("read_tree", "read-tree", base)
+            try:
+                git("apply_failed", "apply", "--cached", "--whitespace=nowarn", str(patch_path))
+            except _UnreadableForV1:
+                # R2 (S5): never "clean" — _v1_verdict keeps this flag only
+                # when the re-run passed (a failed re-run already says so).
+                changed = patch_paths(repo, patch_path)
+                return [
+                    "tamper_check_failed:apply_failed",
+                    *(f"test_config_changed:{p}" for p in test_config_changes(
+                        repo, patch_path, base, changed
+                    )),
+                ]  # fmt: skip
+            sides, at = ["--cached", base], ":"
+        else:
+            sides, at = [base, head], f"{head}:"
         # R1 (S12): raw records carry both modes — ":<old> <new> <oid> <oid> <code>",
         # then the path; a submodule is listed whatever diff.ignoreSubmodules says.
         raw = git(
-            "diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev",
-            "--ignore-submodules=none", base,
-        ).stdout.split(b"\0")  # fmt: skip
+            "diff", "diff", "--raw", "-z", "--no-renames", "--no-abbrev",
+            "--ignore-submodules=none", "--src-prefix=a/", "--dst-prefix=b/", *sides,
+        ).split(b"\0")  # fmt: skip
         changes: list[tuple[str, str, str, str]] = []  # old mode, new mode, code, path
         for header, name in zip(raw[0::2], raw[1::2], strict=False):  # raw ends in b""
             old_mode, new_mode, *_oids, code = header.decode()[1:].split()
@@ -277,7 +315,9 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
         # git-quoted `.github/workflows/é.yml` matched no prefix.
         flags = [
             f"test_config_changed:{path}"
-            for path in test_config_changes(repo, patch_path, base, tuple(c[3] for c in changes))
+            for path in test_config_changes(
+                repo, patch_path, base, tuple(c[3] for c in changes), head=head
+            )
         ]
         for old_mode, new_mode, code, path in changes:
             readable = new_mode in _REGULAR_MODES
@@ -289,17 +329,21 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str) -> list[str]:
                 else:
                     if old_mode in _REGULAR_MODES and old_mode != new_mode:
                         flags.append(f"test_mode_changed:{path}")  # runners may skip +x files
-                    if code == "M" and not git("show", f":{path}").stdout.strip():
+                    blob = git(f"show:{path}", "show", f"{at}{path}")
+                    if code == "M" and not blob.strip():
                         flags.append(f"test_file_emptied:{path}")
+                    if PurePosixPath(path).suffix in _SOURCE_SUFFIXES and not _is_text(blob):
+                        # R2 (S5): test code V1 cannot read as text is never clean
+                        flags.append(f"test_file_uninspectable:{path}")
             if code == "D" or not readable or path.endswith(_DOC_SUFFIXES):
                 continue
             # R1 (S12): --text, so a NUL byte or a `-diff` attribute (the patch
             # may add its own .gitattributes) never reduces the hunks to
             # "Binary files differ".
             diff = git(
-                "diff", "--cached", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
-                "-U0", base, "--", path,
-            ).stdout.decode("utf-8", "replace")  # fmt: skip
+                f"diff:{path}", "diff", "--text", "--no-color", "--no-ext-diff",
+                "--no-textconv", "-U0", *sides, "--", path,
+            ).decode("utf-8", "replace")  # fmt: skip
             hunks = diff.split("\n@@", 1)[1:]  # the header is git's, not the patch's
             if hunks and any(
                 line.startswith("+") and _SKIP_MARKER.search(line) for line in hunks[0].splitlines()
@@ -1390,7 +1434,7 @@ def reverify_run(
         )
     else:
         outcome = replace(outcome, commands_source=commands_source)
-    outcome = _v1_verdict(outcome, repo, patch_path, base_commit or ref or "HEAD")
+    outcome = _v1_verdict(outcome, repo, patch_path, base_commit or ref or "HEAD", checkout)
     if verdict_pr is not None:
         outcome = replace(
             outcome,
@@ -1420,13 +1464,20 @@ def reverify_run(
 
 
 def _v1_verdict(
-    outcome: ReverifyOutcome, repo: Path, patch_path: Path | None, base: str
+    outcome: ReverifyOutcome,
+    repo: Path,
+    patch_path: Path | None,
+    base: str,
+    head: str | None = None,
 ) -> ReverifyOutcome:
     """V1: a patch that changed the tests under the check is "tampered" —
     whatever the re-run said, it did not confirm the patch."""
     flags: list[str] = []
     if patch_path is not None and patch_path.is_file() and outcome.outcome != "not_applicable":
-        flags = static_tamper_flags(repo, patch_path, base)
+        flags = static_tamper_flags(repo, patch_path, base, head)
+        if outcome.outcome != "passed":
+            # R2 (S5): a re-run that did not pass already says the patch failed.
+            flags = [f for f in flags if f != "tamper_check_failed:apply_failed"]
     counts = outcome.test_counts or {}
     if counts.get("status") == "ok" and outcome.outcome == "passed":
         # Review R1 (F3): counts only speak for a clean re-run — a `-x` pin
