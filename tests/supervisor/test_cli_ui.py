@@ -736,7 +736,12 @@ def test_interactive_approve_rebinds_the_patch_after_claiming_the_review(
     assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
     store = RunStore(build_config(home, None).db_path)
     try:
-        assert [a.status for a in store.approvals_for(task_id)] == ["pending"]
+        # R3 J4: the review was minted for this verdict — refused, it is
+        # withdrawn with the reason, never left pending for nobody
+        (minted,) = store.approvals_for(task_id)
+        assert minted.status == "superseded"
+        assert "the patch changed since you read it" in (minted.resolution_note or "")
+        assert store.pending_approvals() == []
     finally:
         store.close()
 
@@ -943,3 +948,59 @@ def test_interactive_verdict_refuses_a_patch_that_appeared_after_a_card_showed_n
         assert store.approvals_for(task_id) == []
     finally:
         store.close()
+
+
+def test_interactive_approve_runs_every_read_only_check_before_minting_a_review(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 J4 (I13): a card that showed no review mints one only right before
+    the claim — a verdict an eligibility check refuses (here: G10 never ran)
+    leaves no pending apply_patch review behind."""
+    import sqlite3
+    from contextlib import closing
+
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("DELETE FROM reverifications WHERE task_id = ?", (task_id,))
+    _interactive(monkeypatch, ["a"])
+    assert _run_cli(home, "review") == 2
+    assert "re-verif" in capsys.readouterr().err
+    store = RunStore(db)
+    try:
+        assert store.approvals_for(task_id) == []
+    finally:
+        store.close()
+
+
+def test_interactive_resume_of_a_gateless_card_mints_a_resume_review(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 J4: a pending_approval run whose card showed no gate is answered with
+    a review minted as a resume says it ("resumed past approval gate"), not a
+    landing's reason."""
+    import sqlite3
+    from contextlib import closing
+
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    capsys.readouterr()
+    task_id = _only_task_id(home)
+    db = build_config(home, None).db_path
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("DELETE FROM approvals WHERE task_id = ?", (task_id,))
+    reasons: list[str] = []
+
+    def resumed(config: Any, store: RunStore, record: Any, actor: str, original: Any,
+                review_id: str, **kw: Any) -> int:  # fmt: skip
+        approval = store.get_approval(review_id)
+        assert approval is not None
+        reasons.append(approval.reason)
+        return 0
+
+    monkeypatch.setattr(cli_cmds, "_resume_claimed_gate", resumed)
+    _interactive(monkeypatch, ["a"])
+    assert _run_cli(home, "review") == 0
+    assert reasons == ["resumed past approval gate"]

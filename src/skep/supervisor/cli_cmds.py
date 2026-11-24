@@ -1688,22 +1688,22 @@ def cmd_review(args: argparse.Namespace) -> int:
         shown = getattr(args, "shown", None)  # Phase 10 R1 D4: set by `skep review`'s walk
         from .serve.actions import landing_reason
 
-        shown_review: str | None = None  # R2 I1: the review the card's verdict answers
         if shown is not None and (args.approve or args.deny):
+            # R3 J4: read-only here — a review is minted only right before
+            # the claim (or the deny), after every eligibility check passed.
             stale = _stale_verdict(store, record, shown)
-            if stale is None:
-                shown_review = _shown_review(
-                    store, record, shown, landing_reason(record.instructions, None)
-                )
-                if shown_review is None:
-                    stale = "an approval was recorded on this run since you read it"
             if stale is not None:
                 return _stale_err(record, stale, audit_dir)
 
         if args.deny:
-            review_id = shown_review or _pending_or_new(
-                store, record, reason=landing_reason(record.instructions, None)
-            )
+            if shown is not None:
+                review_id, _minted = _shown_review(store, record, shown)
+                if review_id is None:
+                    return _stale_err(record, _RECORDED_SINCE, audit_dir)
+            else:
+                review_id = _pending_or_new(
+                    store, record, reason=landing_reason(record.instructions, None)
+                )
             from fastapi import HTTPException
 
             from .serve.actions import deny_approval
@@ -1760,9 +1760,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         # Q8 true resume: approving a suspended task continues it past the gate
         # (a fresh worker run carrying the granted verdict), not "apply a patch".
         if record.state == "pending_approval":
-            return _resume_pending_approval(
-                config, store, record, actor, review_id=shown_review, shown=shown
-            )
+            return _resume_pending_approval(config, store, record, actor, shown=shown)
 
         from .serve.actions import applied_branch_for
 
@@ -1815,12 +1813,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             branch = f"skep/{record.task_id}"
         # B150: the same claim serve's apply_patch takes (ES-F4) — without it
         # a CLI approve during serve's landing applied the patch a second time.
-        if shown is not None and shown_review is not None:
-            refused = _claim_shown(store, record.task_id, shown_review, shown)
+        if shown is not None:
+            shown_review, minted = _shown_review(store, record, shown)
+            if shown_review is None:
+                return _stale_err(record, _RECORDED_SINCE, audit_dir)
+            refused = _claim_shown(store, record.task_id, shown_review, shown, minted=minted)
             if refused is not None:
                 return _stale_err(record, refused, audit_dir)
             review_id = shown_review
         else:
+            shown_review = None
             review_id = _pending_or_new(
                 store, record, reason=landing_reason(record.instructions, None)
             )
@@ -2090,22 +2092,40 @@ def _moved_since_shown(store: RunStore, record: RunRecord, shown: _Shown) -> str
     return None
 
 
-def _shown_review(store: RunStore, record: RunRecord, shown: _Shown, reason: str) -> str | None:
+_RECORDED_SINCE = "an approval was recorded on this run since you read it"
+
+
+def _shown_review(store: RunStore, record: RunRecord, shown: _Shown) -> tuple[str | None, bool]:
     """Phase 10 R2 I1 (I7, I13): the review a card's verdict answers — the one
-    it displayed, never a fresh one looked up after the stale check. A card
-    that displayed none gets one minted only while the run's approvals are
-    still the set it was read with. None: something was recorded since."""
+    it displayed, never a fresh one looked up after the stale check — and
+    whether it was minted for this verdict. A card that displayed none gets
+    one minted only while the run's approvals are still the set it was read
+    with (None: something was recorded since). R3 J4: called only once every
+    read-only check passed, with the reason its verb records — a gated run's
+    is a resume's, a completed run's a landing's."""
     if shown.review_id is not None:
-        return shown.review_id
-    return store.enqueue_approval_if_unchanged(
+        return shown.review_id, False
+    from .serve.actions import landing_reason
+
+    reason = (
+        "resumed past approval gate"
+        if record.state == "pending_approval"
+        else landing_reason(record.instructions, None)
+    )
+    minted = store.enqueue_approval_if_unchanged(
         record.task_id, known=shown.approvals, action="apply_patch", reason=reason
     )
+    return minted, minted is not None
 
 
-def _claim_shown(store: RunStore, task_id: str, review_id: str, shown: _Shown) -> str | None:
+def _claim_shown(
+    store: RunStore, task_id: str, review_id: str, shown: _Shown, *, minted: bool = False
+) -> str | None:
     """Phase 10 R2 I1: claim exactly the shown review, then bind the claim to
     the run state and patch bytes the card showed; a mismatch hands the claim
-    back. Returns why the verdict is refused, or None (claimed)."""
+    back — and R3 J4: a review ``minted`` for this verdict is withdrawn
+    (superseded, with why), never left pending. Returns why the verdict is
+    refused, or None (claimed)."""
     if not store.claim_approval(review_id):
         was = store.get_approval(review_id)
         status = "gone" if was is None else f"{was.status} by {was.resolved_by or '-'}"
@@ -2116,6 +2136,10 @@ def _claim_shown(store: RunStore, task_id: str, review_id: str, shown: _Shown) -
     )
     if moved is not None:
         store.unclaim_approval(review_id)
+        if minted:
+            store.supersede_approval(
+                review_id, actor="skep review", note=f"minted for a verdict refused: {moved}"
+            )
     return moved
 
 
@@ -2318,7 +2342,6 @@ def _resume_pending_approval(
     actor: str,
     *,
     remembered: bool = False,
-    review_id: str | None = None,
     shown: _Shown | None = None,
 ) -> int:
     """Q8: grant the approval and continue the suspended task as a true resume.
@@ -2337,12 +2360,17 @@ def _resume_pending_approval(
             next_command=f'skep run {record.repo} "..." --resume-of {record.task_id}',
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
-    if shown is not None and review_id is not None:
+    if shown is not None:
         # R2 I1: the gate the card showed, bound to what it showed — never a
-        # fresh one minted behind an answer given elsewhere.
-        refused = _claim_shown(store, record.task_id, review_id, shown)
+        # fresh one minted behind an answer given elsewhere. R3 J4: minted
+        # (as a resume) only now, after the envelope check above.
+        shown_review, minted = _shown_review(store, record, shown)
+        if shown_review is None:
+            return _stale_err(record, _RECORDED_SINCE, config.audit_dir / record.task_id)
+        refused = _claim_shown(store, record.task_id, shown_review, shown, minted=minted)
         if refused is not None:
             return _stale_err(record, refused, config.audit_dir / record.task_id)
+        review_id = shown_review
         claimed = True
     else:
         review_id = _pending_or_new(store, record, reason="resumed past approval gate")

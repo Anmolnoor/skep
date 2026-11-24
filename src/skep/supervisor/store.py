@@ -1916,6 +1916,20 @@ class RunStore:
             return self.enqueue_approval(task_id, action=action, reason=reason)
 
     @_locked
+    def supersede_approval(self, review_id: str, *, actor: str, note: str) -> bool:
+        """Phase 10 R3 J4: withdraw a review minted for one verdict that was
+        then refused — 'superseded', with why: never left pending for nobody,
+        and never a 'denied' (which would read as a human's answer, v128-F7,
+        and reject a gated run, v48-F3). Only from 'pending'."""
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'superseded', resolved_at = ?, resolved_by = ?,"
+            " resolution_note = ? WHERE review_id = ? AND status = 'pending'",
+            (_now(), actor, note, review_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
     def claim_approval(self, review_id: str, *, owner: str | None | object = _THIS_PROCESS) -> bool:
         """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
         card claim (ES-F1) for landings. Only the winner runs git. W27: the
