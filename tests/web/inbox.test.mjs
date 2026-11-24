@@ -341,3 +341,18 @@ test("H7: several mirroring cards are separated by commas", async () => {
   const { rows } = await render([mirrored]);
   assert.match(rows[0].textContent, /resolved with it: approve_review, land_run/);
 });
+
+test("R3 J1: an open_pr card that publishes a warned or tampered run has no inline Approve, whatever its wall", async () => {
+  const pr = { ...CARD, id: "P1", boundary: "outbound-content", tool: "open_pr", headline: "open_pr — run x", task_ids: ["fedcba9876543210"], warning: null };
+  const { rows } = await render([
+    pr,
+    { ...pr, id: "P2", warning: "re-verification RAN and FAILED" },
+    { ...pr, id: "P3", tamper: "TEST-TAMPER: the patch changes the tests" },
+  ]);
+  assert.ok(button(rows[0], "Approve"));
+  for (const row of rows.slice(1)) {
+    assert.equal(button(row, "Approve"), undefined);
+    assert.match(row.querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
+    assert.ok(button(row, "Deny"));
+  }
+});

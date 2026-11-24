@@ -579,3 +579,77 @@ def test_a_g10_disagreed_run_leaves_the_queue_once_landed_or_denied_by_a_human(
         store.close()
     queue = serve_client(config).get("/api/review-queue?detail=false").json()
     assert [i["id"] for i in queue["items"]] == [waiting]
+
+
+def test_an_open_pr_card_carries_each_runs_g10_warning_and_tamper(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R3 J1: open_pr lands each run's patch (when unlanded) and publishes it,
+    whatever its boundary label — the card carries every affected run's G10
+    warning and V1 tamper, and is each run's one row. Branch mode names no run."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        tampered = _completed(
+            store, tmp_path, "tampered", patch=True, outcome="tampered", confirmed=False,
+            exit_codes=[0], tamper_flags=("deleted_test:test_x.py",),
+        )  # fmt: skip
+        warned = _completed(
+            store, tmp_path, "warned", patch=True, outcome="unavailable", confirmed=False,
+            detail="no uv", exit_codes=[],
+        )  # fmt: skip
+        fine = _completed(
+            store, tmp_path, "fine", patch=True, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        chat = store.create_chat(title="pr", model=None)
+        one = store.add_chat_action(chat.chat_id, tool="open_pr", args={"task_id": tampered})
+        group = store.add_chat_action(
+            chat.chat_id, tool="open_pr", args={"task_ids": [fine, warned], "title": "t"}
+        )
+        clean = store.add_chat_action(chat.chat_id, tool="open_pr", args={"task_id": fine})
+        branch = store.add_chat_action(
+            chat.chat_id, tool="open_pr", args={"branch": "feat", "repo": str(tmp_path)}
+        )
+    finally:
+        store.close()
+    items = serve_client(config).get("/api/review-queue").json()["items"]
+    assert {i["kind"] for i in items} == {"card"}  # no "run" row beside a card that lands it
+    cards = {i["id"]: i for i in items}
+    assert cards[one]["tamper"].startswith("TEST-TAMPER")
+    assert cards[one]["task_ids"] == [tampered]
+    assert cards[group]["task_ids"] == [fine, warned]
+    assert cards[group]["tamper"] is None
+    assert warned[:13] in cards[group]["warning"] and "re-verify" in cards[group]["warning"]
+    assert cards[clean]["warning"] is None and cards[clean]["tamper"] is None
+    assert cards[branch]["task_ids"] == [] and cards[branch]["warning"] is None
+
+
+def test_an_abbreviated_land_run_task_id_resolves_before_dedupe_and_evidence(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R3 J9: a land_run card naming its run by a short prefix is that run's
+    one row (or its gate's mirror), and its G10 evidence is the run's own —
+    never a false "never re-verified"."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        fine = _completed(
+            store, tmp_path, "fine", patch=True, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        gated = _completed(
+            store, tmp_path, "gated", patch=True, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        review = store.enqueue_approval(gated, action="apply_patch", reason="land it")
+        chat = store.create_chat(title="short", model=None)
+        card = store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": fine[:-4]})
+        store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": gated[:-4] + "…"})
+    finally:
+        store.close()
+    items = serve_client(config).get("/api/review-queue").json()["items"]
+    assert [(i["kind"], i["id"]) for i in items] == [("gate", review), ("card", card)]
+    gate, row = items
+    assert [m["tool"] for m in gate["mirrored_by"]] == ["land_run"]
+    assert row["task_id"] == fine and row["task_ids"] == [fine]
+    assert row["warning"] is None and row["tamper"] is None

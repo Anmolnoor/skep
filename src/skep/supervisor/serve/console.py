@@ -24,6 +24,7 @@ from .actions import (
     never_reverified_error,
     patch_digest,
     policy_decisions,
+    require_run,
     reverification_warning,
     tamper_note,
 )
@@ -55,6 +56,46 @@ def landing_warning(store: RunStore, task_id: str) -> str | None:
     return reverification_warning(store.reverification_for(task_id)) or never_reverified_error(
         store, task_id
     )
+
+
+def canonical_task_id(store: RunStore, task_id: str) -> str:
+    """The run a (possibly abbreviated, v59-F8) task id names, as require_run
+    resolves it; the id itself when it names no run or several."""
+    try:
+        return str(require_run(store, task_id)["task_id"])
+    except HTTPException:
+        return task_id
+
+
+def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
+    """R3 J1: the runs whose patch a card's execution lands or publishes —
+    read from what the tool does (tools.py), not its boundary label: land_run
+    lands one; open_pr lands each unlanded run and pushes it (branch mode names
+    no run); an approve_review of an apply_patch review lands its run."""
+    ids: object = []
+    if tool == "land_run":
+        ids = [args.get("task_id")]
+    elif tool == "open_pr" and not args.get("branch"):
+        ids = args.get("task_ids") or [args.get("task_id")]
+    elif tool == "approve_review":
+        approval = store.get_approval(str(args.get("review_id") or ""))
+        if approval is not None and approval.action == "apply_patch":
+            ids = [approval.task_id]
+    if not isinstance(ids, list):
+        return []
+    return list(dict.fromkeys(canonical_task_id(store, str(t)) for t in ids if t))
+
+
+def _tamper_of(store: RunStore) -> Any:
+    return lambda task_id: tamper_note(store.reverification_for(task_id))
+
+
+def _per_run(runs: list[str], line: Any) -> str | None:
+    """One run's line as it is; several runs' lines each named by run."""
+    lines = [(task_id, text) for task_id in runs if (text := line(task_id))]
+    if len(runs) == 1:
+        return lines[0][1] if lines else None
+    return "; ".join(f"run {task_id[:13]}…: {text}" for task_id, text in lines) or None
 
 
 def ledger_line(result: dict[str, Any]) -> str:
@@ -147,11 +188,12 @@ def review_queue(
     asked: set[str] = {a.task_id for a in pending}  # runs a row already asks about
     titles = {c.chat_id: c.title for c in store.list_chats()} if detail else {}
     for card in store.proposed_chat_actions():
+        runs = card_runs(store, card.tool, card.args)  # J9: canonical ids, before any dedupe
         mirrored = (
             str(card.args.get("review_id") or "")
             if card.tool in _GATE_CARDS
-            else landing.get(str(card.args.get("task_id") or ""))
-            if card.tool == "land_run"
+            else landing.get(runs[0])
+            if card.tool == "land_run" and runs
             else None
         )
         if mirrored in gates:
@@ -173,13 +215,12 @@ def review_queue(
         item: dict[str, Any] = {
             "kind": "card", "id": card.action_id, "boundary": label, "at": card.created_at
         }  # fmt: skip
-        # H2: a landing card is a patch-landing item like a gate — its run's G10 and V1
-        lands = str(card.args.get("task_id") or "") if label == "patch-landing" else ""
-        if lands:
-            asked.add(lands)
+        # H2 / R3 J1: a card that lands or publishes runs' patches carries each
+        # run's G10 and V1, whatever its boundary label, and is each run's one row
+        asked.update(runs)
+        lands = runs[0] if len(runs) == 1 else ""
         if detail:
             shown = engine.card_fields(card.chat_id, card)["card"]
-            reverify = store.reverification_for(lands) if lands else None
             item.update(
                 chat_id=card.chat_id,
                 chat_title=titles.get(card.chat_id, card.chat_id),
@@ -187,10 +228,11 @@ def review_queue(
                 source=card.source,
                 headline=shown.get("headline"),
                 risk=shown.get("risk"),
-                tamper=shown.get("tamper") or tamper_note(reverify),
-                warning=landing_warning(store, lands) if lands else None,
+                tamper=shown.get("tamper") or _per_run(runs, _tamper_of(store)),
+                warning=_per_run(runs, lambda task_id: landing_warning(store, task_id)),
                 task_id=lands or None,
-                branch=card.args.get("branch") if lands else None,
+                task_ids=runs,
+                branch=card.args.get("branch") if card.tool == "land_run" else None,
                 taint=shown.get("taint"),
                 high=shown.get("high") if shown.get("tier") == "high" else None,
                 web_refusal=card_refusal(WEB, card),  # H5: the chat page's D1 words

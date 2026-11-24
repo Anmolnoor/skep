@@ -104,7 +104,9 @@ function verdicts(item) {
     const lane = operator ? "commands" : "actions";
     const base = `/api/chats/${item.chat_id}/${lane}/${item.id}`;
     // H2: the full card keeps its proposed branch; H5: so does the refusal's thread.
-    const away = item.high || warnedLanding(item) || item.web_refusal;
+    // R3 J1: a card carries G10 / V1 only for runs its execution lands or
+    // publishes (land_run, open_pr…) — any of it sends you to the full card.
+    const away = item.high || item.warning || item.tamper || item.web_refusal;
     return {
       approve: away ? null : [`${base}/confirm`, operator ? undefined : { keep: "once" }],
       elsewhere: away ? [`#/chat/${item.chat_id}`, "Open the full card in its thread →"] : null,
