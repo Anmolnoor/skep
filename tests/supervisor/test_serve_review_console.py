@@ -1161,3 +1161,66 @@ def test_an_open_pr_that_opened_nothing_is_a_failed_card_with_its_reason(
         assert record is not None and record.status == "failed"
     finally:
         store.close()
+
+
+def test_a_branch_card_with_an_unresolvable_repo_lists_no_runs_and_stays_deniable(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """R6-1: a Queen-proposed open_pr whose repo holds a NUL byte never breaks
+    the evidence lookup — the queue, the badge and the chat page answer, the
+    card is there with no runs, and it can still be denied."""
+    from skep.supervisor import RunStore
+
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+    )
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        card = store.add_chat_action(
+            chat_id, tool="open_pr", args={"branch": "skep/maintain", "repo": "bad\x00path"}
+        )
+    finally:
+        store.close()
+    queue = client.get("/api/review-queue")
+    assert queue.status_code == 200, queue.text
+    (row,) = [i for i in queue.json()["items"] if i["id"] == card]
+    assert row["task_ids"] == []
+    assert client.get("/api/review-queue", params={"detail": "false"}).status_code == 200
+    page = client.get(f"/api/chats/{chat_id}")
+    assert page.status_code == 200, page.text
+    (action,) = page.json()["actions"]
+    assert "runs" not in action["card"]
+    denied = client.post(f"/api/chats/{chat_id}/actions/{card}/deny")
+    assert denied.status_code == 200, denied.text
+
+
+def test_a_branch_card_naming_another_spelling_of_the_repo_lists_its_landing(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R6-2: the repo is compared by filesystem identity — a card naming an
+    alias of the directory a landing was recorded under (a symlink here; a
+    case variant on a case-insensitive volume) lists that run."""
+    from skep.supervisor import RunStore, mint_task
+
+    real = tmp_path / "MixedCaseRepo"
+    (real / ".git").mkdir(parents=True)
+    alias = tmp_path / "mixedcaserepo"
+    if not alias.exists():  # a case-sensitive volume (Linux CI): a symlinked alias
+        alias.symlink_to(real)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path / "w", instructions="x")
+        store.create_run(task, repo=alias, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "completed")
+        _landed_on(store, task.task_id, "skep/maintain")
+        chat = store.create_chat(title="pr", model=None)
+        store.add_chat_action(
+            chat.chat_id, tool="open_pr", args={"branch": "skep/maintain", "repo": str(real)}
+        )
+    finally:
+        store.close()
+    (action,) = serve_client(config).get(f"/api/chats/{chat.chat_id}").json()["actions"]
+    assert [r["task_id"] for r in action["card"]["runs"]] == [task.task_id]

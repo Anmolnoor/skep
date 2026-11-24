@@ -7,6 +7,7 @@ that was there before it.
 
 from __future__ import annotations
 
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -98,8 +99,17 @@ def _branch_repo(store: RunStore, args: dict[str, Any]) -> Path | None:
     try:
         root = Path(store.db_path).parent.parent / "repos"  # registry.repos_root
         return resolve_repo_arg(str(args["repo"]), root, store)
-    except HTTPException:
+    except (HTTPException, OSError, ValueError):  # R6-1: evidence never raises
         return None
+
+
+def _same_dir(repo: Path, recorded: str) -> bool:
+    """R6-2: filesystem identity, so a case variant or alias of one directory
+    matches; a path that is gone (or unreadable) is not the same."""
+    try:
+        return os.path.samefile(repo, recorded)
+    except (OSError, ValueError):
+        return False
 
 
 def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
@@ -121,7 +131,7 @@ def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
             for task_id in store.runs_landed_on(str(args["branch"]))
             if repo is not None
             and (record := store.get_run(task_id)) is not None
-            and Path(record.repo).resolve() == repo
+            and _same_dir(repo, record.repo)
         ]
     elif tool == "open_pr":
         ids = args.get("task_ids") or [args.get("task_id")]
