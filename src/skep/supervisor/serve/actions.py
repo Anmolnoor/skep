@@ -1649,10 +1649,21 @@ def refresh_repo(
         from .. import github
 
         head = github.fetch_pr_head(repo=resolved, pr=pr)
-        if not head.ok:
+        if not head.ok or head.pr is None:
             raise HTTPException(status_code=502, detail=head.detail)
+        if store is not None:  # R1 (D2): the pair a review run is pinned to
+            store.record_pr_fetch(
+                str(resolved),
+                pr_repo=head.pr.repo,
+                number=head.pr.number,
+                base_branch=head.base_branch,
+                base_commit=head.base_sha,
+                head_commit=head.head_sha,
+            )
         return {
             "repo": str(resolved),
+            "pr": f"{head.pr.repo}#{head.pr.number}",
+            "base_branch": head.base_branch,
             "ref": head.ref,
             "base_sha": head.base_sha,
             "head_sha": head.head_sha,

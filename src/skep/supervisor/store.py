@@ -206,6 +206,19 @@ CREATE TABLE IF NOT EXISTS test_count_baselines (
     created_at TEXT NOT NULL,
     PRIMARY KEY (repo, base_commit, verify_command)
 );
+-- Phase 09 R1 (D2, D3): the PR the supervisor last fetched into a repo's
+-- refs/skep/pr/<number>/ (refresh_repo pr=), base branch included: what a
+-- review run is pinned to at dispatch and its merge re-checks.
+CREATE TABLE IF NOT EXISTS pr_fetches (
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    pr_repo TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    head_commit TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (repo, number)
+);
 CREATE TABLE IF NOT EXISTS task_usage (
     task_id TEXT PRIMARY KEY,
     provider_calls INTEGER,
@@ -1722,6 +1735,37 @@ class RunStore:
             ),
         )
         self._conn.commit()
+
+    @_locked
+    def record_pr_fetch(
+        self,
+        repo: str,
+        *,
+        pr_repo: str,
+        number: int,
+        base_branch: str,
+        base_commit: str,
+        head_commit: str,
+    ) -> None:
+        """Phase 09 R1: ``github.fetch_pr_head`` moved refs/skep/pr/<number>/."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO pr_fetches (repo, number, pr_repo, base_branch,"
+            " base_commit, head_commit, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (repo, number, pr_repo, base_branch, base_commit, head_commit, _now()),
+        )
+        self._conn.commit()
+
+    @_locked
+    def pr_fetch(self, repo: str, number: int) -> dict[str, Any] | None:
+        """The PR ``repo`` last fetched as ``number``: ``{repo (owner/name),
+        number, base_branch, base_commit, head_commit, fetched_at}``."""
+        row = self._conn.execute(
+            "SELECT pr_repo, number, base_branch, base_commit, head_commit, fetched_at"
+            " FROM pr_fetches WHERE repo = ? AND number = ?",
+            (repo, number),
+        ).fetchone()
+        keys = ("repo", "number", "base_branch", "base_commit", "head_commit", "fetched_at")
+        return None if row is None else dict(zip(keys, row, strict=True))
 
     @_locked
     def cached_test_counts(

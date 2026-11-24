@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ class PrHead:
     base_sha: str = ""
     head_sha: str = ""
     pr: PrId | None = None
+    base_branch: str = ""
 
 
 def pr_ref(number: int | str, side: str = "head") -> str:
@@ -114,10 +116,11 @@ def list_pull_requests(
 
 
 def _run(
-    runner: Runner, args: list[str], *, cwd: Path | None = None
+    runner: Runner, args: list[str], *, cwd: Path | None = None, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     where = None if cwd is None else str(cwd)
-    return runner(args, cwd=where, capture_output=True, text=True, check=False)
+    extra = {} if stdin is None else {"input": stdin}
+    return runner(args, cwd=where, capture_output=True, text=True, check=False, **extra)
 
 
 # D1: the origin forms GitHub hands out (an https URL may carry a token as
@@ -187,43 +190,72 @@ def fetch_pr_head(*, repo: Path, pr: str, runner: Runner = subprocess.run) -> Pr
     origin into ``pr_ref(N)`` — supervisor-side, on the operator's own
     credentials, which never enter a sandbox. Workers still never fetch
     (v19-F3/F5); a review run starts from the fetched head (dispatch_run
-    ref=…), and G10 verifies base...head. Honest failure, never raises."""
+    ref=…), and G10 verifies it. Honest failure, never raises.
+
+    R1 (S10, N10): it writes nothing but skep's own refs — no FETCH_HEAD,
+    no remote-tracking ref (``--refmap=``), no prune — and the fetch lands
+    in a staging ref of its own first: the OIDs GitHub reported are checked
+    there, and only then do ``refs/skep/pr/<N>/{head,base}`` move, together.
+    A refusal leaves the last good fetch where it was."""
     try:
         pid = resolve_pr(repo, pr, runner)
     except PrSelectorError as exc:
         return PrHead(False, str(exc))
-    view = _run(runner, _gh_pr("view", pid, "--json", "number,baseRefName,headRefOid"), cwd=repo)
+    fields = "number,baseRefName,baseRefOid,headRefOid"
+    view = _run(runner, _gh_pr("view", pid, "--json", fields), cwd=repo)
     if view.returncode != 0:
         return PrHead(False, f"gh pr view failed: {(view.stderr or view.stdout).strip()}")
     try:
         info = json.loads(view.stdout)
-        number, base, expected = int(info["number"]), str(info["baseRefName"]), info["headRefOid"]
+        number, branch = int(info["number"]), str(info["baseRefName"])
+        want_head, want_base = str(info["headRefOid"]), str(info["baseRefOid"])
     except (ValueError, KeyError, TypeError):
         return PrHead(False, "gh pr view returned unparseable output")
     if number != pid.number:
         return PrHead(False, f"gh answered PR #{number} when asked for {pid.repo}#{pid.number}")
-    head_ref, base_ref = pr_ref(number), pr_ref(number, "base")
-    fetched = _run(
-        runner,
-        ["git", "-C", str(repo), "fetch", "--no-tags", "origin",
-         f"+refs/pull/{number}/head:{head_ref}", f"+refs/heads/{base}:{base_ref}"],
-    )  # fmt: skip
-    if fetched.returncode != 0:
-        return PrHead(False, f"git fetch failed: {(fetched.stderr or fetched.stdout).strip()}")
-    shas = _run(runner, ["git", "-C", str(repo), "rev-parse", head_ref, base_ref]).stdout.split()
-    if len(shas) != 2 or shas[0] != expected:
+    if _run(runner, ["git", "check-ref-format", f"refs/heads/{branch}"]).returncode != 0:
         return PrHead(
-            False,
-            f"PR #{number} moved while it was fetched (GitHub says head {expected}, origin "
-            f"gave {shas[0] if shas else 'nothing'}); refresh_repo pr={number} again",
+            False, f"gh says PR #{number}'s base is {branch!r}, which is not a branch name"
         )
+    git = ["git", "-C", str(repo)]
+    staging = f"refs/skep/fetching/{secrets.token_hex(8)}"
+    try:
+        fetched = _run(
+            runner,
+            [*git, "fetch", "--no-tags", "--no-write-fetch-head", "--no-prune",
+             "--no-recurse-submodules", "--refmap=", "origin",
+             f"+refs/pull/{number}/head:{staging}/head", f"+refs/heads/{branch}:{staging}/base"],
+        )  # fmt: skip
+        if fetched.returncode != 0:
+            why = (fetched.stderr or fetched.stdout).strip()
+            return PrHead(False, f"git fetch failed: {why}")
+        got = _run(runner, [*git, "rev-parse", f"{staging}/head", f"{staging}/base"]).stdout
+        if got.split() != [want_head, want_base]:
+            return PrHead(
+                False,
+                f"PR #{number} moved while it was fetched (GitHub says head {want_head} on "
+                f"{branch} {want_base}; origin gave {' '.join(got.split()) or 'nothing'}); no "
+                f"ref moved — refresh_repo pr={number} again",
+            )
+        head_ref, base_ref = pr_ref(number), pr_ref(number, "base")
+        moved = _run(
+            runner,
+            [*git, "update-ref", "--stdin"],
+            stdin=f"update {head_ref} {want_head}\nupdate {base_ref} {want_base}\n",
+        )
+        if moved.returncode != 0:
+            return PrHead(False, f"git update-ref failed: {moved.stderr.strip()}")
+    finally:
+        for side in ("head", "base"):
+            _run(runner, [*git, "update-ref", "-d", f"{staging}/{side}"])
     return PrHead(
         True,
-        f"fetched PR #{number}: head {shas[0]} on {base} {shas[1]}",
+        f"fetched PR #{number}: head {want_head} on {branch} {want_base}",
         head_ref,
-        shas[1],
-        shas[0],
+        want_base,
+        want_head,
         pid,
+        branch,
     )
 
 

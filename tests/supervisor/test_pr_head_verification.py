@@ -258,16 +258,20 @@ def _gh(answer: dict[str, Any] | None, calls: list[list[str]]) -> github.Runner:
     return run
 
 
+def _answer(base: str, head: str, branch: str = "main") -> dict[str, Any]:
+    return {"number": 7, "baseRefName": branch, "baseRefOid": base, "headRefOid": head}
+
+
 def test_fetch_pr_head_lands_head_and_base_in_skeps_own_refs(repo: Path, tmp_path: Path) -> None:
     clone, base, head = _origin_with_pr(repo, tmp_path)
     branches = git(clone, "for-each-ref", "refs/heads", "refs/remotes").stdout
     calls: list[list[str]] = []
-    answer = {"number": 7, "baseRefName": "main", "headRefOid": head}
 
-    fetched = github.fetch_pr_head(repo=clone, pr="7", runner=_gh(answer, calls))
+    fetched = github.fetch_pr_head(repo=clone, pr="7", runner=_gh(_answer(base, head), calls))
 
     assert fetched.ok, fetched.detail
     assert (fetched.base_sha, fetched.head_sha, fetched.ref) == (base, head, PR_REF)
+    assert (fetched.pr, fetched.base_branch) == (github.PrId(ORIGIN, 7), "main")
     assert git(clone, "rev-parse", PR_REF).stdout.strip() == head
     assert git(clone, "rev-parse", "refs/skep/pr/7/base").stdout.strip() == base
     # I1: the operator's branches and remote-tracking refs never move.
@@ -275,14 +279,55 @@ def test_fetch_pr_head_lands_head_and_base_in_skeps_own_refs(repo: Path, tmp_pat
     assert calls[0][:5] == ["gh", "pr", "view", "--repo", ORIGIN]
 
 
-def test_fetch_pr_head_refuses_a_head_that_moved_mid_fetch(repo: Path, tmp_path: Path) -> None:
-    clone, base, _head = _origin_with_pr(repo, tmp_path)
-    answer = {"number": 7, "baseRefName": "main", "headRefOid": base}
+def test_a_pr_refresh_never_moves_remote_tracking_refs(repo: Path, tmp_path: Path) -> None:
+    """R1 (S10): the configured fetch refspec, prune and FETCH_HEAD stay out
+    of it — a stale origin/main stays stale, a gone branch stays listed."""
+    clone, _base, head = _origin_with_pr(repo, tmp_path)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "main moves on")
+    moved = git(repo, "rev-parse", "main").stdout.strip()
+    git(clone, "update-ref", "refs/remotes/origin/gone", head)
+    git(clone, "config", "fetch.prune", "true")
+    tracking = git(clone, "for-each-ref", "refs/heads", "refs/remotes").stdout
+    fetch_head = Path(git(clone, "rev-parse", "--git-path", "FETCH_HEAD").stdout.strip())
+    fetch_head = fetch_head if fetch_head.is_absolute() else clone / fetch_head
+    written = fetch_head.read_bytes() if fetch_head.exists() else None
+
+    fetched = github.fetch_pr_head(repo=clone, pr="7", runner=_gh(_answer(moved, head), []))
+
+    assert fetched.ok, fetched.detail
+    assert git(clone, "rev-parse", "refs/skep/pr/7/base").stdout.strip() == moved
+    assert git(clone, "for-each-ref", "refs/heads", "refs/remotes").stdout == tracking
+    assert (fetch_head.read_bytes() if fetch_head.exists() else None) == written
+
+
+@pytest.mark.parametrize("side", ["head", "base"])
+def test_a_pr_that_moved_mid_fetch_moves_no_ref(repo: Path, tmp_path: Path, side: str) -> None:
+    """R1 (N10): the fetched OIDs are checked BEFORE any skep ref is
+    written — a refusal leaves the last good fetch exactly where it was."""
+    clone, base, head = _origin_with_pr(repo, tmp_path)
+    git(clone, "update-ref", PR_REF, base)
+    git(clone, "update-ref", "refs/skep/pr/7/base", base)
+    before = git(clone, "for-each-ref", "refs/skep").stdout
+    stale = "f" * 40
+    answer = _answer(stale, head) if side == "base" else _answer(base, stale)
 
     fetched = github.fetch_pr_head(repo=clone, pr="7", runner=_gh(answer, []))
 
     assert not fetched.ok
     assert "moved" in fetched.detail and "refresh_repo pr=7" in fetched.detail
+    assert stale in fetched.detail
+    assert git(clone, "for-each-ref", "refs/skep").stdout == before  # nor any staging ref
+
+
+def test_a_base_branch_name_that_is_no_branch_is_never_fetched(repo: Path, tmp_path: Path) -> None:
+    clone, base, head = _origin_with_pr(repo, tmp_path)
+
+    fetched = github.fetch_pr_head(
+        repo=clone, pr="7", runner=_gh(_answer(base, head, "main:refs/heads/x"), [])
+    )
+
+    assert not fetched.ok and "not a branch name" in fetched.detail
+    assert not git(clone, "for-each-ref", "refs/skep").stdout
 
 
 def test_fetch_pr_head_without_gh_fetches_nothing(repo: Path, tmp_path: Path) -> None:
@@ -649,7 +694,9 @@ def test_merge_pull_request_refuses_when_the_head_cannot_be_read(repo: Path) -> 
 def _fake_fetch(calls: list[dict[str, Any]]) -> Any:
     def fetch(**kwargs: Any) -> github.PrHead:
         calls.append(kwargs)
-        return github.PrHead(True, "fetched PR #7", PR_REF, "b" * 40, "a" * 40)
+        return github.PrHead(
+            True, "fetched PR #7", PR_REF, "b" * 40, "a" * 40, github.PrId(ORIGIN, 7), "main"
+        )
 
     return fetch
 
@@ -676,6 +723,17 @@ def test_refresh_repo_pr_fetches_the_pr_head_from_chat(
     assert calls[0]["pr"] == "7" and calls[0]["repo"] == repo.resolve()
     assert result["ref"] == PR_REF and result["head_sha"] == "a" * 40
     assert f"dispatch_run ref={PR_REF}" in result["next_step"]
+    # R1 (D2/D3): the fetch is recorded — base branch included — for dispatch to pin.
+    store = RunStore(config.db_path)
+    try:
+        recorded = store.pr_fetch(str(repo.resolve()), 7)
+    finally:
+        store.close()
+    assert recorded is not None
+    assert {k: recorded[k] for k in ("repo", "number", "base_branch")} == {
+        "repo": ORIGIN, "number": 7, "base_branch": "main"
+    }  # fmt: skip
+    assert (recorded["base_commit"], recorded["head_commit"]) == ("b" * 40, "a" * 40)
 
 
 def test_refresh_repo_pr_failure_is_an_honest_error(
