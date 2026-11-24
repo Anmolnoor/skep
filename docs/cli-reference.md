@@ -137,8 +137,9 @@ the retained `sandbox.profile.sb`), unlocked, taint —
 monitor and auth alarms flagged (`heartbeat_lost`, `not logged in`, ...), gaps
 over 15 s in `events.ndjson` (a run still going reads its live stream and
 reports the silence since its last event as `-> now`), the G10 re-verify
-(commands, where they came from, exit codes, V1 tamper flags, test counts and
-detail), every `decisions.jsonl` row naming the run or its resume chain (all
+(commands, where they came from, exit codes, V1 status, tamper flags, test
+counts and detail), the decision log's chain head and `ledger verify` status,
+every `decisions.jsonl` row naming the run or its resume chain (all
 rotated generations) plus every refusal the worker's own capability layer
 recorded as an event (`BLOCKED ...`, e.g. the floor's `git push` deny), and
 the last 30 lines of `worker.log` with the `result.json` summary. Every string
@@ -436,6 +437,32 @@ that reports itself read-only.
 `policy grants` lists every learned grant (id, what it matches, lifetime,
 what it is bound to) and `policy revoke` removes one by id — the same verbs
 as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
+
+### The chained decision log and local receipts
+
+```sh
+skep ledger verify [--path FILE] [--json]
+skep proof export TASK_ID [--format md|json]
+```
+
+Every `decisions.jsonl` row is `"v": 2` and hash-chained: `seq`, `prev_hash`
+(the row before it, `GENESIS` first) and `hash` (sha256 of the row's
+canonical JSON). The chain runs on across rotated generations; rows written
+before it (`"v": 1`) stay as they were and are counted as unchained. Every
+100th row's hash is also kept in `audit/policy/chain.sqlite3`.
+`ledger verify` walks every generation and exits 0 (`VALID`) or 1 naming the
+first break as `file:line` — an edited, inserted, deleted or reordered row, a
+missing generation, or a checkpoint the log no longer matches (a cut tail or a
+rewrite). `--path` checks one offline copy; its first row is its anchor.
+
+`proof export` is one run's local receipt — repo, baseline sha, patch
+sha256, skep version, sandbox and read confinement, key relay, policy
+baseline, taint, the G10 command with V1 status and executed test counts,
+the run's decision count and the ledger head hash — as a collapsible Markdown
+block for a PR (`md`, the default) or JSON. It is not tamper-proof: whoever
+can write the skep home can rewrite the whole log and its checkpoints, so the
+anchor outside your machine is the head hash where you publish the receipt.
+Both commands only read.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always

@@ -22,6 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..worker_contract import Event, EventType
+from .ledger_proof import verify_ledger
 from .policy_v3 import _rotated_generations, redact
 from .sandbox import _BUBBLEWRAP_HEADER, _PODMAN_HEADER
 from .serve.actions import UNLOCKED_ACTOR, policy_block_views, policy_decisions, require_run
@@ -206,6 +207,27 @@ def _dispatch_decision(audit_dir: Path, store: RunStore, task_id: str) -> dict[s
     return decision if isinstance(decision, dict) else {}
 
 
+def _v1(tamper_flags: tuple[str, ...], test_counts: dict[str, Any] | None) -> str:
+    """Phase 08: V1's verdict in one word — a row from before V1 (or with no
+    command run) recorded no counts, and says so."""
+    if tamper_flags:
+        return "tampered: " + ", ".join(tamper_flags)
+    return "not recorded" if test_counts is None else "clean"
+
+
+def _ledger(audit_dir: Path) -> dict[str, Any]:
+    """Phase 08 8.1: the decision log's chain head and whether it verifies."""
+    result = verify_ledger(audit_dir)
+    head = result["head"] or {}
+    return {
+        "status": result["status"],
+        "head_seq": head.get("seq"),
+        "head_hash": head.get("hash"),
+        "unchained_rows": result["unchained"],
+        "break": result["break"],
+    }
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -304,9 +326,11 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 "exit_codes": reverify.exit_codes,
                 "tamper_flags": list(reverify.tamper_flags),
                 "test_counts": reverify.test_counts,
+                "v1": _v1(reverify.tamper_flags, reverify.test_counts),
                 "detail": reverify.detail,
             },
         },
+        "ledger": _ledger(audit_dir),
         "resume_chain": chain,
         "policy_trail": trail,
         "policy_blocks": [
@@ -370,10 +394,24 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
             f"commands={g10['commands']} ({g10['commands_source']}) exit_codes={g10['exit_codes']}"
         )
         lines.append(
-            f"{item}V1: tamper_flags={g10['tamper_flags']} test_counts={g10['test_counts']}"
+            f"{item}V1: {g10['v1']} tamper_flags={g10['tamper_flags']} "
+            f"test_counts={g10['test_counts']}"
         )
         if g10["detail"]:
             lines.append(f"{item}G10 detail: {g10['detail']}")
+    ledger = report["ledger"]
+    lines.append(head("Ledger"))
+    if ledger["break"]:
+        where = ledger["break"]
+        lines.append(f"{item}BROKEN at {where['file']}:{where['line']}: {where['reason']}")
+    elif ledger["head_hash"]:
+        lines.append(
+            f"{item}chain head seq {ledger['head_seq']} sha256 {ledger['head_hash']} (VALID)"
+        )
+    else:
+        lines.append(f"{item}no chained rows yet (VALID)")
+    if ledger["unchained_rows"]:
+        lines.append(f"{item}{ledger['unchained_rows']} older v1 rows are not covered by the chain")
     lines.append(head(f"Policy trail (resume chain: {' -> '.join(report['resume_chain'])})"))
     lines += [
         f"{item}{row.get('at', '?')} {row.get('task_id')} {row.get('actor', '?')} "
