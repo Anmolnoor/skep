@@ -241,9 +241,18 @@ def _parse_shell_allow(commands: list[str]) -> tuple[tuple[str, ...], ...]:
 class _PhaseTail(threading.Thread):
     """Live-print coarse phases by tailing the active worktree's event stream."""
 
-    def __init__(self, config: SupervisorConfig, *, since: str | None = None) -> None:
+    def __init__(
+        self,
+        config: SupervisorConfig,
+        *,
+        since: str | None = None,
+        emit: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(name="phase-tail", daemon=True)
         self._config = config
+        # Phase 10 R1: a terminal's spinner takes each phase line; None is the
+        # plain `  → ` print every pipe, NO_COLOR and CI run gets.
+        self._emit = emit
         # Named _stop_event because threading.Thread itself owns a private
         # _stop() method that join() invokes — shadowing it breaks join().
         self._stop_event = threading.Event()
@@ -431,7 +440,10 @@ class _PhaseTail(threading.Thread):
             return
         if text != self._last_line:
             self._last_line = text
-            print(f"  → {text}", flush=True)
+            if self._emit is not None:
+                self._emit(text)
+            else:
+                print(f"  → {text}", flush=True)
 
 
 def _phase_tail_decision(raw: object) -> str:
@@ -1109,7 +1121,10 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
             held.clear()
             record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
+    from .. import cli_ui
+
     tail: _PhaseTail | None = None
+    spinner: cli_ui.PhaseSpinner | None = None
     if matched_template is not None:
         print(
             f"matched template: {matched_template.name}"
@@ -1117,7 +1132,13 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
         )
     if not args.quiet:
         print(f"dispatching task against {repo}{source}")
-        tail = _PhaseTail(config, since=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if cli_ui.rich_enabled():  # Phase 10 R1: a terminal gets the live spinner
+            spinner = cli_ui.PhaseSpinner("dispatching")
+        tail = _PhaseTail(
+            config,
+            since=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            emit=None if spinner is None else spinner.phase,
+        )
         tail.start()
     started = time.monotonic()
     # v70-F3: the explicit flag wins; otherwise the project policy knob
@@ -1159,6 +1180,8 @@ def _cmd_run(args: argparse.Namespace, held: list[dict[str, Any]]) -> int:
     finally:
         if tail is not None:
             tail.stop()
+        if spinner is not None:
+            spinner.stop()
 
     record = outcome.record
     # R1 G1 (I5, I6): only a run whose grants ARE the project's policy — the
@@ -1340,10 +1363,16 @@ def cmd_status_personal(args: argparse.Namespace) -> int:
         if not audit_task.is_file():
             continue
         audited_tasks[record.task_id] = CodingWorkerTask.model_validate_json(audit_task.read_text())
-    print(
-        f"{'task':<14} {'state':<17} {'project':<28} {'autonomy':<58} {'verify':<12} "
-        f"{'re-verify':<14} {'usage':<9} summary"
-    )
+    from .. import cli_ui
+
+    rich = cli_ui.rich_enabled()  # Phase 10 R1: a drawn table on a terminal only
+    columns = ("task", "state", "project", "autonomy", "verify", "re-verify", "usage", "summary")
+    table: list[tuple[str, ...]] = []
+    if not rich:
+        print(
+            f"{'task':<14} {'state':<17} {'project':<28} {'autonomy':<58} {'verify':<12} "
+            f"{'re-verify':<14} {'usage':<9} summary"
+        )
     unconfirmed: list[str] = []
     for record in runs:
         summary = (record.summary or "-").replace("\n", " ")
@@ -1362,12 +1391,30 @@ def cmd_status_personal(args: argparse.Namespace) -> int:
         project_context = None if audited_task is None else audited_task.project_context
         project_cell = _project_summary(project_context)
         autonomy_cell = _status_autonomy_summary(audited_task)
+        verify_cell = record.verification_outcome or "-"
+        usage_cell = _usage_cell(usages.get(record.task_id))
+        if rich:
+            table.append(
+                (
+                    record.task_id[:12],
+                    record.state,
+                    project_cell,
+                    autonomy_cell,
+                    verify_cell,
+                    rv_cell,
+                    usage_cell,
+                    summary,
+                )
+            )
+            continue
         print(
             f"{record.task_id[:12]:<14} {record.state:<17} "
-            f"{project_cell:<28} {autonomy_cell:<58} {record.verification_outcome or '-':<12} "
+            f"{project_cell:<28} {autonomy_cell:<58} {verify_cell:<12} "
             f"{rv_cell:<14} "
-            f"{_usage_cell(usages.get(record.task_id)):<9} {summary}"
+            f"{usage_cell:<9} {summary}"
         )
+    if rich:
+        cli_ui.print_table(columns, table)
     if totals.provider_calls:
         print(f"\nusage: {_usage_summary(totals)} across recorded runs (G8)")
     if unconfirmed:
