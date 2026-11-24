@@ -675,14 +675,57 @@ _LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
 
 
 def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
-    key = (str(store.db_path), config.server_id)
-    hit = _LISTED.get(key)
-    if hit is not None and hit[0] == config:
-        return hit[1]
+    hit = cached_tools(store, config)
+    return hit if hit is not None else refresh_listed_tools(store, config)
+
+
+def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...] | None:
+    """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
+    spawns a server (the prompt's MCP index reads this every turn)."""
+    hit = _LISTED.get((str(store.db_path), config.server_id))
+    return hit[1] if hit is not None and hit[0] == config else None
+
+
+def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
+    """List ``config``'s tools now and keep them (list_mcp_tools, the startup
+    warm). A failed listing raises and keeps nothing."""
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent)
     tools = tuple(MCPClient(config, runner=runner).list_tools())
-    _LISTED[key] = (config, tools)
+    _LISTED[(str(store.db_path), config.server_id)] = (config, tools)
     return tools
+
+
+def warm_listed_tools(store: RunStore) -> list[str]:
+    """Serve startup: list every registered server so turn 1's index names
+    their tools. Never a forged one (``forge-*``): its runtime egress is still
+    open (``_run_forged_sandboxed``), so it runs only when someone asks.
+    Returns the ids now cached; a server that fails is left uncached."""
+    warmed = []
+    for server_id, config in load_mcp_servers(store).items():
+        if server_id.startswith(FORGED_SERVER_PREFIX):
+            continue
+        try:
+            refresh_listed_tools(store, config)
+        except Exception:  # unreachable now; list_mcp_tools asks again later
+            continue
+        warmed.append(server_id)
+    return warmed
+
+
+def index_tool_names(store: RunStore, config: MCPServerConfig) -> list[str] | None:
+    """The cached tool names for the prompt index, '*' on each call that is
+    not a read (it asks unless policy allows it), or None when uncached.
+    Never spawns: a cached tool with no readOnlyHint is exactly what
+    with_server_hints would conclude from this same listing — not a read."""
+    tools = cached_tools(store, config)
+    if tools is None:
+        return None
+    names = []
+    for tool in tools:
+        hinted = tool if tool.read_only is not None else replace(tool, read_only=False)
+        read = _read_only(hinted, *mcp_tool_scope_action(store, hinted))
+        names.append(tool.name + ("" if read else "*"))
+    return names
 
 
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:

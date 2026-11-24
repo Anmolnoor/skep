@@ -409,6 +409,19 @@ def create_app(
                 )
 
         threading.Thread(target=startup_reverify, name="skep-startup-reverify", daemon=True).start()
+
+        # Phase 06 (6.2): list each MCP server's tools once, so turn 1's index
+        # names them (the prompt reads only this cache). Forged servers are
+        # skipped — cache-only until their runtime egress closes (Phase 07.1).
+        def warm_mcp() -> None:
+            from ..mcp_client import warm_listed_tools
+
+            try:
+                warm_listed_tools(run_store)
+            except Exception:
+                logging.getLogger("skep.serve").exception("MCP tool warm-up failed")
+
+        threading.Thread(target=warm_mcp, name="skep-mcp-warm", daemon=True).start()
         try:
             # ES-F1/F4: a card or landing claimed by a process that died
             # mid-execute ends honestly — never re-run, never reopened (either
