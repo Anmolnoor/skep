@@ -277,6 +277,68 @@ def test_interactive_review_deny_skip_and_quit(
         assert f"skipped: task {task_id} still waits" in out
 
 
+def test_review_cards_say_what_g10_ran_whose_command_and_the_counts(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Phase 10 R1 D3 (I2, I8): "re-ran … → exit" only when a command ran;
+    a recorded verify nothing executed is said as that; the command's source
+    and the test counts are on the card; nothing-to-re-verify never reads as
+    NOT CONFIRMED."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+
+    def card(**record: Any) -> tuple[str, str]:
+        store = RunStore(db)
+        try:
+            store.record_reverification(task_id, worker_outcome="passed", **record)
+            (found,) = cli_cmds._review_cards(store)
+        finally:
+            store.close()
+        return found.label, "\n".join(found.lines)
+
+    counts = {"total_executed": 4, "passed": 4, "failed": 0, "errors": 0}
+    label, ran = card(
+        outcome="passed",
+        confirmed=True,
+        commands=["uv run pytest"],
+        exit_codes=[0],
+        detail="ok [command from the project's pinned verify_command]",
+        test_counts={
+            "status": "ok",
+            "runner": "pytest",
+            "baseline": counts,
+            "patched": {**counts, "total_executed": 5, "passed": 5},
+        },
+    )
+    assert label == "CONFIRMED"
+    assert "G10:      passed confirmed=True" in ran
+    assert "re-ran ['uv run pytest'] → exit [0]" in ran
+    assert "command from the project pin" in ran
+    assert "tests:    baseline 4 executed → patched 5 executed" in ran
+    label, unrun = card(
+        outcome="unavailable",
+        confirmed=False,
+        commands=["uv run pytest"],
+        exit_codes=[],
+        detail="the sandbox could not start [command from the worker's own verify step]",
+    )
+    assert label == "NOT CONFIRMED"
+    assert "re-ran" not in unrun and "exit" not in unrun
+    assert "recorded verify: ['uv run pytest'] — nothing executed" in unrun
+    assert "command from the worker's own verify step (unpinned fallback)" in unrun
+    label, benign = card(
+        outcome="not_applicable",
+        confirmed=False,
+        commands=[],
+        exit_codes=[],
+        detail="no patch was produced — nothing to re-verify",
+    )
+    assert label == "NOTHING TO RE-VERIFY"
+    assert "G10:      nothing to re-verify: no patch was produced" in benign
+    assert "confirmed=False" not in benign and "command " not in benign
+
+
 def test_review_cards_name_the_gate_the_disagreement_and_the_tamper(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

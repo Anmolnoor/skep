@@ -222,7 +222,7 @@ const REPORT = {
       detail: "",
     },
   },
-  ledger: { status: "valid", head_seq: 41, head_hash: "abcdef0123456789abcdef", unchained_rows: 0, break: null },
+  ledger: { status: "VALID", head_seq: 41, head_hash: "abcdef0123456789abcdef", unchained_rows: 0, checkpoints_missing: 0, break: null },
   resume_chain: ["task-0123456789"],
   policy_trail: [{ at: "2026-11-24T09:59:00Z", actor: "worker", verdict: "allow", scope: "shell", action: "run", value: "pytest", decided_by: "policy" }],
   worker: { log_tail: ["done"] },
@@ -266,7 +266,7 @@ test("review page: V1 tamper, the G10 warning and taint are loud; the command's 
   assert.ok(alerts.some(a => a.startsWith("TAINTED")), alerts);
   assert.match(main.textContent, /the project's pinned verify_command/);
   assert.match(main.textContent, /baseline 12 executed .* → patched 9 executed/);
-  assert.match(main.textContent, /Ledger: chain head seq 41, sha256 abcdef0123456789… — valid/);
+  assert.match(main.textContent, /Ledger VALID: chain head seq 41, sha256 abcdef0123456789…/);
   assert.match(main.textContent, /skep proof export task-0123456789/);
 });
 

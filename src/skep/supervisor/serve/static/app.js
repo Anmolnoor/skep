@@ -3781,8 +3781,12 @@ async function viewRunDetail(main, taskId) {
     // WHAT?" gets answered, and the answer lived only in the preflight card.
     // These are the commands G10 actually re-ran (the store's own record), not
     // the pin it was configured from — what happened, not what was intended.
-    if ((rv.commands || []).length) {
-      kv("re-verify ran", el("span", { class: "mono" }, rv.commands.join(" && ")));
+    // Phase 10 R1 D3: "ran" only when one executed (exit codes recorded).
+    if ((rv.exit_codes || []).length) {
+      kv("re-verify ran", el("span", { class: "mono" },
+        `${rv.commands.join(" && ")} → exit ${rv.exit_codes.join(", ")}`));
+    } else if ((rv.commands || []).length) {
+      kv("re-verify recorded (not run)", el("span", { class: "mono" }, rv.commands.join(" && ")));
     }
   } else if (detail.reverification_missing) {
     // ES-F291 follow-up (I8): a patch with no G10 record is "not re-verified",

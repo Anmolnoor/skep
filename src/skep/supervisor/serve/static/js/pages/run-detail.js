@@ -16,9 +16,11 @@ import { renderDiff } from "../diff.js";
 import { reviewQueue } from "./inbox.js";
 import { copyText, flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
 
+// Where G10's command came from (I2): the pin, the weaker fallback, or no record.
 const COMMANDS_SOURCE = {
-  project: "the project's pinned verify_command",
-  worker: "the worker's own verify step (no project pin)",
+  project: "project pin — the project's pinned verify_command",
+  worker: "worker fallback — the worker's own verify step (no project pin)",
+  unknown: "unknown — the record does not say",
 };
 
 const countsLine = c => (c
@@ -26,39 +28,52 @@ const countsLine = c => (c
   : "not readable");
 
 // The G10 box: what the supervisor re-ran, whose command it was (I2), what
-// it returned, and V1's verdict on the test counts.
+// it returned, and V1's verdict on the test counts. Phase 10 R1 D3 (I8): "ran"
+// and exit codes only when a command executed; nothing to re-verify is
+// neutral, never "do not trust".
 function g10Box(g10) {
   if (!g10) return el("p", { class: "note" }, "G10: no re-verification recorded for this run.");
   const tampered = String(g10.v1 || "").startsWith("tampered");
-  const rows = [
-    ["re-verify (G10)", `${g10.outcome} — ${g10.confirmed ? "confirmed" : "NOT CONFIRMED, do not trust"}`],
-    ["ran", (g10.commands || []).join(" && ") || "-"],
-    ["command from", COMMANDS_SOURCE[g10.commands_source] || g10.commands_source],
-    ["exit codes", (g10.exit_codes || []).join(", ") || "-"],
-  ];
+  const nothing = g10.outcome === "not_applicable";
+  const commands = (g10.commands || []).join(" && ");
+  const ran = (g10.exit_codes || []).length > 0;
+  const rows = [["re-verify (G10)", nothing
+    ? `nothing to re-verify — ${g10.detail || "the run produced no patch"}`
+    : `${g10.outcome} — ${g10.confirmed ? "confirmed" : "NOT CONFIRMED, do not trust"}`]];
+  if (ran) rows.push(["ran", commands || "-"], ["exit codes", g10.exit_codes.join(", ")]);
+  else if (commands) rows.push(["recorded verify (not run)", commands]);
+  if (commands) rows.push(["command from", COMMANDS_SOURCE[g10.commands_source] || COMMANDS_SOURCE.unknown]);
   const counts = g10.test_counts;
   if (counts?.baseline || counts?.patched) {
     rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
   }
-  rows.push(["V1 (test tamper)", g10.v1]);
-  if (g10.detail) rows.push(["detail", g10.detail]);
+  if (!nothing) rows.push(["V1 (test tamper)", g10.v1]);
+  if (g10.detail && !nothing) rows.push(["detail", g10.detail]);
   return el("div", {},
     tampered ? el("p", { class: "banner bad", role: "alert" },
       `V1 TEST TAMPER — ${g10.v1}. The patch changed what the tests count; read the diff before landing.`) : null,
     el("dl", { class: "kv" }, rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, String(v))])));
 }
 
+// D3: the verifier's own status word, never "valid" by default; a checkpoint
+// that was never kept degrades coverage and says so.
 function ledgerLine(ledger) {
   if (!ledger) return null;
   if (ledger.break) {
     return el("p", { class: "banner bad", role: "alert" },
-      `Ledger BROKEN at ${ledger.break.file}:${ledger.break.line} — ${ledger.break.reason}`);
+      `Ledger BROKEN at ${ledger.break.file || "-"}:${ledger.break.line || "-"} — ${ledger.break.reason}`);
   }
+  const status = ledger.status || "status not reported";
   const head = ledger.head_hash
-    ? `chain head seq ${ledger.head_seq}, sha256 ${String(ledger.head_hash).slice(0, 16)}… — valid`
-    : "no chained rows yet — valid";
-  return el("p", { class: "note mono" }, `Ledger: ${head}`,
-    ledger.unchained_rows ? ` · ${ledger.unchained_rows} older rows are not covered by the chain` : "");
+    ? `chain head seq ${ledger.head_seq}, sha256 ${String(ledger.head_hash).slice(0, 16)}…`
+    : "no chained rows yet";
+  const unchained = ledger.unchained_rows
+    ? ` · ${ledger.unchained_rows} older rows are not covered by the chain` : "";
+  if (ledger.checkpoints_missing) {
+    return el("p", { class: "banner warn", role: "status" },
+      `Ledger ${status}, coverage degraded: ${ledger.checkpoints_missing} due checkpoints were never kept · ${head}${unchained}`);
+  }
+  return el("p", { class: "note mono" }, `Ledger ${status}: ${head}${unchained}`);
 }
 
 // The whole report, as read-only panels. report = GET /api/runs/<id>/forensics.

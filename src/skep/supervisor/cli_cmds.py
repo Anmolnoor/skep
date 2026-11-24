@@ -1939,6 +1939,8 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             label, style = "TAMPER", "red"
         elif reverify is not None and reverify.confirmed:
             label, style = "CONFIRMED", "green"
+        elif reverify is not None and reverify.outcome == "not_applicable":
+            label, style = "NOTHING TO RE-VERIFY", "cyan"  # v65: benign, never a scream
         else:
             label, style = "NOT CONFIRMED", "red"
         lines = [
@@ -1950,10 +1952,7 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             if gate.status == "pending":
                 lines.append(f"card:     review {gate.review_id} — {gate.action}: {gate.reason}")
         if reverify is not None:
-            lines.append(
-                f"G10:      {reverify.outcome} confirmed={reverify.confirmed} "
-                f"re-ran {reverify.commands} → exit {reverify.exit_codes}"
-            )
+            lines += _g10_lines(reverify)
         note = tamper_note(reverify)
         if note:
             lines.append(f"V1:       {note}")
@@ -1969,6 +1968,32 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             )
         )
     return cards
+
+
+def _g10_lines(reverify: Any) -> list[str]:
+    """Phase 10 R1 D3 (I2, I8): what G10 did, as recorded — "re-ran … → exit"
+    only when a command executed, whose command it was, and the counts."""
+    from .forensics import _commands_source
+    from .ledger_proof import _SOURCE
+
+    if reverify.outcome == "not_applicable":
+        return [f"G10:      nothing to re-verify: {reverify.detail}"]
+    lines = [f"G10:      {reverify.outcome} confirmed={reverify.confirmed}"]
+    if reverify.exit_codes:
+        lines.append(f"          re-ran {reverify.commands} → exit {reverify.exit_codes}")
+    elif reverify.commands:
+        lines.append(f"          recorded verify: {reverify.commands} — nothing executed")
+    if reverify.commands:
+        source = _SOURCE.get(_commands_source(reverify.detail), "source unknown")
+        lines.append(f"          command {source}")
+    counts = reverify.test_counts or {}
+    if counts.get("status") == "ok":
+        base, patched = counts["baseline"], counts["patched"]
+        lines.append(
+            f"tests:    baseline {base.get('total_executed', '?')} executed → "
+            f"patched {patched.get('total_executed', '?')} executed"
+        )
+    return lines
 
 
 def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
