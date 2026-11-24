@@ -639,6 +639,7 @@ def test_a_tampered_venv_never_runs_and_promote_tool_rebuilds_it(
         assert record.venv_sha256 == forge.seal_venv(venv)
         home = config.home.parent
         forge.runtime_launch(store, home, "forge-pdf-tool")  # sealed: it runs
+        forge._writable(venv, True)  # L6: committed read-only; its owner can undo that
         package = venv / "lib" / "site-packages" / "pypdf.py"
         package.parent.mkdir(parents=True)
         package.write_text("import os  # planted", encoding="utf-8")
@@ -680,6 +681,7 @@ def test_a_swapped_interpreter_is_refused(
         _locked_active(config, store, shelf, monkeypatch)
         record = load_plugins(store)["pdf-tool"]
         python = forge.venv_python(config.home.parent, "pdf-tool", record.lock_sha256)
+        forge._writable(python.parent.parent, True)  # L6: read-only, but its owner can undo that
         python.write_text("#!/bin/sh\nexec /bin/sh", encoding="utf-8")
         with pytest.raises(ValueError, match="promote_tool pdf-tool"):
             forge.runtime_launch(store, config.home.parent, "forge-pdf-tool")
@@ -817,8 +819,8 @@ def test_every_confirming_surface_shows_the_whole_binding(
     view = render_confirm_card("plugin", (), summary, admin=True)
     assert view.web_ui_only and view.too_long
     small = {**forged, "locked": [], "lock_sha256": "", "diff": "+print(1)\n"}
-    fits = card_notes({**summary, "forge": small})
-    assert f"source sha256: {forged['source_sha256']}" in fits and "+print(1)" in fits
+    fits = "\n".join(card_notes({**summary, "forge": small}))  # L7: packed into items
+    assert f"source sha256: {forged['source_sha256']}\n" in fits and "\n+print(1)" in fits
     assert not render_confirm_card("plugin", (), {**summary, "forge": small}, admin=True).too_long
 
 
@@ -890,3 +892,205 @@ def test_an_unbindable_tool_card_says_why_on_every_surface() -> None:
     expected = "it cannot be installed as shown: no hash lock landed beside it"
     assert expected in card_notes(card, messenger=False)
     assert expected in card_notes(card)
+
+
+# --- review R2 -------------------------------------------------------------
+
+
+def test_a_rollback_before_the_promotion_takes_its_lock_wins(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L5: promote_tool read the record and wrote draft→sandboxed outside
+    the lock — a rollback in that window was overwritten and the tool went
+    active despite its terminal state."""
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        card = _card(store)
+        real = forge.require_card_binding
+
+        def rolled_back_meanwhile(*args: Any) -> None:
+            execute_mutation(
+                "suspend_tool", {"plugin_id": "pdf-tool", "rollback": True}, store=store,
+                holder=ConfigHolder(config, store), runner=cast(Dispatcher, None), actor="op",
+            )  # fmt: skip
+            real(*args)
+
+        monkeypatch.setattr(forge, "require_card_binding", rolled_back_meanwhile)
+        with pytest.raises(ValueError, match=r"changed .*it is now rolled_back"):
+            _promote(config, store, card)
+        assert load_plugins(store)["pdf-tool"].state == "rolled_back"
+        assert "forge-pdf-tool" not in load_mcp_servers(store)
+        assert not (config.home.parent / "tools" / "pdf-tool.py").exists()
+    finally:
+        store.close()
+
+
+def test_every_plugin_record_write_takes_the_promotion_lock(config: SupervisorConfig) -> None:
+    """L5: save_plugin rewrites the whole list — forge_tool's write raced a
+    promotion's publish and could drop it. Every write waits for the lock."""
+    import threading
+
+    store = RunStore(config.db_path)
+    try:
+        record = ForgedPlugin("p", "p", "", "draft", "", "p.py", "", "forge-p")
+        with forge.PROMOTION_LOCK:
+            writer = threading.Thread(target=save_plugin, args=(store, record))
+            writer.start()
+            writer.join(0.3)
+            assert writer.is_alive()  # held off while a promotion holds the lock
+        writer.join(5)
+        assert "p" in load_plugins(store)
+    finally:
+        store.close()
+
+
+def test_an_unregistered_active_tool_is_not_already_active(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L8: with its registration gone the tool has no callable surface, yet
+    promote_tool answered "already active". unregister_mcp_server refuses a
+    forge-* id (suspend_tool is the verb), and promotion re-registers."""
+    from skep.supervisor.mcp_client import remove_mcp_server
+
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        _promote(config, store, _card(store))
+        with pytest.raises(ValueError, match=r"forge-pdf-tool.*suspend_tool"):
+            execute_mutation(
+                "unregister_mcp_server", {"server_id": "forge-pdf-tool"}, store=store,
+                holder=ConfigHolder(config, store), runner=cast(Dispatcher, None), actor="op",
+            )  # fmt: skip
+        assert "forge-pdf-tool" in load_mcp_servers(store)
+        remove_mcp_server(store, "forge-pdf-tool")  # a registration lost some other way
+        promoted = _promote(config, store, _card(store))
+        assert promoted.get("note") != "already active" and promoted["reinstalled"] is True
+        assert "forge-pdf-tool" in load_mcp_servers(store)
+    finally:
+        store.close()
+
+
+def test_self_test_and_smoke_test_alone_are_not_a_tool_server(tmp_path: Path) -> None:
+    """L10: the reserved probes counted as the two distinct tools."""
+    from .forge_rig import contract
+
+    probes_only = ECHO_SERVER_SOURCE.replace('"name": "echo"', '"name": "smoke_test"')
+    ok, reason, _evidence = contract(probes_only, tmp_path)
+    assert not ok and "expose the real tool" in reason
+
+
+@pytest.mark.parametrize(
+    ("declared", "lock_line", "error"),
+    [
+        ('"pypdf==5.1.0"', f"pypdf==4.0.0 --hash=sha256:{_HASH_A}", r"pins pypdf==4\.0\.0"),
+        ('"pypdf>=5"', f"pypdf==5.1.0 --hash=sha256:{_HASH_A}", r"pinned exactly"),
+        (
+            '"pypdf==5.1.0"',
+            f'pypdf==5.1.0 ; python_version < "3.0" --hash=sha256:{_HASH_A}',
+            r"only under a marker",
+        ),
+        (
+            "\"pypdf==5.1.0; sys_platform == 'win32'\"",
+            f"pypdf==5.1.0 --hash=sha256:{_HASH_A}",
+            r"pinned exactly",
+        ),
+    ],
+    ids=["other-version", "range", "lock-marker", "declared-marker"],
+)
+def test_the_lock_must_install_exactly_the_declared_pin(
+    declared: str, lock_line: str, error: str
+) -> None:
+    """L12: coverage compared project names only — a lock pinning another
+    version, or pinning it only under a marker, passed under the card."""
+    with pytest.raises(ValueError, match=error):
+        promotion_binding(_DEPS_TOOL.replace('"pypdf==5.1.0"', declared), lock_line + "\n")
+
+
+def _tree(root: Path, body: str) -> str:
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python").write_text(body, encoding="utf-8")
+    (root / "lib").mkdir()
+    (root / "lib" / "pkg.py").write_text("x = 1\n", encoding="utf-8")
+    return forge.seal_venv(root)
+
+
+def test_a_staged_venv_that_changed_never_replaces_the_active_one(tmp_path: Path) -> None:
+    """L6: the active venv was deleted and the staging tree moved in BEFORE
+    the seal was checked — a tampered tree landed and no venv was left."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    old_seal = _tree(home, "#!old")
+    staging = home.parent / ".staging-x"
+    seal = _tree(staging, "#!new")
+    (staging / "lib" / "pkg.py").write_text("import os  # planted\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed after its trial"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    assert forge.seal_venv(home) == old_seal and not staging.exists()
+
+
+def test_a_venv_that_changes_as_it_lands_restores_the_previous_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L6: the old venv is kept until the moved tree still matches its seal."""
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    old_seal = _tree(home, "#!old")
+    staging = home.parent / ".staging-x"
+    seal = _tree(staging, "#!new")
+    real = forge.seal_venv
+    calls: list[Path] = []
+
+    def swapped_after_the_check(root: Path) -> str:
+        calls.append(root)
+        return real(root) if len(calls) == 1 else "0" * 64
+
+    monkeypatch.setattr(forge, "seal_venv", swapped_after_the_check)
+    with pytest.raises(ValueError, match="changed after its trial"):
+        forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    monkeypatch.setattr(forge, "seal_venv", real)
+    assert forge.seal_venv(home) == old_seal and not staging.exists()
+    assert sorted(p.name for p in home.parent.iterdir()) == [home.name]  # nothing left over
+
+
+def test_a_committed_venv_is_read_only_and_can_be_replaced(tmp_path: Path) -> None:
+    """L6: the launched tree is the sealed one — committed read-only (the
+    seal ignores write bits) — and a later promotion still replaces it."""
+    import stat
+
+    home = forge.venv_python(tmp_path, "p", "c" * 64).parent.parent
+    staging = home.parent / ".staging-1"
+    seal = _tree(staging, "#!one")
+    forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
+    paths = [home, *home.rglob("*")]
+    assert all(not stat.S_IMODE(p.lstat().st_mode) & 0o222 for p in paths)
+    assert forge.seal_venv(home) == seal
+    again = home.parent / ".staging-2"
+    second = _tree(again, "#!two")
+    forge.commit_locked_venv(tmp_path, "p", "c" * 64, again, second)
+    assert forge.seal_venv(home) == second
+    assert sorted(p.name for p in home.parent.iterdir()) == [home.name]
+
+
+def test_a_failed_venv_commit_discards_the_staged_tree(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L6: promote_tool never discarded staging when the commit failed."""
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, _DEPS_TOOL, _LOCK)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+
+        def refuse(*_a: Any) -> str:
+            raise ValueError("the locked environment changed after its trial")
+
+        monkeypatch.setattr(forge, "commit_locked_venv", refuse)
+        with pytest.raises(ValueError, match="changed after its trial"):
+            _promote(config, store, _card(store))
+        venvs = config.home.parent / "tools" / ".venvs" / "pdf-tool"
+        assert list(venvs.iterdir()) == []
+    finally:
+        store.close()

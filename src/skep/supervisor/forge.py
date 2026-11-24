@@ -50,8 +50,9 @@ GATE_MARKER = "FORGE_GATE "
 GATE_SCRIPT = f'print("{GATE_MARKER}the role chain admitted this trial")\n'
 # Review R1 (K7): a promotion's last look at its record and its publish, and
 # a suspend/rollback, happen one at a time — a verdict given elsewhere while
-# a trial ran is never overwritten.
-PROMOTION_LOCK = threading.Lock()
+# a trial ran is never overwritten. Review R2 (L5): every plugin record write
+# takes it too (``save_plugin`` rewrites the whole list), so it is reentrant.
+PROMOTION_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -125,9 +126,10 @@ def load_plugins(store: RunStore) -> dict[str, ForgedPlugin]:
 
 
 def save_plugin(store: RunStore, record: ForgedPlugin) -> None:
-    plugins = load_plugins(store)
-    plugins[record.plugin_id] = record
-    store.set_setting(PLUGINS_SETTINGS_KEY, json.dumps([asdict(p) for p in plugins.values()]))
+    with PROMOTION_LOCK:  # L5: a whole-list rewrite never drops another write
+        plugins = load_plugins(store)
+        plugins[record.plugin_id] = record
+        store.set_setting(PLUGINS_SETTINGS_KEY, json.dumps([asdict(p) for p in plugins.values()]))
 
 
 def authoring_instructions(name: str, purpose: str, rel_path: str) -> str:
@@ -603,6 +605,42 @@ def _project(requirement: str) -> str:
     return re.sub(r"[-_.]+", "-", name.group(1)).lower() if name else requirement
 
 
+# Review R2 (L12): a declared dependency is one exact pin — no range, no
+# marker — so the lock can be held to it with no resolver (``packaging`` is
+# not a skep dependency): every lock line for that project pins that version,
+# unconditionally, for the one environment the tool runs in.
+_DECLARED_PIN = re.compile(
+    r"\s*(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\[[A-Za-z0-9._,\s-]+\])?"
+    r"\s*==\s*(?P<version>[A-Za-z0-9.+!_-]+)\s*"
+)
+
+
+def _require_locked_as_declared(dep: str, locked: tuple[str, ...]) -> None:
+    declared = _DECLARED_PIN.fullmatch(dep)
+    if declared is None:
+        raise ValueError(
+            f"dependency {dep!r} is not pinned exactly — declare each one as name==1.2.3 (no "
+            "range, no marker: the tool runs on this skep's Python only), so the lock must "
+            "install exactly what the card shows"
+        )
+    version = declared.group("version").lower()
+    for pin in locked:
+        if _project(pin) != _project(dep):
+            continue
+        requirement, _, marker = pin.partition(" sha256:")[0].partition(" ; ")
+        if marker:
+            raise ValueError(
+                f"the lock pins {requirement} only under a marker ({marker}) — regenerate "
+                f"<tool>.lock.txt for this Python (`uv pip compile --python-version "
+                f"{sys.version_info.major}.{sys.version_info.minor}`) so {dep} installs as declared"
+            )
+        if requirement.partition("==")[2].lower() != version:
+            raise ValueError(
+                f"the tool declares {dep} but its lock pins {requirement} — regenerate "
+                "<tool>.lock.txt from the tool's dependencies so the card's pin is what installs"
+            )
+
+
 def install_lock(pins: tuple[str, ...]) -> str:
     """Review R1 (K13): what the install lane is handed — the canonical pins
     ``parse_lock`` accepted, re-written, never the raw lock text."""
@@ -642,6 +680,8 @@ def promotion_binding(source: str, lock: str | None) -> dict[str, Any]:
             "regenerate <tool>.lock.txt from the tool's dependencies (`uv pip compile "
             "--generate-hashes --only-binary :all:`)"
         )
+    for dep in deps:
+        _require_locked_as_declared(dep, locked)
     return {
         "source_sha256": sha256_text(source),
         "lock_sha256": sha256_text(lock) if locked and lock is not None else "",
@@ -829,7 +869,11 @@ def commit_locked_venv(
     """After both stages passed: the staged venv moves to its lock-keyed
     home (``--relocatable``) — replacing a tree there that no longer matches
     — and must still match the seal the trials ran against (I2: what was
-    trialed is what runs).
+    trialed is what runs). Review R2 (L6): the staged tree is checked
+    BEFORE anything is replaced, the previous tree is kept until the moved
+    one still matches (and put back if it does not), staging never outlives
+    a failure, and the committed tree is read-only — the seal ignores write
+    bits, so the tree that launches is the tree that was sealed.
     ponytail: superseded lock venvs stay on disk; prune them if disk matters."""
     import shutil
     import tempfile
@@ -838,22 +882,65 @@ def commit_locked_venv(
         return sys.executable
     final = venv_python(skep_home, plugin_id, lock_sha256)
     home = final.parent.parent
-    if staging is not None:
-        if home.exists() or home.is_symlink():
-            stale = Path(tempfile.mkdtemp(prefix=".stale-", dir=home.parent))
-            home.rename(stale / "venv")
-            shutil.rmtree(stale, ignore_errors=True)
-        staging.rename(home)
+    if staging is None:  # the sealed tree was reused as it stands
+        _require_seal(home, seal)
+        return str(final)
+    previous: Path | None = None
     try:
-        landed = seal_venv(home)
+        _require_seal(staging, seal)
+        if home.exists() or home.is_symlink():
+            previous = Path(tempfile.mkdtemp(prefix=".previous-", dir=home.parent)) / "venv"
+            _writable(home, True)  # a read-only tree cannot move
+            home.rename(previous)
+        moved = False
+        try:
+            staging.rename(home)
+            moved = True
+            _require_seal(home, seal)
+        except BaseException:
+            if moved:
+                _writable(home, True)
+                shutil.rmtree(home, ignore_errors=True)
+            if previous is not None:
+                previous.rename(home)
+                _writable(home, False)
+            raise
+        _writable(home, False)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        if previous is not None:
+            if previous.exists():
+                _writable(previous, True)
+            shutil.rmtree(previous.parent, ignore_errors=True)
+    return str(final)
+
+
+def _require_seal(root: Path, seal: str) -> None:
+    try:
+        landed = seal_venv(root)
     except (OSError, ValueError) as exc:
-        raise ValueError(f"the locked environment did not land at {home}: {exc}") from exc
+        raise ValueError(f"the locked environment at {root} is not whole: {exc}") from exc
     if landed != seal:
         raise ValueError(
-            f"the locked environment at {home} changed after its trial (its seal no longer "
+            f"the locked environment at {root} changed after its trial (its seal no longer "
             "matches) — nothing was activated; propose promote_tool again"
         )
-    return str(final)
+
+
+def _writable(root: Path, writable: bool) -> None:
+    """Owner write on (``writable``) or every write bit off, for the whole
+    tree. Links are left alone (chmod would follow them out of the tree)."""
+    import stat
+
+    if root.is_symlink():  # never followed: chmod would reach out of the tree
+        return
+    for current, dirs, files in os.walk(root):
+        for path in [Path(current), *(Path(current) / name for name in [*dirs, *files])]:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            mode = stat.S_IMODE(info.st_mode)
+            os.chmod(path, mode | stat.S_IWUSR if writable else mode & ~0o222)
 
 
 def publish_source(
@@ -920,12 +1007,12 @@ def wall_trial(
         probe = "smoke_test" if stage_hosts and "smoke_test" in names else "self_test"
         if probe not in names:
             return False, f"stage {stage} ({wall}): tools/list has no {probe} tool", evidence
-        if len(set(names)) < 2:
+        if not set(names) - {"self_test", "smoke_test"}:  # L10: the probes are not tools
             return (
                 False,
                 (
-                    f"stage {stage} ({wall}): self_test alone is not a tool server — expose the "
-                    "real tool(s) too"
+                    f"stage {stage} ({wall}): self_test alone (smoke_test included) is not a "
+                    "tool server — expose the real tool(s) too"
                 ),
                 evidence,
             )

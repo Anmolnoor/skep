@@ -800,8 +800,30 @@ def forged_lane(
 # ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
 # read uses no extra server process to learn its hint. Registering the id
 # again or removing it drops the entry; a serve restart starts empty; a
-# failed listing is never kept (the next read asks again).
-_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
+# failed listing is never kept (the next read asks again). Review R2 (L11): a
+# forged server's entry also keys on its bound record (``_binding``).
+_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[object, ...], tuple[MCPTool, ...]]] = {}
+
+
+def _binding(store: RunStore, config: MCPServerConfig) -> tuple[object, ...]:
+    """What a forged server's listing ran under — its record's state and
+    bound triple (+ venv seal); () for any other server."""
+    if not config.server_id.startswith(FORGED_SERVER_PREFIX):
+        return ()
+    from . import forge
+
+    record = next(
+        (p for p in forge.load_plugins(store).values() if p.server_id == config.server_id), None
+    )
+    if record is None:
+        return ("unbound",)
+    return (
+        record.state,
+        record.source_sha256,
+        record.lock_sha256,
+        record.approved_hosts,
+        record.venv_sha256,
+    )
 
 
 def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
@@ -813,15 +835,25 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
     """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
     spawns a server (the prompt's MCP index reads this every turn)."""
     hit = _LISTED.get((str(store.db_path), config.server_id))
-    return hit[1] if hit is not None and hit[0] == config else None
+    if hit is None or hit[0] != config or hit[1] != _binding(store, config):
+        return None  # L11: never a listing from another binding
+    return hit[2]
 
 
 def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
     """List ``config``'s tools now and keep them (list_mcp_tools, the startup
     warm). A failed listing raises and keeps nothing."""
+    binding = _binding(store, config)
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent, store=store)
     tools = tuple(MCPClient(config, runner=runner).list_tools())
-    _LISTED[(str(store.db_path), config.server_id)] = (config, tools)
+    if _binding(store, config) != binding:
+        # L11: a promotion (or suspend) published mid-listing — this answer
+        # describes a tool that no longer runs; the refresh after it wins.
+        raise MCPError(
+            f"{config.server_id!r} had its binding changed while it was listed, so that "
+            f"listing was discarded — list_mcp_tools {config.server_id} lists it again"
+        )
+    _LISTED[(str(store.db_path), config.server_id)] = (config, binding, tools)
     return tools
 
 

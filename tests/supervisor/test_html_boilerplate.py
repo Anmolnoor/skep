@@ -184,3 +184,15 @@ def test_a_landmark_inside_a_comment_or_script_is_not_a_landmark(convert: Any) -
         page = f"{hidden}<header>Real heading</header><aside>Real note</aside><p>Body</p>"
         text = convert(page)
         assert "Real heading" in text and "Real note" in text, hidden
+
+
+@pytest.mark.parametrize("convert", [html_to_text, html_to_markdown])
+def test_a_landmark_in_a_hidden_region_never_keeps_the_chrome_around_it(convert: Any) -> None:
+    """L9: a <main> inside a <template> (or noscript) in the nav kept the nav."""
+    for hidden in (
+        "<template><main>t</main></template>",
+        "<noscript><article>n</article></noscript>",
+    ):
+        page = f"<nav>Site menu {hidden}</nav><main><p>Body text</p></main>"
+        text = convert(page)
+        assert "Body text" in text and "Site menu" not in text, hidden

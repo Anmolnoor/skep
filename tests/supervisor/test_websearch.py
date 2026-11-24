@@ -963,3 +963,139 @@ def test_a_text_body_under_a_wrong_type_is_still_read(monkeypatch: pytest.Monkey
     assert _read("/notes")["text"] == "plain notes"
     with pytest.raises(WebReadError, match="image/png is not a page"):
         _read("/logo.png")
+
+
+# --- review R2 (L3, L4): bounded decode, one deadline, the PDF tail kept ----
+
+
+class _Chunks:
+    """A finite body served in fixed-size chunks; records whether it closed."""
+
+    def __init__(self, data: bytes, size: int) -> None:
+        self.data, self.size, self.closed = data, size, False
+
+    def __iter__(self) -> Any:
+        for start in range(0, len(self.data), self.size):
+            yield self.data[start : start + self.size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_gzip_body_is_never_inflated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L3: httpx inflated each raw chunk whole before the cap — one 64 KiB
+    gzip chunk became 64 MiB. read_url asks for identity and refuses a
+    compressed body instead of inflating it."""
+    import gzip
+
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    bomb = _Chunks(gzip.compress(b"\0" * (64 << 20)), 1 << 20)
+    seen: list[str] = []
+    _streamed(
+        monkeypatch,
+        {"/bomb": (200, {"content-type": "text/html", "content-encoding": "gzip"}, bomb)},
+    )
+    patched = httpx.Client.send
+
+    def spy(client: Any, request: httpx.Request, **kw: Any) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding", ""))
+        return patched(client, request, **kw)
+
+    monkeypatch.setattr(httpx.Client, "send", spy)
+    with pytest.raises(WebReadError, match="gzip-compressed body"):
+        _read("/bomb")
+    assert seen == ["identity"] and bomb.closed
+
+
+def test_one_deadline_covers_a_slow_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: the deadline was checked only between body chunks — a slow DNS
+    answer held read_url far past it."""
+    import socket
+    import time
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    _FakeWeb(monkeypatch, {})
+
+    def slow(host: str, port: int, **_kw: object) -> list[Any]:
+        time.sleep(3)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]  # never dialled
+
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        websearch.fetch_url_text("https://slow.example/", resolve=slow)
+    assert time.monotonic() - start < 2.5
+
+
+def test_one_deadline_covers_every_redirect_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: each hop got its own connect and read timeouts — five slow hops
+    could run five times the budget."""
+    import time
+
+    import httpx
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.5)
+    timeouts: list[float] = []
+
+    def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        time.sleep(0.2)
+        return httpx.Response(302, headers={"location": "/again"}, request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.5s"):
+        _read("/start")
+    assert time.monotonic() - start < 1.6
+    assert len(timeouts) <= 3 and all(t <= 0.5 for t in timeouts)
+    assert timeouts == sorted(timeouts, reverse=True)  # each hop gets what is left
+
+
+def test_a_blocked_body_read_cannot_hold_read_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: a next(chunks) that blocks was outside every check."""
+    import time
+
+    from skep.supervisor.serve import websearch
+
+    monkeypatch.setattr(websearch, "READ_DEADLINE_SECONDS", 0.3)
+    stuck = _Endless(b"a", delay=3.0)
+    _streamed(monkeypatch, {"/stuck": (200, {"content-type": "text/plain"}, stuck)})
+    start = time.monotonic()
+    with pytest.raises(websearch.WebReadError, match=r"longer than 0.3s"):
+        _read("/stuck")
+    assert time.monotonic() - start < 2.5
+
+
+def test_a_transport_error_mid_body_names_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: httpx.ReadTimeout or a dropped connection mid-body escaped raw."""
+    import httpx
+
+    from skep.supervisor.serve.websearch import WebReadError
+
+    class Broken(_Endless):
+        def __iter__(self) -> Any:
+            yield b"<p>start"
+            raise httpx.ReadTimeout("timed out")
+
+    _streamed(monkeypatch, {"/broken": (200, {"content-type": "text/html"}, Broken())})
+    with pytest.raises(WebReadError, match=r"site\.example failed mid-body \(ReadTimeout\)"):
+        _read("/broken")
+
+
+def test_a_pdf_read_past_the_page_cap_keeps_every_byte(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L4: the PDF continuation dropped the first chunk's bytes beyond
+    max_bytes + 1 — a valid PDF arrived with a hole in it."""
+    from .pdf_builder import simple_pdf
+
+    pdf = simple_pdf(*[b"BT /F1 12 Tf 72 720 Td (page %d) Tj ET" % n for n in range(40)])
+    assert len(pdf) > 3 * 1000
+    body = _Chunks(pdf, 1500)
+    _streamed(monkeypatch, {"/doc.pdf": (200, {"content-type": "application/pdf"}, body)})
+    text = _read("/doc.pdf", max_bytes=1000)["text"]
+    assert text == "\n\n".join(f"page {n}" for n in range(40))

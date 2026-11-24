@@ -45,14 +45,20 @@ READ_URL_MAX_CHARS = 10_000
 GRANTED_READ_MAX_BYTES = 262_144
 GRANTED_READ_MAX_CHARS = 40_000
 # Review R1 (K3): one wall-clock budget for a whole read, redirects included —
-# the per-read timeout alone lets a trickling server run forever.
+# the per-read timeout alone lets a trickling server run forever. Review R2
+# (L4): it covers resolution, every hop and every body read; the caller waits
+# at most this plus a grace for the reader to report its own error.
 READ_DEADLINE_SECONDS = 30.0
+READ_GRACE_SECONDS = 1.0
 _READ_HEADERS = {
     # Same posture as the researcher (v42-F2): a mainstream UA, honest tag.
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 skep-read"
     ),
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    # Review R2 (L3): httpx inflates a whole raw chunk before any cap applies
+    # (16 KiB of gzip is 16 MiB) — ask for the bytes as stored.
+    "Accept-Encoding": "identity",
 }
 
 
@@ -109,16 +115,57 @@ def fetch_url_text(
 
     7.3: a PDF (by type or by its bytes) is read as text; an HTTP error, a
     timeout, or a non-text type raises WebReadError naming the next step.
+
+    Review R2 (L4): the read runs on a daemon thread, so no lookup, hop or
+    blocked body read holds the caller past the deadline; the reader stops
+    itself at the deadline too (each hop's timeouts are what is left).
     """
+    import threading
     import time
 
+    deadline = time.monotonic() + READ_DEADLINE_SECONDS
+    outcome: dict[str, Any] = {}
+
+    def read() -> None:
+        try:
+            outcome["read"] = _fetch(
+                url, deadline, redirect_guard, markdown, resolve, max_bytes, max_chars
+            )
+        except BaseException as exc:  # handed to the caller below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=read, name="skep-read-url", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()) + READ_GRACE_SECONDS)
+    if worker.is_alive():  # abandoned: it stops at its own next check
+        raise WebReadError(_too_slow(urllib.parse.urlsplit(url).hostname or url))
+    if "error" in outcome:
+        raise outcome["error"]
+    return dict(outcome["read"])
+
+
+def _too_slow(host: str) -> str:
+    return (
+        f"reading {host} took longer than {READ_DEADLINE_SECONDS:g}s — the site is slow or "
+        "trickling; try again later or read another source"
+    )
+
+
+def _fetch(
+    url: str,
+    deadline: float,
+    redirect_guard: Callable[[str], bool] | None,
+    markdown: bool,
+    resolve: Resolver,
+    max_bytes: int,
+    max_chars: int,
+) -> dict[str, Any]:
     import httpx
 
     from skep.seeds.tools import doc_extract
     from skep.workers.html_text import html_to_markdown, html_to_text
     from skep.workers.researcher import binary_bytes, http_error_message, is_text_type
 
-    deadline = time.monotonic() + READ_DEADLINE_SECONDS
     # W6: no env proxy — a proxy would resolve the name itself, out of sight
     # of the resolved-address check below. The operator's CA bundle
     # (SSL_CERT_FILE / SSL_CERT_DIR) still counts: it hides no lookup. No
@@ -133,7 +180,7 @@ def fetch_url_text(
         current = url
         for _hop in range(5):
             try:
-                response = _pinned_get(client, current, resolve)
+                response = _pinned_get(client, current, resolve, deadline)
             except httpx.TimeoutException as exc:
                 host = urllib.parse.urlsplit(current).hostname
                 raise WebReadError(
@@ -168,6 +215,12 @@ def fetch_url_text(
                 )
             kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
             host = urllib.parse.urlsplit(current).hostname or current
+            coding = response.headers.get("content-encoding", "").strip().lower()
+            if coding not in ("", "identity"):  # L3: so iter_bytes inflates nothing
+                raise WebReadError(
+                    f"{host} sent a {coding}-compressed body though read_url asked for none, "
+                    "and skep does not inflate a body it cannot bound — read another source"
+                )
             chunks = response.iter_bytes()
             body = _take(chunks, bytearray(), max_bytes + 1, deadline, host)
             if kind == "application/pdf" or body.startswith(b"%PDF-"):
@@ -207,21 +260,25 @@ def fetch_url_text(
 
 def _take(chunks: Any, body: bytearray, limit: int, deadline: float, host: str) -> bytearray:
     """Review R1 (K3): pull from a streamed body until ``limit`` bytes (one
-    chunk over at most, trimmed), the end, or the read deadline — never
-    the whole body first."""
+    chunk over at most, kept: a later pull continues the same body, L4), the
+    end, or the read deadline — never the whole body first."""
     import time
+
+    import httpx
 
     while len(body) < limit:
         if time.monotonic() > deadline:
+            raise WebReadError(_too_slow(host))
+        try:
+            chunk = next(chunks, None)
+        except httpx.TransportError as exc:  # L4: a timeout or a dropped connection
             raise WebReadError(
-                f"reading {host} took longer than {READ_DEADLINE_SECONDS:g}s — the site is "
-                "slow or trickling; try again later or read another source"
-            )
-        chunk = next(chunks, None)
+                f"reading {host} failed mid-body ({type(exc).__name__}) — the site is slow or "
+                "dropped the connection; try again later or read another source"
+            ) from exc
         if chunk is None:
             break
         body += chunk
-    del body[limit:]
     return body
 
 
@@ -261,10 +318,14 @@ def known_non_public(url: str) -> str | None:
     return None
 
 
-def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
+def _pinned_get(client: Any, url: str, resolve: Resolver, deadline: float) -> Any:
     """W6: GET ``url`` from the address its host resolves to — resolved once
     here and vetted public, then dialled by IP with the name as Host and SNI
-    (so TLS still verifies the name). Every hop of a redirect comes here."""
+    (so TLS still verifies the name). Every hop of a redirect comes here.
+    L4: each request's timeouts are what is left of ``deadline``, and a hop
+    whose lookup used it up is never dialled."""
+    import time
+
     import httpx
 
     parts = urllib.parse.urlsplit(url)
@@ -279,6 +340,9 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
         raise httpx.ConnectError(f"{host!r} does not resolve")
     if not addresses:
         raise ValueError(_non_public(host, why))
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise WebReadError(_too_slow(host))
     userinfo = parts.netloc.rpartition("@")[0]
     named = httpx.URL(url)  # IDNA: Host and SNI carry the ASCII name
     error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")
@@ -293,6 +357,7 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
             urllib.parse.urlunsplit(parts._replace(netloc=netloc)),
             headers={**_READ_HEADERS, "Host": named.netloc.decode("ascii")},
             extensions={"sni_hostname": named.raw_host.decode("ascii")},
+            timeout=httpx.Timeout(min(10.0, left), connect=min(5.0, left)),
         )
         try:
             return client.send(request, stream=True)  # K3: headers first, body on demand

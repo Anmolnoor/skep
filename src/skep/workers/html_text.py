@@ -109,6 +109,7 @@ class _ChromeFilter(HTMLParser):
         self._content: list[str | int] | None = None  # [tag, depth]
         # [tag, depth, chunk mark, keep]: keep = a content landmark opened inside
         self._region: list[str | int | bool] | None = None
+        self._drop_depth = 0  # inside script/style/template/noscript/head (each extractor)
 
     def _is_chrome(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
         if tag in _NEVER_CHROME or tag in _VOID:
@@ -130,14 +131,16 @@ class _ChromeFilter(HTMLParser):
         if self._region is not None:
             if tag == self._region[0]:
                 self._region[1] = int(self._region[1]) + 1
-            if _is_landmark(tag, attrs):  # K10: the body is inside — keep it all
+            # K10: the body is inside — keep it all; review R2 (L9): unless it
+            # sits in a hidden region (a template's <main> is not the body)
+            if _is_landmark(tag, attrs) and not self._drop_depth:
                 self._region[3] = True
         elif self._is_chrome(tag, attrs):
             self._region = [tag, 1, len(self._chunks), False]
         elif self._content is not None:
             if tag == self._content[0]:
                 self._content[1] = int(self._content[1]) + 1
-        elif _is_landmark(tag, attrs):
+        elif _is_landmark(tag, attrs) and not self._drop_depth:
             self._content = [tag, 1]
         self._start(tag, attrs)
 
@@ -165,7 +168,6 @@ class _ChromeFilter(HTMLParser):
 class _TextExtractor(_ChromeFilter):
     def __init__(self, landmark: bool) -> None:
         super().__init__(landmark)
-        self._drop_depth = 0
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _DROP_CONTENT:
@@ -197,7 +199,6 @@ class _MarkdownExtractor(_ChromeFilter):
 
     def __init__(self, landmark: bool) -> None:
         super().__init__(landmark)
-        self._drop_depth = 0
         self._links: list[str] = []
 
     def _start(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:

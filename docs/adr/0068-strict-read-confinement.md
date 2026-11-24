@@ -549,3 +549,45 @@ finishes, the seal is recorded with the approval (`venv_sha256`) and
 checked before every reuse and every launch; and the promotion publishes
 its binding atomically — conditional on the plugin record it read before
 the trial, with the previous tool's bytes restored if the publish fails.
+
+### Review round R2 (Phase 07, 2026-11-23)
+
+- **The venv that launches is the venv that was sealed, as far as skep can
+  make it.** A promotion checks the staged venv against its seal *before*
+  it replaces anything, keeps the previous venv until the moved tree still
+  matches (and puts it back if it does not), and never leaves a staging
+  tree behind a failure. The committed tree is read-only (every write bit
+  off; the seal covers paths, bytes, exec bits and link targets, not write
+  bits, so this does not change it), and the forged-tool wall binds
+  `<skep home>/tools/.venvs` read-only on both backends (only the install
+  lane gets its own staging dir writable).
+- **The residual, stated (I8).** The seal is checked on the live tree and
+  the interpreter is then launched by path: a check-then-exec gap remains.
+  Closing it would mean copying the venv into each call's throwaway
+  workspace. Whoever can win that race can already write the skep home
+  (the tree is owned by the operator and read-only), and that writer can
+  also rewrite the plugin record, so the gap gives an attacker nothing
+  they did not already have. The read-only bits stop accidents and other
+  processes, not the home's owner.
+  ponytail: the seal is re-hashed on every launch; cache it per
+  (inode, mtime, size) if call volume on a large venv ever matters.
+- **Promotion and every record write share one lock.** `promote_tool`
+  reads the record it publishes against, and writes `draft → sandboxed`,
+  under `PROMOTION_LOCK`; `save_plugin` takes the same (reentrant) lock, so
+  a whole-list rewrite (a `forge_tool` record, say) never drops a publish
+  or a rollback, and a rollback confirmed before the promotion took the
+  lock wins.
+- **A forged registration leaves only through its lifecycle.**
+  `unregister_mcp_server` refuses a `forge-*` id (pointing to
+  `suspend_tool`), and `promote_tool` answers "already active" only while
+  the tool is registered.
+- **Discovery is keyed by the binding.** A forged server's cached
+  `tools/list` records the state, bound triple and venv seal it ran under;
+  a listing whose binding changed mid-listing is discarded, and a cached one
+  is served only while its binding still holds.
+- **The trial needs a real tool.** `self_test` and `smoke_test` are probes;
+  a server exposing only those fails the trial.
+- **A declared dependency is one exact pin.** `name==version`, no range
+  or marker. Every lock line for that project must pin that version with no
+  marker, so the card's pin is what installs. A resolver (`packaging`) is
+  not a skep dependency.

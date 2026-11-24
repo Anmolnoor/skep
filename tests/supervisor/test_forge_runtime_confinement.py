@@ -511,3 +511,78 @@ def test_register_mcp_server_refuses_the_reserved_forge_prefix(config: Superviso
         assert load_mcp_servers(store) == {}
     finally:
         store.close()
+
+
+# --- review R2 -------------------------------------------------------------
+
+
+def test_the_runtime_lane_never_makes_the_venvs_writable(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L6: the launched venv is read-only to the tool — only the install
+    lane gets a (staging) writable root."""
+    store = _store(home)
+    try:
+        config = _activate(store, home)
+        seen = _capture_lane(monkeypatch)
+        runner_for_config(config, skep_home=home, store=store)("tools/list", {})
+        assert seen["profile"]["extra_writable"] == ()
+    finally:
+        store.close()
+
+
+@needs_wall
+def test_a_forged_tool_cannot_write_its_venv(home: Path, tmp_path: Path) -> None:
+    """L6, against the real wall: <skep home>/tools/.venvs is bound read-only."""
+    target = home / "tools" / ".venvs" / "probe" / "planted.py"
+    target.parent.mkdir(parents=True)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    probe = f"open({str(target)!r}, 'w').write('x')"
+    proc = mcp_client.forged_lane(
+        [sys.executable, "-c", probe], skep_home=home, hosts=(), workspace=workspace
+    )
+    assert proc.returncode != 0 and not target.exists()
+
+
+def test_a_listing_from_an_older_binding_is_never_cached(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L11: a forged listing started before a promotion could finish after
+    the post-promotion refresh and overwrite it. Discovery is keyed by the
+    bound triple: a listing whose binding changed meanwhile is discarded,
+    and a cached one is served only while its binding still holds."""
+    import dataclasses
+
+    from skep.supervisor.mcp_client import cached_tools
+
+    store = _store(home)
+    try:
+        config = _activate(store, home)
+        record = load_plugins(store)["probe"]
+        newer = dataclasses.replace(record, source_sha256="f" * 64)
+
+        def promoted_meanwhile(*_a: Any, **_k: Any) -> Any:
+            def run(method: str, params: Any) -> Any:
+                if method == "tools/list":
+                    save_plugin(store, newer)  # the promotion publishes mid-listing
+                    return {"tools": [{"name": "old_tool"}]}
+                return {}
+
+            return run
+
+        monkeypatch.setattr(mcp_client, "runner_for_config", promoted_meanwhile)
+        with pytest.raises(MCPError, match="binding changed"):
+            refresh_listed_tools(store, config)
+        assert cached_tools(store, config) is None
+        monkeypatch.setattr(
+            mcp_client,
+            "runner_for_config",
+            lambda *_a, **_k: lambda method, params: {"tools": [{"name": "new_tool"}]},
+        )
+        assert [t.name for t in refresh_listed_tools(store, config)] == ["new_tool"]
+        assert [t.name for t in cached_tools(store, config) or ()] == ["new_tool"]
+        save_plugin(store, record)  # the binding moves again: the cached listing is stale
+        assert cached_tools(store, config) is None
+    finally:
+        store.close()

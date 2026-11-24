@@ -1225,12 +1225,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "wheels installed from hashes) and the `# skep-hosts:` hosts; the "
         "confirm installs only that. Trial, in the sandbox: offline with no "
         "network, tools/list plus the zero-argument self_test; then, only if "
-        "hosts are approved, the same with network pinned to them. Only then "
+        "hosts are approved, network pinned to them, calling smoke_test if "
+        "the tool has one (else self_test). Only then "
         "is it registered for call_mcp_tool; every call runs in that sandbox "
         "with those hosts. A suspended plugin, an active one that is refused "
         "(tampered or unbound) or whose source, lock or hosts changed take "
-        "the same card and trial. Fails honestly (and stays demoted) if the "
-        "authoring run has not landed or the trial fails.",
+        "the same card and trial. Fails honestly if the authoring run has "
+        "not landed or the trial fails: a new plugin stays demoted, a failed "
+        "UPDATE leaves the active copy running unchanged.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),
@@ -5244,19 +5246,27 @@ def _execute_mutation(
             preanswered=preanswered,  # D23: the manifest its card showed
             chat_id=chat_id,  # E4
         )
-        forge.save_plugin(
-            store,
-            forge.ForgedPlugin(
-                plugin_id=plugin_id,
-                name=tool_title,
-                purpose=purpose,
-                state="draft",
-                repo=str(root),
-                rel_path=rel_path,
-                task_id=task_id,
-                server_id=f"forge-{plugin_id}",
-            ),
-        )
+        with forge.PROMOTION_LOCK:  # review R2 (L5): never over a promotion's publish
+            live_plugin = forge.load_plugins(store).get(plugin_id)
+            if live_plugin is not None and live_plugin.state in {"active", "suspended"}:
+                raise ValueError(
+                    f"plugin {plugin_id!r} became {live_plugin.state} while run {task_id} was "
+                    "dispatched, so the run is not recorded as its source — suspend_tool with "
+                    "rollback=true retires it first; then forge the replacement"
+                )
+            forge.save_plugin(
+                store,
+                forge.ForgedPlugin(
+                    plugin_id=plugin_id,
+                    name=tool_title,
+                    purpose=purpose,
+                    state="draft",
+                    repo=str(root),
+                    rel_path=rel_path,
+                    task_id=task_id,
+                    server_id=f"forge-{plugin_id}",
+                ),
+            )
         return {
             "forged": plugin_id,
             "task_id": task_id,
@@ -5317,7 +5327,14 @@ def _execute_mutation(
             except ValueError:
                 runnable = False
             bound = (record.source_sha256, record.lock_sha256, record.approved_hosts)
-            if runnable and bound == (binding["source_sha256"], binding["lock_sha256"], hosts):
+            # review R2 (L8): and only while it is registered — no
+            # registration, no callable surface
+            registered = record.server_id in load_mcp_servers(store)
+            if (
+                runnable
+                and registered
+                and bound == (binding["source_sha256"], binding["lock_sha256"], hosts)
+            ):
                 return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
             reinstall = True
         forge.require_card_binding(card, binding)
@@ -5329,11 +5346,26 @@ def _execute_mutation(
             forge.ensure_forge_seed(forge_repo)
             actions.workon(holder, store, path=str(forge_repo))
             trial_repo = str(forge_repo)
-        if record.state == "draft":
-            require_transition("draft", "sandboxed")
-            record = dataclasses.replace(record, state="sandboxed")
-            forge.save_plugin(store, record)
-        expected = record  # K7: the record the publish below must still find
+
+        def changed(live: Any, since: str) -> ValueError:
+            live_state = "gone" if live is None else live.state
+            return ValueError(
+                f"plugin {plugin_id!r} changed {since} (it is now {live_state}), so nothing "
+                "was installed — propose promote_tool again if it should run"
+            )
+
+        with forge.PROMOTION_LOCK:
+            # Review R2 (L5): the record the publish checks against is read,
+            # and draft→sandboxed written, under the lock — a rollback
+            # confirmed since the read above wins, never overwritten.
+            live = forge.load_plugins(store).get(plugin_id)
+            if live != record:
+                raise changed(live, "since this promotion read it")
+            if record.state == "draft":
+                require_transition("draft", "sandboxed")
+                record = dataclasses.replace(record, state="sandboxed")
+                forge.save_plugin(store, record)
+            expected = record  # K7: the record the publish below must still find
         if record.state != "active":
             kept = f"the plugin stays {record.state!r}"
         elif runnable:
@@ -5387,12 +5419,7 @@ def _execute_mutation(
             live = forge.load_plugins(store).get(plugin_id)
             if live != expected:
                 discard()
-                live_state = "gone" if live is None else live.state
-                raise ValueError(
-                    f"plugin {plugin_id!r} changed while its trial ran (it is now "
-                    f"{live_state}), so nothing was installed — propose promote_tool again "
-                    "if it should run"
-                )
+                raise changed(live, "while its trial ran")
             record = dataclasses.replace(record, trial=evidence)
             forge.save_plugin(store, record)
             if not ok:
@@ -5417,6 +5444,7 @@ def _execute_mutation(
                     skep_home, plugin_id, binding["lock_sha256"], staging, seal
                 )
             except ValueError as exc:
+                discard()  # review R2 (L6): staging never outlives a failure
                 raise ValueError(f"{exc} — {kept}") from exc
             published = dataclasses.replace(
                 record,
@@ -5550,8 +5578,16 @@ def _execute_mutation(
         return {"pack_id": pack_record.pack_id, "state": pack_record.state}
     if name == "unregister_mcp_server":
         # v47-F2: CRUD honesty — the remove half of register_mcp_server.
-        from ..mcp_client import MCPError, remove_mcp_server
+        from ..mcp_client import FORGED_SERVER_PREFIX, MCPError, remove_mcp_server
 
+        if str(args["server_id"]).startswith(FORGED_SERVER_PREFIX):
+            # Review R2 (L8): registered ⟺ active — a forged tool leaves its
+            # registration only through its lifecycle, never half of it.
+            raise ValueError(
+                f"{args['server_id']!r} is a forged tool's registration — suspend_tool "
+                f"{str(args['server_id']).removeprefix(FORGED_SERVER_PREFIX)} pauses it "
+                "(rollback=true retires it); unregister_mcp_server is for servers you registered"
+            )
         try:
             remove_mcp_server(store, str(args["server_id"]))
         except MCPError as exc:

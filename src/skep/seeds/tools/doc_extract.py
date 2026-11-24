@@ -34,6 +34,9 @@ MAX_BYTES = 8 * 1024 * 1024
 # process, so a tiny hostile file must cost neither gigabytes nor minutes.
 MAX_DECODED_BYTES = 32 * 1024 * 1024  # every stream's filter output, summed
 MAX_READ_BYTES = 4 * MAX_BYTES  # raw stream bytes handed to a decoder, summed
+# Review R2 (L1, L2): bytes the tokenizer walks, summed over EVERY use — each
+# object parse, each use of a content stream, each draw of a form, each CMap.
+MAX_PARSED_BYTES = 2 * MAX_DECODED_BYTES
 MAX_FILTERS = 4  # filters on one stream
 MAX_OBJECTS = 200_000  # objects found by scanning plus unpacked from object streams
 MAX_WORK = 2_000_000  # parser tokens plus font/CMap map entries
@@ -70,10 +73,15 @@ TOOLS: list[dict[str, Any]] = [
 
 # --- PDF -------------------------------------------------------------------------------
 
-_WS = b" \t\r\n\f\x00"
-_DELIM = b"()<>[]{}/%"
-_NUM = re.compile(rb"[+-]?(?:\d+\.?\d*|\.\d+)")
-_OBJ = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
+# Review R2 (L2): every scan is linear — digit runs are bounded and an object
+# header never starts inside one (it backtracked quadratically), whitespace,
+# words and literal runs are matched in C, not walked byte by byte in Python.
+_NUM = re.compile(rb"[+-]?(?:\d{1,32}\.?\d{0,32}|\.\d{1,32})")
+_DIGITS = re.compile(rb"\d{1,10}")
+_OBJ = re.compile(rb"(?<!\d)(\d{1,10})\s+(\d{1,5})\s+obj\b")
+_BLANKS = re.compile(rb"(?:[ \t\r\n\f\x00]+|%[^\r\n]*)*")
+_WORD = re.compile(rb"[^ \t\r\n\f\x00()<>\[\]{}/%]*")
+_LITERAL_STOP = re.compile(rb"[()\\]")
 _ESCAPES = {ord("n"): 10, ord("r"): 13, ord("t"): 9, ord("b"): 8, ord("f"): 12}
 _LIGATURES = str.maketrans(
     {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl"}
@@ -114,7 +122,7 @@ class _Budget:
     """Review R1 (K2): what one document may cost. Past any cap: ValueError."""
 
     def __init__(self) -> None:
-        self.decoded = self.read = self.objects = self.work = self.forms = 0
+        self.decoded = self.read = self.objects = self.work = self.forms = self.parsed = 0
 
     def raw(self, size: int) -> None:
         self.read += size  # stream extents may overlap in a hostile file
@@ -135,6 +143,14 @@ class _Budget:
 
     def room(self) -> int:
         return MAX_DECODED_BYTES - self.decoded
+
+    def parse(self, size: int) -> None:
+        self.parsed += size
+        if self.parsed > MAX_PARSED_BYTES:
+            raise self.refuse(f"more than {MAX_PARSED_BYTES >> 20} MiB parsed")
+
+    def parse_room(self) -> int:
+        return MAX_PARSED_BYTES - self.parsed
 
     def object(self) -> None:
         self.objects += 1
@@ -160,41 +176,48 @@ class _Parser:
     """Tokenizer for PDF objects and content streams: composites come back
     built (dict, list), ``n g R`` as a _Ref, anything else bare as an _Op."""
 
-    def __init__(self, data: bytes, budget: _Budget, pos: int = 0) -> None:
+    def __init__(self, data: bytes, budget: _Budget, pos: int = 0, *, paid: bool = False) -> None:
         self.data = data
         self.budget = budget
         self.pos = pos
+        # Review R2 (L1, L2): every byte walked is charged. ``paid``: the
+        # caller charged this whole buffer for this use; else the parser
+        # charges as it goes and never walks past what the budget has left.
+        self.mark = len(data) if paid else pos
+        self.end = len(data) if paid else min(len(data), pos + budget.parse_room() + 1)
+
+    def _charge(self) -> None:
+        if self.pos > self.mark:
+            self.budget.parse(self.pos - self.mark)
+            self.mark = self.pos
 
     def skip(self) -> None:
-        data, end = self.data, len(self.data)
-        while self.pos < end:
-            if data[self.pos] in _WS:
-                self.pos += 1
-            elif data[self.pos] == 0x25:  # % comment
-                newline = data.find(b"\n", self.pos)
-                self.pos = end if newline < 0 else newline + 1
-            else:
-                return
+        if self.pos < self.end:
+            self.pos = _BLANKS.match(self.data, self.pos, self.end).end()  # type: ignore[union-attr]
+        self._charge()
 
     def _word_end(self, pos: int) -> int:
-        while pos < len(self.data) and self.data[pos] not in _WS + _DELIM:
-            pos += 1
-        return pos
+        if pos >= self.end:
+            return pos
+        return _WORD.match(self.data, pos, self.end).end()  # type: ignore[union-attr]
 
     def token(self) -> Any:
         self.budget.tick()
+        value = self._token()
+        self._charge()
+        return value
+
+    def _token(self) -> Any:
         self.skip()
         data = self.data
-        if self.pos >= len(data):
+        if self.pos >= self.end:
             return None
         char = data[self.pos : self.pos + 1]
         if char == b"/":
             end = self._word_end(self.pos + 1)
-            raw = re.sub(
-                rb"#([0-9A-Fa-f]{2})",
-                lambda m: bytes([int(m.group(1), 16)]),
-                data[self.pos + 1 : end],
-            )
+            raw = data[self.pos + 1 : end]
+            self.budget.tick(raw.count(b"#"))  # L2: each #xx escape is a Python step
+            raw = re.sub(rb"#([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
             self.pos = end
             return _Name(raw.decode("latin-1"))
         if char == b"(":
@@ -209,8 +232,8 @@ class _Parser:
             self.pos += 2
             return _Op(">>")
         if char == b"<":
-            end = data.find(b">", self.pos)
-            end = len(data) if end < 0 else end
+            end = data.find(b">", self.pos, self.end)
+            end = self.end if end < 0 else end
             digits = re.sub(rb"[^0-9A-Fa-f]", b"", data[self.pos + 1 : end])
             self.pos = end + 1
             return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
@@ -223,7 +246,7 @@ class _Parser:
         if char in (b"]", b"{", b"}", b")", b">"):
             self.pos += 1
             return _Op(char.decode())
-        number = _NUM.match(data, self.pos)
+        number = _NUM.match(data, self.pos, self.end)
         if number:
             self.pos = number.end()
             if b"." in number.group():
@@ -237,21 +260,31 @@ class _Parser:
     def _maybe_ref(self, value: int) -> Any:
         save = self.pos
         self.skip()
-        gen = re.compile(rb"\d+").match(self.data, self.pos)
+        gen = _DIGITS.match(self.data, self.pos, self.end)
         if gen:
             self.pos = gen.end()
             self.skip()
-            if self.data.startswith(b"R", self.pos) and self._word_end(self.pos) == self.pos + 1:
+            if (
+                self.data.startswith(b"R", self.pos, self.end)
+                and self._word_end(self.pos) == self.pos + 1
+            ):
                 self.pos += 1
                 return _Ref(value, int(gen.group()))
         self.pos = save
         return value
 
     def _literal(self) -> bytes:
-        data, end = self.data, len(self.data)
+        data, end = self.data, self.end
         self.pos += 1
         depth, out = 1, bytearray()
         while self.pos < end:
+            hit = _LITERAL_STOP.search(data, self.pos, end)  # L2: plain runs copied in C
+            stop = end if hit is None else hit.start()
+            out += data[self.pos : stop]
+            self.pos = stop
+            if hit is None:
+                break
+            self.budget.tick()  # L2: each paren or escape is a Python step
             char = data[self.pos]
             self.pos += 1
             if char == 0x5C and self.pos < end:  # backslash escape
@@ -297,12 +330,14 @@ def _decode(meta: Any, raw: bytes, budget: _Budget) -> bytes | None:
             if len(data) > room:
                 raise budget.refuse(f"more than {MAX_DECODED_BYTES >> 20} MiB of decoded streams")
         elif name in ("ASCIIHexDecode", "AHx"):
-            digits = re.sub(rb"[^0-9A-Fa-f]", b"", data.split(b">")[0])
+            digits = re.sub(rb"[^0-9A-Fa-f]", b"", data.partition(b">")[0])
             data = bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
         elif name in ("ASCII85Decode", "A85"):
-            body = data.strip().removeprefix(b"<~").split(b"~>")[0]
+            body = re.sub(rb"\s", b"", data.strip().removeprefix(b"<~").partition(b"~>")[0])
+            if 4 * body.count(b"z") + len(body) > budget.room():  # L2: 'z' is four bytes
+                raise budget.refuse(f"more than {MAX_DECODED_BYTES >> 20} MiB of decoded streams")
             try:
-                data = base64.a85decode(re.sub(rb"\s", b"", body))
+                data = base64.a85decode(body)
             except ValueError:
                 return None
         else:
@@ -317,7 +352,7 @@ class _Pdf:
         self.objects: dict[int, Any] = {}
         self.streams: dict[int, memoryview] = {}  # extents only: nothing copied
         self._decoded: dict[int, bytes | None] = {}
-        self._fonts: dict[int, _Font] = {}
+        self._fonts: dict[Any, _Font] = {}
         # every endstream once, so a stream with a bad /Length finds its end
         # by bisection — never a rescan of the file per object (K2)
         ends = [m.start() for m in re.finditer(rb"endstream", data)]
@@ -387,11 +422,12 @@ class _Pdf:
         return self._decode(ref.num)
 
     def font(self, ref: Any) -> "_Font":
-        if not isinstance(ref, _Ref):
-            return _Font(self, ref)
-        if ref.num not in self._fonts:  # a font's maps are built once per document
-            self._fonts[ref.num] = _Font(self, ref)
-        return self._fonts[ref.num]
+        # A font's maps are built once per document — an inline font dict too
+        # (L2), by identity: it lives in self.objects as long as this reader.
+        key = ref if isinstance(ref, _Ref) else id(ref)
+        if key not in self._fonts:
+            self._fonts[key] = _Font(self, ref)
+        return self._fonts[key]
 
     def pages(self) -> list[dict[str, Any]]:
         roots = [self.get(t.get("Root")) for t in self.trailers]
@@ -403,17 +439,18 @@ class _Pdf:
         seen: set[int] = set()
 
         def walk(ref: Any, inherited: dict[str, Any], depth: int) -> None:
-            if depth > 64 or (isinstance(ref, _Ref) and ref.num in seen):
-                return
-            if isinstance(ref, _Ref):
-                seen.add(ref.num)
+            # L2: a node is walked once, by identity — an inline kid has no
+            # reference to remember, and kids sharing one array were walked
+            # exponentially
             node = self.get(ref)
-            if not isinstance(node, dict):
+            if depth > 64 or not isinstance(node, dict) or id(node) in seen:
                 return
+            seen.add(id(node))
             if "Resources" in node:
                 inherited = {"Resources": node["Resources"]}
             kids = self.get(node.get("Kids"))
             if isinstance(kids, list):
+                self.budget.tick(len(kids))
                 for kid in kids:
                     walk(kid, inherited, depth + 1)
             else:
@@ -426,6 +463,7 @@ class _Pdf:
 
 def _cmap(data: bytes, budget: _Budget) -> tuple[dict[int, str], int]:
     """A ToUnicode CMap: code -> text, and the code width in bytes."""
+    budget.parse(len(data))  # L1: every use of a CMap is charged
     mapping: dict[int, str] = {}
     space = re.search(rb"begincodespacerange\s*<([0-9A-Fa-f]+)>", data)
     width = max(1, len(space.group(1)) // 2) if space else 1
@@ -433,17 +471,20 @@ def _cmap(data: bytes, budget: _Budget) -> tuple[dict[int, str], int]:
     def utf16(hexed: bytes) -> str:
         return bytes.fromhex(hexed.decode()).decode("utf-16-be", errors="replace")
 
-    for block in re.findall(rb"beginbfchar(.*?)endbfchar", data, re.S):
+    for block in _blocks(data, b"beginbfchar", b"endbfchar"):
         for source, target in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>", block):
+            budget.tick()
             mapping[int(source, 16)] = utf16(target)
-    for block in re.findall(rb"beginbfrange(.*?)endbfrange", data, re.S):
+    for block in _blocks(data, b"beginbfrange", b"endbfrange"):
         for low, high, target in re.findall(
-            rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])", block
+            rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\][]*\])", block
         ):
             first, last = int(low, 16), int(high, 16)
             budget.tick(min(max(last - first, 0), 65535) + 1)
             if target.startswith(b"["):
-                for offset, item in enumerate(re.findall(rb"<([0-9A-Fa-f]*)>", target)):
+                items = re.findall(rb"<([0-9A-Fa-f]*)>", target)
+                budget.tick(len(items))
+                for offset, item in enumerate(items):
                     mapping[first + offset] = utf16(item)
                 continue
             base = bytes.fromhex(target[1:-1].decode()) or b"\0\0"
@@ -452,6 +493,19 @@ def _cmap(data: bytes, budget: _Budget) -> tuple[dict[int, str], int]:
                 unit = ((start + offset) & 0xFFFF).to_bytes(2, "big")
                 mapping[first + offset] = (base[:-2] + unit).decode("utf-16-be", errors="replace")
     return mapping, width
+
+
+def _blocks(data: bytes, begin: bytes, end: bytes) -> list[bytes]:
+    """Each ``begin``…``end`` block in one pass: an opener with no closer
+    stops the search, never a rescan to the end per opener (L2)."""
+    found, pos = [], 0
+    while (start := data.find(begin, pos)) >= 0:
+        stop = data.find(end, start)
+        if stop < 0:
+            break
+        found.append(data[start + len(begin) : stop])
+        pos = stop + len(end)
+    return found
 
 
 def _glyph(name: str) -> str | None:
@@ -484,7 +538,9 @@ class _Font:
         self.codec = "mac_roman" if base == "MacRomanEncoding" else "cp1252"
         if isinstance(encoding, dict):
             code = 0
-            for item in pdf.get(encoding.get("Differences")) or []:
+            differences = pdf.get(encoding.get("Differences")) or []
+            pdf.budget.tick(len(differences))  # L2: a shared array costs every font
+            for item in differences:
                 if isinstance(item, int):
                     code = item
                 elif isinstance(item, _Name):
@@ -497,10 +553,13 @@ class _Font:
             child = pdf.get(kids[0]) if isinstance(kids, list) and kids else None
             child = child if isinstance(child, dict) else {}
             self.default = _number(pdf.get(child.get("DW"))) or 1000.0
-            spec = [pdf.get(v) for v in pdf.get(child.get("W")) or []]
+            widths = pdf.get(child.get("W")) or []
+            pdf.budget.tick(len(widths))
+            spec = [pdf.get(v) for v in widths]
             i = 0
             while i + 1 < len(spec):  # [c [w w ...]] or [c_first c_last w]
                 if isinstance(spec[i], int) and isinstance(spec[i + 1], list):
+                    pdf.budget.tick(len(spec[i + 1]))
                     for offset, w in enumerate(spec[i + 1]):
                         self._set(spec[i] + offset, pdf.get(w))
                     i += 2
@@ -515,7 +574,9 @@ class _Font:
                     break
         else:
             first = pdf.get(font.get("FirstChar"))
-            for offset, w in enumerate(pdf.get(font.get("Widths")) or []):
+            widths = pdf.get(font.get("Widths")) or []
+            pdf.budget.tick(len(widths))
+            for offset, w in enumerate(widths):
                 if isinstance(first, int):
                     self._set(first + offset, pdf.get(w))
 
@@ -610,7 +671,7 @@ def _run(
     fonts = fonts if isinstance(fonts, dict) else {}
     xobjects = pdf.get(resources.get("XObject"))
     xobjects = xobjects if isinstance(xobjects, dict) else {}
-    parser = _Parser(content, pdf.budget)
+    parser = _Parser(content, pdf.budget, paid=True)  # L1: the caller charged this use
     operands: list[Any] = []
     while (token := parser.token()) is not None:
         if not isinstance(token, _Op):
@@ -635,8 +696,10 @@ def _run(
         elif token in ("Tj", "'", '"') and isinstance(last, bytes):
             if token != "Tj":
                 state.move(0, -state.leading)
+            pdf.budget.tick(len(last))  # L2: one step per shown byte
             state.show([last])
         elif token == "TJ" and isinstance(last, list):
+            pdf.budget.tick(sum(len(item) for item in last if isinstance(item, bytes)))
             state.show(last)
         elif token == "ID":  # inline image: skip its raw bytes to EI
             end = re.compile(rb"\sEI(?=\s|$)").search(parser.data, parser.pos)
@@ -653,6 +716,7 @@ def _run(
                 pdf.budget.form()
                 body = pdf.stream(ref)
                 if body is not None:
+                    pdf.budget.parse(len(body))  # L1: every draw is charged
                     saved = state.tm, state.tlm
                     inner = form.get("Resources") or resources
                     _run(pdf, body, inner, state, depth + 1, drawing | {ref.num})
@@ -687,7 +751,11 @@ def pdf_to_text(data: bytes, *, max_chars: int = MAX_TEXT_CHARS) -> str:
             # K11: a reference may name an ARRAY of streams — read in order
             target = pdf.get(contents)
             refs = target if isinstance(target, list) else [contents]
-            body = b"\n".join(s for s in map(pdf.stream, refs) if s is not None)
+            streams = [s for s in map(pdf.stream, refs) if s is not None]
+            # L1: every use is charged, before the join allocates it — one
+            # cached stream named N times costs N times
+            pdf.budget.parse(sum(map(len, streams)) + len(streams))
+            body = b"\n".join(streams)
             state.out, state.last = [], None
             try:
                 _run(pdf, body, page.get("Resources"), state)

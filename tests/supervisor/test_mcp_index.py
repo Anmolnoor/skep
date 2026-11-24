@@ -148,7 +148,7 @@ def test_serve_startup_warms_in_the_background_forged_included(
         deadline = time.monotonic() + 10
         while len(spawned) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
-    assert spawned == [f"{FORGED_SERVER_PREFIX}x", "mail"]
+    assert sorted(spawned) == [f"{FORGED_SERVER_PREFIX}x", "mail"]  # listed in parallel
 
 
 def test_a_failing_server_is_skipped_by_the_warm(
