@@ -198,7 +198,17 @@ def run_terminal_text(
     # the operator concluded the work was destroyed. Patchless completions
     # stay opt-in (the model's own continuation reports success).
     patch = patch_path(store, task_id) if run.state == "completed" else None
-    unlanded_patch = patch is not None and applied_branch_for(store, task_id) is None
+    landed = run.state == "completed" and applied_branch_for(store, task_id) is not None
+    unlanded_patch = patch is not None and not landed
+    # v128-F7: the newest landing verdict a human denied (not a failed
+    # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
+    landings = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
+    last = landings[-1] if landings else None
+    human_denied = (
+        last is not None
+        and last.status == "denied"
+        and "apply failed:" not in (last.resolution_note or "")
+    )
     # v56-F5 (ADR 0038): a gate is a call to action, not an opt-in — a run
     # waiting on the operator must never sit silent in the queue.
     pending_gate = run.state == "pending_approval"
@@ -207,7 +217,14 @@ def run_terminal_text(
     # Only outcome "failed" is the disagreement shape: "not_applicable" is
     # benign (v65) and "unavailable" already rides the unlanded-patch line.
     reverify = store.reverification_for(task_id) if run.state == "completed" else None
-    disagreed = reverify is not None and not reverify.confirmed and reverify.outcome == "failed"
+    # R3 J6: like an unlanded patch, a landed or human-denied run asks nothing more.
+    disagreed = (
+        reverify is not None
+        and not reverify.confirmed
+        and reverify.outcome == "failed"
+        and not landed
+        and not human_denied
+    )
     if (
         run.state not in FAILED_STATES
         and not completed_opt_in
@@ -277,15 +294,8 @@ def run_terminal_text(
                 f"work is on no branch){unverified}"
             )
         kind = "action_needed"
-        # v128-F7: the newest landing verdict a human denied (not a failed
-        # apply, v81-F2) is the answer — the patch is kept, nothing is asked.
-        landings = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
-        last = landings[-1] if landings else None
-        if (
-            last is not None
-            and last.status == "denied"
-            and "apply failed:" not in (last.resolution_note or "")
-        ):
+        if human_denied:
+            assert last is not None
             text = (
                 f"run {task_id[:13]}… completed — landing denied by {last.resolved_by}"
                 f"{files}; the patch is kept: land_run {task_id} still lands it"

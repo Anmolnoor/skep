@@ -551,3 +551,31 @@ def test_staged_probe_and_test_share_one_verdict(
         "ok": False,
         "detail": "no base URL configured",
     }
+
+
+def test_a_g10_disagreed_run_leaves_the_queue_once_landed_or_denied_by_a_human(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R3 J6: a disagreement is "action needed" only while its patch is
+    unlanded and no human has denied landing it — like an unlanded patch."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.cli_cmds import _review_cards
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    store = RunStore(config.db_path)
+    try:
+        g10 = {"outcome": "failed", "confirmed": False, "exit_codes": [1]}
+        landed = _completed(store, tmp_path, "landed", patch=True, **g10)
+        denied = _completed(store, tmp_path, "denied", patch=True, **g10)
+        waiting = _completed(store, tmp_path, "waiting", patch=True, **g10)
+        for task_id, approved in ((landed, True), (denied, False)):
+            review = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+            store.resolve_approval(review, approved=approved, actor="operator")
+        assert run_terminal_text(store, landed, completion_opt_in=False) is None
+        notice = run_terminal_text(store, denied, completion_opt_in=False)
+        assert notice is not None and notice[1] == "info" and "denied" in notice[0]
+        assert [c.task_id for c in _review_cards(store)] == [waiting]
+    finally:
+        store.close()
+    queue = serve_client(config).get("/api/review-queue?detail=false").json()
+    assert [i["id"] for i in queue["items"]] == [waiting]
