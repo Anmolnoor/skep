@@ -1153,7 +1153,9 @@ def test_an_open_pr_that_opened_nothing_is_a_failed_card_with_its_reason(
     ).json()
     reply = client.post(f"/api/chats/{chat_id}/commands/{card['action_id']}/confirm").json()
     assert reply["ok"] is False
-    assert reply["error"].startswith("the PR was not opened: git ls-remote failed")
+    # Phase 09 R3: a remoteless open_pr names the missing GitHub repo
+    assert reply["error"].startswith("the PR was not opened: ")
+    assert "point origin at the GitHub repo" in reply["error"]
     assert reply["result"]["opened"] is False
     store = RunStore(config.db_path, readonly=True)
     try:
