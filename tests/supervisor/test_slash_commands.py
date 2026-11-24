@@ -177,19 +177,22 @@ def test_a_card_verb_is_refused_only_where_no_command_proposing_it_runs() -> Non
 def test_confirm_refuses_a_card_whose_command_the_surface_does_not_carry(
     config: SupervisorConfig,
 ) -> None:
-    """Defence in depth (I5/I6): the browser never proposes /model's card, but
-    a card skep chat left pending shows in the same chat — the web confirm
-    path refuses it before the claim, so nothing runs and it stays pending."""
+    """Phase 10 R1 D1: a client hint, not authorization (one token, one
+    operator). The browser never proposes /model's card, but a card skep chat
+    left pending shows in the same chat — the web's confirm is refused before
+    the claim (answer it where it was asked), so nothing runs and it stays
+    pending. Cancel is taken anywhere (test_command_deck)."""
     desk = serve_client(config)
     chat_id = desk.post("/api/chats", json={}).json()["chat_id"]
     action_id = desk.post(
         f"/api/chats/{chat_id}/commands",
         json={"tool": "set_assistant_model", "args": {"model": "m2"}},
     ).json()["action_id"]
-    for verb in ("confirm", "deny"):
-        refused = desk.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
-        assert refused.status_code == 403, verb
-        assert refused.json()["detail"] == "/model is not available on web; it runs on cli"
+    refused = desk.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == (
+        "/model is not available on web; it runs on cli — answer it in skep chat"
+    )
     (card,) = desk.get(f"/api/chats/{chat_id}").json()["actions"]
     assert card["status"] == "proposed"
     # The confirm path is a desk path: a messenger's name is not a surface here.

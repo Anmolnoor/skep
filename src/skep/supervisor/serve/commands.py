@@ -10,9 +10,11 @@ first; a name its surface does not carry is refused there, before any handler
 or model runs.
 
 A row that proposes a confirm card names the card's ``verb``. The desk's
-confirm path asks ``check_card`` before it claims a card, so a card whose
-command the confirming surface does not carry is refused again there
-(defence in depth, 10.3). Both checks only ever refuse.
+confirm path asks ``check_card`` before it claims a card, so a card is
+confirmed where it was asked. The desk's two surfaces share one serve token
+— one operator — so that ``surface`` is a client hint, not authorization
+(Phase 10 R1): usability, and a cancel is taken on either. Both checks only
+ever refuse.
 
 Who runs a command: on ``web`` and ``cli`` the operator (serve token / the
 local terminal); on a messenger an allow-listed member — admission happens

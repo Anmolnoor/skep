@@ -123,8 +123,10 @@ gitignored on the public tree: plans stay local, only the fix commits push
   completion and refusals, and keeps only the executors. Mutations become
   `chat_actions` rows with `source='operator'`, resolved on
   `/api/chats/{id}/commands/{action_id}/confirm|deny` under actor
-  `operator-command` — which refuses a card whose command the confirming
-  surface does not carry (`?surface=cli` for `skep chat`). `/workon <path>` is
+  `operator-command`. `?surface=web|cli` there is a client hint, NOT
+  authorization (one serve token = one operator): a confirm is answered where
+  the card was asked (the web draws skep chat's `/model` card read-only with
+  "answer it in skep chat"), a cancel is taken on either. `/workon <path>` is
   the local-dir on-ramp (confirmed git baseline, then project setup). A new
   web command needs a registry row AND an executor branch — a test pins the
   two to one set.

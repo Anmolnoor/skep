@@ -1972,6 +1972,14 @@ function cardVerdict(action) {
 // was dismissed and the run sat in pending_approval with no card.
 function resolvesOnCommands(card) { return card.source !== "assistant"; }
 
+// Phase 10 R1 D1: the cards that hold this composer — the server's own rule
+// (chat.py blocking_cards, with the web's surface hint): pending, not a gate
+// mirror, and one the web can confirm. A card skep chat must answer
+// (web_refusal) is read-only here and never locks the conversation.
+function blocksComposer(action) {
+  return action.status === "proposed" && action.source !== "gate" && !action.web_refusal;
+}
+
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
   // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
@@ -2715,8 +2723,8 @@ async function viewChat(main, chatId) {
 
   // ---------- the command deck executor (v25-F1) ----------
 
-  const anyCardPending = () =>
-    log.querySelector(".confirm-card:not(.resolved):not(.gate-card)") !== null;
+  const anyCardPending = () => [...log.querySelectorAll(".confirm-card")].some(card =>
+    !["resolved", "gate-card", "elsewhere-card"].some(cls => card.classList.contains(cls)));
 
   const commandHelp = (intro) => {
     log.append(el("div", { class: "command-help" },
@@ -2779,6 +2787,33 @@ async function viewChat(main, chatId) {
     return card;
   };
 
+  // Phase 10 R1 D1: a desk card the web cannot confirm (skep chat's /model).
+  // `?surface=` is a client hint, not authorization — so this is usability,
+  // not a wall: the card says where to answer it, and Cancel works here
+  // (a deny only narrows). Never locks the composer.
+  const elsewhereCard = (d) => {
+    const cancel = el("button", { class: "danger" }, "Cancel");
+    const card = el("div", { class: "confirm-card command-card elsewhere-card", "data-action-id": d.action_id },
+      ...cardBody(d),
+      el("p", { class: "note" }, d.web_refusal),
+      el("div", { class: "actions" }, cancel));
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      try {
+        const result = await api("POST", `/api/chats/${activeChatId}/commands/${d.action_id}/deny`);
+        commandResult(`${d.tool}: canceled`, result, d.tool);
+        resolveCardUI(card, "✗ Canceled", "deny");
+      } catch (e) {
+        flash("bad", e.message);
+        cancel.disabled = false;
+      }
+      setComposerLocked(anyCardPending());
+    });
+    log.append(card);
+    scrollBottom();
+    return card;
+  };
+
   // v87-F2: a worker approval gate, mirrored into the chat as an actionable
   // card — resolved on the commands endpoints (actor operator-command), and
   // superseded automatically when the Approvals view answers first. Never
@@ -2834,12 +2869,11 @@ async function viewChat(main, chatId) {
       // v25-F1: operator /commands resolve on the commands endpoints; only
       // model proposals resume the model after the verdict. v87-F2: gate
       // mirrors ride the commands endpoints too, without locking anything.
-      if (action.source === "operator") commandCard(action);
+      if (action.source === "operator") (action.web_refusal ? elsewhereCard : commandCard)(action);
       else if (action.source === "gate") gateCard(action);
       else actionCard(action);
     }
-    setComposerLocked(actions.some(
-      action => action.status === "proposed" && action.source !== "gate"));
+    setComposerLocked(actions.some(blocksComposer));
   };
 
   const proposeCommand = async (tool, args, notes = []) => {
@@ -3320,7 +3354,8 @@ async function viewChat(main, chatId) {
       chatId: activeChatId,
     });
     const payload = attachments.length ? { content, attachments } : { content };
-    try { await runStream(`/api/chats/${activeChatId}/messages`, payload); }
+    // D1: the surface hint, so the server's 409 follows the web's lock rule.
+    try { await runStream(`/api/chats/${activeChatId}/messages?surface=web`, payload); }
     catch (e) { flash("bad", e.message); send.disabled = false; }
     watchStatus();  // v43-F4: a dispatched run keeps reporting after the turn
     input.focus();
@@ -4916,7 +4951,7 @@ async function poll() {
       // the composer itself in its finally, and a route() here would tear
       // down the DOM the stream is appending to.
       const detail = await api("GET", `/api/chats/${pendingCardChatId}`);
-      if (!detail.actions.some(action => action.status === "proposed")) {
+      if (!detail.actions.some(blocksComposer)) {
         pendingCardChatId = null;
         route();
       }

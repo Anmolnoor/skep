@@ -13,6 +13,7 @@ from typing import cast
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.packs import get_policy_pack
@@ -359,6 +360,78 @@ def test_operator_command_deny_cancels_without_execution(
     assert client.get("/api/projects/deck-project").json()["phase"] == "build"
     (resolved,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     assert resolved["status"] == "denied"
+
+
+MODEL_CARD_ON_THE_WEB = "/model is not available on web; it runs on cli — answer it in skep chat"
+
+
+def _model_card(client: TestClient, chat_id: str) -> str:
+    """The one card only skep chat carries: /model's set_assistant_model."""
+    response = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "set_assistant_model", "args": {"model": "m2"}},
+    )
+    return str(response.json()["action_id"])
+
+
+def test_surface_is_a_hint_confirm_answers_where_asked_and_cancel_is_anywhere(
+    config: SupervisorConfig,
+) -> None:
+    """Phase 10 R1 D1 (I7, I8): web and skep chat share one token — one
+    operator — so ``?surface=`` is a client hint, not authorization. Confirm
+    still answers a card where it was asked (the web is told where); a cancel
+    only narrows, so any desk surface may give it."""
+    client = serve_client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    action_id = _model_card(client, chat_id)
+    refused = client.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm")
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == MODEL_CARD_ON_THE_WEB
+    (card,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert card["status"] == "proposed"
+    assert card["web_refusal"] == MODEL_CARD_ON_THE_WEB  # the web draws it read-only
+    canceled = client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+    assert canceled.status_code == 200 and canceled.json()["denied"] is True
+    (card,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert card["status"] == "denied" and "web_refusal" not in card
+    # A card the web carries is never marked.
+    web_card = client.post(
+        f"/api/chats/{chat_id}/commands", json={"tool": "set_role", "args": {"name": "x"}}
+    ).json()["action_id"]
+    marked = {a["action_id"]: a for a in client.get(f"/api/chats/{chat_id}").json()["actions"]}
+    assert "web_refusal" not in marked[web_card]
+
+
+def test_a_card_the_web_cannot_confirm_never_holds_the_web_composer(
+    config: SupervisorConfig,
+) -> None:
+    """D1: the web composer locks on exactly the cards the web can confirm,
+    and the server's 409 follows the same rule for the web — while skep chat
+    (no hint: the strict rule) still answers its own card first."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client = serve_client(config)
+        client.put(
+            "/api/llm/config",
+            json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+        )
+        chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+        _model_card(client, chat_id)
+        held = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        assert held.status_code == 409  # skep chat: resolve its card first
+        ollama.script_reply("hello")
+        web = client.post(f"/api/chats/{chat_id}/messages?surface=web", json={"content": "hi"})
+        assert web.status_code == 200, web.text
+        assert "hello" in web.text
+        client.post(
+            f"/api/chats/{chat_id}/commands", json={"tool": "set_role", "args": {"name": "x"}}
+        )
+        again = client.post(f"/api/chats/{chat_id}/messages?surface=web", json={"content": "hi"})
+        assert again.status_code == 409  # a card the web can confirm holds it
+    finally:
+        ollama.stop()
 
 
 def test_command_endpoint_rejects_tools_outside_the_deck(config: SupervisorConfig) -> None:

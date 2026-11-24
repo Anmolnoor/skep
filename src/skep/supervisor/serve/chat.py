@@ -64,7 +64,7 @@ from .cards import (
     recorded_card,
     unreadable_under_deny,
 )
-from .commands import CommandRefused, check_card, web_deck
+from .commands import WEB, CommandRefused, check_card, web_deck
 from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
@@ -504,13 +504,36 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     )
 
 
-def blocking_cards(store: RunStore, chat_id: str) -> list[ChatActionRecord]:
+def card_refusal(surface: str, card: ChatActionRecord) -> str | None:
+    """Phase 10 R1 D1: why ``surface`` will not confirm ``card`` — a desk card
+    whose command only another desk surface carries (/model's card, born in
+    skep chat) — or None. ``surface`` is a client hint, not authorization:
+    the web and skep chat share one token, so one operator (I8 — never call
+    this a boundary). The refusal is usability: a card is answered where it
+    was asked. A cancel is never refused here — a deny only narrows (I7)."""
+    if card.source not in ("operator", "gate"):
+        return None  # a model proposal resolves on /actions, not the deck
+    try:
+        check_card(surface, card.tool)
+    except CommandRefused as exc:
+        return f"{exc} — answer it in {'skep chat' if surface == WEB else 'the web console'}"
+    return None
+
+
+def blocking_cards(
+    store: RunStore, chat_id: str, *, surface: str | None = None
+) -> list[ChatActionRecord]:
     """ES-F5 (B100): the pending cards that hold the conversation — all but a
     gate mirror (v87-F2: a gate can wait; the conversation must not). The web
-    composer locks on exactly this set (app.js renderPendingCards); the
+    composer locks on exactly this set (app.js blocksComposer); the
     server 409'd on every card, so a gate that never times out locked the
-    chat while the UI showed it open."""
-    return [card for card in store.pending_chat_actions(chat_id) if card.source != "gate"]
+    chat while the UI showed it open. D1: with a ``surface`` hint, a card
+    that surface cannot confirm does not hold its composer either."""
+    return [
+        card
+        for card in store.pending_chat_actions(chat_id)
+        if card.source != "gate" and (surface is None or card_refusal(surface, card) is None)
+    ]
 
 
 def executed_status(payload: dict[str, Any]) -> str:
@@ -4117,6 +4140,10 @@ def add_chat_routes(
                     )
         return detail
 
+    def _web_refusal(action: ChatActionRecord) -> dict[str, str]:
+        refusal = card_refusal(WEB, action) if action.status == "proposed" else None
+        return {"web_refusal": refusal} if refusal else {}
+
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
@@ -4129,6 +4156,9 @@ def add_chat_routes(
                     "description": tool_description(a.tool),
                     # W39: the same card, decision and why-line the live event had
                     **engine.card_fields(chat_id, a),
+                    # D1: a pending card the web cannot confirm says where to
+                    # answer it; the web draws it read-only, Cancel still works.
+                    **_web_refusal(a),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],
@@ -4188,7 +4218,9 @@ def add_chat_routes(
         return FileResponse(path, media_type=attachment_mime(name))
 
     @app.post("/api/chats/{chat_id}/messages")
-    def post_message(chat_id: str, body: MessageRequest) -> StreamingResponse:
+    def post_message(
+        chat_id: str, body: MessageRequest, surface: Literal["web", "cli"] | None = None
+    ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
         for name in body.attachments:
@@ -4200,7 +4232,9 @@ def add_chat_routes(
         # ES-F2 (B14): the pending-card check happens under the turn lock —
         # checked outside it, two POSTs both passed and both ran turns.
         lock = take_turn(chat_id)
-        if blocking_cards(run_store, chat_id) and not body.read_only:
+        # D1: ``surface`` (a client hint) — a card it cannot confirm does
+        # not hold it; no hint is the strict rule (every non-gate card).
+        if blocking_cards(run_store, chat_id, surface=surface) and not body.read_only:
             # v67-F3: a read-only /btw may run beside a pending card — safe
             # precisely because nothing it does can need confirmation.
             lock.release()
@@ -4344,13 +4378,14 @@ def add_chat_routes(
                 detail="this is an assistant proposal; resolve it via "
                 f"/api/chats/{chat_id}/actions/{action_id}/confirm or /deny",
             )
-        # Phase 10 10.3 (I5/I6): defence in depth behind the deck's own
-        # refusal — a card whose command this surface does not carry is
-        # refused before the claim, so nothing runs and it stays pending.
-        try:
-            check_card(surface, action.tool)
-        except CommandRefused as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        # Phase 10 R1 D1: ``surface`` is a client hint, not authorization —
+        # web and skep chat share one token, one operator. A confirm is
+        # answered where the card was asked (refused before the claim, so
+        # nothing runs and it stays pending); a cancel is taken anywhere,
+        # since a deny only narrows (I7).
+        refusal = card_refusal(surface, action) if confirm else None
+        if refusal is not None:
+            raise HTTPException(status_code=403, detail=refusal)
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
@@ -4431,7 +4466,8 @@ def add_chat_routes(
             record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
-    # The desk's two surfaces share this path; skep chat says it is the cli.
+    # The desk's two surfaces share this path; skep chat says it is the cli —
+    # a client hint (one token, one operator), never an authorization check.
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")
     def confirm_command(
         chat_id: str, action_id: str, surface: Literal["web", "cli"] = "web"

@@ -926,7 +926,8 @@ def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
     styles = (STATIC_DIR / "style.css").read_text()
 
     assert "const cardBody = (d)" in source
-    assert source.count("...cardBody(d)") == 3  # actionCard, commandCard, gateCard
+    # actionCard, commandCard, gateCard, and Phase 10 R1 D1's elsewhereCard
+    assert source.count("...cardBody(d)") == 4
     # The description and args are reference, reachable but not the default view.
     assert 'el("details", { class: "card-details" }' in source
     # The three restatements are deleted.
@@ -1625,8 +1626,9 @@ def test_pending_cards_reconcile_without_a_reload() -> None:
     undrawn card exists. Both key off data-action-id on the card DOM."""
     source = (STATIC_DIR / "app.js").read_text()
 
-    # The id rides the DOM on ALL card kinds (assistant, command, v87-F2 gate).
-    assert source.count('"data-action-id": d.action_id') == 3
+    # The id rides the DOM on ALL card kinds (assistant, command, v87-F2 gate,
+    # and the read-only card skep chat must answer, Phase 10 R1 D1).
+    assert source.count('"data-action-id": d.action_id') == 4
     # One shared reconciler; replay and the stream finally both use it.
     assert "const renderPendingCards" in source
     assert source.count("renderPendingCards();") >= 2
