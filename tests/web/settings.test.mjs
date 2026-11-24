@@ -191,21 +191,26 @@ test("older flag: complete is one plain line with its date, then the checklist",
   assert.equal(byText(panel, "button", "Finish setup"), undefined);
 });
 
-test("older flag: each missing item names where it is set and opens that page's route", async () => {
+test("setup flag: each pending onboard step is named, with its page when another page sets it", async () => {
   const opened = [];
-  const app = setupApp({ ...SETUP, complete: false, marked_complete: false, completed_at: null,
-    missing: ["llm", "default_model", "workspace_project", "policy"] });
+  // Phase 05: `missing` is onboard's step keys — an old home with the legacy
+  // flag set still reads "not complete", never "the older flag: not complete"
+  const app = setupApp({ ...SETUP, complete: false, marked_complete: true,
+    missing: ["model", "workdir", "sandbox", "template", "role"] });
   const panel = app.el("div");
   await app.renderSetupTab(panel);
   const flag = panel.querySelector(".setup-flag");
-  assert.match(flag.textContent, /^The older setup flag: not complete/);
+  assert.match(flag.textContent, /^Setup is not complete/);
+  assert.ok(!flag.textContent.includes("older setup flag"));
+  for (const label of ["model (provider and key)", "work folder", "sandbox", "policy baseline", "role"]) {
+    assert.ok(flag.textContent.includes(label), label);
+  }
+  assert.ok(!/\b(model|workdir|sandbox|template|role) —/.test(flag.textContent)); // no raw keys
   const links = flag.querySelectorAll("button");
-  assert.deepEqual(links.map(b => b.textContent),
-    ["Open Models", "Open Models", "Open Projects", "Open Projects"]);
-  assert.ok(flag.textContent.includes("LLM connection"));
-  assert.ok(flag.textContent.includes("execution policy"));
+  assert.deepEqual(links.map(b => b.textContent), ["Open Models", "Open Projects"]);
   for (const link of links) { await link.click(); opened.push(app.location.hash); }
-  assert.deepEqual(opened, ["#/settings/models", "#/settings/models", "#/settings/projects", "#/settings/projects"]);
+  assert.deepEqual(opened, ["#/settings/models", "#/settings/projects"]);
+  assert.equal(flag.textContent.split("in the checklist below").length - 1, 3);
 });
 
 test("older flag: everything set but not recorded offers Finish, which records it", async () => {

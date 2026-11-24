@@ -91,12 +91,11 @@ async function renderChannelsAndWebhooks(panel) {
 
 // -- Setup: the older flag in one line, then the five-step checklist. -------
 
-// Where each thing the older flag needs is set — one place each.
+// The pending steps another page also sets; the rest are set only in the
+// checklist right below.
 const SETUP_WHERE = {
-  llm: ["models", "Models"],
-  default_model: ["models", "Models"],
-  workspace_project: ["projects", "Projects"],
-  policy: ["projects", "Projects"],
+  model: ["models", "Models"],
+  workdir: ["projects", "Projects"],
 };
 
 export async function renderSetupTab(panel) {
@@ -104,19 +103,20 @@ export async function renderSetupTab(panel) {
   panel.append(olderFlag(setup), await onboardChecklist());
 }
 
-// `/api/setup/status` is the older record (and the gate in route()); the
-// checklist below is `/api/onboard`. They are separate in the backend, so the
-// older one is stated, never drawn as a card that contradicts the checklist.
+// Phase 05: `/api/setup/status` (the gate in route()) IS the checklist below
+// — its `missing` is onboard's pending steps. The older record is only the
+// legacy `marked_complete` flag, stated in one line, never a contradiction.
 function olderFlag(setup) {
   if (!setup.complete) {
     const labels = setupMissingLabels(setup);
     return el("div", { class: "setup-flag" },
       el("p", { class: "note" },
-        "The older setup flag: not complete. Every page but Settings waits for it. Still missing:"),
+        "Setup is not complete. Every page but Settings waits for it. Still to do:"),
       el("ul", { class: "setup-missing" }, setup.missing.map((key, i) => {
-        const [tab, name] = SETUP_WHERE[key] || ["setup", "Setup"];
-        return el("li", {}, `${labels[i]} — `,
-          el("button", { type: "button", class: "ghost", onclick: () => { location.hash = `#/settings/${tab}`; } }, `Open ${name}`));
+        const where = SETUP_WHERE[key];
+        return el("li", {}, `${labels[i]} — `, where
+          ? el("button", { type: "button", class: "ghost", onclick: () => { location.hash = `#/settings/${where[0]}`; } }, `Open ${where[1]}`)
+          : "in the checklist below");
       })));
   }
   if (setup.marked_complete && setup.completed_at) {

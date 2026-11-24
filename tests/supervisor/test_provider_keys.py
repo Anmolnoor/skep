@@ -92,6 +92,7 @@ def test_provider_id_slug_guard_blocks_traversal() -> None:
     validate_provider_profile(_profile(provider_id="a-b.c_9"))
 
 
+@pytest.mark.usefixtures("accept_probes")  # Phase 05 R1: the key is probed first
 def test_rest_key_route_writes_file_and_never_a_get(config: SupervisorConfig) -> None:
     client = serve_client(config)
     client.post(
@@ -107,7 +108,11 @@ def test_rest_key_route_writes_file_and_never_a_get(config: SupervisorConfig) ->
 
     put = client.put("/api/providers/openrouter/key", json={"api_key": "sk-secret-value"})
     assert put.status_code == 200
-    assert put.json() == {"provider_id": "openrouter", "api_key_set": True}
+    assert put.json() == {
+        "provider_id": "openrouter",
+        "api_key_set": True,
+        "api_key_env_cleared": None,
+    }
     path = provider_secret_path(config.home, "openrouter")
     assert path.read_text().strip() == "sk-secret-value"
     assert path.stat().st_mode & 0o777 == 0o600
@@ -141,11 +146,14 @@ def test_chat_speaks_with_the_active_profiles_key(
             "base_url": ollama.base_url,
             "model": "qwen3",
             "cost_class": "local",
-            "activate": True,
         },
     )
     assert created.status_code == 201
-    client.put("/api/providers/local-fake/key", json={"api_key": "sk-profile-key"})
+    # Phase 05 R1: the key first (probed against the fake), then the switch —
+    # activating a profile that has no working credential yet is refused.
+    keyed = client.put("/api/providers/local-fake/key", json={"api_key": "sk-profile-key"})
+    assert keyed.status_code == 200
+    assert client.post("/api/providers/local-fake/activate").status_code == 200
 
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     ollama.script_reply("hello from the profile key")
@@ -155,11 +163,8 @@ def test_chat_speaks_with_the_active_profiles_key(
     assert auth == "Bearer sk-profile-key"
 
 
-def test_worker_bootstrap_uses_the_active_profiles_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # the staged probe (review R1 D3) has its own test: no real api.z.ai here
-    monkeypatch.setattr("skep.supervisor.cli_cmds._probe_refusal", lambda *a, **k: None)
+@pytest.mark.usefixtures("accept_probes")  # the zai preset is a real host
+def test_worker_bootstrap_uses_the_active_profiles_key(tmp_path: Path) -> None:
     personal = tmp_path
     supervisor_home = personal / "supervisor"
     assert (
@@ -186,11 +191,10 @@ def test_worker_bootstrap_uses_the_active_profiles_key(
     assert provider.api_key == "sk-worker-key"
 
 
+@pytest.mark.usefixtures("accept_probes")  # the probe has its own tests
 def test_cli_set_key_reads_stdin_not_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # the staged probe (review R1 D3) has its own test: no real api.deepseek.com here
-    monkeypatch.setattr("skep.supervisor.cli_cmds._probe_refusal", lambda *a, **k: None)
     cmd_provider_add(
         argparse.Namespace(
             home=tmp_path,

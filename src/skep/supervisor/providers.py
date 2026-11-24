@@ -93,14 +93,22 @@ class ProviderHealth:
 def _refusal(exc: Exception, profile: ProviderProfile, what: str) -> tuple[str, int | None]:
     """The I9 detail for a failed probe: the provider's words, plus the fix
     when the status says the key was refused."""
+    from .policy_v3 import redact
+
     status = getattr(exc, "status", None)
-    detail = f"{what}: {str(exc) or exc.__class__.__name__}"
+    detail = f"{what}: {redact(str(exc) or exc.__class__.__name__)}"
     if status in (401, 403):
         detail += (
             f" — the key was refused; give {profile.provider_id!r} a working key "
             f"(skep provider set-key {profile.provider_id}, or the env var it names)"
         )
     return detail, status if isinstance(status, int) else None
+
+
+def _redacted(exc: Exception) -> str:
+    from .policy_v3 import redact
+
+    return redact(str(exc) or exc.__class__.__name__)
 
 
 def check_provider_health(
@@ -130,7 +138,7 @@ def check_provider_health(
             reachable=False,
             model_found=False,
             latency_ms=None,
-            error=refusal if refused in (401, 403) else (str(exc) or exc.__class__.__name__),
+            error=refusal if refused in (401, 403) else _redacted(exc),
             checked_at=now,
             http_status=refused,
         )
@@ -176,6 +184,7 @@ def live_probes(
     last only for its own endpoint)."""
     from .serve.llm import (
         REGISTRY_PROTOCOLS,
+        OllamaError,
         list_models,
         probe_completion,
         resolve_provider_api_key,
@@ -192,14 +201,33 @@ def live_probes(
         )
         return protocol, key
 
-    def _list(profile: ProviderProfile) -> list[str]:
+    def _scrubbed(call: Callable[[Any, str | None], Any], profile: ProviderProfile) -> Any:
+        """Phase 05 R1 (I9/I11): a provider that quotes the key back
+        ("Incorrect API key provided: ...") never gets it into a reply, a
+        CLI line or a stored health row — the provider's words otherwise."""
         protocol, key = _target(profile)
-        return list_models(profile.base_url, key, protocol=protocol, timeout=timeout)
+        try:
+            return call(protocol, key)
+        except OllamaError as exc:
+            text = str(exc).replace(key, "***") if key else str(exc)
+            raise OllamaError(text, status=exc.status) from None
+
+    def _list(profile: ProviderProfile) -> list[str]:
+        return list(
+            _scrubbed(
+                lambda protocol, key: list_models(
+                    profile.base_url, key, protocol=protocol, timeout=timeout
+                ),
+                profile,
+            )
+        )
 
     def _probe(profile: ProviderProfile) -> None:
-        protocol, key = _target(profile)
-        probe_completion(
-            profile.base_url, key, model=profile.model, protocol=protocol, timeout=timeout
+        _scrubbed(
+            lambda protocol, key: probe_completion(
+                profile.base_url, key, model=profile.model, protocol=protocol, timeout=timeout
+            ),
+            profile,
         )
 
     return {"list_models": _list, "probe": _probe}
@@ -368,28 +396,45 @@ def _adopt_legacy_settings(store: RunStore) -> None:
             if adopted != active:
                 store.upsert_provider_profile(adopted)
         else:
-            taken = {p.provider_id for p in store.list_provider_profiles()}
-            pid = next(
-                c
-                for c in ("assistant", *(f"assistant-{n}" for n in range(2, 1000)))
-                if c not in taken
-            )
             store.upsert_provider_profile(
-                ProviderProfile(
-                    provider_id=pid,
-                    protocol=protocol,
-                    base_url=base_url,
-                    model=model.strip(),
-                    cost_class="local"
-                    if provider_host(base_url) in {"localhost", "127.0.0.1", "::1"}
-                    else "paid",
+                dataclasses.replace(
+                    endpoint_profile(
+                        store,
+                        base_url=base_url,
+                        protocol=protocol,
+                        model=model.strip(),
+                        source="migrated:llm-settings",
+                    ),
                     active=True,
-                    source="migrated:llm-settings",
                 )
             )
     from datetime import UTC, datetime
 
     store.set_setting(LLM_REGISTRY_CANONICAL, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def endpoint_profile(
+    store: RunStore, *, base_url: str, protocol: str, model: str, source: str
+) -> ProviderProfile:
+    """Phase 05: the profile a NEW endpoint gets — its own unused id, no key
+    and no key env (a credential never follows to a new host, v119-F1), its
+    endpoint host as the only allowlist entry, and a cost class from that
+    host (a remote one is never ``local``, which would skip allow_remote).
+    Not saved, not active."""
+    taken = {p.provider_id for p in store.list_provider_profiles()}
+    pid = next(
+        c for c in ("assistant", *(f"assistant-{n}" for n in range(2, 1000))) if c not in taken
+    )
+    return ProviderProfile(
+        provider_id=pid,
+        protocol=protocol,
+        base_url=base_url,
+        model=model,
+        cost_class="local"
+        if provider_host(base_url) in {"localhost", "127.0.0.1", "::1"}
+        else "paid",
+        source=source,
+    )
 
 
 def _seed_from_legacy(store: RunStore, home: Path) -> ProviderProfile | None:

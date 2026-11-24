@@ -417,11 +417,15 @@ def bedrock_chat_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     timeout: float,
+    max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """One streamed Converse call, normalized to the shared chunk shape."""
     del api_key  # SigV4 needs a key pair; bedrock reads the environment only.
     credentials = _credentials()
-    body = json.dumps(bedrock_payload(messages=messages, tools=tools)).encode("utf-8")
+    payload = bedrock_payload(messages=messages, tools=tools)
+    if max_tokens is not None:
+        payload["inferenceConfig"] = {"maxTokens": max_tokens}
+    body = json.dumps(payload).encode("utf-8")
     url = f"{base_url.rstrip('/')}/model/{quote(model, safe='')}/converse-stream"
     decoder = EventStreamDecoder()
     pending: dict[int, dict[str, str]] = {}

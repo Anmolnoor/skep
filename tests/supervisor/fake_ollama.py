@@ -51,6 +51,8 @@ class FakeOllama:
         # Phase 05: 1-token liveness probes (strict_wire.is_probe), kept apart
         # so the requests a test indexes are its own turns.
         self.probes: list[dict[str, Any]] = []
+        # Phase 05 R1: the probe's answer as NDJSON chunks; None = one "pong".
+        self.probe_reply: list[dict[str, Any]] | None = None
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -243,7 +245,10 @@ class FakeOllama:
                         return
                     if is_probe(body):
                         pong = {"model": model, "message": {"role": "assistant", "content": "pong"}}
-                        self._send(200, (json.dumps({**pong, "done": True}) + "\n").encode())
+                        answer = fake.probe_reply
+                        if answer is None:
+                            answer = [{**pong, "done": True, "done_reason": "length"}]
+                        self._send(200, "".join(json.dumps(c) + "\n" for c in answer).encode())
                         return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')

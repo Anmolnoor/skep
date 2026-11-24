@@ -240,9 +240,14 @@ def onboard_model(
             },
         )
     from .provider_presets import preset_egress_note
-    from .providers import ProviderProfile, check_provider_health, live_probes
+    from .providers import (
+        ProviderProfile,
+        check_provider_health,
+        live_probes,
+        validate_provider_profile,
+    )
     from .serve.actions import add_provider, use_provider
-    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
+    from .serve.llm import provider_rollback
 
     preset = _preset_for(provider, endpoint, model, api_key_env)
     base_url = (endpoint or preset.base_url or "").strip()
@@ -255,14 +260,20 @@ def onboard_model(
     # below writes, with the credential it would resolve — and probe it (the
     # model list AND a 1-token completion) BEFORE anything is written. A
     # refused key (ollama.com lists models to anyone, then 401s the chat)
-    # leaves the live provider byte-for-byte as it was (I8).
-    candidate = ProviderProfile(
-        provider_id=preset.preset_id,
-        protocol=preset.protocol,
-        base_url=base_url,
-        model=model,
-        api_key_env=key_env,
-        cost_class=preset.cost_class,
+    # leaves the live provider byte-for-byte as it was (I8). R1: validated
+    # first (a pasted key in --api-key-env, a bad URL) — never sent anywhere.
+    # The probe resolves the credential exactly as the builtin worker will
+    # (named env var → the profile's key file → llm-secret for its own
+    # endpoint; workers read this registry profile first, P10).
+    candidate = validate_provider_profile(
+        ProviderProfile(
+            provider_id=preset.preset_id,
+            protocol=preset.protocol,
+            base_url=base_url,
+            model=model,
+            api_key_env=key_env,
+            cost_class=preset.cost_class,
+        )
     )
     health = check_provider_health(
         candidate, now=_now(), **live_probes(holder.current.home, store, timeout=15.0)
@@ -276,56 +287,40 @@ def onboard_model(
         )
         raise ValueError(f"test call failed: {health.error} — nothing changed: {kept}")
 
-    # L2: snapshot what the switch touches and put it all back if anything
-    # fails mid-write (an interrupt included) — a failed switch changes
-    # nothing (I8). Phase 05: the test call already ran, on the candidate.
-    profile_file = home / "profile.json"
-    saved_profile = profile_file.read_bytes() if profile_file.exists() else None
-    saved_row = store.get_provider_profile(preset.preset_id)
+    # L2: what the switch touches is put back if anything fails mid-write
+    # (an interrupt included) — a failed switch changes nothing (I8). Phase
+    # 05: the test call already ran, on the candidate.
     previous = store.active_provider_profile()
-    saved_settings = {
-        key: store.get_setting(key) for key in (LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL)
-    }
     try:
-        if preset.preset_id in ("ollama", "openai-compatible"):
-            add_provider(
-                store,
-                provider_id=preset.preset_id,
-                protocol=preset.protocol,
-                base_url=base_url,
-                model=model,
-                api_key_env=key_env,
-                cost_class=preset.cost_class,
-                source="onboard",
-            )
-        else:
-            add_provider(
-                store, preset=preset.preset_id, base_url=base_url, model=model, api_key_env=key_env
-            )
-        used = use_provider(store, holder.current.home, provider_id=preset.preset_id)
-        # use_provider writes profile.json through with no key env (v19-F9); put
-        # the operator's NAME back so doctor and workers read the same truth.
-        run_personal_setup(
-            home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
-        )
-    except BaseException as exc:  # an interrupt mid-switch rolls back too
-        if saved_row is None:
-            store.delete_provider_profile(preset.preset_id)
-        else:
-            store.upsert_provider_profile(saved_row)
-        if previous is not None:
-            store.set_active_provider(previous.provider_id)
-        for key, value in saved_settings.items():
-            if value is None:  # absent before: delete, not a JSON null row
-                store.delete_setting(key)
+        with provider_rollback(store, holder.current.home):
+            if preset.preset_id in ("ollama", "openai-compatible"):
+                add_provider(
+                    store,
+                    provider_id=preset.preset_id,
+                    protocol=preset.protocol,
+                    base_url=base_url,
+                    model=model,
+                    api_key_env=key_env,
+                    cost_class=preset.cost_class,
+                    source="onboard",
+                )
             else:
-                store.set_setting(key, value)
-        if saved_profile is None:
-            profile_file.unlink(missing_ok=True)
-        else:
-            profile_file.write_bytes(saved_profile)
-        if not isinstance(exc, Exception):
-            raise
+                add_provider(
+                    store,
+                    preset=preset.preset_id,
+                    base_url=base_url,
+                    model=model,
+                    api_key_env=key_env,
+                )
+            used = use_provider(
+                store, holder.current.home, provider_id=preset.preset_id, probe=False
+            )
+            # use_provider writes profile.json through with no key env (v19-F9); put
+            # the operator's NAME back so doctor and workers read the same truth.
+            run_personal_setup(
+                home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
+            )
+    except Exception as exc:
         kept = (
             f"the previous provider {previous.provider_id!r} is still active"
             if previous is not None

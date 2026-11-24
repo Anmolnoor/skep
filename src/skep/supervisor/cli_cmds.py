@@ -2339,39 +2339,11 @@ def cmd_provider_presets(args: argparse.Namespace) -> int:
     return 0
 
 
-def _probe_refusal(
-    store: RunStore, config: SupervisorConfig, profile: Any, key: str | None = None
-) -> str | None:
-    """Phase 05 review R1 D3 (I8, I9): stage ``profile`` — with the candidate
-    ``key`` when one is about to be written, else its own credential — and
-    probe it (model list + a 1-token completion) BEFORE a key write or an
-    active switch. None when it answered, else the refusal, never the key.
-    ponytail: CLI-side, on providers.check_provider_health + live_probes;
-    fold into a shared staged action once one exists."""
-    from .providers import check_provider_health, live_probes, provider_host
-    from .serve.llm_copilot import COPILOT_HOST, resolve_copilot_bearer
-
-    def _candidate(p: Any) -> str | None:
-        # a Copilot GitHub token works only once exchanged, as at run time
-        if key and provider_host(p.base_url) == COPILOT_HOST:
-            return resolve_copilot_bearer(key)
-        return key
-
-    probes = live_probes(config.home, store, key_for=_candidate if key is not None else None)
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    health = check_provider_health(profile, now=now, **probes)
-    if health.ok:
-        return None
-    active = store.active_provider_profile()
-    kept = f"{active.provider_id!r} is still active" if active else "no provider is active"
-    return f"test call to {profile.provider_id} failed: {health.error} — nothing changed; {kept}"
-
-
 def cmd_provider_add(args: argparse.Namespace) -> int:
     """v108-F2: the registry's CLI write face — same actions.py verb as
     POST /api/providers and the carded chat tool (ADR 0050)."""
     from .providers import ProviderError
-    from .serve.actions import add_provider, use_provider
+    from .serve.actions import add_provider
 
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
@@ -2388,25 +2360,9 @@ def cmd_provider_add(args: argparse.Namespace) -> int:
     }
     try:
         try:
-            if args.activate:
-                # review R1 D3: stage the exact profile add_provider would
-                # save (a capture, no write) and probe it before registering
-                staged: list[Any] = []
-
-                class _Stage:
-                    def upsert_provider_profile(self, profile: Any) -> Any:
-                        from .providers import validate_provider_profile
-
-                        staged.append(validate_provider_profile(profile))
-                        return staged[-1]
-
-                add_provider(_Stage(), **fields)  # type: ignore[arg-type]
-                if refusal := _probe_refusal(store, config, staged[0]):
-                    return _err(refusal)
-            result = add_provider(store, **fields)
+            # review R1 D3: activate stages + probes before anything is written
+            result = add_provider(store, **fields, home=config.home, activate=args.activate)
             provider = result["provider"]
-            if args.activate:
-                result.update(use_provider(store, config.home, provider_id=provider["provider_id"]))
         except ProviderError as exc:
             return _err(str(exc))
     finally:
@@ -2429,10 +2385,7 @@ def cmd_provider_use(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         try:
-            profile = store.get_provider_profile(args.provider_id)
-            # review R1 D3: probe before the switch (an unknown id refuses below)
-            if profile is not None and (refusal := _probe_refusal(store, config, profile)):
-                return _err(refusal)
+            # review R1 D3: use_provider probes before the switch
             result = use_provider(store, config.home, provider_id=args.provider_id)
         except ProviderError as exc:
             return _err(str(exc))
@@ -2466,48 +2419,40 @@ def cmd_provider_remove(args: argparse.Namespace) -> int:
 def cmd_provider_set_key(args: argparse.Namespace) -> int:
     """v108-F4: store one profile's key in its own 0600 file. The value is
     read from stdin (tty: hidden prompt) — never from argv, which would leak
-    into shell history and the process table."""
-    from .serve.llm import provider_secret_path, store_provider_api_key
+    into shell history and the process table. Phase 05 R1: the shared
+    ``set_provider_key`` probes a key before it replaces the stored one."""
+    from .providers import ProviderError
+    from .serve.actions import set_provider_key
+    from .serve.llm import provider_secret_path
 
     config = build_config(args.home, None)
     if not config.db_path.is_file():
         return _err("no providers configured")
+    value = ""
+    if not args.clear:
+        if sys.stdin.isatty():
+            import getpass
+
+            value = getpass.getpass(f"API key for {args.provider_id}: ")
+        else:
+            value = sys.stdin.readline()
+        value = value.strip()
+        if not value:
+            return _err("empty key (pass --clear to remove a stored one)")
     store = RunStore(config.db_path)
     try:
-        profile = store.get_provider_profile(args.provider_id)
+        result = set_provider_key(store, config.home, provider_id=args.provider_id, key=value)
+    except ProviderError as exc:
+        return _err(str(exc))
     finally:
         store.close()
-    if profile is None:
-        return _err(f"unknown provider {args.provider_id!r}")
-    from .codex_login import NO_KEY_REFUSAL, uses_codex_login
-
-    if uses_codex_login(profile.base_url):
-        return _err(f"{args.provider_id} {NO_KEY_REFUSAL}")
     if args.clear:
-        store_provider_api_key(config.home, args.provider_id, "")
         print(f"cleared key for {args.provider_id}")
         return 0
-    if sys.stdin.isatty():
-        import getpass
-
-        value = getpass.getpass(f"API key for {args.provider_id}: ")
-    else:
-        value = sys.stdin.readline()
-    value = value.strip()
-    if not value:
-        return _err("empty key (pass --clear to remove a stored one)")
-    store = RunStore(config.db_path, readonly=True)
-    try:  # review R1 D3: a key the provider refuses never replaces the stored one
-        refusal = _probe_refusal(store, config, profile, key=value)
-    finally:
-        store.close()
-    if refusal:
-        return _err(refusal)
-    store_provider_api_key(config.home, args.provider_id, value)
     path = provider_secret_path(config.home, args.provider_id)
     print(f"stored key for {args.provider_id} ({path.name}, 0600 — never sqlite, never a GET)")
-    if profile.api_key_env:
-        print(f"note: env var {profile.api_key_env} still wins over the file when set")
+    if result["api_key_env_cleared"]:
+        print(f"note: cleared api_key_env {result['api_key_env_cleared']} so it no longer wins")
     return 0
 
 

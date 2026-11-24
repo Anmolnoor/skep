@@ -779,9 +779,10 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     assert "setup.default_workspace" in setup
     assert "Use default workspace" in setup
     assert "trusted_local_dev" in setup
-    # Each thing the older flag misses names the tab where it is set.
-    assert 'llm: ["models", "Models"]' in setup
-    assert 'workspace_project: ["projects", "Projects"]' in setup
+    # Phase 05: `missing` is onboard's step keys; a step another page also
+    # sets names that tab (tests/web/settings.test.mjs drives the rest).
+    assert 'model: ["models", "Models"]' in setup
+    assert 'workdir: ["projects", "Projects"]' in setup
     assert "project policy overrides" not in setup
     assert "trusted roots" not in setup
     assert "network allowlist" not in setup

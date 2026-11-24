@@ -139,6 +139,7 @@ def test_the_active_key_follows_the_url_not_the_active_profile(
         store.close()
 
 
+@pytest.mark.usefixtures("accept_probes")
 def test_config_view_reports_the_login_not_a_key(
     tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,6 +549,7 @@ def _use(supervisor: Path, provider_id: str) -> dict[str, object]:
         store.close()
 
 
+@pytest.mark.usefixtures("accept_probes")
 def test_workers_keep_their_provider_and_never_get_the_login(
     tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -654,6 +656,7 @@ def test_the_token_only_leaves_for_the_exact_https_host(
         resolve_provider_api_key(tmp_path, _codex_profile(base_url=base_url))
 
 
+@pytest.mark.usefixtures("accept_probes")
 def test_workers_keep_their_own_profile_key_while_the_queen_is_on_the_plan(
     tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

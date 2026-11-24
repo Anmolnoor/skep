@@ -19,6 +19,7 @@ from skep.supervisor.serve.chat import _request_too_large
 from skep.supervisor.serve.llm import OllamaError, store_assistant_key
 
 from .fake_ollama import FakeOllama
+from .fake_openai import FakeOpenAI
 from .test_serve_chat import configured_client, sse_events
 
 
@@ -254,7 +255,13 @@ def test_a_provider_or_model_change_clears_the_ceiling(
         client.put("/api/llm/config", json={"protocol": "openai-compat"})
         assert ceilings() == (None, None)
         measure()
-        client.put("/api/llm/config", json={"base_url": "http://127.0.0.1:1"})
+        # Phase 05 R1: a new endpoint is probed before it is saved — a live one
+        other = FakeOpenAI(models=["other"]).start()
+        try:
+            moved = client.put("/api/llm/config", json={"base_url": other.base_url})
+        finally:
+            other.stop()
+        assert moved.status_code == 200
         assert ceilings() == (None, None)
     finally:
         store.close()
