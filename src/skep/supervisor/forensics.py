@@ -313,6 +313,7 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
         for row in trail
     ) or any(d.get("reason") == "dispatch.auto_allowed.unlocked" for d in dispatch.values())
     reverify = store.reverification_for(task_id)
+    pinned = store.run_pr(task_id)
     report = {
         "task_id": task_id,
         "identity": {
@@ -345,6 +346,13 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 for t in transitions
                 if t["detail"] and any(alarm in t["detail"].lower() for alarm in ALARMS)
             ],
+            # R4 (S5): the PR this run covers — G10's tuple, or the dispatch
+            # pin when no verdict was recorded (merge-base unavailable then).
+            "pr": reverify.pr
+            if reverify is not None and reverify.pr
+            else None
+            if pinned is None
+            else {**pinned, "merge_base": None},
             "heartbeat_gaps": _heartbeat_gaps(
                 _events_path(audit_dir, store, task_id), active=run["state"] in ACTIVE
             ),
@@ -438,6 +446,8 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
     ]
     if g10 is None:
         lines.append(f"{item}G10: no re-verification recorded")
+        if outcome.get("pr"):  # R4 (S5): a PR run that failed before G10
+            lines.append(f"{item}{pr_line(outcome['pr'])}")
     else:
         lines.append(
             f"{item}G10: {g10['outcome']} confirmed={g10['confirmed']} "

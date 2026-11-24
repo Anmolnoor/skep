@@ -279,8 +279,12 @@ found nothing) and there is no override flag. The card pins the verdict's
 head, base branch and base SHA when it is proposed; at merge time the live PR
 is re-read and the merge is refused if any of the three moved (a base that
 advanced needs a fresh review). A PR that would land later is refused before
-anything merges: one with an auto-merge request, or whose base branch has a
-merge queue (or whose queue setting skep cannot read) — merge those on GitHub.
+anything merges: one with an auto-merge request, or whose base branch GitHub
+says has a merge queue — merge those on GitHub. That queue check is
+best-effort: when skep cannot read the queue setting (a fine-grained token
+without "Merge queues: Read", say) it goes on to the merge, GitHub refuses a
+branch that requires a queue (HTTP 405), and the refusal names the queue skep
+could not rule out.
 The merge itself is GitHub's REST merge endpoint called with the verified head
 SHA (`gh api -X PUT repos/OWNER/NAME/pulls/N/merge -f sha=HEAD`): GitHub
 merges at once or refuses — it never queues and never enables auto-merge —

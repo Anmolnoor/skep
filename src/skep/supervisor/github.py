@@ -93,7 +93,7 @@ class PullRequestList:
     detail: str
 
 
-_PR_LIST_FIELDS = "number,title,state,headRefName,url,isDraft"
+_PR_LIST_FIELDS = "number,title,state,headRefName,url,isDraft,author"
 _PR_LIST_STATES = frozenset({"open", "closed", "merged", "all"})
 
 
@@ -103,7 +103,9 @@ def list_pull_requests(
     """v57-F4: read-only PR list via gh on the operator's own credentials.
 
     Honest failure, never raises — no gh, no auth, no remote all come back
-    as ok=False with the reason."""
+    as ok=False with the reason. R4 (S9): each PR's ``author`` is its
+    ``login`` and ``is_bot`` — what tells GitHub's Dependabot from anyone
+    who named a branch ``dependabot/...``."""
     if state not in _PR_LIST_STATES:
         known = ", ".join(sorted(_PR_LIST_STATES))
         return PullRequestList(False, [], f"unknown state {state!r}; known: {known}")
@@ -123,6 +125,9 @@ def list_pull_requests(
         prs = json.loads(listed.stdout or "[]")
     except json.JSONDecodeError:
         return PullRequestList(False, [], "gh pr list returned unparseable output")
+    for pr in prs:
+        who = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+        pr["author"] = {"login": who.get("login"), "is_bot": who.get("is_bot") is True}
     return PullRequestList(True, prs, f"{len(prs)} {state} PR(s)")
 
 
@@ -222,12 +227,19 @@ _DEFERRED = (
 )
 
 
-def _deferred_landing(runner: Runner, pid: PrId, branch: str, live: dict[str, Any]) -> str | None:
-    """R2 (D5): why this PR would land later, at whatever the base is then —
-    an auto-merge request already set, or a merge queue on ``branch`` (one
-    skep cannot rule out counts) — or None."""
+def _deferred_landing(
+    runner: Runner, pid: PrId, branch: str, live: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """R2 (D5): (why this PR would land later, at whatever the base is then
+    — an auto-merge request already set, or a merge queue on ``branch`` —
+    or None; why the queue probe could not tell, or None).
+
+    R4 (orchestrator decision, N3 over S7): the probe is best-effort. Only a
+    clean, error-free, non-null ``mergeQueue`` refuses here; a probe that
+    failed or errored refuses nothing — the REST merge never enqueues and
+    answers 405 when a queue is required, and that refusal names the queue."""
     if live.get("autoMergeRequest"):
-        return f"PR #{pid.number} already has an auto-merge request: it {_DEFERRED}"
+        return f"PR #{pid.number} already has an auto-merge request: it {_DEFERRED}", None
     owner, name = pid.repo.split("/", 1)
     asked = _run(
         runner,
@@ -248,12 +260,12 @@ def _deferred_landing(runner: Runner, pid: PrId, branch: str, live: dict[str, An
             else []
         )
         why = "; ".join(str(m) for m in said if m) or (asked.stderr or asked.stdout).strip()
-        return (
-            f"could not check whether {branch} has a merge queue (GitHub said: "
+        return None, (
+            f"skep could not check whether {branch} has a merge queue (GitHub said: "
             f"{why[:300] or 'nothing'}); if it does, it " + _DEFERRED
         )
     queue = found["mergeQueue"]
-    return None if queue is None else f"{branch} {_DEFERRED}"
+    return (None if queue is None else f"{branch} {_DEFERRED}"), None
 
 
 def _landed_base(runner: Runner, pid: PrId, commit: str, strategy: str) -> tuple[str | None, str]:
@@ -360,8 +372,9 @@ def open_pull_request(
     """Push ``branch`` and open a PR against ``base``. Honest failure, never raises.
 
     Phase 09 R3 (S16): gh is told the repo — origin's, as HOST/OWNER/REPO,
-    so GH_HOST never redirects it — and the head as OWNER:BRANCH, the branch
-    just pushed to that same repo; a non-GitHub origin is refused first."""
+    so GH_HOST never redirects it — and a non-GitHub origin is refused
+    first. R4 (S2): the head is the bare branch just pushed to that same
+    repo; OWNER:BRANCH is gh's cross-repo (fork) form."""
     origin = origin_repo(repo, runner)
     if origin is None:
         return PullRequestResult(False, None, _NOT_GITHUB.format(repo=repo))
@@ -389,7 +402,7 @@ def open_pull_request(
     created = _run(
         runner,
         ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
-         "--head", f"{origin.split('/')[0]}:{branch}", "--title", title, "--body", body],
+         "--head", branch, "--title", title, "--body", body],
         cwd=repo,
     )  # fmt: skip
     if created.returncode != 0:
@@ -413,8 +426,10 @@ def _rest_merge(
 ) -> tuple[int | None, dict[str, Any], str]:
     """R3 (D8): ``PUT repos/<o>/<n>/pulls/<N>/merge`` pinned to ``head`` —
     the HTTP status, the JSON body (``{}`` when it is not one) and gh's own
-    words. GitHub merges immediately or refuses: this endpoint never queues
-    and never enables auto-merge."""
+    words: its JSON ``message``, else the body, else gh's stderr — never the
+    status line and headers ``--include`` prints first (R4, N7). GitHub
+    merges immediately or refuses: this endpoint never queues and never
+    enables auto-merge."""
     put = _run(
         runner,
         _gh_api("--include", "-X", "PUT", f"repos/{pid.repo}/pulls/{pid.number}/merge",
@@ -422,12 +437,15 @@ def _rest_merge(
     )  # fmt: skip
     text = put.stdout.replace("\r\n", "\n")
     status = _HTTP_STATUS.match(text)
+    raw = text.partition("\n\n")[2].strip() if status else text.strip()
     try:
-        body = json.loads(text.partition("\n\n")[2])
+        body = json.loads(raw)
     except ValueError:
         body = None
-    gh_said = (put.stderr or put.stdout).strip() or "no answer"
-    return (int(status[1]) if status else None), body if isinstance(body, dict) else {}, gh_said
+    answer = body if isinstance(body, dict) else {}
+    message = answer.get("message")
+    said = message if isinstance(message, str) and message else raw or put.stderr.strip()
+    return (int(status[1]) if status else None), answer, said or "no answer"
 
 
 def merge_pull_request(
@@ -448,7 +466,8 @@ def merge_pull_request(
     base_commit, base_branch. The live PR is re-read first and the merge is
     refused, naming both SHAs, if its head, its base branch or that branch's
     tip moved since; R2 (D5): so is a PR with an auto-merge request or a
-    merge queue on its base (one skep cannot rule out counts).
+    merge queue on its base — R4: the queue probe is best-effort; one that
+    cannot answer leaves the refusal to GitHub's 405, which names the queue.
 
     R3 (D8): those checks give clearer refusals; the safety is the merge
     itself — GitHub's REST merge endpoint, called with ``sha=<pinned head>``:
@@ -508,21 +527,22 @@ def merge_pull_request(
             f"refused: {branch} is now {now_base}, not {base} — the base advanced since G10 "
             f"verified head {head} against it; nothing merged. {again}",
         )
-    deferred = _deferred_landing(runner, pid, branch, live)
+    deferred, unprobed = _deferred_landing(runner, pid, branch, live)
     if deferred is not None:
         return MergeResult(False, f"refused: {deferred}; nothing merged")
-    status, answer, gh_said = _rest_merge(runner, pid, head, strategy)
+    status, answer, said = _rest_merge(runner, pid, head, strategy)
     commit = answer.get("sha") if answer.get("merged") is True else None
     if status in _MERGE_REFUSED:
-        said = answer.get("message") or gh_said
+        queue = f" ({unprobed})" if unprobed and status == 405 else ""
         return MergeResult(
-            False, f"refused by GitHub (HTTP {status}): {said}; nothing merged at head {head}"
+            False,
+            f"refused by GitHub (HTTP {status}): {said}{queue}; nothing merged at head {head}",
         )
     if status != 200 or not isinstance(commit, str) or not commit:
         return MergeResult(
             False,
             f"GitHub's answer to merging {pid.repo}#{n} could not be read (HTTP {status}: "
-            f"{gh_said[:300]}): outcome unknown — check GitHub",
+            f"{said[:300]}): outcome unknown — check GitHub",
         )
     done = f"merged {pid.repo}#{n} at head {head} ({strategy}): merge commit {commit}"
     landed_on, unread = _landed_base(runner, pid, commit, strategy)

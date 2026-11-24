@@ -565,7 +565,7 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_prs",
         "GitHub pull requests for a registered repo (number, title, state, head "
-        "branch, url, draft flag) — read-only, via gh on the operator's own "
+        "branch, url, draft flag, author login + is_bot) — read-only, via gh on the operator's own "
         "credentials. Honest failure when gh is missing or unauthenticated. Use "
         "before open_pr (does one already exist?) and before merge_pr.",
         {
@@ -1588,7 +1588,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the PR number or its URL on the repo's origin, never a branch. Refused "
         "unless G10 cleanly confirmed the PR's head (refresh_repo pr=N, then a "
         "review run on refs/skep/pr/N/head); merges only that head. Refused if the "
-        "head or base moved, or the branch lands via merge queue/auto-merge; a base "
+        "head or base moved, or it has auto-merge or a merge queue (GitHub refuses "
+        "a queue skep could not check); a base "
         "that moves during the merge itself is reported, not prevented.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},

@@ -327,7 +327,7 @@ def build_receipt(store: RunStore, home: Path, audit_dir: Path, task_id: str) ->
     task_id, identity, g10 = report["task_id"], report["identity"], report["outcome"]["g10"]
     run, reverify = store.get_run(task_id), store.reverification_for(task_id)
     base = (run.base_commit if run else None) or (reverify.base_commit if reverify else None)
-    pr = reverify.pr if reverify is not None else None
+    pr = report["outcome"]["pr"]  # R4 (S5): the dispatch pin when G10 never ran
     if pr:
         # Phase 09 R1 (S14/N7): a PR verdict's baseline is the merge-base V1
         # counted on — the PR head is what was verified, never "baseline".

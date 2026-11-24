@@ -466,6 +466,7 @@ def test_a_resumed_review_keeps_its_pin_or_starts_fresh_never_mixed(
         git(repo, "commit", "-qam", "push")
         newer = git(repo, "rev-parse", "HEAD").stdout.strip()
         git(repo, "checkout", "-q", "main")
+        git(repo, "update-ref", PR_REF, newer)  # R4 (S4): a refresh publishes ref + pin
         store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
         if tree == "moved":
             git(Path(first.workspace), "commit", "-qm", "moved", "--allow-empty")
@@ -513,6 +514,7 @@ def test_an_unpinned_pr_run_resumed_never_pairs_its_old_tree_with_a_new_pin(
         git(repo, "commit", "-qam", "push")
         newer = git(repo, "rev-parse", "HEAD").stdout.strip()
         git(repo, "checkout", "-q", "main")
+        git(repo, "update-ref", PR_REF, newer)  # R4 (S4): a refresh publishes ref + pin
         store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
     finally:
         store.close()
@@ -1502,17 +1504,15 @@ def test_merge_pull_request_refuses_a_pr_that_moved_since_the_verdict(
     [
         ({"autoMergeRequest": {"enabledAt": "2026-11-24T00:00:00Z"}}, None, 0),
         (None, {"id": "MQ_1"}, 0),
-        (None, None, 1),
     ],
-    ids=["auto-merge-set", "merge-queue", "queue-unreadable"],
+    ids=["auto-merge-set", "merge-queue"],
 )
 def test_a_pr_that_would_land_deferred_is_never_merged(
     repo: Path, live: dict[str, Any] | None, queue: Any, api_code: int
 ) -> None:
     """R2 (D5, S2/N7): auto-merge or a merge queue lands later, at whatever
-    the base is then — skep refuses before it merges, and a queue it
-    cannot rule out counts as one (R3: the REST merge is the safety; this
-    pre-check names the reason)."""
+    the base is then — skep refuses before it merges (R3: the REST merge is
+    the safety; this pre-check names the reason)."""
     calls: list[list[str]] = []
     runner = _merge_gh(calls, live, queue=queue, api_code=api_code)
 
@@ -1524,7 +1524,7 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
 
 
 @pytest.mark.parametrize(
-    ("code", "answer", "needle"),
+    ("code", "answer"),
     [
         (
             1,
@@ -1532,33 +1532,54 @@ def test_a_pr_that_would_land_deferred_is_never_merged(
                 "data": {"repository": {"mergeQueue": None}},
                 "errors": [{"message": "Resource not accessible by personal access token"}],
             },
-            "Resource not accessible by personal access token",
         ),
-        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}, "no repo"),
-        (0, {"data": {"repository": None}}, "could not check"),
-        (0, {"data": {"repository": "x"}}, "could not check"),
+        (0, {"data": {"repository": None}, "errors": [{"message": "no repo"}]}),
+        (0, {"data": {"repository": None}}),
+        (0, {"data": {"repository": "x"}}),
     ],
     ids=["exit-1-with-null-queue", "errors-with-exit-0", "repository-null", "repository-not-dict"],
 )
-def test_a_merge_queue_probe_that_failed_is_never_read_as_no_queue(
-    repo: Path, code: int, answer: Any, needle: str
+def test_a_merge_queue_probe_that_failed_leaves_the_refusal_to_github(
+    repo: Path, code: int, answer: Any
 ) -> None:
-    """R3 (S5/N3): a fine-grained token without Merge queues: Read gets
-    ``mergeQueue: null`` AND an error — the probe checks the exit code,
-    ``errors`` and that ``data.repository`` is an object, and refuses
-    naming GitHub's own words."""
+    """R4 (orchestrator, N3 over S7): the GraphQL queue probe is best-effort
+    — a fine-grained token without Merge queues: Read gets ``mergeQueue:
+    null`` AND an error, which is never read as "no queue", but neither is
+    it a refusal: the REST merge never enqueues and answers 405 when a
+    queue is required, and that refusal names the queue skep could not
+    rule out. Only a clean, non-null mergeQueue refuses before the PUT."""
     calls: list[list[str]] = []
 
     def graphql(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, code, json.dumps(answer), "gh: error")
 
-    result = github.merge_pull_request(
-        repo=repo, pin=PIN_7, runner=_merge_gh(calls, graphql=graphql)
-    )
+    queued = {"message": "Changes must be made through the merge queue"}
+    runner = _merge_gh(calls, graphql=graphql, merge_status=405, merge_body=queued)
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
 
-    assert not result.merged and needle in result.detail and "nothing merged" in result.detail
-    assert "merge it on GitHub" in result.detail
-    assert not [c for c in calls if "PUT" in c]
+    assert [c for c in calls if "PUT" in c], "the probe's failure never stops the REST merge"
+    assert not result.merged and "nothing merged" in result.detail
+    assert "Changes must be made through the merge queue" in result.detail
+    assert "merge queue" in result.detail and "merge it on GitHub" in result.detail
+
+    unqueued = github.merge_pull_request(
+        repo=repo, pin=PIN_7, runner=_merge_gh([], graphql=graphql)
+    )
+    assert unqueued.merged, unqueued.detail  # no queue after all: GitHub merged it
+
+
+def test_a_merge_answer_github_could_not_read_quotes_its_body_not_its_headers(
+    repo: Path,
+) -> None:
+    """R4 (N7): "outcome unknown" quotes GitHub's own message (or the body),
+    never the status line and headers ``gh api --include`` prints first."""
+    said = _merge_gh([], merge_status=502, merge_body={"message": "Bad Gateway"})
+    plain = _merge_gh([], merge_status=200, merge_body="<html>gateway</html>")
+
+    for runner, needle in ((said, "Bad Gateway"), (plain, "<html>gateway</html>")):
+        result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=runner)
+        assert "outcome unknown" in result.detail and needle in result.detail
+        assert "Content-Type" not in result.detail and "HTTP/2.0" not in result.detail
 
 
 @pytest.mark.parametrize("strategy", ["merge", "squash"])
@@ -1922,6 +1943,39 @@ def test_an_early_g10_refusal_still_names_the_pr_it_refused(
     assert receipt["baseline_sha"] == "merge-base unavailable"
 
 
+def test_a_pr_worker_that_failed_before_g10_still_names_its_pr_everywhere(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R4 (S5): a PR review whose worker failed before G10 has no verdict —
+    the receipt and the forensics read the dispatch pin (merge-base
+    unavailable), and the PR head is never labelled the baseline."""
+    from skep.supervisor.forensics import build_run_forensics, render_forensics
+    from skep.supervisor.ledger_proof import build_receipt
+
+    _seed(repo)
+    base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo.parent / "ws-fail", instructions="review PR 7")
+        store.create_run(
+            task, repo=repo.resolve(), ref=PR_REF, execution_mode="workspace",
+            base_commit=head, pr=_pair(base, head),
+        )  # fmt: skip
+        store.transition(task.task_id, "dispatched", None)
+        store.transition(task.task_id, "failed", "tests failed")
+        receipt = build_receipt(store, config.home, config.audit_dir, task.task_id)
+        report = build_run_forensics(store, config.audit_dir, task.task_id)
+    finally:
+        store.close()
+
+    pinned = {**_pair(base, head), "merge_base": None}
+    assert receipt["g10"] is None and receipt["pr"] == pinned
+    assert receipt["baseline_sha"] == "merge-base unavailable"
+    assert report["outcome"]["g10"] is None and report["outcome"]["pr"] == pinned
+    text = render_forensics(report, markdown=False)
+    assert f"PR {ORIGIN}#7: head {head} on main {base} (merge-base unavailable)" in text
+
+
 def test_a_crash_before_g10_never_strands_a_patchless_pr_review(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2132,3 +2186,149 @@ def test_the_queen_reads_the_receipt_and_the_forensics_as_evidence(
         f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {base})" in forensics["forensics"]
     )
     assert taint.untrusted is not None
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    [("pyproject.toml", "a=1"), ("package.json", "{}"), ("tox.ini", "[a]"), ("setup.cfg", "[a]")],
+)
+def test_a_runner_config_replaced_by_a_symlink_is_a_flag_and_never_merges(
+    repo: Path, config: SupervisorConfig, path: str, target: str
+) -> None:
+    """R4 (N2): `git show` of a symlink blob is its target string, and
+    "a=1" / "{}" / "[a]" parse as config with no runner section — so a
+    runner config swapped for a symlink compared equal and read clean. A
+    present side that is not a regular file is a flag, and the merge is
+    refused."""
+    _seed(repo)
+    _github_origin(repo)
+    # No runner section on either side: only the mode can tell them apart.
+    (repo / path).write_text(
+        {
+            "pyproject.toml": "[project]\nname = 'toy'\n",
+            "package.json": '{"name": "toy"}\n',
+        }.get(path, "[metadata]\nname = toy\n")
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "runner config")
+    head = _pr_by_index(repo, ["--cacheinfo", f"120000,{_blob(repo, target)},{path}"])
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")
+
+    assert f"tamper_check_failed:config_mode:{path}" in record.tamper_flags
+    assert record.confirmed is False, outcome.detail
+    _card, _summary, refused = _propose(config, {"repo": str(repo), "pr": "7"})
+    assert refused is not None and "merge" in refused
+
+
+def test_a_runner_config_that_becomes_a_submodule_is_a_flag(repo: Path) -> None:
+    """R4 (N2): a gitlink (160000) side is no config either."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    seed = _seed(repo)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "pytest config")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    head = _pr_by_index(
+        repo,
+        ["--force-remove", "pyproject.toml"],
+        ["--add", "--cacheinfo", f"160000,{seed},pyproject.toml"],
+    )
+
+    flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
+    assert "tamper_check_failed:config_mode:pyproject.toml" in flags
+
+
+def test_skep_pr_list_shows_each_author_and_marks_a_bot(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R4 (S9, ADR 0050): the operator's face shows the author list_prs gives chat."""
+    from skep.cli import main
+
+    from .test_cli import _registered_clone
+
+    home = tmp_path / "home"
+    _registered_clone(home, repo)
+    prs = [
+        {"number": 7, "state": "OPEN", "headRefName": "dependabot/pip/x", "title": "Bump x",
+         "author": {"login": "app/dependabot", "is_bot": True}},
+        {"number": 8, "state": "OPEN", "headRefName": "dependabot/pip/y", "title": "Bump y",
+         "author": {"login": "mallory", "is_bot": False}},
+    ]  # fmt: skip
+    monkeypatch.setattr(
+        github, "list_pull_requests", lambda **_: github.PullRequestList(True, prs, "2 open PR(s)")
+    )
+
+    assert main(["--home", str(home), "pr", "list", "fixture"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "app/dependabot (bot)" in out[0] and "mallory" in out[1] and "(bot)" not in out[1]
+
+
+def test_pr_pin_publication_holds_one_lock_under_the_skep_home(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 (S4): CLI and serve publish a PR pin — fetch, ref update, store row
+    — under one file lock in the skep home, so two refreshes never leave
+    the refs from one and the stored pin from the other."""
+    import fcntl
+
+    from skep.supervisor.serve.actions import refresh_repo
+
+    held: list[bool] = []
+    fetch = _fake_fetch([])
+
+    def probing_fetch(**kwargs: Any) -> github.PrHead:
+        with open(config.home / "pr-pin.lock", "a") as other:  # another process's open
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                held.append(False)
+        answer: github.PrHead = fetch(**kwargs)
+        return answer
+
+    monkeypatch.setattr(github, "fetch_pr_head", probing_fetch)
+    store = RunStore(config.db_path)
+    real_record = store.record_pr_fetch
+
+    def probing_record(*args: Any, **kwargs: Any) -> None:
+        probing_fetch(repo=repo, pr="7")
+        real_record(*args, **kwargs)
+
+    monkeypatch.setattr(store, "record_pr_fetch", probing_record)
+    try:
+        refresh_repo(ConfigHolder(config, store), str(repo), store=store, pr="7")
+    finally:
+        store.close()
+
+    assert held == [True, True]  # held across the fetch AND the store write
+
+
+@pytest.mark.parametrize("side", ["head", "base"])
+def test_a_fresh_review_refuses_a_pin_the_published_refs_disagree_with(
+    repo: Path, config: SupervisorConfig, side: str
+) -> None:
+    """R4 (S4): the stored pin and refs/skep/pr/N/* are published together;
+    a dispatch that finds them apart (a refresh raced, or a ref was moved by
+    hand) refuses and asks for a refresh instead of pinning either one."""
+    from skep.supervisor import WorktreeError
+    from skep.supervisor.dispatch import run_task
+
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        store.record_pr_fetch(
+            str(repo.resolve()), pr_repo=ORIGIN, number=7, base_branch="main",
+            base_commit=base, head_commit=head,
+        )  # fmt: skip
+    finally:
+        store.close()
+    git(repo, "update-ref", f"refs/skep/pr/7/{side}", base if side == "head" else head)
+
+    with pytest.raises(WorktreeError, match="refresh_repo pr=7 again"):
+        run_task(repo, "Review it. MODE:happy", config=config, ref=PR_REF)
