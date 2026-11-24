@@ -1993,16 +1993,14 @@ def _review_interactive() -> bool:
 def _review_cards(store: RunStore) -> list[_ReviewCard]:
     """What waits on the operator — the same "action needed" every face pushes
     (``run_terminal_text``): a gated run, an unlanded patch, a G10 disagreement.
-    # ponytail: the newest 200 runs; an older waiting run still lists in
-    # `skep status --personal` and reviews by id.
+    Phase 10 R1 D6 (I13): every run in a waiting state is read, newest first,
+    before anything is limited — an old gate is never off the walk.
     """
     from .serve.actions import patch_path, tamper_note
     from .serve.run_status import run_terminal_text
 
     cards = []
-    for record in store.recent_runs(200):
-        if record.state not in ("pending_approval", "completed"):
-            continue
+    for record in reversed(store.runs_with_states(("pending_approval", "completed"))):
         notice = run_terminal_text(store, record.task_id, completion_opt_in=False)
         if notice is None or notice[1] != "action_needed":
             continue

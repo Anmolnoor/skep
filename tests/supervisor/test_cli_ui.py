@@ -562,6 +562,32 @@ def test_review_cards_say_what_g10_ran_whose_command_and_the_counts(
     assert "confirmed=False" not in benign and "command " not in benign
 
 
+def test_review_finds_a_waiting_run_older_than_any_display_window(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Phase 10 R1 D6 (I13): the walk queries what waits — gated runs,
+    unlanded patches, G10 disagreements — before any limit, so a patch that
+    waited behind 250 newer runs is still on it."""
+    import sqlite3
+    from contextlib import closing
+
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO runs (task_id, trace_id, repo, ref, workspace, execution_mode,"
+            " instructions, state, created_at, updated_at)"
+            " VALUES (?, ?, ?, NULL, '/w', 'workspace', 'later', 'failed', ?, ?)",
+            [
+                (f"later-{n:03d}", f"t-{n}", str(repo), f"2999-01-01T00:00:{n:03d}Z", "2999")
+                for n in range(250)
+            ],
+        )
+    assert _run_cli(home, "review") == 0
+    assert task_id in capsys.readouterr().out
+
+
 def test_review_cards_name_the_gate_the_disagreement_and_the_tamper(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
