@@ -2558,7 +2558,10 @@ def test_merge_pr_tool_is_web_ui_only_hitl(
         result = confirm({"merge": pin})
     finally:
         store.close()
-    assert result == {"merged": True, "detail": "merged 7 (merge)", "head_commit": "a" * 40}
+    assert result == {
+        "merged": True, "detail": "merged 7 (merge)", "head_commit": "a" * 40,
+        "base_commit": "b" * 40, "landed_base": None,
+    }  # fmt: skip
     assert merges == [{"repo": repo.resolve(), "pin": pin, "strategy": "merge"}]
 
 

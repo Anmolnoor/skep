@@ -62,6 +62,10 @@ the head, base branch and base SHA G10 confirmed; without a clean verdict
 skep refuses the proposal itself. If the card's head or base differs from
 the verdict's, tell the operator to deny it. If the PR or its base moves
 after the card, the merge is refused: say so and start again at 2.1.
+A base that uses a merge queue or auto-merge is refused too: tell the
+operator to merge it on GitHub. If the result says it merged onto another
+base than the one verified, report that line verbatim: the branch needs a
+re-verify.
 
 **Workflow bump**: a `test_config_changed:.github/workflows/...` flag.
 skep does not verify CI config, so never propose `merge_pr`. Call

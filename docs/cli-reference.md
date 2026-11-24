@@ -278,9 +278,20 @@ commit, and the V1 test-tamper check reads the PR's own diff
 found nothing) and there is no override flag. The card pins the verdict's
 head, base branch and base SHA when it is proposed; at merge time the live PR
 is re-read and the merge is refused if any of the three moved (a base that
-advanced needs a fresh review). gh merges with `--match-head-commit`, and the
-result says merged only when GitHub reports the PR merged — a merge queue or
-auto-merge is reported as queued.
+advanced needs a fresh review). A PR that would land later is refused before
+gh runs: one with an auto-merge request, or whose base branch has a merge queue
+(or whose queue setting skep cannot read) — merge those on GitHub. gh merges
+with `--match-head-commit` (never `--auto` or `--admin`), and the result says
+merged only when GitHub reports the PR merged; if gh set auto-merge instead,
+skep disables it and says not merged, and an outcome it cannot read back is
+"unknown — check GitHub".
+
+GitHub pins only the head atomically. The base branch can still advance in the
+seconds between skep's re-read and GitHub's merge; skep cannot close that
+window. After a merge or squash it reads the merge commit's base-side parent,
+and if that is not the verified base it says so loudly ("merged onto base X but
+verified against Y; re-verify BRANCH") and records it. A rebase merge does not
+expose the base it landed on, so that comparison is reported as not made.
 
 - `repo list` shows every repo skep can reach: clones and workon directories.
 - `repo refresh` fetches origin and fast-forwards the default branch. Run it

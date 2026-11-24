@@ -155,15 +155,18 @@ def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> 
 
     def gh(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(args))
-        merged = any(call[2] == "merge" for call in calls)
+        if args[1] == "api":  # R2 (D4, D5): no merge queue; the commit's parent
+            answer = {"data": {"repository": {"mergeQueue": None}}, "parents": [{"sha": "b" * 40}]}
+            return _cp(args, 0, json.dumps(answer))
+        merged = any(call[1:3] == ["pr", "merge"] for call in calls)
         state = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}} if merged else {}
         return _cp(args, 0, json.dumps({**live, "state": "OPEN", **state}))
 
     result = merge_pull_request(repo=tmp_path, pin=pin, strategy="squash", runner=gh)
     assert result.merged and "7" in result.detail
-    assert calls[1] == [
-        "gh", "pr", "merge", "--repo", "me/repo", "--squash", "--match-head-commit", "a" * 40,
-        "--", "7",
+    assert calls[2] == [
+        "gh", "pr", "merge", "--repo", "github.com/me/repo", "--squash", "--match-head-commit",
+        "a" * 40, "--", "7",
     ]  # fmt: skip
 
     broken = _gh_fake(1, "", "not mergeable")
@@ -183,11 +186,20 @@ def test_close_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> 
 
     result = close_pull_request(repo=repo, pr="7", runner=ok)
     assert result.closed and "7" in result.detail
-    assert calls == [["gh", "pr", "close", "--repo", "me/repo", "--", "7"]]
+    assert calls == [["gh", "pr", "close", "--repo", "github.com/me/repo", "--", "7"]]
 
     swept = close_pull_request(repo=repo, pr="7", delete_branch=True, runner=ok)
     assert swept.closed and "branch" in swept.detail
-    assert calls[-1] == ["gh", "pr", "close", "--repo", "me/repo", "--delete-branch", "--", "7"]
+    assert calls[-1] == [
+        "gh",
+        "pr",
+        "close",
+        "--repo",
+        "github.com/me/repo",
+        "--delete-branch",
+        "--",
+        "7",
+    ]
 
     failed = close_pull_request(repo=repo, pr="7", runner=_gh_fake(1, "", "no pull requests found"))
     assert not failed.closed and "no pull requests found" in failed.detail
@@ -198,20 +210,19 @@ def test_list_pull_requests_parses_json_and_degrades_honestly(tmp_path: Path) ->
     from skep.supervisor.github import list_pull_requests
 
     payload = '[{"number": 7, "title": "fix", "state": "OPEN", "headRefName": "skep/x"}]'
+    repo = _github_repo(tmp_path)
+    calls: list[list[str]] = []
+    ok = _gh_fake(0, payload, calls=calls)
 
-    def ok(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert args[:3] == ["gh", "pr", "list"]
-        return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
-    listed = list_pull_requests(repo=tmp_path, runner=ok)
+    listed = list_pull_requests(repo=repo, runner=ok)
+    assert calls[0][:5] == ["gh", "pr", "list", "--repo", "github.com/me/repo"]
     assert listed.ok is True
     assert listed.prs[0]["number"] == 7
     assert "1 open PR" in listed.detail
 
-    def broken(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="gh: not logged in")
+    broken = _gh_fake(1, "", "gh: not logged in")
 
-    failed = list_pull_requests(repo=tmp_path, runner=broken)
+    failed = list_pull_requests(repo=repo, runner=broken)
     assert failed.ok is False and "not logged in" in failed.detail
 
     bad_state = list_pull_requests(repo=tmp_path, state="weird", runner=ok)
