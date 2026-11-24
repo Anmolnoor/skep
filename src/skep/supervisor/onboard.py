@@ -209,6 +209,59 @@ def _preset_for(provider: str, endpoint: str | None, model: str, api_key_env: st
     )
 
 
+def _key_fix(
+    candidate: Any, *, key_env: str | None, registered: bool, home: Path | None
+) -> str | None:
+    """The 401/403 fix that is true for this candidate (I9). None keeps the
+    default text: a registered profile in the default home that takes a
+    stored key, where plain `skep provider set-key` works. ``home`` is the
+    skep home when it is not the default one — the commands then carry it."""
+    from urllib.parse import urlsplit
+
+    from .codex_login import NO_KEY_REFUSAL, uses_codex_login
+    from .policy_v3 import redact
+
+    again = "then run the same skep onboard command again"
+    pid = candidate.provider_id
+    if uses_codex_login(candidate.base_url):
+        return f"{pid!r} {NO_KEY_REFUSAL}, {again}"
+    if candidate.protocol == "bedrock":
+        return (
+            "Bedrock takes no key: it signs with the AWS credentials in this environment "
+            "(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN if you use "
+            f"one) — set working ones, {again}"
+        )
+    skep = shlex.join(["skep", *(["--home", str(home)] if home else [])])
+    if registered:  # the default text; with a home of its own, said for it
+        if home is None:
+            return None
+        return (
+            f"give {pid!r} a working key ({skep} provider set-key {shlex.quote(pid)}, "
+            "or the env var it names)"
+        )
+    if key_env:
+        return f"set {key_env} to a working key (it is unset or holds a refused one), {again}"
+    # an endpoint is printed back only as scheme, host and path: one with
+    # userinfo, a query or a fragment (where a credential can sit, in any
+    # spelling), or anything the redactor masks, is a placeholder. The rest is
+    # quoted so the line is one a shell and argparse take (IPv6, a spaced model)
+    url = candidate.base_url
+    parts = urlsplit(url)
+    plain = not ("@" in parts.netloc or parts.query or parts.fragment or redact(url) != url)
+    base_url = (
+        shlex.quote(f"--base-url={url}") if plain else "--base-url=<the endpoint URL you gave>"
+    )
+    add = (
+        f"{skep} provider add {shlex.quote(pid)} --protocol {candidate.protocol} "
+        f"{base_url} {shlex.quote(f'--model={candidate.model}')}"
+    )
+    return (
+        f"{pid!r} is not registered yet, so there is no stored key to replace: run {add}, "
+        f"then {skep} provider set-key {shlex.quote(pid)}, {again} "
+        "(or pass --api-key-env NAME for a variable that holds the key)"
+    )
+
+
 def onboard_model(
     holder: ConfigHolder,
     store: RunStore,
@@ -282,8 +335,18 @@ def onboard_model(
             cost_class=preset.cost_class,
         )
     )
+    # I9: an unregistered candidate has no stored key for set-key to replace
+    default_home = Path(os.environ.get("SKEP_HOME", Path.home() / ".skep"))
     health = check_provider_health(
-        candidate, now=_now(), **live_probes(holder.current.home, store, timeout=15.0)
+        candidate,
+        now=_now(),
+        key_fix=_key_fix(
+            candidate,
+            key_env=key_env,
+            registered=store.get_provider_profile(pid) is not None,
+            home=None if home.resolve() == default_home.resolve() else home,
+        ),
+        **live_probes(holder.current.home, store, timeout=15.0),
     )
     if not health.ok:
         previous = store.active_provider_profile()
