@@ -3457,8 +3457,9 @@ class ChatEngine:
         if lock is None:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
-                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-                )
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep,
+                    high=high is not None, shown_items=items,
+                )  # fmt: skip
             queued = not blocking_cards(self.store, chat_id)
             if queued:
                 self.store.queue_follow_up(action_id, actor)
@@ -3471,8 +3472,9 @@ class ChatEngine:
         try:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
-                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-                )
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep,
+                    high=high is not None, shown_items=items,
+                )  # fmt: skip
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()
@@ -3601,6 +3603,7 @@ class ChatEngine:
         actor: str,
         keep: str,
         high: bool = False,
+        shown_items: int | None = None,
     ) -> dict[str, Any]:
         """Claim, execute (or deny) and record one card; the tool row's payload.
 
@@ -3614,6 +3617,17 @@ class ChatEngine:
             # second confirm, a Deny or the timeout sweep now lose with a 409.
             if not self.store.claim_chat_action(action_id):
                 raise card_taken(self.store, action_id)
+            # R4 K2: a fold lands only on a 'proposed' card, so the claimed row
+            # is the set that runs — the count the confirmer saw is checked on it.
+            action = self.store.get_chat_action(action_id) or action
+            items = action.fold_items()
+            if shown_items is not None and len(items) != shown_items:
+                self.store.unclaim_chat_action(action_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"this card now holds {len(items)} items, not the {shown_items} "
+                    "you were shown. Nothing ran. Open it in its thread to read every item",
+                )
             payloads: list[dict[str, Any]] = []
             # P4-2 (ADR 0059 D6): the operator approving a dispatch card at
             # their desk answers the deferred asks its manifest LISTED, for

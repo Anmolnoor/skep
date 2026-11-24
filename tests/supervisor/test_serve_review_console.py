@@ -770,3 +770,43 @@ def test_the_badge_poll_reads_no_patch_and_walks_only_runs_that_can_still_wait(
     light = client.get("/api/review-queue?detail=false").json()
     assert [i["id"] for i in light["items"]] == [waiting]
     assert opened == []
+
+
+def test_an_item_folded_between_the_count_check_and_the_claim_runs_nothing(
+    config: SupervisorConfig, ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 K2: the count is checked again on the claimed snapshot — an item
+    folded after the first check and before the claim hands the card back
+    (409 "Nothing ran") instead of running a set nobody was shown."""
+    from skep.supervisor import RunStore
+
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+    )
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        card = store.add_chat_action(chat_id, tool="read_url", args={"url": "https://x.dev/a"})
+    finally:
+        store.close()
+    claim = RunStore.claim_chat_action
+
+    def fold_then_claim(self: RunStore, action_id: str) -> bool:
+        self.fold_into_chat_action(action_id, args={"url": "https://x.dev/b"}, tool_call_id=None)
+        return claim(self, action_id)
+
+    monkeypatch.setattr(RunStore, "claim_chat_action", fold_then_claim)
+    refused = client.post(
+        f"/api/chats/{chat_id}/actions/{card}/confirm", json={"keep": "once", "items": 1}
+    )
+    assert refused.status_code == 409
+    assert "2 items" in refused.json()["detail"] and "Nothing ran" in refused.json()["detail"]
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        record = store.get_chat_action(card)
+        assert record is not None and record.status == "proposed"
+        assert len(record.fold_items()) == 2
+    finally:
+        store.close()
