@@ -228,6 +228,25 @@ def test_cli_set_key_reads_stdin_not_argv(
     assert not path.exists()
 
 
+@pytest.mark.usefixtures("accept_probes")
+def test_cli_set_key_prompts_hidden_on_a_tty_and_refuses_an_empty_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = RunStore(tmp_path / "supervisor" / "supervisor.sqlite3")
+    store.upsert_provider_profile(_profile(provider_id="tty", base_url="http://127.0.0.1:9"))
+    store.close()
+    tty = io.StringIO("")
+    tty.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.stdin", tty)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-hidden")
+    args = argparse.Namespace(home=tmp_path, provider_id="tty", clear=False)
+    assert cmd_provider_set_key(args) == 0
+    assert provider_secret_path(tmp_path / "supervisor", "tty").read_text().strip() == "sk-hidden"
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "  ")
+    assert cmd_provider_set_key(args) != 0
+    assert "empty key" in capsys.readouterr().err
+
+
 def test_activation_and_probe_get_per_profile_keys(tmp_path: Path) -> None:
     """The probe path (ticker) resolves per profile too."""
     from skep.supervisor.serve.ticker import _probe_list_models

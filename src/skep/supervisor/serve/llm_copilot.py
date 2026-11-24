@@ -45,6 +45,8 @@ def no_exchange() -> Iterator[None]:
         yield
     finally:
         _offline.reset(reset)
+
+
 # Phase 03 review R2 (M5): bearer -> GitHub token, as this context resolved
 # them (``copilot_sources``). The shared cache cannot answer that later: a
 # renewal by another run drops or replaces its entry in between.
