@@ -431,6 +431,53 @@ def test_a_review_run_with_no_recorded_fetch_is_refused(
         run_task(repo, "Review it. MODE:happy", config=config, ref=PR_REF)
 
 
+@pytest.mark.parametrize("tree", ["intact", "moved"])
+def test_a_resumed_review_keeps_its_pin_or_starts_fresh_never_mixed(
+    repo: Path, config: SupervisorConfig, tree: str
+) -> None:
+    """R2 (S11, N6): a retry of a PR review run inherits the first run's
+    (base, head) pin, not a newer fetch, while its warm worktree is still
+    at that head. A worktree whose HEAD moved is not reused: the retry
+    starts fresh on the PR's latest fetch, never a new pin on an old tree."""
+    from skep.supervisor.dispatch import run_task
+
+    base, head = _pr(repo, {"existing.py": "value = 0  # bumped\n"})
+    store = RunStore(config.db_path)
+    try:
+        fetch: dict[str, Any] = {
+            "pr_repo": ORIGIN, "number": 7, "base_branch": "main", "base_commit": base,
+        }  # fmt: skip
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=head)
+        first = run_task(repo, "Review. MODE:badresult", config=config, ref=PR_REF).record
+        assert first.state == "failed" and first.workspace
+        git(repo, "checkout", "-q", "dependabot/bump")
+        (repo / "existing.py").write_text("value = 0  # pushed again\n", encoding="utf-8")
+        git(repo, "commit", "-qam", "push")
+        newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "-q", "main")
+        store.record_pr_fetch(str(repo.resolve()), **fetch, head_commit=newer)
+        if tree == "moved":
+            git(Path(first.workspace), "commit", "-qm", "moved", "--allow-empty")
+    finally:
+        store.close()
+
+    retry = run_task(
+        repo, "Review. MODE:happy", config=config, ref=PR_REF, resume_of=first.task_id
+    ).record
+
+    store = RunStore(config.db_path)
+    try:
+        pinned = store.run_pr(retry.task_id)
+    finally:
+        store.close()
+    if tree == "intact":
+        assert pinned == _pair(base, head) and retry.workspace == first.workspace
+        assert retry.base_commit == head
+    else:
+        assert pinned == _pair(base, newer) and retry.workspace != first.workspace
+        assert retry.base_commit == newer
+
+
 # --- 2. G10 + V1 across base...head when the review run changed nothing --------
 
 

@@ -794,6 +794,32 @@ def run_task(
                 resume_workspace = _resume_workspace(run_store, repo, worktrees_root, resume_of)
             if resume_workspace is None or not with_cursor:
                 effective_worker_state = strip_resume_cursor(effective_worker_state)
+        # Phase 09 R1 (D2, S6): a review run on a fetched PR head is pinned
+        # ONCE, here, to the (base, head) pair its fetch recorded: the worker
+        # starts from that head, and G10, V1 and the verdict use the same pair —
+        # refs/skep/pr/<N>/* is never read again for this run.
+        pr_pin: dict[str, Any] | None = None
+        if ref is not None and (pr_match := PR_HEAD_REF.fullmatch(ref)):
+            # R2 (S11, N6): a resume inherits its run's pin while the reused
+            # tree is still at that head; a tree whose HEAD moved is never
+            # reused — the resume starts fresh on the latest fetch, unmixed.
+            pr_pin = None if resume_of is None else run_store.run_pr(resume_of)
+            if (
+                pr_pin is not None
+                and resume_workspace is not None
+                and resolve_commit(resume_workspace, "HEAD") != pr_pin["head_commit"]
+            ):
+                resume_workspace, pr_pin = None, None
+                effective_worker_state = strip_resume_cursor(effective_worker_state)
+            if pr_pin is None:
+                pr_pin = run_store.pr_fetch(str(repo.resolve()), int(pr_match[1]))
+                if pr_pin is None:
+                    raise WorktreeError(
+                        f"{ref}: skep has no fetch of PR #{pr_match[1]} recorded for {repo}, "
+                        "so there is no head to pin the review to — refresh_repo "
+                        f"pr={pr_match[1]} first, then dispatch the review"
+                    )
+                pr_pin.pop("fetched_at")
         # v89-F1: shield registration and the sweep share one lock, and the
         # keep-set snapshot sits INSIDE it with the sweep it feeds — a snapshot
         # taken outside would reopen the very window the lock exists to close.
@@ -846,20 +872,6 @@ def run_task(
             approval_verdict=approval_verdict,
             worker_state=effective_worker_state,
         )
-        # Phase 09 R1 (D2, S6): a review run on a fetched PR head is pinned
-        # ONCE, here, to the (base, head) pair its fetch recorded: the worker
-        # starts from that head, and G10, V1 and the verdict use the same pair —
-        # refs/skep/pr/<N>/* is never read again for this run.
-        pr_pin: dict[str, Any] | None = None
-        if ref is not None and (pr_match := PR_HEAD_REF.fullmatch(ref)):
-            pr_pin = run_store.pr_fetch(str(repo.resolve()), int(pr_match[1]))
-            if pr_pin is None:
-                raise WorktreeError(
-                    f"{ref}: skep has no fetch of PR #{pr_match[1]} recorded for {repo}, so "
-                    f"there is no head to pin the review to — refresh_repo pr={pr_match[1]} "
-                    "first, then dispatch the review"
-                )
-            pr_pin.pop("fetched_at")
         # Protect this task's worktree and its later re-verify worktree from any
         # concurrent sibling's orphan sweep. (The reused dir keeps the chain's
         # first task's name and was already shielded above.)
