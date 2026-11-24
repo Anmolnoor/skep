@@ -3315,11 +3315,11 @@ you upgrade a home that is in use.
 
 **Behaviour changes**
 
-- Script schedules get a temporary `HOME`. To make an additional host file
-  readable, name its absolute path in the command: skep mounts eligible
-  regular files read-only, and files reached through symlinks or under
-  protected paths are not eligible. List concrete hosts in the schedule for
-  any network access (#132).
+- Script schedules get a temporary `HOME`. To give the script read-only
+  access to an additional host file, name its absolute path in the command.
+  Only eligible regular files are allowed; files reached through symlinks or
+  under protected paths are ineligible. List concrete hosts in the schedule
+  for any network access (#132).
 - Prompt schedules now read only stored data. Move GitHub, checkout, MCP
   discovery and live run evidence checks to an attended turn (#132).
 - Before merging a PR through skep, refresh and review its current head and
