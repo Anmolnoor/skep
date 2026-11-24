@@ -1915,6 +1915,22 @@ def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
     assert guards == fetches == 2
 
 
+def test_diff_syntax_colour_is_tokens_that_clear_aa_and_never_inner_html() -> None:
+    """Phase 10 R1 D2: the diff's offline syntax colour is five :root tokens,
+    each AA on every surface a diff is painted on, so a light theme overrides
+    tokens, not rules; and diff.js builds every token as a text node."""
+    from .test_style_tokens import _contrast, _tokens
+
+    css = (STATIC_DIR / "style.css").read_text()
+    tokens = _tokens()
+    for kind in ("kw", "str", "num", "key", "com"):
+        assert f".diff .tok-{kind} {{ color: var(--syntax-{kind});" in css, kind
+        for surface in ("--bg", "--panel", "--panel-2", "--panel-3"):
+            ratio = _contrast(tokens[f"--syntax-{kind}"], tokens[surface])
+            assert ratio >= 4.5, (kind, surface, ratio)
+    assert "innerHTML" not in (STATIC_DIR / "js" / "diff.js").read_text()
+
+
 def test_diagnose_run_executes_in_the_kept_worktree_and_teaches_when_gone(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:

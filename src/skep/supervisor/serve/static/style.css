@@ -53,6 +53,14 @@
   --warn: #f0b23e;        /* status: waiting on you */
   --info: #a1a4aa;        /* low-priority pills: neutral */
   --on-accent: #0f1011;   /* text on the white primary */
+  /* Phase 10 R1 D2: offline syntax colour in diffs (js/diff.js). The app has
+     one theme (graphite, dark); each clears AA on every surface a diff sits
+     on (test_serve_ui pins it), so a light theme overrides these five only. */
+  --syntax-kw: #c4a7ff;
+  --syntax-str: #7fd1e0;
+  --syntax-num: #f5a97f;
+  --syntax-key: #8fb8ff;
+  --syntax-com: #85888e;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -477,9 +485,16 @@ pre.log, pre.diff {
   background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
   padding: 14px; overflow-x: auto; max-height: 420px; overflow-y: auto;
 }
-.diff .add { color: var(--ok); }
-.diff .del { color: var(--bad); }
+/* D2: a tint marks the side, so a coloured token never hides it. */
+.diff .add { color: var(--ok); background: rgba(62,207,142,.07); }
+.diff .del { color: var(--bad); background: rgba(239,107,107,.07); }
 .diff .hunk { color: var(--accent); }
+.diff .tok-kw { color: var(--syntax-kw); }
+.diff .tok-str { color: var(--syntax-str); }
+.diff .tok-num { color: var(--syntax-num); }
+.diff .tok-key { color: var(--syntax-key); }
+.diff .tok-com { color: var(--syntax-com); font-style: italic; }
+.diff-raw summary { cursor: pointer; color: var(--muted); }
 .event { color: var(--muted); }
 .event .etype { color: var(--text); }
 .actions { display: flex; gap: 8px; margin: 10px 0; }
