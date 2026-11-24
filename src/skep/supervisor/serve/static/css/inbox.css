@@ -1,0 +1,6 @@
+/* Phase 10 R2: the Inbox's own rules (style.css belongs to another round).
+   H3: a batch gate's commands sit in the text column and wrap on a phone;
+   H6: an approve that came back with a warning flashes as one. Tokens only. */
+.review-row > .inbox-commands { grid-column: 2; margin: var(--space-1) 0 0; padding-left: var(--space-4); }
+.inbox-command { font-size: var(--text-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
+.flash.warn { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
