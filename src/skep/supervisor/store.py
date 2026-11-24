@@ -1381,6 +1381,11 @@ class RunStore:
                 # column that marks no old draft.
                 with self._conn:
                     self._begin_immediate()
+                    # Review R3 (R3-2): another open may have migrated while
+                    # this one waited for the lock — re-check under it.
+                    pragma = f"PRAGMA table_info({table})"
+                    if "taint" in {row[1] for row in self._conn.execute(pragma)}:
+                        continue
                     # W21: the bits of the chat that wrote the row (a JSON list,
                     # NULL = none); a chat that reads the row takes them on.
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
