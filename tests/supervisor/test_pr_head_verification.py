@@ -657,6 +657,45 @@ def test_a_git_read_v1_needs_that_fails_is_a_flag_never_clean(repo: Path) -> Non
     assert static_tamper_flags(repo, patch, missing) == ["tamper_check_failed:read_tree"]
 
 
+def test_a_runner_config_v1_cannot_read_is_a_flag_never_equal(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 (S12): a failed read of a present pyproject.toml side used to
+    become None — the same None as "absent" — so both sides compared equal
+    and a runner-config change read clean. The raw diff's modes say which
+    sides exist; a present side that cannot be read is a flag."""
+    from skep.supervisor import policy
+    from skep.supervisor.reverify import static_tamper_flags
+
+    _seed(repo)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "pytest config")
+    base, head = _pr(repo, {"pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-k nope'\n"})
+    git(repo, "checkout", "-qb", "drop-config", base)
+    git(repo, "rm", "-q", "pyproject.toml")
+    git(repo, "commit", "-qm", "drop")
+    dropped = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    patch = repo.parent / "unused.diff"
+    real = policy._git_text
+
+    def flaky(repo_: Path, *args: str, env: dict[str, str] | None = None) -> str | None:
+        if args[0] == "show" and args[1].endswith(":pyproject.toml"):
+            return None  # the read fails, whatever the side
+        return real(repo_, *args, env=env)
+
+    monkeypatch.setattr(policy, "_git_text", flaky)
+    assert static_tamper_flags(repo, patch, base, head=head) == [
+        "tamper_check_failed:config_show:pyproject.toml"
+    ]
+    monkeypatch.undo()
+    # A side the diff says is absent is absent, never a read error.
+    assert static_tamper_flags(repo, patch, base, head=dropped) == [
+        "test_config_changed:pyproject.toml"
+    ]
+
+
 def test_a_patch_v1_cannot_apply_on_a_passing_rerun_is_flagged(repo: Path) -> None:
     """R2 (S5): a patch run whose re-run passed but whose patch V1 cannot
     apply to its scratch index is unconfirmed — never silently clean. A

@@ -42,7 +42,7 @@ from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .github import PR_HEAD_REF
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
-from .policy import test_config_changes
+from .policy import ConfigUnreadable, test_config_changes
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
@@ -264,7 +264,7 @@ def static_tamper_flags(
     and so is a git read that exits non-zero (R2)."""
     try:
         return _static_tamper_flags(repo, patch_path, base, head)
-    except _UnreadableForV1 as exc:
+    except (_UnreadableForV1, ConfigUnreadable) as exc:
         return [f"tamper_check_failed:{exc.what}"]
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return [f"tamper_check_failed:{type(exc).__name__}"]
@@ -317,7 +317,12 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
         flags = [
             f"test_config_changed:{path}"
             for path in test_config_changes(
-                repo, patch_path, base, tuple(c[3] for c in changes), head=head
+                repo,
+                patch_path,
+                base,
+                tuple(c[3] for c in changes),
+                head=head,
+                modes={c[3]: (c[0], c[1]) for c in changes},  # R3 (S12)
             )
         ]
         for old_mode, new_mode, code, path in changes:

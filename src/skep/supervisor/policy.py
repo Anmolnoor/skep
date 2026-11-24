@@ -410,6 +410,18 @@ def pin_control_changes(
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
+class ConfigUnreadable(ValueError):
+    """R3 (S12): a runner-config side the diff says exists could not be read
+    — never the same as an absent side. ``what`` names the read."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+_ABSENT_MODE = "000000"  # git's raw-diff mode for a side that does not exist
+
+
 def test_config_changes(
     repo: Path,
     patch_path: Path,
@@ -417,12 +429,15 @@ def test_config_changes(
     changed_files: tuple[str, ...],
     *,
     head: str | None = None,
+    modes: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[str, ...]:
     """V1 (review R1, F7): the changed files that are test-runner config —
     ``_TEST_CONFIG_GLOBS``, ``.github/workflows/**``, and the runner section
     of the ``_TEST_CONFIG_PARSED`` files — read like ``pin_control_changes``.
     ``head`` (Phase 09 R2): read the new side from that commit, not from the
-    patch applied to ``base``."""
+    patch applied to ``base``. ``modes`` (R3, S12): each path's (old, new)
+    raw-diff modes — a side they say exists that cannot be read raises
+    ``ConfigUnreadable`` instead of comparing as absent."""
     hits = [
         path
         for path in changed_files
@@ -430,7 +445,9 @@ def test_config_changes(
         or path.startswith(".github/workflows/")
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
-    hits += _config_changes(repo, patch_path, base, parsed, runner_only=True, head=head)
+    hits += _config_changes(
+        repo, patch_path, base, parsed, runner_only=True, head=head, modes=modes
+    )
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
@@ -442,6 +459,7 @@ def _config_changes(
     *,
     runner_only: bool,
     head: str | None = None,
+    modes: dict[str, tuple[str, str]] | None = None,
 ) -> list[str]:
     """``paths`` whose ``_test_config`` differs between ``base`` and the patch
     applied in a scratch index; every path when the patch does not apply."""
@@ -461,6 +479,11 @@ def _config_changes(
             name = os.path.basename(path)
             before = _git_text(repo, "show", f"{base}:{path}")
             after = _git_text(repo, "show", f"{head or ''}:{path}", env=env)
+            old, new = (modes or {}).get(path, (_ABSENT_MODE, _ABSENT_MODE))
+            if applied and (
+                (before is None and old != _ABSENT_MODE) or (after is None and new != _ABSENT_MODE)
+            ):
+                raise ConfigUnreadable(f"config_show:{path}")
             if not applied or _test_config(name, before, runner_only=runner_only) != _test_config(
                 name, after, runner_only=runner_only
             ):
