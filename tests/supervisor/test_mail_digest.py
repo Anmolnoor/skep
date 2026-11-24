@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import email
 import imaplib
+import ssl
 import sys
 import textwrap
 from email.message import EmailMessage
@@ -37,7 +38,8 @@ class FakeIMAP:
     messages: ClassVar[list[bytes]] = []
     calls: ClassVar[list[tuple[Any, ...]]] = []
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, ssl_context: Any = None) -> None:
+        assert ssl_context is not None and ssl_context.verify_mode == ssl.CERT_REQUIRED  # S6
         self.calls.append(("connect", host, port))
 
     def __enter__(self) -> FakeIMAP:
@@ -136,7 +138,7 @@ def test_the_digest_dials_through_the_proxy_the_wall_names(
     class Proxied(FakeIMAP):
         def __init__(self, host: str, port: int, *, proxy: str) -> None:
             proxied.append((host, port, proxy))
-            super().__init__(host, port)
+            super().__init__(host, port, ssl.create_default_context())
 
     monkeypatch.setattr(mail, "_ProxiedIMAP4_SSL", Proxied)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
@@ -280,7 +282,7 @@ def _raw(i):
 
 
 class IMAP4_SSL:
-    def __init__(self, host, port):
+    def __init__(self, host, port, ssl_context=None):
         assert host == "imap.example.com", host
     def __enter__(self):
         return self
@@ -302,17 +304,18 @@ def test_the_documented_command_runs_as_a_script_schedule_and_the_alarm_parses_i
 ) -> None:
     """The setup doc's line, through ``run_schedule_script`` itself (the
     scrubbed env, the wall): config inline, the password from the file the
-    command names. The fake imaplib's dir is let in beside the declared
-    inputs (a dir is never one), so the wall stays the real one."""
-    from skep.supervisor import scheduler
+    command names. The fake imaplib's dir is let in as a read root of the
+    wall (a dir is never a declared input), so the wall stays the real one."""
+    import functools
+
+    from skep.supervisor import scheduler, wall
 
     fake = tmp_path / "fake"
     fake.mkdir()
     (fake / "imaplib.py").write_text(textwrap.dedent(_FAKE_IMAPLIB), encoding="utf-8")
     password = tmp_path / "mail-password"
     password.write_text("pw-from-home\n")
-    declared = scheduler.script_inputs
-    monkeypatch.setattr(scheduler, "script_inputs", lambda c: (*declared(c), fake))
+    monkeypatch.setattr(wall, "walled", functools.partial(wall.walled, read_allowlist=(fake,)))
     monkeypatch.setenv("SKEP_MAIL_PASSWORD", "never-inherited")  # scrubbed away
     command = (
         documented_mail_command()

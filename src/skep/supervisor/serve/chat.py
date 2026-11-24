@@ -1552,13 +1552,14 @@ _SECRET_ARG_KEY = re.compile(
 
 # Phase 09 R1 (S8, ADR 0042): ALL a scheduled prompt turn may call — store
 # reads, named. Anything else is off its menu: list_prs reads GitHub as you,
-# repo_state/git_* read checkouts, list_mcp_tools starts a server.
+# repo_state/git_* read checkouts, list_mcp_tools starts a server; R2 (S12):
+# get_run reads patch/draft files, list_repos walks checkout dirs.
 SCHEDULED_TURN_TOOLS: frozenset[str] = frozenset(
     {
-        "list_runs", "get_run", "await_runs", "list_approvals",
+        "list_runs", "await_runs", "list_approvals",
         "list_chats", "get_chat_messages", "get_chat_context", "search_chats",
         "list_notes", "list_tasks", "list_memory", "search_memory", "list_memory_proposals",
-        "list_schedules", "list_repos", "list_projects",
+        "list_schedules", "list_projects",
         "describe_tools", CLARIFY_TOOL_NAME,  # turn control: they read nothing
     }
 )  # fmt: skip

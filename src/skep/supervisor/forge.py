@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .netproxy import host_entry_problem
 from .store import RunStore
 
 PLUGINS_SETTINGS_KEY = "plugins"
@@ -485,8 +486,6 @@ _PEP723_BLOCK = re.compile(
     r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$"
 )
 _HOSTS_LINE = re.compile(r"(?m)^# skep-hosts:(?P<hosts>.*)$")
-_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-_HOST_ENTRY = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
 # What a lock may hold: ``name==version [; marker] --hash=sha256:…`` lines.
 _LOCK_LINE = re.compile(
     r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?P<extras>\[[A-Za-z0-9._,-]+\])?"
@@ -543,7 +542,7 @@ def declared_hosts(source: str) -> tuple[str, ...]:
         for raw in re.split(r"[,\s]+", line.group("hosts").strip()):
             if not raw:
                 continue
-            if not _HOST_ENTRY.fullmatch(raw.lower()):
+            if host_entry_problem(raw) is not None:
                 raise ValueError(
                     f"`# skep-hosts:` entry {raw!r} is not a host name — list hosts like "
                     "`api.example.com`, `*.example.com` or `host:8443`; `*` (every host) is "

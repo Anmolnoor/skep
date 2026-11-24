@@ -2203,6 +2203,10 @@ def _schedule_role_refusal(config: SupervisorConfig, store: RunStore, schedule: 
 
 
 def cmd_schedule_add(args: argparse.Namespace) -> int:
+    if args.caste in ("note", "script") and args.instructions is None and not args.template:
+        # Phase 09 R2 (N8b, ADR 0050): repo-less, as on REST and propose_schedule —
+        # the one positional after NAME is the text or command, verbatim
+        return _schedule_add_repo_less(args)
     repo = Path(args.repo).expanduser().resolve()
     if not (repo / ".git").exists():
         return _err(f"{repo} is not a git repository.", next_command="point at a git repo")
@@ -2273,6 +2277,38 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
             print(f"scheduled {args.name!r}: {args.caste} on {repo} every {args.every}")
     finally:
         store.close()
+    print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
+    return 0
+
+
+def _schedule_add_repo_less(args: argparse.Namespace) -> int:
+    """A note/script schedule with no repo: the tick posts the text or runs
+    the command inside the wall (script hosts: ``--network``)."""
+    try:
+        interval = parse_interval(args.every)
+        schedule = make_schedule(
+            name=args.name,
+            repo="",
+            instructions=args.repo,
+            interval_seconds=interval,
+            worker_kind=args.caste,
+            network=(args.network or []) if args.caste == "script" else (),
+            start_at=args.start_at,
+            once=args.once,
+            role=args.role,
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        refusal = _schedule_role_refusal(config, store, schedule)
+        if refusal is not None:
+            return refusal
+        store.add_schedule(schedule)
+    finally:
+        store.close()
+    print(f"scheduled {args.name!r}: {args.caste} every {args.every}")
     print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
     return 0
 
@@ -3985,7 +4021,8 @@ def register_supervisor_commands(
 
     sched_add = schedule_sub.add_parser("add", help="add a recurring schedule")
     sched_add.add_argument("name")
-    sched_add.add_argument("repo", type=Path)
+    # a note/script schedule takes no repo: this is then its text or command (N8b)
+    sched_add.add_argument("repo", metavar="repo|command")
     # Optional so `schedule add NAME REPO --template T` works; required for a
     # direct (inline-instructions) schedule.
     sched_add.add_argument("instructions", nargs="?", default=None)

@@ -2077,7 +2077,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "items": {"type": "string"},
                 "description": "hosts a worker schedule may reach; this chat's role "
                 "drops any it does not allow. Also a script schedule's only reachable "
-                "hosts inside its wall (none by default)",
+                "hosts inside its wall (none by default; named hosts, never `*`)",
             },
             "once": {
                 "type": "boolean",
@@ -6652,6 +6652,14 @@ def _mutation_execution_decision(
     skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
     if skep_self is not None:  # D11: refused at proposal, no card
         return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
+    if name == "propose_schedule" and args.get("caste") == "script":
+        from ..scheduler import script_network_problem
+
+        if hosts_refused := script_network_problem(list(args.get("network") or [])):
+            # R2 (N1): a `*` host is refused at proposal, no card
+            return AutonomyDecision(
+                verdict="deny", reason="schedule.deny.hosts", detail=hosts_refused
+            )
     role_refused = (
         _schedule_role_refusal(store, holder, chat_id, args) if name == "propose_schedule" else None
     )

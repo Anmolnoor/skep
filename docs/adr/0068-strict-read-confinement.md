@@ -607,12 +607,22 @@ the launch path `forged_lane` now shares, so the two cannot drift:
   non-link file its command names, as an argument or as a `NAME=value`
   value. Never a directory. Each is judged by `extra_read_path_problem`
   first, so one in or over the skep home, at or above `$HOME`, or on `/etc`
-  refuses the run (`script refused: …`). The secret masks still land last.
+  refuses the run (`script refused: …`). The wall takes them as single
+  files (`read_files`, Phase 09 R2), never as read roots: one named through
+  a link, or no longer a regular file, refuses; bubblewrap binds a copy
+  taken from the file opened without following links, and Seatbelt grants
+  its `(literal …)` path, so a directory swapped in after the check is
+  never opened up. The secret masks still land last.
   The card shows the command, so the operator sees every input.
 - **Writes:** a throwaway workspace (its `HOME`, `TMPDIR`), deleted after
   the run.
 - **Egress:** the schedule's `network` hosts through a FilteringProxy, none
-  by default. The REST face and `skep schedule add --network` set it.
+  by default. The REST face, `propose_schedule` and `skep schedule add
+  NAME "<command>" --caste script --network HOST` (repo-less since Phase 09
+  R2, like the other two) set it. Each
+  entry is one concrete host (`api.example.com`, `*.example.com`,
+  `host:8443`); `*` alone would make the wall allow-all, past the proxy, so
+  every creation face and `wall.walled` itself refuse it (Phase 09 R2).
   IMAP has no proxy support, so `skep.mcp_servers.mail`'s digest tunnels
   through the proxy with one CONNECT (`HTTPS_PROXY`); TLS still runs end to
   end with the mail host.

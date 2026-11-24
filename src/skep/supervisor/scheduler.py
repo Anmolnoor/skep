@@ -175,8 +175,9 @@ def run_schedule_script(
     an operator-vetted command, never a new command.
 
     Phase 09 R1 (S7): inside the strict wall (``wall.walled``, the forged
-    tools' own). Reads: ADR 0068's allowlist plus ``script_inputs`` (the
-    secret masks still land last, and an input in the skep home refuses).
+    tools' own). Reads: ADR 0068's allowlist plus ``script_inputs``, bound
+    as single files (R2: ``read_files``; the secret masks still land last,
+    and an input in the skep home, or one reached through a link, refuses).
     Writes: a throwaway workspace, which is also its HOME and TMPDIR.
     Egress: ``hosts`` (the schedule's ``network``) through a FilteringProxy,
     none when empty. No backend refuses the run (I12). Creation stays
@@ -196,7 +197,7 @@ def run_schedule_script(
             skep_home=skep_home,
             hosts=tuple(hosts),
             workspace=workspace,
-            read_allowlist=inputs,
+            read_files=inputs,  # R2 (S7): bound as files, never as roots
         ) as (argv, wall_env):
             env = {**script_env(workspace), **wall_env}
             return _run_script_process(argv, env, workspace, timeout_seconds, stdin)
@@ -398,6 +399,17 @@ def next_fire_times(
     return times
 
 
+def script_network_problem(network: Sequence[str]) -> str | None:
+    """Phase 09 R2 (N1): why a script schedule's ``network`` cannot be its
+    wall's hosts — each must be one concrete host, never ``*`` — or None."""
+    from .netproxy import host_entry_problem
+
+    for host in network:
+        if (problem := host_entry_problem(str(host))) is not None:
+            return f"a script schedule's network: {problem}"
+    return None
+
+
 def make_schedule(
     *,
     name: str,
@@ -417,6 +429,8 @@ def make_schedule(
 ) -> ScheduleRecord:
     if worker_kind in RETIRED_CASTES:  # v127-F11: refused at creation, every face
         raise ValueError(f"caste {worker_kind!r} is retired: {RETIRED_CASTES[worker_kind]}")
+    if worker_kind == "script" and (problem := script_network_problem(network)):
+        raise ValueError(problem)  # R2 (N1): refused at creation, every face
     created = now_ts()
     start = _start_slot(start_at)
     return ScheduleRecord(
