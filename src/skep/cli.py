@@ -670,9 +670,16 @@ def _onboard_chat(supervisor_home: Path, role: str) -> int:
 
 
 def _doctor(args: argparse.Namespace) -> int:
+    from . import cli_ui
+
     status = build_status(args.home, offline=args.offline)
-    print((status_json if args.json else format_doctor_report)(status), end="")
-    return 0 if status["overall"] == "ready" else 1
+    ready = status["overall"] == "ready"
+    if not args.json and cli_ui.rich_enabled():
+        report = format_doctor_report(status).rstrip("\n")
+        cli_ui.print_panel(report, title="skep doctor", style="green" if ready else "red")
+    else:
+        print((status_json if args.json else format_doctor_report)(status), end="")
+    return 0 if ready else 1
 
 
 def _status(args: argparse.Namespace) -> int:

@@ -35,6 +35,8 @@ dependencies = [
     # v6: the serve daemon's own LLM client (chat); also FastAPI's TestClient.
     "httpx>=0.27",
     "pydantic>=2",
+    # Phase 10 10.2: the terminal's presentation layer (TTY only; pipes stay plain).
+    "rich>=13.7",
     "uvicorn>=0.30",
     "websockets>=16.1",
 ]

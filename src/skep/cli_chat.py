@@ -33,6 +33,7 @@ import httpx
 
 from .supervisor.roles import delegation_line
 from .supervisor.serve.auth import TOKEN_FILE
+from .supervisor.serve.commands import CLI, WEB, CommandRefused, commands_for, resolve
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 TOKEN_HEADER = "X-Skep-Token"
@@ -210,112 +211,10 @@ def iter_sse(response: HttpxResponseLike) -> Iterator[tuple[str, dict[str, Any]]
 # lockstep — tests pin table == executor AND table == the app.js deck.
 # ---------------------------------------------------------------------------
 
+# Phase 10 10.2: a view of the one registry (serve/commands.py) — usage and
+# help are declared there, for this deck, the web's and the messengers'.
 COMMANDS: dict[str, dict[str, str]] = {
-    "help": {"usage": "/help", "desc": "list the command deck"},
-    "policy": {
-        "usage": "/policy [repo]",
-        "desc": "effective policy for a repo (default: last used)",
-    },
-    "repos": {"usage": "/repos", "desc": "registered repos"},
-    "skills": {"usage": "/skills", "desc": "learned-skill candidates and admitted skills"},
-    "runs": {"usage": "/runs [n]", "desc": "recent runs"},
-    "approvals": {"usage": "/approvals", "desc": "the pending approval queue"},
-    "state": {
-        "usage": "/state <repo>",
-        "desc": "a repo's git state: branches, HEAD, recent commits",
-    },
-    "setup": {
-        "usage": "/setup <repo> [--pack X] [--phase Y]",
-        "desc": "bind a repo to a trusted project (confirm card)",
-    },
-    "phase": {
-        "usage": "/phase <project-id> <bootstrap|build|maintain>",
-        "desc": "move a project's trust phase (confirm card)",
-    },
-    "unregister": {
-        "usage": "/unregister <project-id>",
-        "desc": "unregister a project: skep forgets it, its folder stays (confirm card)",
-    },
-    "land": {
-        "usage": "/land <task-id> [branch]",
-        "desc": "land a completed run's patch (confirm card)",
-    },
-    "approve": {
-        "usage": "/approve <review-id|card-id> [branch]",
-        "desc": "approve a pending review (confirm card), or a pending card by its id",
-    },
-    "deny": {
-        "usage": "/deny <review-id|card-id>",
-        "desc": "deny a pending review (confirm card), or a pending card by its id",
-    },
-    "workon": {
-        "usage": "/workon <path> [--pack X] [--phase Y]",
-        "desc": "make a local directory a first-class workspace — "
-        "git baseline + trusted project (confirm card)",
-    },
-    "schedule": {
-        "usage": "/schedule <name> <repo> <every> <instructions…>",
-        "desc": "create a recurring schedule the ticker dispatches — "
-        "every takes 30m/6h/1d (confirm card)",
-    },
-    "persona": {
-        "usage": "/persona <text…|default>",
-        "desc": "set the profile-level identity every chat starts with — "
-        "identity only, never policy (confirm card)",
-    },
-    "role": {
-        "usage": "/role <builder|operator|assistant|custom-role>",
-        "desc": "switch this chat's role — prompt, voice and policy layer together; "
-        "a role only tightens the baseline (confirm card)",
-    },
-    "personality": {
-        "usage": "/personality <concise|technical|friendly|custom:text|default>",
-        "desc": "set this chat's reply style — style only, never policy (confirm card)",
-    },
-    "btw": {
-        "usage": "/btw <question…>",
-        "desc": "ask a side question WITHOUT touching running work — "
-        "read-only turn: no cards, no mutations, runs beside a pending card",
-    },
-    "trust": {
-        "usage": "/trust [private|untrusted]",
-        "desc": "trust this chat again: clear its taint (both bits by default) — "
-        "yours only, never the model's; outside content read later sets it again",
-    },
-    "steer": {
-        "usage": "/steer <task-id> <text…>",
-        "desc": "send a steering note into a RUNNING react run — "
-        "input, never authority: resolves no card, approval, or gate",
-    },
-    "resume": {
-        "usage": "/resume <task-id>",
-        "desc": "continue a crashed/timed-out run from its checkpoint — model-free (confirm card)",
-    },
-    "browser": {
-        "usage": "/browser",
-        "desc": "register the built-in Playwright browser under the browse scope (confirm card)",
-    },
-    "status": {
-        "usage": "/status",
-        "desc": "re-print the startup banner: assistant readiness, approvals/cards waiting",
-    },
-    "model": {
-        "usage": "/model [name] [--scope chat|default]",
-        "desc": "show effective model for this chat; with name: propose set_assistant_model",
-    },
-    "stop": {
-        "usage": "/stop",
-        "desc": "stop this chat's running turn at its next step (from another terminal: "
-        "skep chat --chat <id> --oneshot /stop) — cards stay pending, runs keep running",
-    },
-    "exit": {
-        "usage": "/exit",
-        "desc": "leave the REPL — bare exit/quit also work",
-    },
-    "replay": {
-        "usage": "/replay",
-        "desc": f"print the last {REPLAY_MESSAGES} messages of this chat",
-    },
+    row.name: {"usage": row.usage, "desc": row.help} for row in commands_for(CLI)
 }
 
 # CLI_ONLY: commands that exist ONLY in the terminal — the web has equivalent
@@ -323,7 +222,7 @@ COMMANDS: dict[str, dict[str, str]] = {
 # topbar health dot; /model -> composer model select; /exit -> close tab;
 # /replay -> the web transcript is always on screen (v77-F5); /stop -> the
 # stop button on the working line (v130-F10: typing there queues mid-turn).
-CLI_ONLY = frozenset({"status", "model", "exit", "replay", "stop"})
+CLI_ONLY = frozenset(row.name for row in commands_for(CLI) if WEB not in row.surfaces)
 
 
 def _parse_slash(text: str) -> tuple[str, list[str], dict[str, str]]:
@@ -365,6 +264,13 @@ def _verify_pin_note(preview: dict[str, Any]) -> str:
 
 
 def _print_help() -> None:
+    from . import cli_ui
+
+    if cli_ui.rich_enabled():
+        cli_ui.print_table(
+            ("command", "what it does"), [(r.usage, r.help) for r in commands_for(CLI)]
+        )
+        return
     width = max(len(spec["usage"]) for spec in COMMANDS.values())
     for spec in COMMANDS.values():
         print(f"  {spec['usage']:<{width}}  {spec['desc']}")
@@ -888,11 +794,11 @@ class ChatRepl:
 
     def run_command(self, text: str) -> None:
         name, args, flags = _parse_slash(text)
-        spec = COMMANDS.get(name)
-        if spec is None:
-            print(_c(RED, f"unknown command: /{name}") + " — /help lists the deck")
+        try:  # the registry's one authorization step (a messenger verb is refused)
+            usage = f"usage: {resolve(CLI, name).usage}"
+        except CommandRefused as refused:
+            print(_c(RED, str(refused)) + " — /help lists the deck")
             return
-        usage = f"usage: {spec['usage']}"
         if name == "help":
             _print_help()
             return
