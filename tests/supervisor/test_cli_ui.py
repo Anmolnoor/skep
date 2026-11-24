@@ -798,3 +798,95 @@ def test_a_batch_gate_card_lists_every_command_the_approval_grants(
     for argv in batch:
         assert f"  {' '.join(argv)}" in out
     assert "[a] approve all 3 & resume" in out
+
+
+_HOSTILE = "+clear = '\x1b[2J'\n+link = '\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\'\n"
+_HOSTILE_SUMMARY = "fixed\x1b[1A\x1b[2Kall good\x07\x9b31m"
+
+
+def _hostile_run(repo: Path, home: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    patch.write_text(patch.read_text() + _HOSTILE)
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        store._conn.execute(
+            "UPDATE runs SET summary = ? WHERE task_id = ?", (_HOSTILE_SUMMARY, task_id)
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    return task_id
+
+
+def _no_raw_control(out: str) -> None:
+    for raw in ("\x1b[2J", "\x1b]8", "\x1b[1A", "\x07", "\x9b"):
+        assert raw not in out
+    assert "\\x1b[2J" in out and "\\x1b]8;;https://evil.example" in out
+    assert "\\x1b[1A" in out and "\\x07" in out and "\\x9b31m" in out
+
+
+@pytest.mark.parametrize("rich", [False, True])
+def test_review_evidence_shows_control_bytes_as_escapes(
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    rich: bool,
+) -> None:
+    """R2 I3: a patch (or a summary) cannot repaint the screen the operator
+    reads before the verdict — ESC/CSI/OSC, BEL and C1 print as visible
+    escapes on the walk's rich and plain cards and on `skep review <id>`."""
+    home = tmp_path / "home"
+    task_id = _hostile_run(repo, home, capsys)
+    if rich:
+        _on_a_terminal(monkeypatch, color=True)
+    else:
+        monkeypatch.setattr(cli_ui, "rich_enabled", lambda stream=None: False)
+    _interactive(monkeypatch, [])
+    assert _run_cli(home, "review") == 0
+    _no_raw_control(capsys.readouterr().out)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("pydoc.pager", lambda text: print(text))
+    assert _run_cli(home, "review", task_id) == 0
+    _no_raw_control(capsys.readouterr().out)
+
+
+def test_piped_review_keeps_the_patch_bytes(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2 I3: off a terminal the evidence is the bytes recorded — escaping is
+    for a screen, not for a file a script reads."""
+    home = tmp_path / "home"
+    task_id = _hostile_run(repo, home, capsys)
+    assert _run_cli(home, "review", task_id) == 0
+    assert _HOSTILE in capsys.readouterr().out
+
+
+def test_visible_escapes_c0_del_c1_and_keeps_newline_and_tab() -> None:
+    assert cli_ui.visible("a\tb\nc\x00\x1b\x7f\x85\x9f\u00a0é") == (
+        "a\tb\nc\\x00\\x1b\\x7f\\x85\\x9f\u00a0é"
+    )
+
+
+def test_review_splits_an_empty_patch_at_its_own_line(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I5: the rich review splits evidence at the patch's recorded index —
+    an empty patch equals the blank separator before it, and lines.index()
+    split there, pushing the patch's blank into the tail."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    _patch_of(home, task_id).write_text("")
+    seen: dict[str, str] = {}
+
+    def capture(head: str, patch: str, tail: str) -> str:
+        seen.update(head=head, patch=patch, tail=tail)
+        return ""
+
+    _on_a_terminal(monkeypatch)
+    monkeypatch.setattr(cli_ui, "review_ansi", capture)
+    monkeypatch.setattr(cli_ui, "page_ansi", lambda text: None)
+    assert _run_cli(home, "review", task_id) == 0
+    assert seen["patch"] == "" and seen["head"].endswith("\n")
+    assert seen["tail"].startswith("next: skep review")

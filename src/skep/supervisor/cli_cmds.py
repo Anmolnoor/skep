@@ -1634,9 +1634,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                 lines.append(f"  auto-landing: not fired ({blocked})")
             patch_path = artifacts.get("patch")
             patch_text = None
+            patch_at = -1  # R2 I5: where the patch sits in lines (it may be "")
             if patch_path is not None and patch_path.is_file():
                 patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
                 lines.append("")
+                patch_at = len(lines)
                 lines.append(patch_text)
                 lines.append(
                     f"next: git -C {shlex.quote(record.repo)} switch {landed}  # landed"
@@ -1648,10 +1650,14 @@ def cmd_review(args: argparse.Namespace) -> int:
                 lines.append("  patch:        none produced")
             from .. import cli_ui
 
+            if sys.stdout.isatty():  # R2 I3: a screen gets control bytes as escapes
+                lines = [cli_ui.visible(line) for line in lines]
             if patch_text is not None and cli_ui.rich_enabled():
                 # D4 (N8): on a terminal the patch is lit as a diff.
-                head, tail = lines[: lines.index(patch_text)], lines[lines.index(patch_text) + 1 :]
-                cli_ui.page_ansi(cli_ui.review_ansi("\n".join(head), patch_text, "\n".join(tail)))
+                head, tail = lines[:patch_at], lines[patch_at + 1 :]
+                cli_ui.page_ansi(
+                    cli_ui.review_ansi("\n".join(head), lines[patch_at], "\n".join(tail))
+                )
             else:
                 pydoc.pager("\n".join(lines))
             return 0
@@ -2223,15 +2229,18 @@ def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
     code = 0
     for card in cards:
         title = f"{card.label} · task {card.task_id}"
+        # R2 I3: evidence reaches the screen with its control bytes as escapes.
+        body = cli_ui.visible("\n".join(card.lines))
+        patch = cli_ui.visible(card.patch or "")
         if rich:
-            cli_ui.print_panel("\n".join(card.lines), title=title, style=card.style)
-            if card.patch:
-                cli_ui.print_diff(card.patch)
+            cli_ui.print_panel(body, title=title, style=card.style)
+            if patch:
+                cli_ui.print_diff(patch)
         else:
             print(title)
-            print("\n".join(f"  {line}" for line in card.lines))
-            if card.patch:
-                print(card.patch)
+            print("\n".join(f"  {line}" for line in body.split("\n")))
+            if patch:
+                print(patch)
         act = "resume" if card.label == "ASK" else "land"
         every = f" all {card.batch}" if card.batch > 1 else ""
         keys = (

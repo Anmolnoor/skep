@@ -10,6 +10,7 @@ the renderers only — building the parser (``skep --help``) never loads it.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TextIO
@@ -23,6 +24,17 @@ def rich_enabled(stream: TextIO | None = None) -> bool:
     """True only on a terminal with NO_COLOR unset."""
     stream = sys.stdout if stream is None else stream
     return stream.isatty() and not os.environ.get("NO_COLOR")
+
+
+# C0 except \t and \n, DEL, and C1: ESC/CSI/OSC/BEL and friends.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def visible(text: str) -> str:
+    """Phase 10 R2 I3: control characters as visible ``\\xNN`` escapes, so
+    evidence printed to a terminal (a patch, a worker's summary) cannot move
+    the cursor, clear the screen or plant a link before the verdict."""
+    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
 
 
 def console() -> Console:
