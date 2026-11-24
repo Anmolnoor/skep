@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """morning-ritual, step 1: gather the brief's inputs for the chained prompt.
 
-Run by a `script` schedule (supervisor-side, scrubbed env, 120 s, output
-capped at 4000 chars). Holds no secrets and imports nothing outside the
-standard library except skep's own read-only readers, so it must run under
-skep's python (the interpreter on the first line of the `skep` launcher):
+Run by a `script` schedule, inside skep's wall (scrubbed env, 120 s, output
+capped at 4000 chars, reads only the files its command names, egress only
+to the schedule's `network` hosts through a proxy). Holds no secrets and
+imports nothing outside the standard library except skep's own read-only
+readers, so it must run under skep's python (the interpreter on the first
+line of the `skep` launcher):
 
 - weather (`--weather LAT,LON`): today's forecast from api.open-meteo.com
   (keyless, the only host this file contacts itself);
 - calendar (`--calendar-days N`): skep.mcp_servers.calendar over
   SKEP_CALENDAR_ICS (a local .ics file or an https export URL);
 - mail (`--mail N`): skep.mcp_servers.mail's read-only digest of the newest
-  N messages (EXAMINE + BODY.PEEK; nothing is marked read). Its password is
-  read by that module from ~/.skep/supervisor/mail-secret, never here.
+  N messages (EXAMINE + BODY.PEEK; nothing is marked read). That module
+  reads the password from the file SKEP_MAIL_PASSWORD_FILE names, never here.
 
 Everything printed is outside content: the prompt step reads it as labeled
 context, never as instructions. Mail goes last and keeps the digest's own

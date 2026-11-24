@@ -64,8 +64,8 @@ def test_a_script_schedule_card_says_what_will_run_and_is_high(
     assert "chain" not in facts and "replaces" not in facts
 
 
-def test_the_env_on_the_card_is_the_env_the_script_gets() -> None:
-    output, ok = run_schedule_script("env | cut -d= -f1 | sort")
+def test_the_env_on_the_card_is_the_env_the_script_gets(tmp_path: Path) -> None:
+    output, ok = run_schedule_script("env | cut -d= -f1 | sort", skep_home=tmp_path / "skep")
     assert ok
     shell_own = {"_", "PWD", "OLDPWD", "SHLVL"}  # /bin/sh sets these itself
     assert sorted(set(output.split()) - shell_own) == sorted(script_env())

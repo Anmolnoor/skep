@@ -20,6 +20,7 @@ from types import ModuleType
 
 import pytest
 
+from skep.supervisor import sandbox
 from skep.supervisor.reverify import pytest_counts, static_tamper_flags
 from skep.supervisor.serve.chat import off_menu
 from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES, READ_TOOL_NAMES
@@ -168,21 +169,42 @@ def test_fetch_brief_needs_a_source() -> None:
     assert exc.value.code == 2
 
 
-def test_fetch_brief_runs_as_a_script_with_a_scrubbed_env(brief_home: Path) -> None:
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(brief_home),
-        "SKEP_CALENDAR_ICS": str(brief_home / "cal.ics"),
-    }
-    done = subprocess.run(
-        [sys.executable, str(SKILLS / "morning-ritual" / "fetch_brief.py"), "--calendar-days", "1"],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
+@pytest.mark.skipif(
+    sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
+    reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
+)
+def test_fetch_brief_runs_inside_the_script_wall(brief_home: Path) -> None:
+    """S7: the documented shape through the real script lane. The .ics the
+    command names is read; with no hosts declared the weather cannot leave."""
+    from skep.supervisor.scheduler import run_schedule_script
+
+    script = SKILLS / "morning-ritual" / "fetch_brief.py"
+    output, ok = run_schedule_script(
+        f"SKEP_CALENDAR_ICS={brief_home / 'cal.ics'} {sys.executable} {script} "
+        "--weather 49.28,-123.12 --calendar-days 1",
+        skep_home=brief_home / ".skep",
     )
-    assert done.returncode == 0, done.stderr
-    assert "## Calendar" in done.stdout and "— standup" in done.stdout
+    assert ok is False, output  # the weather section failed: no network
+    assert "## Calendar" in output and "— standup" in output
+    assert "## Weather\n(unavailable: URLError" in output
+
+
+def test_the_morning_brief_declares_its_inputs_and_hosts() -> None:
+    """S7: the skill's command names its files (declared inputs, none in the
+    skep home) and its schedule names the hosts the script contacts."""
+    from skep.supervisor.scheduler import script_inputs
+
+    text = (SKILLS / "morning-ritual" / "SKILL.md").read_text(encoding="utf-8")
+    (network,) = re.findall(r"network=(\[[^\]]*\])", text)
+    (command,) = re.findall(r'instructions="([^"]+)"', text)
+    imap = re.search(r"SKEP_MAIL_IMAP_HOST=(\S+)", command)
+    assert imap is not None and json.loads(network) == ["api.open-meteo.com", imap.group(1)]
+    assert "SKEP_MAIL_PASSWORD_FILE=/abs/path/" in command and ".skep" not in command
+    real = command.replace(
+        "/abs/path/to/examples/skills/morning-ritual/fetch_brief.py",
+        str(SKILLS / "morning-ritual" / "fetch_brief.py"),
+    )
+    assert SKILLS / "morning-ritual" / "fetch_brief.py" in script_inputs(real)
 
 
 # -- 9.1: seed-dependabot-fixture.sh --------------------------------------------
