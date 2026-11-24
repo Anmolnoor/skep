@@ -313,9 +313,8 @@ _MERGE_FLAGS = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}
 def merge_pull_request(
     *,
     repo: Path,
-    pr: str,
+    pin: dict[str, Any],
     strategy: str = "merge",
-    expected_head_sha: str | None = None,
     runner: Runner = subprocess.run,
 ) -> MergeResult:
     """v47-F5: merge an open PR via gh. Honest failure, never raises.
@@ -324,43 +323,81 @@ def merge_pull_request(
     explicit operator confirm on the operator's own gh credentials — workers
     cannot merge, and nothing merges automatically.
 
-    Phase 09 (9.0, I1, I9): ``expected_head_sha`` (the head G10 verified, as
-    the card showed it) pins the merge — a moved head is refused here with
-    both SHAs, and GitHub refuses a push that races this check
-    (``--match-head-commit``, the API's expected head)."""
+    Phase 09 R1 (D3, I1, I8, I9): ``pin`` is the clean G10 verdict the card
+    was proposed with (``cards.merge_pin``): repo, number, head_commit,
+    base_commit, base_branch. The live PR is re-read first and the merge is
+    refused, naming both SHAs, if its head, its base branch or that branch's
+    tip moved since. gh then merges with ``--match-head-commit`` (never
+    ``--auto``/``--admin``), and the result says merged only when GitHub
+    reports the PR MERGED — a zero exit that queued it is said as such."""
     flag = _MERGE_FLAGS.get(strategy)
     if flag is None:
         return MergeResult(False, f"unknown merge strategy {strategy!r}")
     try:
-        pid = resolve_pr(repo, pr, runner)
-    except PrSelectorError as exc:
-        return MergeResult(False, f"{exc}; nothing merged")
-    flags = [flag]
-    if expected_head_sha:
-        view = _run(
-            runner, _gh_pr("view", pid, "--json", "headRefOid", "--jq", ".headRefOid"), cwd=repo
+        pid = PrId(str(pin["repo"]), int(pin["number"]))
+        head, base, branch = (str(pin[k]) for k in ("head_commit", "base_commit", "base_branch"))
+    except (KeyError, TypeError, ValueError):
+        return MergeResult(
+            False,
+            "the merge pin has no verified head, base and base branch — propose merge_pr "
+            "again; nothing merged",
         )
-        head = view.stdout.strip()
-        if view.returncode != 0:
-            why = (view.stderr or view.stdout).strip()
-            return MergeResult(
-                False,
-                f"gh pr view failed: {why} — PR #{pid.number}'s head could not be checked "
-                f"against the verified {expected_head_sha}; nothing merged",
-            )
-        if head != expected_head_sha:
-            return MergeResult(
-                False,
-                f"refused: PR #{pid.number}'s head is now {head}, not {expected_head_sha}, "
-                "the head G10 verified — it was pushed to after verification; nothing merged. "
-                f"refresh_repo pr={pid.number}, review the new head, then propose merge_pr again",
-            )
-        flags += ["--match-head-commit", expected_head_sha]
-    merged = _run(runner, _gh_pr("merge", pid, *flags), cwd=repo)
+    n = pid.number
+    again = f"refresh_repo pr={n}, review it again, then propose merge_pr again"
+    view = _run(
+        runner, _gh_pr("view", pid, "--json", "headRefOid,baseRefOid,baseRefName,state"), cwd=repo
+    )
+    try:
+        live: dict[str, Any] = json.loads(view.stdout) if view.returncode == 0 else {}
+        state, now_head = str(live["state"]), str(live["headRefOid"])
+        now_base, now_branch = str(live["baseRefOid"]), str(live["baseRefName"])
+    except (ValueError, KeyError, TypeError):
+        why = (view.stderr or view.stdout).strip()
+        return MergeResult(
+            False,
+            f"gh pr view failed: {why} — PR #{n} could not be checked against the verified "
+            f"head {head}; nothing merged",
+        )
+    if state != "OPEN":
+        return MergeResult(False, f"refused: PR #{n} is {state}, not OPEN; nothing merged")
+    if now_head != head:
+        return MergeResult(
+            False,
+            f"refused: PR #{n}'s head is now {now_head}, not {head}, the head G10 verified — "
+            f"it was pushed to after verification; nothing merged. {again}",
+        )
+    if now_branch != branch:
+        return MergeResult(
+            False,
+            f"refused: PR #{n} now targets {now_branch}, not {branch}, the base G10 "
+            f"verified it against; nothing merged. {again}",
+        )
+    if now_base != base:
+        return MergeResult(
+            False,
+            f"refused: {branch} is now {now_base}, not {base} — the base advanced since G10 "
+            f"verified head {head} against it; nothing merged. {again}",
+        )
+    merged = _run(runner, _gh_pr("merge", pid, flag, "--match-head-commit", head), cwd=repo)
     if merged.returncode != 0:
         why = (merged.stderr or merged.stdout).strip()
         return MergeResult(False, f"gh pr merge failed: {why}")
-    return MergeResult(True, f"merged {pid.repo}#{pid.number} ({strategy})")
+    after = _run(runner, _gh_pr("view", pid, "--json", "state,mergeCommit"), cwd=repo)
+    try:
+        landed = json.loads(after.stdout) if after.returncode == 0 else {}
+        final, commit = str(landed.get("state")), (landed.get("mergeCommit") or {}).get("oid")
+    except (ValueError, AttributeError):
+        final, commit = "unreadable", None
+    if final != "MERGED":
+        return MergeResult(
+            False,
+            f"gh pr merge exited 0, but GitHub reports {pid.repo}#{n} as {final}: it was "
+            f"queued (a merge queue or auto-merge), not merged — nothing is on {branch} yet; "
+            "list_prs shows when it lands",
+        )
+    return MergeResult(
+        True, f"merged {pid.repo}#{n} at head {head} ({strategy}): merge commit {commit}"
+    )
 
 
 def close_pull_request(

@@ -1568,9 +1568,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE merging an open GitHub PR (requires user confirmation in the web "
         "UI; messenger channels can never confirm it). The ONLY way a base branch "
         "like main advances — runs gh on the operator's own credentials. `pr` is "
-        "the PR number or its URL on the repo's origin, never a branch. Pinned to "
-        "the head G10 last verified for it, if any: "
-        "a later push makes GitHub refuse it.",
+        "the PR number or its URL on the repo's origin, never a branch. Refused "
+        "unless G10 cleanly confirmed the PR's head (refresh_repo pr=N, then a "
+        "review run on refs/skep/pr/N/head); it merges only that head onto that "
+        "base, and is refused if either moved.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "pr": {"type": "string"},
@@ -4481,6 +4482,12 @@ def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str 
     None for every other tool and anything the confirm reports itself (an
     unknown run or review, a mid-run gate)."""
     try:
+        if name == "merge_pr":
+            # Phase 09 R1 (D3): no card for a merge its confirm must refuse.
+            from .cards import merge_pin
+
+            pin = merge_pin(store, args)
+            return f"merge_pr refused: {pin['error']}" if "error" in pin else None
         if name == "open_pr" and not args.get("branch"):
             # ES-F292 follow-up: open_pr lands each run first (land_run).
             ids = args.get("task_ids") or [args.get("task_id")]
@@ -5827,22 +5834,22 @@ def _execute_mutation(
         # v47-F5: the only base-branch advance, strictly behind the confirm the
         # operator just gave. gh failure degrades to an honest tool result.
         from .. import github
-        from .cards import merge_pin
 
-        # Phase 09 (9.0, I1, I8): the head the card showed, never re-looked-up
+        # Phase 09 R1 (D3, I1, I8): exactly the pin the card was proposed
+        # with — a verdict is never looked up at click time.
         pin = (card or {}).get("merge")
-        pin = merge_pin(store, args) if pin is None else pin
+        if not pin:
+            raise ValueError(
+                "merge refused: this card has no verified PR head pinned from when it was "
+                "proposed — propose merge_pr again"
+            )
         if "error" in pin:
-            raise ValueError(f"merge cannot be pinned to a verified head: {pin['error']}")
+            raise ValueError(f"merge refused: {pin['error']}")
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
         merge = github.merge_pull_request(
-            repo=repo_path,
-            pr=str(args["pr"]),
-            strategy=str(args.get("strategy") or "merge"),
-            expected_head_sha=pin.get("expected_head_sha"),
+            repo=repo_path, pin=pin, strategy=str(args.get("strategy") or "merge")
         )
-        merged = {"merged": merge.merged, "detail": merge.detail}
-        return {**merged, "expected_head_sha": pin["expected_head_sha"]} if pin else merged
+        return {"merged": merge.merged, "detail": merge.detail, "head_commit": pin["head_commit"]}
     if name == "close_pr":
         # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
         # reopens) — but NOT with delete_branch: deleting the head ref cascade-

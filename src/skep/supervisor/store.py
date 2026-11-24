@@ -1858,14 +1858,15 @@ class RunStore:
         )
 
     @_locked
-    def pr_head_verdict(self, repo: str, ref: str) -> ReverifyRecord | None:
-        """Phase 09 (9.0): the newest G10 verdict on a PR head — a review run
-        of ``repo`` on ``ref`` (refs/skep/pr/<N>/head) that recorded one."""
+    def pr_head_verdict(self, pr_repo: str, number: int) -> ReverifyRecord | None:
+        """Phase 09 R1 (D1, D3): the newest G10 verdict on PR ``number`` of
+        the GitHub repo ``pr_repo`` (owner/name) — its canonical identity,
+        whichever local clone ran the review."""
         row = self._conn.execute(
-            "SELECT r.task_id FROM reverifications r JOIN runs u ON u.task_id = r.task_id"
-            " WHERE u.repo = ? AND u.ref = ? AND r.head_commit IS NOT NULL"
-            " ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
-            (repo, ref),
+            "SELECT task_id FROM reverifications"
+            " WHERE json_extract(pr_json, '$.repo') = ? AND json_extract(pr_json, '$.number') = ?"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (pr_repo, number),
         ).fetchone()
         return None if row is None else self.reverification_for(row[0])
 

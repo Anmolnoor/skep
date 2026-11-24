@@ -715,10 +715,11 @@ def recorded_card(
 
 
 def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
-    """Phase 09 (9.0, I1, I8): the PR head a merge_pr card pins — the head
-    of G10's newest verdict on this PR (a review run on refs/skep/pr/<N>/head),
-    recorded when the card is proposed; the confirm passes exactly it to
-    GitHub. ``{}``: no verdict covers the PR, so the merge is not pinned."""
+    """Phase 09 R1 (D3, I1, I8): what a merge_pr card pins, read ONCE, when
+    it is proposed — the newest G10 verdict on the PR's canonical identity
+    (origin owner/name, number). Only a clean, confirmed verdict pins:
+    ``{repo, number, base_branch, base_commit, head_commit, merge_base,
+    task_id}``. Anything else is ``{"error": why}`` and nothing merges."""
     from pathlib import Path
 
     from fastapi import HTTPException
@@ -734,33 +735,46 @@ def merge_pin(store: RunStore, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": str(exc.detail)}
     except PrSelectorError as exc:
         return {"error": str(exc)}
-    verdict = store.pr_head_verdict(str(repo), pr_ref(pid.number))
-    if verdict is None:
-        return {}
-    return {
-        "expected_head_sha": verdict.head_commit,
-        "base_sha": verdict.base_commit,
-        "task_id": verdict.task_id,
-        "outcome": verdict.outcome,
-        "confirmed": verdict.confirmed,
-    }
+    verdict = store.pr_head_verdict(pid.repo, pid.number)
+    again = (
+        f"refresh_repo pr={pid.number}, dispatch_run ref={pr_ref(pid.number)}, "
+        "then propose merge_pr again"
+    )
+    if verdict is None or not verdict.pr:
+        return {"error": f"no G10 verdict covers {pid.repo}#{pid.number}: {again}"}
+    problem = _unclean(verdict)
+    if problem is not None:
+        return {
+            "error": f"G10 did not cleanly confirm {pid.repo}#{pid.number} at head "
+            f"{verdict.head_commit} ({problem}; run {verdict.task_id}) — an unverified head "
+            f"never merges: fix the PR, then {again}"
+        }
+    keys = ("repo", "number", "base_branch", "base_commit", "head_commit", "merge_base")
+    return {**{key: verdict.pr[key] for key in keys}, "task_id": verdict.task_id}
+
+
+def _unclean(verdict: Any) -> str | None:
+    """Why a PR verdict is not G10 passed + V1 clean, or None (D3)."""
+    if verdict.tamper_flags:
+        return "V1: " + ", ".join(verdict.tamper_flags)
+    if verdict.outcome != "passed":
+        return f"G10 {verdict.outcome}"
+    if not verdict.confirmed:
+        return "G10 passed, but not confirmed: the review worker itself did not pass"
+    if (verdict.test_counts or {}).get("status") == "unparseable":
+        return "V1 could not read the test counts"
+    return None
 
 
 def merge_line(pin: dict[str, Any]) -> str:
     if "error" in pin:
-        return f"it cannot be pinned to a verified head: {pin['error']}"
-    if not pin:
-        return (
-            "NOT pinned: no G10 verdict covers this PR's head (refresh_repo pr=<N>, then a "
-            "review run on refs/skep/pr/<N>/head) — it merges whatever head the PR has"
-        )
-    verdict = (
-        "G10 confirmed it" if pin["confirmed"] else f"G10 did NOT confirm it ({pin['outcome']})"
-    )
+        return f"REFUSED — {pin['error']}"
+    branch = pin["base_branch"]
     return (
-        f"merges only head {pin['expected_head_sha'][:12]} — {verdict} on base "
-        f"{str(pin['base_sha'] or 'unknown')[:12]} (run {pin['task_id'][:8]}); "
-        "a push to the PR after this card makes GitHub refuse the merge"
+        f"merges only {pin['repo']}#{pin['number']} at head {pin['head_commit'][:12]} — "
+        f"G10 confirmed that exact tree and V1 found nothing (run {pin['task_id'][:8]}) — "
+        f"onto {branch} {pin['base_commit'][:12]}; a push to the PR or to {branch} after "
+        "this card refuses the merge"
     )
 
 

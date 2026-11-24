@@ -140,22 +140,37 @@ def _gh_fake(
 
 
 def test_merge_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:
-    """v47-F5: the only base-branch advance — gh pr merge, honest on failure."""
+    """v47-F5: the only base-branch advance — gh pr merge, honest on failure.
+    Phase 09 R1 (D3): it merges only a pinned, verified head."""
+    import json
+
     from skep.supervisor.github import merge_pull_request
 
-    repo = _github_repo(tmp_path)
+    pin = {
+        "repo": "me/repo", "number": 7, "base_branch": "main",
+        "base_commit": "b" * 40, "head_commit": "a" * 40,
+    }  # fmt: skip
+    live = {"headRefOid": "a" * 40, "baseRefOid": "b" * 40, "baseRefName": "main"}
     calls: list[list[str]] = []
-    ok = _gh_fake(0, "merged", calls=calls)
 
-    result = merge_pull_request(repo=repo, pr="7", strategy="squash", runner=ok)
+    def gh(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        merged = any(call[2] == "merge" for call in calls)
+        state = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}} if merged else {}
+        return _cp(args, 0, json.dumps({**live, "state": "OPEN", **state}))
+
+    result = merge_pull_request(repo=tmp_path, pin=pin, strategy="squash", runner=gh)
     assert result.merged and "7" in result.detail
-    assert calls == [["gh", "pr", "merge", "--repo", "me/repo", "--squash", "--", "7"]]
+    assert calls[1] == [
+        "gh", "pr", "merge", "--repo", "me/repo", "--squash", "--match-head-commit", "a" * 40,
+        "--", "7",
+    ]  # fmt: skip
 
     broken = _gh_fake(1, "", "not mergeable")
-    failed = merge_pull_request(repo=repo, pr="7", runner=broken)
+    failed = merge_pull_request(repo=tmp_path, pin=pin, runner=broken)
     assert not failed.merged and "not mergeable" in failed.detail
     # An unknown strategy never reaches gh.
-    assert not merge_pull_request(repo=repo, pr="7", strategy="yolo", runner=broken).merged
+    assert not merge_pull_request(repo=tmp_path, pin=pin, strategy="yolo", runner=broken).merged
 
 
 def test_close_pull_request_invokes_gh_and_degrades_honestly(tmp_path: Path) -> None:

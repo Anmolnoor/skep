@@ -40,7 +40,11 @@ from skep.supervisor.serve.app import STATIC_DIR, TERMINAL_STATES
 from skep.supervisor.serve.cards import recorded_card
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
-from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
+from skep.supervisor.serve.tools import (
+    execute_mutation,
+    landing_card_error,
+    mutation_execution_decision,
+)
 
 from .conftest import FAKE_WORKER, git, serve_client
 from .test_role_policy import _home
@@ -601,11 +605,14 @@ def test_the_dependabot_chain_end_to_end(
         assert (landed["action"], landed["branch"]) == ("applied", f"skep/{task_id}")
         assert git(repo, "show", f"skep/{task_id}:existing.py").stdout == "value = 1\n"
         assert git(repo, "show", "main:existing.py").stdout == "value = 0\n"  # main untouched
-        # …and the PR merges only behind the merge card, on the operator's gh.
-        merge_decision, merged = queen("merge_pr", {"repo": str(repo), "pr": "41"})
-        assert merge_decision is None or merge_decision.verdict == "require_approval"
-        assert merged == {"merged": True, "detail": "merged #41"}
-        assert merges[0]["pr"] == "41"
+        # …and the PR merges only behind a merge card pinned to a head G10
+        # confirmed (Phase 09 R1, D3): this branch was never reviewed as PR
+        # #41's head, so no merge card is shown and no confirm merges it.
+        merge = {"repo": str(repo), "pr": "41"}
+        assert "no G10 verdict" in str(landing_card_error(store, "merge_pr", merge))
+        with pytest.raises(ValueError, match="propose merge_pr again"):
+            queen("merge_pr", merge)
+        assert merges == []
     finally:
         runner.shutdown(wait=True)
         store.close()

@@ -3124,19 +3124,17 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
     repo = _pr_repo(args)
     if isinstance(repo, int):
         return repo
-    # Phase 09 (9.0, I1): pinned to the head G10 verified, as on the chat card.
+    # Phase 09 R1 (D3, I1): only a clean G10 verdict on this PR's head pins
+    # a merge, exactly as on the chat card — and the CLI has no override.
     store = RunStore(build_config(args.home, None).db_path)
     try:
         pin = merge_pin(store, {"repo": str(repo), "pr": args.number})
     finally:
         store.close()
+    if "error" in pin:
+        return _err(f"merge refused: {pin['error']}")
     print(f"  pin: {merge_line(pin)}")
-    result = github.merge_pull_request(
-        repo=repo,
-        pr=args.number,
-        strategy=args.method,
-        expected_head_sha=pin.get("expected_head_sha"),
-    )
+    result = github.merge_pull_request(repo=repo, pin=pin, strategy=args.method)
     # gh failures come back as ok=False with the reason rather than raising, so
     # the exit code has to be derived — a merge that did not happen must not
     # report success (I8).

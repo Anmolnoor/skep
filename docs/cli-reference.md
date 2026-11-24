@@ -274,8 +274,13 @@ anything else is refused before gh runs. A review run dispatched on
 nothing, G10 runs the project's pinned `verify_command` on the exact head
 commit, and the V1 test-tamper check reads the PR's own diff
 (merge-base..head). `skep pr merge` (and the
-`merge_pr` card) then merges only that verified head: a push after it makes
-GitHub refuse the merge.
+`merge_pr` card) merges a PR only when that verdict is clean (G10 passed, V1
+found nothing) and there is no override flag. The card pins the verdict's
+head, base branch and base SHA when it is proposed; at merge time the live PR
+is re-read and the merge is refused if any of the three moved (a base that
+advanced needs a fresh review). gh merges with `--match-head-commit`, and the
+result says merged only when GitHub reports the PR merged — a merge queue or
+auto-merge is reported as queued.
 
 - `repo list` shows every repo skep can reach: clones and workon directories.
 - `repo refresh` fetches origin and fast-forwards the default branch. Run it

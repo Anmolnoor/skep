@@ -12,6 +12,7 @@ import json
 import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -220,12 +221,10 @@ def test_a_flag_or_foreign_selector_never_reaches_gh(repo: Path, selector: str) 
     calls: list[list[str]] = []
 
     fetched = github.fetch_pr_head(repo=repo, pr=selector, runner=_gh_only(calls))
-    merged = github.merge_pull_request(
-        repo=repo, pr=selector, expected_head_sha="a" * 40, runner=_gh_only(calls)
-    )
     closed = github.close_pull_request(repo=repo, pr=selector, runner=_gh_only(calls))
 
-    assert not fetched.ok and not merged.merged and not closed.closed
+    # A merge takes no selector at all: only the card's pin (section 3).
+    assert not fetched.ok and not closed.closed
     assert calls == []
 
 
@@ -235,9 +234,7 @@ def test_every_gh_call_names_the_repo_and_ends_with_the_bare_number(repo: Path) 
     sha = "a" * 40
 
     github.fetch_pr_head(repo=repo, pr="#07", runner=_gh_only(calls, "{}"))
-    github.merge_pull_request(
-        repo=repo, pr="07", expected_head_sha=sha, runner=_gh_only(calls, sha)
-    )
+    github.merge_pull_request(repo=repo, pin={**PIN_7, "head_commit": sha}, runner=_merge_gh(calls))
     github.close_pull_request(repo=repo, pr="#7", delete_branch=True, runner=_gh_only(calls))
 
     assert calls, "gh was never asked"
@@ -694,18 +691,18 @@ def test_a_pr_that_changes_nothing_is_not_applicable(repo: Path, config: Supervi
     assert record.confirmed is False
 
 
-# --- 3. the card pins the verified head; the merge passes it to GitHub ----------
+# --- 3. a merge needs a clean verdict, pinned at propose, re-checked live (D3) --
 
 
 def _confirm_merge(
     config: SupervisorConfig, args: dict[str, Any], card: dict[str, Any] | None
-) -> tuple[dict[str, Any], list[dict[str, Any]], pytest.MonkeyPatch]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     merges: list[dict[str, Any]] = []
     patch = pytest.MonkeyPatch()
 
     def fake_merge(**kwargs: Any) -> github.MergeResult:
         merges.append(kwargs)
-        return github.MergeResult(True, "merged 7 (merge)")
+        return github.MergeResult(True, "merged acme/widget#7 (merge)")
 
     patch.setattr(github, "merge_pull_request", fake_merge)
     store = RunStore(config.db_path)
@@ -723,10 +720,51 @@ def _confirm_merge(
     finally:
         store.close()
         patch.undo()
-    return result, merges, patch
+    return result, merges
 
 
-def test_the_merge_card_carries_the_verified_head_through_to_github(
+def _propose(config: SupervisorConfig, args: dict[str, Any]) -> tuple[Any, Any, str | None]:
+    """A merge_pr proposal as chat makes one: the propose-time refusal
+    (``landing_card_error``) and the card recorded with its pin."""
+    from skep.supervisor.serve.tools import landing_card_error
+
+    store = RunStore(config.db_path)
+    try:
+        card = recorded_card("merge_pr", args, None, store) or {}
+        return (
+            card,
+            card_summary("merge_pr", args, store=store, recorded=card),
+            (landing_card_error(store, "merge_pr", args)),
+        )
+    finally:
+        store.close()
+
+
+def _verdict(
+    config: SupervisorConfig,
+    repo: Path,
+    head: str = "a" * 40,
+    base: str = "b" * 40,
+    **fields: Any,
+) -> str:
+    """A G10 verdict on PR 7's ``head`` (clean and confirmed unless
+    ``fields`` say otherwise), recorded with its PR tuple."""
+    store = RunStore(config.db_path)
+    try:
+        task_id = _review_run(store, repo, head, base)
+        recorded: dict[str, Any] = {
+            "outcome": "passed", "worker_outcome": "passed", "confirmed": True,
+            "commands": [PIN], "exit_codes": [0], "detail": "ok", "base_commit": base,
+            "head_commit": head, "pr": {**_pair(base, head), "merge_base": base},
+            "test_counts": {"status": "ok"}, **fields,
+        }  # fmt: skip
+        store.record_reverification(task_id, **recorded)
+        return task_id
+    finally:
+        store.close()
+
+
+def test_the_merge_card_carries_the_verified_pr_through_to_github(
     repo: Path, config: SupervisorConfig
 ) -> None:
     _seed(repo)
@@ -735,186 +773,232 @@ def test_the_merge_card_carries_the_verified_head_through_to_github(
     _outcome, _record, task_id = _g10(repo, config, head)
     args = {"repo": str(repo), "pr": "7"}
 
-    store = RunStore(config.db_path)
-    try:
-        card = recorded_card("merge_pr", args, None, store) or {}
-        summary = card_summary("merge_pr", args, store=store, recorded=card)
-    finally:
-        store.close()
+    card, summary, refused = _propose(config, args)
 
-    assert card["merge"]["expected_head_sha"] == head
-    assert card["merge"]["base_sha"] == base and card["merge"]["task_id"] == task_id
-    assert f"merges only head {head[:12]}" in summary["risk"]
-    assert "G10 confirmed" in summary["risk"] and "refuse" in summary["risk"]
+    assert refused is None
+    assert card["merge"] == {
+        **_pair(base, head), "merge_base": base, "task_id": task_id
+    }  # fmt: skip
+    assert f"merges only {ORIGIN}#7 at head {head[:12]}" in summary["risk"]
+    assert "G10 confirmed" in summary["risk"] and "refuses" in summary["risk"]
 
-    result, merges, _ = _confirm_merge(config, args, card)
-    assert merges[0]["expected_head_sha"] == head
-    assert result["expected_head_sha"] == head and result["merged"] is True
+    result, merges = _confirm_merge(config, args, card)
+    assert merges[0]["pin"] == card["merge"] and result["merged"] is True
+    assert result["head_commit"] == head
 
 
 def test_a_newer_verdict_after_the_card_does_not_change_what_merges(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """The confirm merges what the card showed (I8), never a lookup redone."""
-    _seed(repo)
-    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
-    card = {"merge": {"expected_head_sha": head, "base_sha": "b" * 40, "task_id": "t"}}
-    store = RunStore(config.db_path)
-    try:
-        task_id = _review_run(store, repo, "f" * 40)
-        store.record_reverification(
-            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
-            commands=[PIN], exit_codes=[0], detail="later", head_commit="f" * 40,
-        )  # fmt: skip
-    finally:
-        store.close()
+    _github_origin(repo)
+    card = {"merge": {**_pair("b" * 40, "a" * 40), "merge_base": "b" * 40, "task_id": "t"}}
+    _verdict(config, repo, head="f" * 40, outcome="failed", confirmed=False)
 
-    _result, merges, _ = _confirm_merge(config, {"repo": str(repo), "pr": "7"}, card)
+    _result, merges = _confirm_merge(config, {"repo": str(repo), "pr": "7"}, card)
 
-    assert merges[0]["expected_head_sha"] == head
+    assert merges[0]["pin"]["head_commit"] == "a" * 40
 
 
-def test_a_card_without_a_verdict_says_it_is_not_pinned(
+@pytest.mark.parametrize(
+    ("fields", "why"),
+    [
+        ({"outcome": "failed", "confirmed": False}, "failed"),
+        ({"outcome": "tampered", "confirmed": False,
+          "tamper_flags": ("test_file_deleted:tests/test_app.py",)}, "test_file_deleted"),
+        ({"outcome": "unavailable", "confirmed": False, "exit_codes": []}, "unavailable"),
+        ({"worker_outcome": "failed", "confirmed": False}, "not confirmed"),
+        ({"test_counts": {"status": "unparseable"}}, "test counts"),
+        (None, "no G10 verdict"),
+    ],
+)  # fmt: skip
+def test_no_clean_confirmed_verdict_means_no_merge_on_any_face(
+    repo: Path,
+    tmp_path: Path,
+    config: SupervisorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fields: dict[str, Any] | None,
+    why: str,
+) -> None:
+    """R1 (S1/N4, D3): refused in chat (no card is shown), at the card's
+    confirm, and by `skep pr merge` — which has no override."""
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+
+    _github_origin(repo)
+    config = replace(config, home=build_config(tmp_path / "home", None).home)
+    if fields is not None:
+        _verdict(config, repo, **fields)
+    args = {"repo": str(repo), "pr": "7"}
+
+    card, _summary, refused = _propose(config, args)
+
+    assert refused is not None and why in refused and "refresh_repo pr=7" in refused
+    with pytest.raises(ValueError, match="merge refused"):
+        _confirm_merge(config, args, card)
+    merges: list[dict[str, Any]] = []
+    monkeypatch.setattr(github, "merge_pull_request", lambda **kw: merges.append(kw))
+    assert main(["--home", str(tmp_path / "home"), "pr", "merge", str(repo), "7"]) != 0
+    assert merges == [] and why in capsys.readouterr().err
+
+
+def test_a_card_without_a_saved_pin_is_refused_at_confirm(
     repo: Path, config: SupervisorConfig
 ) -> None:
+    """R1 (D3): the pin is the card's, saved when it was proposed — a card
+    without one is never completed by a verdict looked up at click time."""
     _github_origin(repo)
-    args = {"repo": str(repo), "pr": "https://github.com/acme/widget/pull/7"}
-    store = RunStore(config.db_path)
-    try:
-        card = recorded_card("merge_pr", args, None, store) or {}
-        live = card_summary("merge_pr", args, store=store)
-    finally:
-        store.close()
+    _verdict(config, repo)
 
-    assert card["merge"] == {}
-    assert "NOT pinned" in live["risk"] and "refresh_repo pr=" in live["risk"]
-    result, merges, _ = _confirm_merge(config, args, card)
-    assert merges[0]["expected_head_sha"] is None and "expected_head_sha" not in result
-
-
-def test_a_card_proposed_without_the_record_pins_live(repo: Path, config: SupervisorConfig) -> None:
-    """An operator-command card records no merge block; the confirm looks
-    the verdict up the same way the card summary did."""
-    _seed(repo)
-    _github_origin(repo)
-    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
-    store = RunStore(config.db_path)
-    try:
-        task_id = _review_run(store, repo, head)
-        store.record_reverification(
-            task_id, outcome="failed", worker_outcome="passed", confirmed=False,
-            commands=[PIN], exit_codes=[1], detail="broke", base_commit="b" * 40,
-            head_commit=head,
-        )  # fmt: skip
-        summary = card_summary("merge_pr", {"repo": str(repo), "pr": "#7"}, store=store)
-    finally:
-        store.close()
-
-    assert "G10 did NOT confirm it (failed)" in summary["risk"]
-    _result, merges, _ = _confirm_merge(config, {"repo": str(repo), "pr": "#7"}, None)
-    assert merges[0]["expected_head_sha"] == head
+    cards: list[dict[str, Any] | None] = [None, {}, {"merge": {}}]
+    for card in cards:
+        with pytest.raises(ValueError, match="propose merge_pr again"):
+            _confirm_merge(config, {"repo": str(repo), "pr": "7"}, card)
 
 
 @pytest.mark.parametrize(
     ("selector", "pinned"),
-    [("07", True), ("https://github.com/ACME/widget/pull/7/files", True), ("7 ", False)],
+    [
+        ("07", True),
+        ("https://github.com/ACME/widget/pull/7/files", True),
+        ("7 ", False),
+        ("--admin", False),
+        ("--repo=evil/x", False),
+    ],
 )
 def test_the_card_pins_the_canonical_pr_never_the_typed_text(
     repo: Path, config: SupervisorConfig, selector: str, pinned: bool
 ) -> None:
     """R1 (S2/N2, D1): "07" and a /files URL are PR 7; "7 " is refused."""
-    _seed(repo)
     _github_origin(repo)
-    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
-    _g10(repo, config, head)
+    _verdict(config, repo)
 
-    store = RunStore(config.db_path)
-    try:
-        card = recorded_card("merge_pr", {"repo": str(repo), "pr": selector}, None, store) or {}
-    finally:
-        store.close()
+    card, _summary, refused = _propose(config, {"repo": str(repo), "pr": selector})
 
-    assert (card["merge"].get("expected_head_sha") == head) is pinned
-    assert ("error" in card["merge"]) is not pinned
+    assert (card["merge"].get("head_commit") == "a" * 40) is pinned
+    assert (refused is None) is pinned
 
 
 def test_a_foreign_pr_url_never_pins_this_repos_verdict(
     repo: Path, config: SupervisorConfig
 ) -> None:
-    _seed(repo)
     _github_origin(repo)
-    _base, head = _pr(repo, {"requirements.txt": "requests==2.32.0\n"})
-    _g10(repo, config, head)
+    _verdict(config, repo)
     args = {"repo": str(repo), "pr": "https://github.com/evil/fork/pull/7"}
 
-    store = RunStore(config.db_path)
-    try:
-        card = recorded_card("merge_pr", args, None, store) or {}
-    finally:
-        store.close()
+    card, _summary, refused = _propose(config, args)
 
-    assert "evil/fork" in card["merge"]["error"] and ORIGIN in card["merge"]["error"]
-    with pytest.raises(ValueError, match="cannot be pinned"):
+    assert refused is not None and "evil/fork" in refused and ORIGIN in refused
+    with pytest.raises(ValueError, match="merge refused"):
         _confirm_merge(config, args, card)
 
 
-def test_an_unresolvable_pin_refuses_the_merge(config: SupervisorConfig) -> None:
-    with pytest.raises(ValueError, match="cannot be pinned"):
-        _confirm_merge(config, {"repo": "x", "pr": "7"}, {"merge": {"error": "two repos"}})
+def test_a_verdict_from_another_github_repo_never_pins_this_one(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """R1 (D1): the verdict is keyed on (owner/name, number) — PR 7 of a
+    fork shares the number, not the identity."""
+    _github_origin(repo, "https://github.com/someone/fork.git")
+    _verdict(config, repo)  # recorded for acme/widget#7
+
+    _card, _summary, refused = _propose(config, {"repo": str(repo), "pr": "7"})
+
+    assert refused is not None and "no G10 verdict" in refused
 
 
-def _merge_gh(head: str, calls: list[list[str]]) -> github.Runner:
+PIN_7 = {**_pair("b" * 40, "a" * 40), "merge_base": "b" * 40, "task_id": "t"}
+
+
+def _merge_gh(
+    calls: list[list[str]],
+    live: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    merge_code: int = 0,
+) -> github.Runner:
+    """gh as GitHub answers: the PR now (``live``), then after the merge."""
+    now = {
+        "headRefOid": "a" * 40, "baseRefOid": "b" * 40, "baseRefName": "main", "state": "OPEN",
+        **(live or {}),
+    }  # fmt: skip
+    merged = after or {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
+
     def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[0] != "gh":
             return subprocess.run(args, **kwargs)
         calls.append(list(args))
-        out = f"{head}\n" if args[:3] == ["gh", "pr", "view"] else "merged"
-        return subprocess.CompletedProcess(args, 0, out, "")
+        if args[2] == "merge":
+            return subprocess.CompletedProcess(args, merge_code, "", "" if not merge_code else "no")
+        answer = merged if any(c[2] == "merge" for c in calls) else now
+        return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
 
     return run
 
 
-def test_merge_pull_request_pins_the_expected_head(repo: Path) -> None:
-    _github_origin(repo)
+def test_merge_pull_request_merges_exactly_the_pinned_head(repo: Path) -> None:
     calls: list[list[str]] = []
-    sha = "a" * 40
 
-    result = github.merge_pull_request(
-        repo=repo, pr="7", expected_head_sha=sha, runner=_merge_gh(sha, calls)
-    )
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls))
 
     assert result.merged, result.detail
-    assert calls[-1] == [
-        "gh", "pr", "merge", "--repo", ORIGIN, "--merge", "--match-head-commit", sha, "--", "7",
+    assert "c" * 40 in result.detail  # the merge commit GitHub reports
+    merge = [c for c in calls if c[2] == "merge"]
+    assert merge == [
+        ["gh", "pr", "merge", "--repo", ORIGIN, "--merge", "--match-head-commit", "a" * 40,
+         "--", "7"],
     ]  # fmt: skip
+    assert not any(flag in c for c in calls for flag in ("--auto", "--admin"))
 
 
-def test_merge_pull_request_refuses_a_head_that_moved(repo: Path) -> None:
-    _github_origin(repo)
+@pytest.mark.parametrize(
+    ("live", "needle"),
+    [
+        ({"headRefOid": "d" * 40}, "pushed to after verification"),
+        ({"baseRefName": "release"}, "now targets release"),
+        ({"baseRefOid": "e" * 40}, "the base advanced"),
+        ({"state": "CLOSED"}, "CLOSED"),
+    ],
+)
+def test_merge_pull_request_refuses_a_pr_that_moved_since_the_verdict(
+    repo: Path, live: dict[str, Any], needle: str
+) -> None:
+    """R1 (S3/N3, D3): head, base branch and base SHA are re-read before gh
+    merges anything; the refusal names both SHAs."""
     calls: list[list[str]] = []
-    sha, moved = "a" * 40, "c" * 40
 
-    result = github.merge_pull_request(
-        repo=repo, pr="7", expected_head_sha=sha, runner=_merge_gh(moved, calls)
-    )
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh(calls, live))
+
+    assert not result.merged and needle in result.detail and "nothing merged" in result.detail
+    moved = next(iter(live.values()))
+    if moved not in ("release", "CLOSED"):
+        assert moved in result.detail and ("a" * 40 in result.detail or "b" * 40 in result.detail)
+    assert not [c for c in calls if c[2] == "merge"]
+
+
+def test_a_zero_exit_that_did_not_merge_is_reported_as_queued(repo: Path) -> None:
+    """R1 (S13): gh exits 0 when it hands the PR to a merge queue or
+    auto-merge — merged only when GitHub says MERGED."""
+    after = {"state": "OPEN", "mergeCommit": None}
+
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh([], after=after))
 
     assert not result.merged
-    assert moved in result.detail and sha in result.detail
-    assert "refresh_repo pr=7" in result.detail
-    assert not [c for c in calls if c[:3] == ["gh", "pr", "merge"]]  # nothing merged
+    assert "queued" in result.detail and "OPEN" in result.detail
 
 
-def test_merge_pull_request_refuses_when_the_head_cannot_be_read(repo: Path) -> None:
-    _github_origin(repo)
-
+def test_merge_pull_request_refuses_when_the_pr_cannot_be_read(repo: Path) -> None:
     def broken(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if args[0] != "gh":
             return subprocess.run(args, **kwargs)
         return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
 
-    result = github.merge_pull_request(repo=repo, pr="7", expected_head_sha="a" * 40, runner=broken)
+    result = github.merge_pull_request(repo=repo, pin=PIN_7, runner=broken)
 
     assert not result.merged and "HTTP 502" in result.detail and "nothing merged" in result.detail
+    incomplete = github.merge_pull_request(repo=repo, pin={"repo": ORIGIN}, runner=broken)
+    assert not incomplete.merged and "propose merge_pr again" in incomplete.detail
+    failed = github.merge_pull_request(repo=repo, pin=PIN_7, runner=_merge_gh([], merge_code=1))
+    assert not failed.merged and "gh pr merge failed" in failed.detail
 
 
 # --- faces: chat (refresh_repo pr=) and CLI (skep repo refresh --pr, skep pr merge)
@@ -1003,22 +1087,15 @@ def test_the_cli_fetches_a_pr_and_merges_it_pinned(
     assert main(["--home", str(home), "repo", "refresh", "fixture", "--pr", "7"]) == 0
     assert fetches[0]["pr"] == "7" and f"ref: {PR_REF}" in capsys.readouterr().out
 
-    store = RunStore(build_config(home, None).db_path)
-    try:
-        task_id = _review_run(store, clone, "a" * 40)
-        store.record_reverification(
-            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
-            commands=[PIN], exit_codes=[0], detail="ok", head_commit="a" * 40,
-        )  # fmt: skip
-    finally:
-        store.close()
+    config = build_config(home, None)
+    _verdict(config, clone)
     merges: list[dict[str, Any]] = []
 
     def fake_merge(**kwargs: Any) -> github.MergeResult:
         merges.append(kwargs)
-        return github.MergeResult(True, "merged 7 (merge)")
+        return github.MergeResult(True, "merged acme/widget#7 (merge)")
 
     monkeypatch.setattr(github, "merge_pull_request", fake_merge)
     assert main(["--home", str(home), "pr", "merge", "fixture", "7"]) == 0
-    assert merges[0]["expected_head_sha"] == "a" * 40
-    assert f"merges only head {'a' * 12}" in capsys.readouterr().out
+    assert merges[0]["pin"]["head_commit"] == "a" * 40
+    assert f"merges only {ORIGIN}#7 at head {'a' * 12}" in capsys.readouterr().out
