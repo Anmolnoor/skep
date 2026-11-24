@@ -23,7 +23,10 @@ from skep.seeds.tools.doc_extract import pdf_to_text
 
 from .pdf_builder import HELVETICA, build, simple_pdf, stream
 
-SECONDS = 5.0  # generous for a loaded CI box; unbounded parsing takes minutes
+# Every case here took minutes to hours unbounded; bounded, they finish in
+# about a second — but CI runs them under coverage on a slow, loaded box (two
+# took 5.1-5.4 s there). 30 s still tells bounded from unbounded, without flaking.
+SECONDS = 30.0
 
 
 @contextmanager
@@ -136,10 +139,9 @@ def test_many_streams_without_endstream_scan_in_linear_time() -> None:
 
 def test_nested_object_headers_cost_bounded_work() -> None:
     nested = b"1 0 obj [" + b"1 0 obj " * 400_000 + b"]"
-    # 3.2 MB walked linearly takes ~2.5 s on a slow box (more under a loaded
-    # parallel suite); the quadratic scan this pins took hours — 30 s still
-    # tells them apart without flaking on CI
-    with _quick(30.0), pytest.raises(ValueError, match="too complex"):
+    # 3.2 MB walked linearly takes ~2.5 s on a slow box; the quadratic scan
+    # this pins took hours
+    with _quick(), pytest.raises(ValueError, match="too complex"):
         pdf_to_text(b"%PDF-1.7\n" + nested)
 
 
@@ -348,10 +350,8 @@ def test_a_cmap_range_is_charged_for_what_it_expands_to() -> None:
     budget = doc_extract._Budget()
     target = b"00" * 8192
     cmap = b"beginbfrange <0000> <FFFF> <" + target + b"> endbfrange"
-    began = time.monotonic()
-    with pytest.raises(ValueError):
+    with _quick(), pytest.raises(ValueError):  # unbounded, it built ~512 MiB first
         doc_extract._cmap(cmap, budget)
-    assert time.monotonic() - began < 1.0
 
 
 def test_the_text_cap_holds_inside_one_shown_string() -> None:
@@ -418,9 +418,9 @@ def test_a_long_shown_string_extracts_in_linear_time() -> None:
 
     state = doc_extract._Text(max_chars=10_000_000)
     state.font = _One()  # type: ignore[assignment]
-    began = time.monotonic()
-    state.show([b"\x01" * 80_000])
-    assert time.monotonic() - began < 1.0 and state.chars == 80_000
+    with _quick():  # 200K glyphs: linear well under a second; the quadratic sum took minutes
+        state.show([b"\x01" * 200_000])
+    assert state.chars == 200_000
 
 
 def test_the_cap_never_slices_from_the_end() -> None:
