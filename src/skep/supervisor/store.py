@@ -1900,6 +1900,22 @@ class RunStore:
         return self.enqueue_approval(task_id, action=action, reason=reason)
 
     @_locked
+    def enqueue_approval_if_unchanged(
+        self, task_id: str, *, known: tuple[str, ...], action: str, reason: str
+    ) -> str | None:
+        """Phase 10 R2 I1: mint the review a card implied — only if the task's
+        approvals are still exactly the ``known`` ones it was read with, in
+        ONE locked call. None: a review came (and maybe went) since."""
+        with self._conn:  # the database's write lock across the read and the insert
+            self._begin_immediate()
+            rows = self._conn.execute(
+                "SELECT review_id FROM approvals WHERE task_id = ?", (task_id,)
+            ).fetchall()
+            if {str(row[0]) for row in rows} != set(known):
+                return None
+            return self.enqueue_approval(task_id, action=action, reason=reason)
+
+    @_locked
     def claim_approval(self, review_id: str, *, owner: str | None | object = _THIS_PROCESS) -> bool:
         """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
         card claim (ES-F1) for landings. Only the winner runs git. W27: the

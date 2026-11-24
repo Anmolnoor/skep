@@ -1651,3 +1651,36 @@ def test_a_legacy_read_takes_the_file_lock_even_before_any_commit(
         assert not (config.home / llm.PROVIDER_LOCK_FILE).exists()
         assert llm.legacy_api_key(config.home, "https://a.example", store) == "env-r11"
     assert (config.home / llm.PROVIDER_LOCK_FILE).exists() and held == [True]
+
+
+# --- Phase 10 R2 I6: Test and Save resolve ONE staged candidate --------------------
+
+
+def test_testing_an_inactive_registered_endpoint_probes_the_model_save_activates(
+    config: SupervisorConfig,
+) -> None:
+    """R2 I6: Test probed the endpoint's first listed model while Save picked
+    (and probed) the registered profile's pinned one — the operator saw a
+    green check for a model that was never the one activated."""
+    old = FakeOllama(models=["m1"]).start()
+    other = FakeOllama(models=["first", "pinned"]).start()
+    other.show_context_lengths = {"first": 8192, "pinned": 65536}
+    client = serve_client(config)
+    try:
+        _configured(client, old, "m1")
+        with _store(config) as store:
+            store.upsert_provider_profile(
+                ProviderProfile("other", "ollama", other.base_url, "pinned")
+            )
+        probed = client.post("/api/llm/probe", json={"base_url": other.base_url}).json()
+        saved = client.put("/api/llm/config", json={"base_url": other.base_url})
+    finally:
+        old.stop()
+        other.stop()
+    assert probed["ok"] is True and probed["model"] == "pinned"
+    assert probed["context_window"]["window"] == 65536
+    assert saved.status_code == 200, saved.text
+    with _store(config) as store:
+        active = store.active_provider_profile()
+    assert active is not None and active.provider_id == "other"
+    assert active.model == probed["model"]

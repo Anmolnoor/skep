@@ -149,9 +149,31 @@ def _read_approval_choice() -> str:
         else:
             print()
             return choice.strip().lower() or "s"
+    return _read_line()
+
+
+def _read_line() -> str:
+    """R2 I4 (I7): the no-raw-terminal fallback, under the single key's
+    timeout — no line within it, or EOF, is a skip ("s"), never a wait
+    forever. A stdin without a descriptor (a test's) reads directly."""
     try:
-        return input("> ").strip().lower()
-    except EOFError:
+        fd: int | None = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is not None:
+        import select
+
+        print("> ", end="", flush=True)
+        try:
+            ready, _, _ = select.select([fd], [], [], REVIEW_KEY_TIMEOUT_SECONDS)
+        except (OSError, ValueError):
+            ready = [fd]  # not selectable here: read as before
+        if not ready:
+            print()
+            return "s"
+    try:
+        return input("" if fd is not None else "> ").strip().lower()
+    except (EOFError, OSError):  # a hung-up terminal reads EIO on some systems
         return "s"
 
 
@@ -1634,9 +1656,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                 lines.append(f"  auto-landing: not fired ({blocked})")
             patch_path = artifacts.get("patch")
             patch_text = None
+            patch_at = -1  # R2 I5: where the patch sits in lines (it may be "")
             if patch_path is not None and patch_path.is_file():
                 patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
                 lines.append("")
+                patch_at = len(lines)
                 lines.append(patch_text)
                 lines.append(
                     f"next: git -C {shlex.quote(record.repo)} switch {landed}  # landed"
@@ -1648,29 +1672,36 @@ def cmd_review(args: argparse.Namespace) -> int:
                 lines.append("  patch:        none produced")
             from .. import cli_ui
 
+            if sys.stdout.isatty():  # R2 I3: a screen gets control bytes as escapes
+                lines = [cli_ui.visible(line) for line in lines]
             if patch_text is not None and cli_ui.rich_enabled():
                 # D4 (N8): on a terminal the patch is lit as a diff.
-                head, tail = lines[: lines.index(patch_text)], lines[lines.index(patch_text) + 1 :]
-                cli_ui.page_ansi(cli_ui.review_ansi("\n".join(head), patch_text, "\n".join(tail)))
+                head, tail = lines[:patch_at], lines[patch_at + 1 :]
+                cli_ui.page_ansi(
+                    cli_ui.review_ansi("\n".join(head), lines[patch_at], "\n".join(tail))
+                )
             else:
                 pydoc.pager("\n".join(lines))
             return 0
 
         actor = args.actor or getpass.getuser()
         shown = getattr(args, "shown", None)  # Phase 10 R1 D4: set by `skep review`'s walk
-        if shown is not None and (args.approve or args.deny):
-            stale = _stale_verdict(store, record, shown)
-            if stale is not None:
-                return _err(
-                    f"{stale}; nothing done",
-                    state=record.state,
-                    evidence=str(audit_dir),
-                    next_command=f"skep review {record.task_id}  # read it again, then decide",
-                )
         from .serve.actions import landing_reason
 
+        shown_review: str | None = None  # R2 I1: the review the card's verdict answers
+        if shown is not None and (args.approve or args.deny):
+            stale = _stale_verdict(store, record, shown)
+            if stale is None:
+                shown_review = _shown_review(
+                    store, record, shown, landing_reason(record.instructions, None)
+                )
+                if shown_review is None:
+                    stale = "an approval was recorded on this run since you read it"
+            if stale is not None:
+                return _stale_err(record, stale, audit_dir)
+
         if args.deny:
-            review_id = _pending_or_new(
+            review_id = shown_review or _pending_or_new(
                 store, record, reason=landing_reason(record.instructions, None)
             )
             from fastapi import HTTPException
@@ -1729,7 +1760,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         # Q8 true resume: approving a suspended task continues it past the gate
         # (a fresh worker run carrying the granted verdict), not "apply a patch".
         if record.state == "pending_approval":
-            return _resume_pending_approval(config, store, record, actor)
+            return _resume_pending_approval(
+                config, store, record, actor, review_id=shown_review, shown=shown
+            )
 
         from .serve.actions import applied_branch_for
 
@@ -1782,8 +1815,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             branch = f"skep/{record.task_id}"
         # B150: the same claim serve's apply_patch takes (ES-F4) — without it
         # a CLI approve during serve's landing applied the patch a second time.
-        review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
-        if not store.claim_approval(review_id):
+        if shown is not None and shown_review is not None:
+            refused = _claim_shown(store, record.task_id, shown_review, shown)
+            if refused is not None:
+                return _stale_err(record, refused, audit_dir)
+            review_id = shown_review
+        else:
+            review_id = _pending_or_new(
+                store, record, reason=landing_reason(record.instructions, None)
+            )
+        if review_id != shown_review and not store.claim_approval(review_id):
             from .serve.actions import landing_taken
 
             return _err(
@@ -1896,6 +1937,15 @@ def _auto_apply_blocked(store: RunStore, task_id: str) -> str | None:
     return None
 
 
+def _stale_err(record: RunRecord, why: str, audit_dir: Path) -> int:
+    return _err(
+        f"{why}; nothing done",
+        state=record.state,
+        evidence=str(audit_dir),
+        next_command=f"skep review {record.task_id}  # read it again, then decide",
+    )
+
+
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
     # ES-F4: one locked store call, the same pending-or-new the serve uses.
     review_id = store.pending_or_enqueue_approval(
@@ -1989,6 +2039,9 @@ class _Shown:
     state: str
     review_id: str | None  # the open review the verb would answer; None: none open
     patch_sha256: str | None  # the bytes of the patch the card showed
+    # R2 I1: every review the run had when read — a review minted for a card
+    # that showed none is minted only while this is still the whole set.
+    approvals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2000,6 +2053,7 @@ class _ReviewCard:
     lines: list[str]
     patch: str | None
     shown: _Shown
+    batch: int = 0  # R2 I2: how many commands approving this card's gate grants
 
 
 def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
@@ -2017,6 +2071,12 @@ def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | N
         return f"review {shown.review_id} is no longer pending ({status})"
     if shown.review_id is None and open_review is not None:
         return f"review {open_review} is waiting on this run since you read it"
+    return _moved_since_shown(store, record, shown)
+
+
+def _moved_since_shown(store: RunStore, record: RunRecord, shown: _Shown) -> str | None:
+    """The run's state or its patch's bytes differ from what the card showed."""
+    task_id = record.task_id
     if record.state != shown.state:
         return f"task {task_id} moved from {shown.state} to {record.state} since you read it"
     if shown.patch_sha256 is not None:
@@ -2030,6 +2090,35 @@ def _stale_verdict(store: RunStore, record: RunRecord, shown: _Shown) -> str | N
                 f"(sha256 {shown.patch_sha256[:12]} → {now[:12]})"
             )
     return None
+
+
+def _shown_review(store: RunStore, record: RunRecord, shown: _Shown, reason: str) -> str | None:
+    """Phase 10 R2 I1 (I7, I13): the review a card's verdict answers — the one
+    it displayed, never a fresh one looked up after the stale check. A card
+    that displayed none gets one minted only while the run's approvals are
+    still the set it was read with. None: something was recorded since."""
+    if shown.review_id is not None:
+        return shown.review_id
+    return store.enqueue_approval_if_unchanged(
+        record.task_id, known=shown.approvals, action="apply_patch", reason=reason
+    )
+
+
+def _claim_shown(store: RunStore, task_id: str, review_id: str, shown: _Shown) -> str | None:
+    """Phase 10 R2 I1: claim exactly the shown review, then bind the claim to
+    the run state and patch bytes the card showed; a mismatch hands the claim
+    back. Returns why the verdict is refused, or None (claimed)."""
+    if not store.claim_approval(review_id):
+        was = store.get_approval(review_id)
+        status = "gone" if was is None else f"{was.status} by {was.resolved_by or '-'}"
+        return f"review {review_id} is no longer pending ({status})"
+    record = store.get_run(task_id)
+    moved = (
+        f"task {task_id} is gone" if record is None else _moved_since_shown(store, record, shown)
+    )
+    if moved is not None:
+        store.unclaim_approval(review_id)
+    return moved
 
 
 def _review_interactive() -> bool:
@@ -2062,14 +2151,27 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             label, style = "NOTHING TO RE-VERIFY", "cyan"  # v65: benign, never a scream
         else:
             label, style = "NOT CONFIRMED", "red"
+        open_review = store.pending_or_enqueue_approval(
+            record.task_id, action="apply_patch", reason="", create=False
+        )
         lines = [
             f"state:    {record.state}",
             f"summary:  {record.summary or '-'}",
             f"waiting:  {notice[0]}",
         ]
+        batch = 0
         for gate in store.approvals_for(record.task_id):
             if gate.status == "pending":
                 lines.append(f"card:     review {gate.review_id} — {gate.action}: {gate.reason}")
+                # R2 I2 (I8): an approve grants EVERY stored command (ES-F8),
+                # not only the reason's first — the card shows each one.
+                commands = store.approval_commands(gate.review_id) or []
+                if commands:
+                    many = "command" if len(commands) == 1 else "commands"
+                    lines.append(f"grants:   {len(commands)} {many}")
+                    lines += [f"            {shlex.join(argv)}" for argv in commands]
+                if gate.review_id == open_review:
+                    batch = len(commands)
         if reverify is not None:
             lines += _g10_lines(reverify)
         note = tamper_note(reverify)
@@ -2077,9 +2179,6 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
             lines.append(f"V1:       {note}")
         patch = patch_path(store, record.task_id)
         raw = patch.read_bytes() if patch is not None else None
-        open_review = store.pending_or_enqueue_approval(
-            record.task_id, action="apply_patch", reason="", create=False
-        )
         cards.append(
             _ReviewCard(
                 record.task_id,
@@ -2092,7 +2191,9 @@ def _review_cards(store: RunStore) -> list[_ReviewCard]:
                     record.state,
                     open_review,
                     None if raw is None else hashlib.sha256(raw).hexdigest(),
+                    tuple(a.review_id for a in store.approvals_for(record.task_id)),
                 ),
+                batch,
             )
         )
     return cards
@@ -2150,17 +2251,24 @@ def _review_inbox(args: argparse.Namespace, config: SupervisorConfig) -> int:
     code = 0
     for card in cards:
         title = f"{card.label} · task {card.task_id}"
+        # R2 I3: evidence reaches the screen with its control bytes as escapes.
+        body = cli_ui.visible("\n".join(card.lines))
+        patch = cli_ui.visible(card.patch or "")
         if rich:
-            cli_ui.print_panel("\n".join(card.lines), title=title, style=card.style)
-            if card.patch:
-                cli_ui.print_diff(card.patch)
+            cli_ui.print_panel(body, title=title, style=card.style)
+            if patch:
+                cli_ui.print_diff(patch)
         else:
             print(title)
-            print("\n".join(f"  {line}" for line in card.lines))
-            if card.patch:
-                print(card.patch)
+            print("\n".join(f"  {line}" for line in body.split("\n")))
+            if patch:
+                print(patch)
         act = "resume" if card.label == "ASK" else "land"
-        keys = f"  [a] approve & {act}  [d] deny  [f] forensics  [p] receipt  [s] skip  [q] quit"
+        every = f" all {card.batch}" if card.batch > 1 else ""
+        keys = (
+            f"  [a] approve{every} & {act}  [d] deny  [f] forensics  [p] receipt"
+            "  [s] skip  [q] quit"
+        )
         while True:
             print(keys)
             choice = _read_approval_choice()
@@ -2212,6 +2320,8 @@ def _resume_pending_approval(
     actor: str,
     *,
     remembered: bool = False,
+    review_id: str | None = None,
+    shown: _Shown | None = None,
 ) -> int:
     """Q8: grant the approval and continue the suspended task as a true resume.
 
@@ -2229,11 +2339,20 @@ def _resume_pending_approval(
             next_command=f'skep run {record.repo} "..." --resume-of {record.task_id}',
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
-    review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+    if shown is not None and review_id is not None:
+        # R2 I1: the gate the card showed, bound to what it showed — never a
+        # fresh one minted behind an answer given elsewhere.
+        refused = _claim_shown(store, record.task_id, review_id, shown)
+        if refused is not None:
+            return _stale_err(record, refused, config.audit_dir / record.task_id)
+        claimed = True
+    else:
+        review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+        claimed = False
     # W27a: the claim serve's resume_past_gate takes (B142), held across this
     # foreground run under this process's pid — a serve approve, or a serve
     # restart's sweep, sees a live owner and leaves the gate alone.
-    if not store.claim_approval(review_id):
+    if not claimed and not store.claim_approval(review_id):
         from .serve.actions import gate_taken
 
         return _err(

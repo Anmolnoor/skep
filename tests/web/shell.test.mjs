@@ -236,7 +236,7 @@ test("the header reads Settings / <page> in the surface, and the plain title out
     return nodes["topbar-title"].textContent;
   };
   assert.equal(title("#/runs", "Runs"), "Settings / Runs");
-  assert.equal(title("#/runs/abc", "run abc"), "Settings / run abc");
+  assert.equal(title("#/runs/abc", "run abc"), "Runs / run abc"); // R2 I10: under Runs
   assert.equal(title("#/projects/acme", "project acme"), "Settings / project acme");
   assert.equal(title("#/policies/grants", "Policies"), "Settings / Policies / Standing grants");
   assert.equal(title("#/settings/models", "Settings"), "Settings / Models");

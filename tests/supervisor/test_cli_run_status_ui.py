@@ -201,10 +201,18 @@ def test_status_personal_on_a_terminal_is_a_rich_table(
 ) -> None:
     done, old = _seed_runs(tmp_path / "home", repo)
     _on_a_terminal(monkeypatch)
+    monkeypatch.delenv("TERM", raising=False)  # R2 I12: rich pins a dumb TERM to 80 columns
     monkeypatch.setattr(  # a wide terminal: rich wraps a cell rather than cut it
         cli_ui,
         "console",
-        lambda: Console(file=sys.stdout, force_terminal=True, width=240, highlight=False),
+        # R2 I12: a colour system named, so TERM unset or dumb still draws ANSI
+        lambda: Console(
+            file=sys.stdout,
+            force_terminal=True,
+            color_system="standard",
+            width=240,
+            highlight=False,
+        ),
     )
     assert _run_cli(tmp_path / "home", "status", "--personal") == 0
     out = capsys.readouterr().out

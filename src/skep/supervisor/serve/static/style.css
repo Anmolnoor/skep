@@ -564,8 +564,11 @@ button:disabled { opacity: .5; cursor: default; }
 tr.click.superseded { opacity: .55; }
 
 /* run detail */
-.kv { display: grid; grid-template-columns: 160px 1fr; gap: 4px 16px; }
+/* Phase 10 R2 I9: minmax(0, …) and anywhere-wrap, so a long repo, workspace
+   or binding path wraps inside its cell instead of widening the page. */
+.kv { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 4px 16px; }
 .kv dt { color: var(--muted); }
+.kv dt, .kv dd { min-width: 0; overflow-wrap: anywhere; }
 .kv dd { margin: 0; }
 pre.log, pre.diff {
   background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
@@ -1856,7 +1859,7 @@ main.chat-view { padding: 0; max-width: none; }
   /* #main beats the `main` padding above on purpose — this is the narrowing. */
   #main { width: 100%; padding: 12px; box-sizing: border-box; }
   table { display: block; overflow-x: auto; white-space: nowrap; }
-  .kv { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: minmax(0, 1fr); }
   .row { flex-direction: column; align-items: stretch; }
   .field { min-width: 0; width: 100%; }
   .actions { flex-wrap: wrap; }
@@ -1869,7 +1872,14 @@ main.chat-view { padding: 0; max-width: none; }
   .run-card-summary { white-space: normal; }
   /* v75-F6: the timeline scrolls sideways instead of squeezing its nodes. */
   .run-timeline { overflow-x: auto; }
+  .run-timeline { max-width: 100%; min-width: 0; } /* R2 I9: scrolls inside its card */
   .timeline-node { min-width: 76px; }
+  /* Phase 10 R2 I9: the New run form fits. A wrapping column flex sizes its
+     line to the widest child's max-content (a long <select> option), so the
+     form does not wrap here; no control is wider than its column. */
+  .composer.stacky { flex-wrap: nowrap; }
+  .composer.stacky .field, .composer.stacky .field.grow { min-width: 0; }
+  input, textarea, select { max-width: 100%; min-width: 0; }
   /* v75-F7: template card headers wrap; the stepper scrolls if cramped. */
   .template-card-header { flex-wrap: wrap; }
   .skill-stepper { overflow-x: auto; }
@@ -1947,7 +1957,9 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
   font-size: var(--text-sm); font-weight: 600; padding: var(--space-2) var(--space-3);
   border: 1px solid var(--bad); border-radius: var(--radius-sm);
 }
-.decision-filters { flex-wrap: wrap; align-items: flex-end; }
+/* Phase 10 R2 I9 (N4): .row.decision-filters outranks the phone block's
+   column-flipped .row, so the filters wrap two to a line, not 9rem tall each. */
+.row.decision-filters { flex-direction: row; flex-wrap: wrap; align-items: flex-end; }
 .decision-filters .field { min-width: 9rem; flex: 1 1 9rem; }
 .decision-older { margin: var(--space-2) 0; }
 .policy-baseline-sha { overflow-wrap: anywhere; }

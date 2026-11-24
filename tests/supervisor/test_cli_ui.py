@@ -50,10 +50,16 @@ def test_importing_the_cli_loads_neither_httpx_nor_rich() -> None:
 
 def test_rich_only_on_a_terminal_without_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TERM", raising=False)
     assert cli_ui.rich_enabled(_Tty()) is True
     assert cli_ui.rich_enabled(io.StringIO()) is False  # a pipe / a file / CI
     monkeypatch.setenv("NO_COLOR", "1")
     assert cli_ui.rich_enabled(_Tty()) is False
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("TERM", "dumb")  # R2 I12: a dumb terminal gets the plain bytes
+    assert cli_ui.rich_enabled(_Tty()) is False
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert cli_ui.rich_enabled(_Tty()) is True
 
 
 def test_no_skep_module_imports_rich_at_import_time() -> None:
@@ -623,3 +629,289 @@ def test_review_cards_name_the_gate_the_disagreement_and_the_tamper(
     out = capsys.readouterr().out
     assert "[a] approve & resume" in out and "card:     review" in out
     assert "V1:       " in out and out.count("still waits") == 3
+
+
+def _after_stale_check(monkeypatch: pytest.MonkeyPatch, meanwhile: Any) -> None:
+    """Phase 10 R2 I1: the other surface acts AFTER the stale check passed —
+    between the check and the verdict, where a re-lookup minted a fresh review."""
+    check = cli_cmds._stale_verdict
+
+    def then(*args: Any) -> str | None:
+        found = check(*args)
+        meanwhile()
+        return found
+
+    monkeypatch.setattr(cli_cmds, "_stale_verdict", then)
+
+
+def test_interactive_approve_never_lands_a_review_denied_after_the_stale_check(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1 (I7, I13): the card showed review X; the web denied X after the
+    stale check — `a` claims exactly X, finds it answered, and lands nothing
+    (no fresh review is minted and approved behind the web's deny)."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+    store = RunStore(db)
+    try:
+        shown = store.enqueue_approval(task_id, action="apply_patch", reason="land it")
+    finally:
+        store.close()
+
+    def denied_on_the_web() -> None:
+        store = RunStore(db)
+        try:
+            store.resolve_approval(shown, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, denied_on_the_web)
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert f"review {shown} is no longer pending (denied by web)" in err
+    assert "nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(db)
+    try:
+        assert [(a.review_id, a.status) for a in store.approvals_for(task_id)] == [
+            (shown, "denied")
+        ]
+    finally:
+        store.close()
+
+
+def test_interactive_approve_refuses_when_a_review_came_and_went_since_the_card(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: the card showed no review; after the stale check the web minted
+    one and denied it — the CLI mints nothing to approve in its place."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+
+    def minted_and_denied() -> None:
+        store = RunStore(db)
+        try:
+            review = store.enqueue_approval(task_id, action="apply_patch", reason="web")
+            store.resolve_approval(review, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, minted_and_denied)
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert "an approval was recorded on this run since you read it; nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied"]
+    finally:
+        store.close()
+
+
+def test_interactive_approve_rebinds_the_patch_after_claiming_the_review(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: the patch's bytes are checked again once the review is claimed —
+    a rewrite that slipped in before the claim is refused and the claim is
+    handed back, pending."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    claim = RunStore.claim_approval
+
+    def claim_then_rewrite(self: RunStore, review_id: str, **kw: Any) -> bool:
+        won = claim(self, review_id, **kw)
+        patch.write_text(patch.read_text() + "+sneaked = 1\n")
+        return won
+
+    monkeypatch.setattr(RunStore, "claim_approval", claim_then_rewrite)
+    _interactive(monkeypatch, ["a"])
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert "the patch changed since you read it" in err and "nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["pending"]
+    finally:
+        store.close()
+
+
+def test_interactive_resume_claims_the_shown_gate_only(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: an ASK card's gate denied after the stale check resumes nothing."""
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    capsys.readouterr()
+    task_id = _only_task_id(home)
+    db = build_config(home, None).db_path
+    store = RunStore(db)
+    try:
+        (gate,) = [a for a in store.approvals_for(task_id) if a.status == "pending"]
+    finally:
+        store.close()
+
+    def denied_on_the_web() -> None:
+        store = RunStore(db)
+        try:
+            store.resolve_approval(gate.review_id, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, denied_on_the_web)
+    assert _run_cli(home, "review") == 2
+    assert f"review {gate.review_id} is no longer pending (denied by web)" in (
+        capsys.readouterr().err
+    )
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied"]
+        assert len(store.recent_runs(10)) == 1  # nothing resumed
+    finally:
+        store.close()
+
+
+def test_a_batch_gate_card_lists_every_command_the_approval_grants(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I2 (I8): approving a batch card grants every stored command
+    (ES-F8) — the card prints each one and the key says how many."""
+    import sqlite3
+    from contextlib import closing
+
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    task_id = _only_task_id(home)
+    batch = [["uv", "sync"], ["uv", "run", "pytest", "-q"], ["npm", "ci"]]
+    with closing(sqlite3.connect(build_config(home, None).db_path)) as conn, conn:
+        conn.execute(
+            "UPDATE approvals SET commands_json = ? WHERE task_id = ?",
+            (json.dumps(batch), task_id),
+        )
+    capsys.readouterr()
+    _interactive(monkeypatch, [])
+    assert _run_cli(home, "review") == 0
+    out = capsys.readouterr().out
+    assert "grants:   3 commands" in out
+    for argv in batch:
+        assert f"  {' '.join(argv)}" in out
+    assert "[a] approve all 3 & resume" in out
+
+
+_HOSTILE = "+clear = '\x1b[2J'\n+link = '\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\'\n"
+_HOSTILE_SUMMARY = "fixed\x1b[1A\x1b[2Kall good\x07\x9b31m"
+
+
+def _hostile_run(repo: Path, home: Path, capsys: pytest.CaptureFixture[str]) -> str:
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    patch.write_text(patch.read_text() + _HOSTILE)
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        store._conn.execute(
+            "UPDATE runs SET summary = ? WHERE task_id = ?", (_HOSTILE_SUMMARY, task_id)
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    return task_id
+
+
+def _no_raw_control(out: str) -> None:
+    for raw in ("\x1b[2J", "\x1b]8", "\x1b[1A", "\x07", "\x9b"):
+        assert raw not in out
+    assert "\\x1b[2J" in out and "\\x1b]8;;https://evil.example" in out
+    assert "\\x1b[1A" in out and "\\x07" in out and "\\x9b31m" in out
+
+
+@pytest.mark.parametrize("rich", [False, True])
+def test_review_evidence_shows_control_bytes_as_escapes(
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    rich: bool,
+) -> None:
+    """R2 I3: a patch (or a summary) cannot repaint the screen the operator
+    reads before the verdict — ESC/CSI/OSC, BEL and C1 print as visible
+    escapes on the walk's rich and plain cards and on `skep review <id>`."""
+    home = tmp_path / "home"
+    task_id = _hostile_run(repo, home, capsys)
+    if rich:
+        _on_a_terminal(monkeypatch, color=True)
+    else:
+        monkeypatch.setattr(cli_ui, "rich_enabled", lambda stream=None: False)
+    _interactive(monkeypatch, [])
+    assert _run_cli(home, "review") == 0
+    _no_raw_control(capsys.readouterr().out)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("pydoc.pager", lambda text: print(text))
+    assert _run_cli(home, "review", task_id) == 0
+    _no_raw_control(capsys.readouterr().out)
+
+
+def test_piped_review_keeps_the_patch_bytes(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2 I3: off a terminal the evidence is the bytes recorded — escaping is
+    for a screen, not for a file a script reads."""
+    home = tmp_path / "home"
+    task_id = _hostile_run(repo, home, capsys)
+    assert _run_cli(home, "review", task_id) == 0
+    assert _HOSTILE in capsys.readouterr().out
+
+
+def test_visible_escapes_c0_del_c1_and_keeps_newline_and_tab() -> None:
+    assert cli_ui.visible("a\tb\nc\x00\x1b\x7f\x85\x9f\u00a0é") == (
+        "a\tb\nc\\x00\\x1b\\x7f\\x85\\x9f\u00a0é"
+    )
+
+
+def test_review_splits_an_empty_patch_at_its_own_line(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I5: the rich review splits evidence at the patch's recorded index —
+    an empty patch equals the blank separator before it, and lines.index()
+    split there, pushing the patch's blank into the tail."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    _patch_of(home, task_id).write_text("")
+    seen: dict[str, str] = {}
+
+    def capture(head: str, patch: str, tail: str) -> str:
+        seen.update(head=head, patch=patch, tail=tail)
+        return ""
+
+    _on_a_terminal(monkeypatch)
+    monkeypatch.setattr(cli_ui, "review_ansi", capture)
+    monkeypatch.setattr(cli_ui, "page_ansi", lambda text: None)
+    assert _run_cli(home, "review", task_id) == 0
+    assert seen["patch"] == "" and seen["head"].endswith("\n")
+    assert seen["tail"].startswith("next: skep review")
+
+
+def test_the_line_fallback_skips_on_timeout_and_eof(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2 I4 (I7): a terminal without raw mode reads a line under the same
+    timeout as the single key — silence and EOF both skip."""
+    import os
+    import termios
+
+    def refuse(fd: int) -> Any:
+        raise termios.error(25, "Inappropriate ioctl for device")
+
+    master = _pty_stdin(monkeypatch)
+    monkeypatch.setattr(termios, "tcgetattr", refuse)
+    monkeypatch.setattr(cli_cmds, "REVIEW_KEY_TIMEOUT_SECONDS", 0.2)
+    assert cli_cmds._read_approval_choice() == "s"  # nothing typed: skip
+    os.close(master)  # the terminal hung up: EOF
+    assert cli_cmds._read_approval_choice() == "s"

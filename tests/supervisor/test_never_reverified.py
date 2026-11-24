@@ -249,4 +249,7 @@ def test_run_page_says_not_reverified(repo: Path, config: SupervisorConfig, tmp_
             _record(store, task_id)
         finally:
             store.close()
-        assert client.get(f"/api/runs/{task_id}").json()["reverification_missing"] is None
+        detail = client.get(f"/api/runs/{task_id}").json()
+        assert detail["reverification_missing"] is None
+        # Phase 10 R2 I10: the run page names whose command G10 re-ran
+        assert detail["reverification"]["commands_source"] == "unknown"

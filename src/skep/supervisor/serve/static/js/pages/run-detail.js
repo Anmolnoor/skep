@@ -31,6 +31,20 @@ const countsLine = c => (c
 // it returned, and V1's verdict on the test counts. Phase 10 R1 D3 (I8): "ran"
 // and exit codes only when a command executed; nothing to re-verify is
 // neutral, never "do not trust".
+// Phase 10 R2 I10: whose command G10 re-ran and the test counts, as rows —
+// the review page's G10 box and the run page say them the same way.
+export function g10Provenance(g10) {
+  const rows = [];
+  if ((g10.commands || []).length) {
+    rows.push(["command from", COMMANDS_SOURCE[g10.commands_source] || COMMANDS_SOURCE.unknown]);
+  }
+  const counts = g10.test_counts;
+  if (counts?.baseline || counts?.patched) {
+    rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
+  }
+  return rows;
+}
+
 function g10Box(g10) {
   if (!g10) return el("p", { class: "note" }, "G10: no re-verification recorded for this run.");
   const tampered = String(g10.v1 || "").startsWith("tampered");
@@ -42,11 +56,7 @@ function g10Box(g10) {
     : `${g10.outcome} — ${g10.confirmed ? "confirmed" : "NOT CONFIRMED, do not trust"}`]];
   if (ran) rows.push(["ran", commands || "-"], ["exit codes", g10.exit_codes.join(", ")]);
   else if (commands) rows.push(["recorded verify (not run)", commands]);
-  if (commands) rows.push(["command from", COMMANDS_SOURCE[g10.commands_source] || COMMANDS_SOURCE.unknown]);
-  const counts = g10.test_counts;
-  if (counts?.baseline || counts?.patched) {
-    rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
-  }
+  rows.push(...g10Provenance(g10));
   if (!nothing) rows.push(["V1 (test tamper)", g10.v1]);
   if (g10.detail && !nothing) rows.push(["detail", g10.detail]);
   return el("div", {},
