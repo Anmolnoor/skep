@@ -1043,3 +1043,319 @@ def test_an_endpoint_that_lists_no_models_needs_a_model_named(
     )
     refused = client.put("/api/llm/config", json={"base_url": "http://127.0.0.1:9"})
     assert refused.status_code == 400 and "lists no models" in refused.json()["detail"]
+
+
+# --- R3 H1: SKEP_LLM_API_KEY keeps its own owner, whatever llm-secret does -----------
+
+
+def test_clearing_another_endpoints_key_never_frees_the_env_key(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SKEP_LLM_API_KEY is A's and there is no llm-secret: a switch to keyless
+    B that clears its key, a Settings clear and a set-key clear never hand
+    A's env key to B — and A still authenticates with it."""
+    config = installed
+    from skep.workers.llm_plan import worker_provider_from_home
+
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "ke1")
+    a = FakeOllama(api_key="ke1", models=["m1"]).start()
+    b = FakeOllama(models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        moved = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": ""})
+        listed = client.get("/api/llm/models")
+        cleared = client.put("/api/llm/config", json={"api_key": ""})
+        with _store(config) as store:
+            on_b = store.active_provider_profile()
+            assert on_b is not None and on_b.base_url == b.base_url
+            actions.set_provider_key(store, config.home, provider_id=on_b.provider_id, key="")
+        worker = worker_provider_from_home(config.home.parent)
+        with _store(config) as store:
+            back = actions.use_provider(store, config.home, provider_id="default")
+    finally:
+        a.stop()
+        b.stop()
+    assert moved.status_code == 200, moved.text
+    assert listed.status_code == 200 and cleared.status_code == 200
+    assert "Bearer ke1" not in _auths(b)
+    assert worker is not None and worker.api_key is None
+    assert back["active"] == "default" and "Bearer ke1" in _auths(a)
+
+
+def test_saving_another_endpoints_key_leaves_the_env_key_with_its_owner(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "ke1")
+    a = FakeOllama(api_key="ke1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        moved = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": "kb1"})
+        listed = client.get("/api/llm/models")
+        with _store(config) as store:
+            actions.use_provider(store, config.home, provider_id="default")
+        again = client.get("/api/llm/models")
+    finally:
+        a.stop()
+        b.stop()
+    assert moved.status_code == 200, moved.text
+    assert listed.status_code == 200 and again.status_code == 200, again.text
+    assert "Bearer ke1" not in _auths(b) and "Bearer kb1" not in _auths(a)
+    assert "Bearer ke1" in _auths(a)
+
+
+# --- R3 H2: a probed key commits only to the profile it was probed for ---------------
+
+
+def test_a_key_probed_for_one_endpoint_never_lands_on_an_id_re_added_for_another(
+    config: SupervisorConfig,
+) -> None:
+    import threading
+
+    a = FakeOllama(api_key="ka2", models=["m1"]).start()
+    b = FakeOllama(models=["m2"]).start()
+    client = serve_client(config)
+    results: list[Any] = []
+    try:
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="p", protocol="ollama", base_url=a.base_url, model="m1"
+            )
+        a.gate = threading.Event()
+        thread = threading.Thread(
+            target=lambda: results.append(
+                client.put("/api/providers/p/key", json={"api_key": "ka2"})
+            )
+        )
+        thread.start()
+        assert a.arrived.wait(10)
+        with _store(config) as store:  # meanwhile p is removed and re-added for B
+            actions.remove_provider(store, config.home, provider_id="p")
+            actions.add_provider(
+                store, provider_id="p", protocol="ollama", base_url=b.base_url, model="m2"
+            )
+        a.gate.set()
+        thread.join(10)
+        with _store(config) as store:
+            row = store.get_provider_profile("p")
+    finally:
+        a.stop()
+        b.stop()
+    assert results[0].status_code == 409, results[0].text
+    assert not provider_secret_path(config.home, "p").exists()
+    assert row is not None and row.base_url == b.base_url
+
+
+# --- R3 H3: with nothing active, a key is the endpoint's it is saved for -------------
+
+
+def test_a_key_saved_with_no_active_profile_is_the_targets(config: SupervisorConfig) -> None:
+    """The active profile was removed, B is still registered: a B key saved
+    from Settings activates B and is B's — A's key stays A's."""
+    from skep.supervisor.serve.llm import saved_key_for
+
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1", "ka1")
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="b", protocol="ollama", base_url=b.base_url, model="m2"
+            )
+            actions.remove_provider(store, config.home, provider_id="default")
+        saved = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": "kb1"})
+        listed = client.get("/api/llm/models")
+        with _store(config) as store:
+            active = store.active_provider_profile()
+            for_a = saved_key_for(store, config.home, a.base_url)
+    finally:
+        a.stop()
+        b.stop()
+    assert saved.status_code == 200, saved.text
+    assert listed.status_code == 200, listed.text
+    assert active is not None and (active.provider_id, active.model) == ("b", "m2")
+    assert "Bearer kb1" not in _auths(a) and for_a == "ka1"
+    assert provider_secret_path(config.home, "b").read_text() == "kb1\n"
+
+
+def test_a_clear_with_nothing_active_sends_nothing_and_activates_nothing(
+    config: SupervisorConfig,
+) -> None:
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1", "ka1")
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="b", protocol="ollama", base_url="http://127.0.0.1:9", model="m2"
+            )
+            actions.remove_provider(store, config.home, provider_id="default")
+        sent = len(a.requests) + len(a.probes)
+        cleared = client.put("/api/llm/config", json={"api_key": ""})
+        with _store(config) as store:
+            active = store.active_provider_profile()
+    finally:
+        a.stop()
+    assert cleared.status_code == 200, cleared.text
+    assert len(a.requests) + len(a.probes) == sent and active is None
+    assert "llm-secret" not in _files(config.home)  # A's key, cleared for A
+
+
+def test_a_staged_key_never_takes_over_another_staged_endpoints_key(
+    config: SupervisorConfig,
+) -> None:
+    """Before any default model: A's staged key is A's; a B key with nowhere
+    to keep A's is refused, and B's complete save keeps it in B's own file."""
+    from skep.supervisor.serve.llm import saved_key_for
+
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        staged = client.put("/api/llm/config", json={"base_url": a.base_url, "api_key": "ka1"})
+        before = _raw(config.home), _files(config.home)
+        refused = client.put("/api/llm/config", json={"base_url": b.base_url, "api_key": "kb1"})
+        after = _raw(config.home), _files(config.home)
+        _configured(client, b, "m2", "kb1")
+        listed = client.get("/api/llm/models")
+        with _store(config) as store:
+            for_a = saved_key_for(store, config.home, a.base_url)
+    finally:
+        a.stop()
+        b.stop()
+    assert staged.status_code == 200, staged.text
+    assert refused.status_code == 400 and "no provider profile" in refused.json()["detail"]
+    assert after == before
+    assert listed.status_code == 200, listed.text
+    assert "Bearer kb1" not in _auths(a) and for_a == "ka1"
+
+
+# --- R3 H4 / H5 / H6: workers resolve the credential Settings probed -----------------
+
+
+def test_a_workers_key_replaces_profile_jsons_env_var(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the ChatGPT-login Queen, a workers' endpoint only profile.json
+    knows: the key Settings saved for it beats the env var it named."""
+    config = installed
+    from skep.profile import load_profile, run_personal_setup
+    from skep.workers.llm_plan import _api_key, worker_provider_from_home
+
+    monkeypatch.setenv("OLD_KEY", "kold")
+    a = FakeOllama(models=["m1"]).start()
+    w = FakeOllama(api_key="kw1", models=["m2"]).start()
+    personal = config.home.parent
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        _codex_queen(config)
+        run_personal_setup(
+            personal, provider="ollama", model="m2", endpoint=w.base_url, api_key_env="OLD_KEY"
+        )
+        saved = client.put("/api/llm/config", json={"api_key": "kw1"})
+        worker = worker_provider_from_home(personal)
+    finally:
+        a.stop()
+        w.stop()
+    assert saved.status_code == 200, saved.text
+    assert worker is not None and _api_key(worker) == "kw1"
+    assert load_profile(personal).provider.api_key_env is None
+
+
+def test_a_workers_registry_row_keeps_its_key_env_when_no_key_resolves(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = installed
+    from skep import status
+    from skep.profile import run_personal_setup
+    from skep.workers.llm_plan import LlmPlanError, _api_key, worker_provider_from_home
+
+    monkeypatch.delenv("MISSING_KEY", raising=False)
+    a = FakeOllama(models=["m1"]).start()
+    personal = config.home.parent
+    w_url = "http://127.0.0.1:9"
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        _codex_queen(config)
+        with _store(config) as store:
+            store.upsert_provider_profile(
+                ProviderProfile("w", "ollama", w_url, "m2", api_key_env="MISSING_KEY")
+            )
+        run_personal_setup(personal, provider="ollama", model="m2", endpoint=w_url)
+        worker = worker_provider_from_home(personal)
+        check = status.worker_provider_check(personal, 1.0, offline=True)
+    finally:
+        a.stop()
+    assert worker is not None and worker.profile.api_key_env == "MISSING_KEY"
+    with pytest.raises(LlmPlanError, match="MISSING_KEY"):
+        _api_key(worker)
+    assert (check["status"], check["kind"]) == ("blocked", "config"), check
+
+
+def test_a_copilot_workers_endpoint_with_no_profile_gets_the_exchanged_bearer(
+    installed: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = installed
+    from skep.profile import run_personal_setup
+    from skep.supervisor.serve import llm_copilot
+    from skep.workers.llm_plan import LlmUpstreamError, worker_provider_from_home
+
+    copilot = "https://api.githubcopilot.com"
+
+    def exchange(token: str, **_: Any) -> tuple[str, float]:
+        if token != "ghu_w3":
+            raise OllamaError("copilot token exchange failed: 401", status=401)
+        return "bearer-w3", 9e9
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", exchange)
+    a = FakeOllama(models=["m1"]).start()
+    personal = config.home.parent
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1")
+        _codex_queen(config)
+        run_personal_setup(personal, provider="openai-compat", model="gpt-5-mini", endpoint=copilot)
+        (config.home / "llm-secret").write_text("ghu_w3\n")
+        with _store(config) as store:
+            store.set_setting("llm_secret_endpoint", copilot)
+        worker = worker_provider_from_home(personal)
+        (config.home / "llm-secret").write_text("ghu_w3no\n")
+        with pytest.raises(LlmUpstreamError) as refused:
+            worker_provider_from_home(personal)
+    finally:
+        a.stop()
+    assert worker is not None and worker.api_key == "bearer-w3"
+    assert refused.value.status == 401
+
+
+# --- R3 H7: api_key_set under the ChatGPT login is the workers' endpoint's ----------
+
+
+def test_api_key_set_under_the_chatgpt_login_is_the_workers_endpoints(
+    installed: SupervisorConfig,
+) -> None:
+    config = installed
+    a = FakeOllama(api_key="ka1", models=["m1"]).start()
+    b = FakeOllama(api_key="kb1", models=["m2"]).start()
+    client = serve_client(config)
+    try:
+        _configured(client, a, "m1", "ka1")
+        with _store(config) as store:
+            actions.add_provider(
+                store, provider_id="b", protocol="ollama", base_url=b.base_url, model="m2"
+            )
+            actions.set_provider_key(store, config.home, provider_id="b", key="kb1")
+            actions.use_provider(store, config.home, provider_id="b")
+        _codex_queen(config)
+        cleared = client.put("/api/llm/config", json={"api_key": ""})
+        saved = client.put("/api/llm/config", json={"api_key": "kb1"})
+    finally:
+        a.stop()
+        b.stop()
+    assert cleared.status_code == 200 and cleared.json()["api_key_set"] is False
+    assert saved.status_code == 200 and saved.json()["api_key_set"] is True

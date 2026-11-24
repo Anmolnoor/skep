@@ -1425,22 +1425,29 @@ def add_provider(
             source=source,
         )
     staged = validate_provider_profile(profile)
-    held = store.get_provider_profile(staged.provider_id)
-    if held is not None and held.base_url != staged.base_url:
-        # R2 (F3): its saved key and key env belong to the endpoint it has
-        raise ProviderError(
-            f"provider {staged.provider_id!r} is registered for {held.base_url}, and its key "
-            f"belongs there — register {staged.base_url} under its own id "
-            f"(e.g. {staged.provider_id}-2)"
-        )
+
+    def _endpoint_kept() -> None:
+        held = store.get_provider_profile(staged.provider_id)
+        if held is not None and held.base_url != staged.base_url:
+            # R2 (F3): its saved key and key env belong to the endpoint it has
+            raise ProviderError(
+                f"provider {staged.provider_id!r} is registered for {held.base_url}, and its "
+                f"key belongs there — register {staged.base_url} under its own id "
+                f"(e.g. {staged.provider_id}-2)"
+            )
+
+    from .llm import _PROVIDER_WRITES, provider_rollback
+
+    _endpoint_kept()
     if not activate:
-        return _registered(store, profile, preset)
+        with _PROVIDER_WRITES:  # R3 (H2): checked and written under the provider lock
+            _endpoint_kept()
+            return _registered(store, profile, preset)
     if home is None:
         raise ProviderError("activating a provider needs the supervisor home")
     _probe_profile(store, home, staged)
-    from .llm import provider_rollback
-
     with provider_rollback(store, home):
+        _endpoint_kept()
         result = _registered(store, profile, preset)
         provider_id = str(result["provider"]["provider_id"])
         result.update(use_provider(store, home, provider_id=provider_id, probe=False))
@@ -1495,6 +1502,25 @@ def _probe_profile(
         raise ProviderError(f"{health.error} — nothing changed: {kept}")
 
 
+def _still_probed(store: RunStore, probed: Any) -> Any:
+    """R3 (H2), under the provider lock: ``probed`` as it is now — provided
+    its id still names the endpoint and protocol that were tested; else
+    ProviderConflict and nothing is written (a key probed for A never lands
+    on the id re-added for B)."""
+    from ..providers import ProviderConflict
+
+    current = store.get_provider_profile(probed.provider_id)
+    if current is None or (current.base_url, current.protocol) != (
+        probed.base_url,
+        probed.protocol,
+    ):
+        raise ProviderConflict(
+            f"provider {probed.provider_id!r} changed while it was being tested — nothing was "
+            "saved: check it and try again"
+        )
+    return current
+
+
 def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str) -> dict[str, Any]:
     """Phase 05 R1: THE write of one profile's key value (``skep provider
     set-key``, PUT /api/providers/{id}/key). A non-empty key is probed
@@ -1518,7 +1544,7 @@ def set_provider_key(store: RunStore, home: Path, *, provider_id: str, key: str)
             store, home, profile, key=key, kept=f"the saved key for {provider_id!r} is as it was"
         )
     with provider_rollback(store, home):
-        _save_profile_key(store, home, profile, key)
+        _save_profile_key(store, home, _still_probed(store, profile), key)
     return {
         "provider_id": provider_id,
         "api_key_set": bool(key),
@@ -1533,13 +1559,14 @@ def remove_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[st
     Queen keeps speaking its current config until another profile is
     activated. ``home`` is the supervisor home."""
     from ..providers import ProviderError
-    from .llm import store_provider_api_key
+    from .llm import provider_rollback, store_provider_api_key
 
-    profile = store.get_provider_profile(provider_id)
-    if profile is None:
-        raise ProviderError(f"unknown provider {provider_id!r}")
-    store.delete_provider_profile(provider_id)
-    store_provider_api_key(home, provider_id, "")
+    with provider_rollback(store, home):  # R3 (H2): serialized with every provider write
+        profile = store.get_provider_profile(provider_id)
+        if profile is None:
+            raise ProviderError(f"unknown provider {provider_id!r}")
+        store.delete_provider_profile(provider_id)
+        store_provider_api_key(home, provider_id, "")
     return {"removed": provider_id, "was_active": profile.active}
 
 
@@ -1578,6 +1605,8 @@ def use_provider(
     if probe:
         _probe_profile(store, home, profile)
     with provider_rollback(store, home):
+        if probe:
+            _still_probed(store, profile)
         pin_legacy_key(store, home)
         store.set_active_provider(provider_id)
         store.set_setting(LLM_BASE_URL, profile.base_url)

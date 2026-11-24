@@ -87,6 +87,9 @@ SECRET_ENV = "SKEP_LLM_API_KEY"
 # profile, so "llm-secret belongs to LLM_BASE_URL" (v119-F1) handed the old
 # key to every newly activated host.
 LLM_SECRET_ENDPOINT = "llm_secret_endpoint"
+# R3 (H1): SKEP_LLM_API_KEY's own owner. Sharing the file's marker let a
+# save or clear of llm-secret move (or drop) the env key's owner with it.
+LLM_ENV_KEY_ENDPOINT = "llm_env_key_endpoint"
 
 
 class OllamaError(Exception):
@@ -264,15 +267,19 @@ def _raw_provider_api_key(
     return legacy_api_key(home, profile.base_url, store)
 
 
-def legacy_key_endpoint(home: Path, store: RunStore | None) -> str:
-    """v119-F1: the endpoint llm-secret was saved for — the saved
-    LLM_BASE_URL; with none saved, or the Queen on the ChatGPT plan (ADR 0063:
-    the saved key is the workers'), the workers' profile.json endpoint. The
-    sources migrate_legacy_provider seeds the ``default`` profile from, in
-    the same order. ``home`` is the supervisor home."""
+def legacy_key_endpoint(
+    home: Path, store: RunStore | None, marker: str = LLM_SECRET_ENDPOINT
+) -> str:
+    """v119-F1: the endpoint llm-secret (R3: or, with ``marker`` =
+    LLM_ENV_KEY_ENDPOINT, SKEP_LLM_API_KEY) belongs to — its pinned owner;
+    unpinned, the saved LLM_BASE_URL; with none saved, or the Queen on the
+    ChatGPT plan (ADR 0063: the saved key is the workers'), the workers'
+    profile.json endpoint. The sources migrate_legacy_provider seeds the
+    ``default`` profile from, in the same order. ``home`` is the supervisor
+    home."""
     from ..codex_login import uses_codex_login
 
-    pinned = store.get_setting(LLM_SECRET_ENDPOINT) if store is not None else None
+    pinned = store.get_setting(marker) if store is not None else None
     if isinstance(pinned, str) and pinned.strip():
         return pinned.strip().rstrip("/")
     saved = store.get_setting(LLM_BASE_URL) if store is not None else None
@@ -291,23 +298,43 @@ def pin_legacy_key(store: RunStore, home: Path) -> None:
     """Phase 05 R1: before the active endpoint moves, record the endpoint
     llm-secret belongs to, so it never follows the switch. Idempotent; a key
     saved before any endpoint keeps belonging to the first one saved. R2
-    (F4): SKEP_LLM_API_KEY too — the env key is the same legacy credential."""
-    if store.get_setting(LLM_SECRET_ENDPOINT) or resolve_api_key(home) is None:
-        return
-    owner = legacy_key_endpoint(home, store)
-    if owner:
-        store.set_setting(LLM_SECRET_ENDPOINT, owner)
+    (F4): SKEP_LLM_API_KEY too — R3 (H1): under its own marker, so nothing
+    a save or clear of llm-secret does moves it."""
+    for marker, key in _legacy_values(home):
+        if key and not store.get_setting(marker):
+            owner = legacy_key_endpoint(home, store, marker)
+            if owner:
+                store.set_setting(marker, owner)
 
 
-def legacy_api_key(home: Path, endpoint: str, store: RunStore | None = None) -> str | None:
-    """v119-F1: llm-secret / SKEP_LLM_API_KEY, for its own endpoint only. It
-    was the fallback for EVERY profile, so the health sweep sent the main key
-    to each keyless profile's host every five minutes. The same URL match
-    resolve_active_api_key and worker_key_profile use; anywhere else gets no
-    key (a local server needs none; a remote one fails, naming the fix)."""
-    if endpoint.strip().rstrip("/") != legacy_key_endpoint(home, store):
-        return None
-    return resolve_api_key(home)
+def _legacy_values(home: Path) -> tuple[tuple[str, str | None], ...]:
+    """(owner marker, key) of SKEP_LLM_API_KEY, then of llm-secret — R3
+    (H1): each has its own owner; the env key first, as it always shadowed
+    the file."""
+    path = home / SECRET_FILE
+    held = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    return (
+        (LLM_ENV_KEY_ENDPOINT, os.environ.get(SECRET_ENV, "").strip() or None),
+        (LLM_SECRET_ENDPOINT, held or None),
+    )
+
+
+def legacy_api_key(
+    home: Path, endpoint: str, store: RunStore | None = None, *, unowned: bool = False
+) -> str | None:
+    """v119-F1: SKEP_LLM_API_KEY / llm-secret, each for its own endpoint
+    only. It was the fallback for EVERY profile, so the health sweep sent
+    the main key to each keyless profile's host every five minutes. The same
+    URL match resolve_active_api_key and worker_key_profile use; anywhere
+    else gets no key (a local server needs none; a remote one fails, naming
+    the fix). ``unowned``: a key no endpoint owns yet also counts — it is
+    the first one saved's (pin_legacy_key)."""
+    want = endpoint.strip().rstrip("/")
+    owners = (want, "") if unowned else (want,)
+    for marker, key in _legacy_values(home):
+        if key and legacy_key_endpoint(home, store, marker) in owners:
+            return key
+    return None
 
 
 def legacy_key_withheld(home: Path, profile: ProviderProfile, store: RunStore) -> str | None:
@@ -315,15 +342,20 @@ def legacy_key_withheld(home: Path, profile: ProviderProfile, store: RunStore) -
     None when it has a credential, needs none from skep, or none exists."""
     from ..codex_login import uses_codex_login
 
-    if uses_codex_login(profile.base_url) or resolve_api_key(home) is None:
+    owners = [
+        legacy_key_endpoint(home, store, marker) or "the saved endpoint"
+        for marker, key in _legacy_values(home)
+        if key
+    ]
+    if uses_codex_login(profile.base_url) or not owners:
         return None
     if _raw_provider_api_key(home, profile, store) is not None:
         return None
-    owner = legacy_key_endpoint(home, store) or "the saved endpoint"
+    owner = " and ".join(dict.fromkeys(owners))
     return (
         f"provider {profile.provider_id!r} has no key of its own, and the main key "
-        f"(llm-secret) is only sent to {owner}, so it is called without one — give it "
-        f"its own key: `skep provider set-key {profile.provider_id}`"
+        f"(llm-secret / {SECRET_ENV}) is only sent to {owner}, so it is called without "
+        f"one — give it its own key: `skep provider set-key {profile.provider_id}`"
     )
 
 
@@ -392,12 +424,23 @@ def assistant_llm(store: RunStore) -> tuple[str | None, str | None, LLMProtocol]
 
 
 def _assistant_key_set(store: RunStore, home: Path) -> bool:
-    """Whether the active profile has a credential — the one chat sends."""
+    """Whether the active profile has a credential — the one chat sends.
+    R3 (H7): on the ChatGPT login a key here is the workers' (ADR 0063), so
+    it is whether THEIR endpoint has one, never whether llm-secret exists."""
     from ..codex_login import uses_codex_login
 
     active = store.active_provider_profile()
-    if active is None or uses_codex_login(active.base_url):
+    if active is None:
         return resolve_api_key(home) is not None
+    if uses_codex_login(active.base_url):
+        endpoint = _workers_provider(home)[0]
+        holder = _registered_for(store, endpoint)
+        key = (
+            _raw_provider_api_key(home, holder, store)
+            if holder is not None
+            else legacy_api_key(home, endpoint, store)
+        )
+        return key is not None  # an unowned key is the first endpoint's (pin_legacy_key)
     return _raw_provider_api_key(home, active, store) is not None
 
 
@@ -1586,9 +1629,9 @@ def _committed_key(
         return wire_key(target, os.environ.get(env, "").strip() or None) if env else None
     if registered and profile is not None:
         return resolve_provider_api_key(home, profile, store)
-    # a new endpoint has no key — but llm-secret no endpoint owns yet belongs
-    # to the first one saved (pin_legacy_key)
-    return resolve_api_key(home) if legacy_key_endpoint(home, store) in ("", target) else None
+    # a new endpoint has no key — but a legacy key no endpoint owns yet
+    # belongs to the first one saved (pin_legacy_key)
+    return legacy_api_key(home, target, store, unowned=True)
 
 
 def save_assistant_llm(
@@ -1641,8 +1684,20 @@ def save_assistant_llm(
             "and none is configured"
         )
     moved = active is not None and target != active.base_url.rstrip("/")
+    # R3 (H3): nothing active on a non-empty registry (the active profile was
+    # removed) — the save activates its target's profile, probed like a
+    # switch; a bare clear only clears (it sends nothing anywhere)
+    orphaned = (
+        active is None
+        and bool(target)
+        and bool(view.list_provider_profiles())
+        and (api_key != "" or (base_url, model, protocol) != (None, None, None))
+    )
+    same = target == (saved_url or "").rstrip("/")  # P8: the saved model only for its endpoint
     candidate, registered = (
-        _endpoint_profile(view, target, protocol, wire, model) if moved else (None, False)
+        _endpoint_profile(view, target, protocol, wire, model or (saved_model if same else None))
+        if moved or orphaned
+        else (None, False)
     )
     codex = uses_codex_login(target)
     switched = (
@@ -1665,8 +1720,6 @@ def save_assistant_llm(
                 provider_id=candidate.provider_id,
             )
         elif (api_key and not codex) or switched:
-            # P8: the saved model only for the endpoint it was saved with
-            same = target == (saved_url or "").rstrip("/")
             _probe_or_refuse(
                 view,
                 home,
@@ -1701,8 +1754,8 @@ def save_assistant_llm(
             )
             if updated != active:
                 store.upsert_provider_profile(updated)
-        if api_key is not None:
-            store_assistant_key(store, home, api_key, workers=workers[0])
+        if api_key is not None:  # saved for the endpoint it was probed against
+            store_assistant_key(store, home, api_key, endpoint=workers[0] if codex else target)
         for key, value in (settings or {}).items():
             store.set_setting(key, value)
         _write_through_profile(store, home.parent)
@@ -1794,14 +1847,17 @@ def _save_profile_key(store: RunStore, home: Path, profile: ProviderProfile, val
         _write_legacy(store, home, mine, value)
 
 
-def _save_workers_key(store: RunStore, home: Path, endpoint: str, value: str) -> None:
-    """Phase 05 R2 (F2): the workers' key while the Queen is on the ChatGPT
-    login, saved for ``endpoint`` — the one it was probed against: their
-    registered profile's own file; llm-secret only when that endpoint has no
-    profile, never overwriting a key another endpoint owns. Empty clears
-    their key — and llm-secret only if it is theirs."""
+def _save_endpoint_key(store: RunStore, home: Path, endpoint: str, value: str) -> None:
+    """Phase 05 R2 (F2): a key saved for ``endpoint`` — the one it was probed
+    against: the workers' while the Queen is on the ChatGPT login; R3 (H3)
+    the save's target while nothing is active. Its registered profile's own
+    file; llm-secret only when that endpoint has no profile, never
+    overwriting a key another endpoint owns. Empty clears its key — and
+    llm-secret only if it is that endpoint's."""
     from ..providers import ProviderError
 
+    if value:
+        _clear_workers_env(home, endpoint)
     registered = _registered_for(store, endpoint) if endpoint else None
     if registered is not None:
         _save_profile_key(store, home, registered, value)
@@ -1820,23 +1876,44 @@ def _save_workers_key(store: RunStore, home: Path, endpoint: str, value: str) ->
     _write_legacy(store, home, endpoint, value)
 
 
-def store_assistant_key(store: RunStore, home: Path, value: str, *, workers: str = "") -> None:
+def _clear_workers_env(home: Path, endpoint: str) -> None:
+    """R3 (H4): profile.json's endpoint just got a saved key — the env var
+    it names would shadow it in every worker (read first), so it goes in the
+    same commit. ``home`` is the supervisor home."""
+    from skep.profile import load_profile, profile_path, run_personal_setup
+
+    if not (endpoint and profile_path(home.parent).is_file()):
+        return
+    try:
+        provider = load_profile(home.parent).provider
+    except (OSError, ValueError):
+        return  # unreadable: no worker resolved an endpoint from it
+    if provider.api_key_env and (provider.endpoint or "").strip().rstrip("/") == endpoint:
+        run_personal_setup(
+            home.parent,
+            provider=provider.name,
+            model=provider.model,
+            endpoint=provider.endpoint,
+            api_key_env=None,
+        )
+
+
+def store_assistant_key(store: RunStore, home: Path, value: str, *, endpoint: str = "") -> None:
     """Phase 05 (5.1): a key saved from Settings is the ACTIVE profile's —
     its own 0600 file, which ``resolve_active_api_key`` reads first (a key
     saved only to llm-secret lost to an older per-profile file) — with
-    ``llm-secret`` kept as the legacy mirror. Empty clears both. With
-    nothing active yet it is llm-secret, owned by the endpoint it is saved
-    for. With the Queen on the ChatGPT login it is the WORKERS' — R2 (F2):
-    ``workers`` is the endpoint the caller probed it against, resolved once."""
+    ``llm-secret`` kept as the legacy mirror. Empty clears both. Otherwise
+    it is ``endpoint``'s, the one the caller probed it against, resolved
+    once: with the Queen on the ChatGPT login the WORKERS' (R2, F2); with
+    nothing active, the save's target (R3, H3 — never llm-secret's old
+    owner)."""
     from ..codex_login import uses_codex_login
 
     active = store.active_provider_profile()
-    if active is None:
-        _write_legacy(store, home, legacy_key_endpoint(home, store), value)
-    elif uses_codex_login(active.base_url):
-        _save_workers_key(store, home, workers, value)
-    else:
+    if active is not None and not uses_codex_login(active.base_url):
         _save_profile_key(store, home, active, value)
+    else:
+        _save_endpoint_key(store, home, endpoint, value)
 
 
 def _write_through_profile(store: RunStore, personal_home: Path) -> None:
