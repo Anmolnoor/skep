@@ -492,7 +492,13 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
             detail=f"action {action_id!r} is already being confirmed — its result "
             "lands in this chat when it finishes",
         )
-    return HTTPException(status_code=409, detail=f"action {action_id!r} already {status}")
+    result = action.result if action is not None else None
+    note = result.get("note") if isinstance(result, dict) else None
+    # E2: the winner's own words ("the engine already answered no: …"), when it left some
+    return HTTPException(
+        status_code=409,
+        detail=f"action {action_id!r} already {status}" + (f": {note}" if note else ""),
+    )
 
 
 def blocking_cards(store: RunStore, chat_id: str) -> list[ChatActionRecord]:
@@ -4285,7 +4291,12 @@ def add_chat_routes(
                 raise
             if confirm and status == "confirmed":
                 status = executed_status(payload)
-            run_store.resolve_chat_action(action_id, status=status, result=payload, claimed=True)
+            try:
+                run_store.resolve_chat_action(
+                    action_id, status=status, result=payload, claimed=True
+                )
+            except ValueError:  # E2: the ACP engine settled it first — its answer stands
+                raise card_taken(run_store, action_id) from None
         else:
             payload = {"ok": False, "denied": True, "note": "the operator canceled this command"}
             try:

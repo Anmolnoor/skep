@@ -146,19 +146,31 @@ class AcpEngine:
         # A10: the dispatching chat (a schedule's), else ONE fallback per run.
         self._chat_id, self._chat_lock = chat_id, threading.Lock()
         self._asks: list[threading.Thread] = []  # A7: joined by finish()
+        self._reader = threading.Thread(target=self._read, name="acp-engine-read", daemon=True)
         self._thread = threading.Thread(target=self._drive, name="acp-engine", daemon=True)
+        self._reader.start()  # E5: before finish() can ever join it
         self._thread.start()
 
     def finish(self, timeout: float = 30.0) -> str | None:
         """Wait for the session and its open asks to end; the failure the run
         must state, or None. Called before the store closes: an ask still
-        waiting would resolve its card on a closed store."""
+        waiting would resolve its card on a closed store.
+
+        E5: the reader is joined before the asks — only it starts one, and
+        its EOF wakes them — and a drive, reader or ask thread still alive
+        at the deadline is a stated failure (A15), never "none"."""
         end = time.monotonic() + timeout
-        self._thread.join(timeout)
-        for ask in list(self._asks):
+        for thread in (self._thread, self._reader):
+            thread.join(max(0.0, end - time.monotonic()))
+        threads = [self._thread, self._reader, *self._asks]
+        for ask in threads[2:]:
             ask.join(max(0.0, end - time.monotonic()))
-        if self._thread.is_alive():  # A15: never "no failure" for a session still running
-            return f"the ACP session did not end within {timeout:g}s of the worker's exit"
+        alive = [thread.name for thread in threads if thread.is_alive()]
+        if alive:
+            return (
+                f"the ACP session did not end within {timeout:g}s of the worker's exit "
+                f"(still running: {', '.join(alive)})"
+            )
         return self.failure
 
     # --- the wire -------------------------------------------------------
@@ -194,7 +206,9 @@ class AcpEngine:
                 self._responses[rid] = msg
                 self._cond.notify_all()
         elif method == "session/request_permission" and rid is not None:
-            ask = threading.Thread(target=self._forwarded, args=(msg,), daemon=True)
+            ask = threading.Thread(
+                target=self._forwarded, args=(msg,), name="acp-engine-ask", daemon=True
+            )
             self._asks.append(ask)
             ask.start()
         elif rid is not None:
@@ -220,7 +234,6 @@ class AcpEngine:
     def _drive(self) -> None:
         from .. import __version__
 
-        threading.Thread(target=self._read, name="acp-engine-read", daemon=True).start()
         try:
             self._request("initialize", {
                 "protocolVersion": 1,
@@ -280,6 +293,7 @@ class AcpEngine:
         from ..supervisor.acp.mapper import Decided, permission_probe
         from ..supervisor.serve.actions import (
             ACP_TIMEOUT_ACTOR,
+            abandon_acp_permission,
             expire_acp_permission,
             propose_acp_permission,
         )
@@ -315,9 +329,12 @@ class AcpEngine:
                 note = "the run ended before an answer" if self._closed else "card timed out"
                 if expire_acp_permission(self._store, action_id, f"auto-denied: {note}"):
                     continue  # re-read: the denial it just recorded
-                if lost:  # A6: a confirm stuck mid-claim is no answer — deny
-                    card = None
-                    break
+                if lost:  # A6: a confirm stuck mid-claim is no answer — deny,
+                    # E2: settling the card first; a confirm that won answers
+                    if abandon_acp_permission(self._store, action_id, note):
+                        card = None
+                        break
+                    continue  # re-read: the verdict that confirm recorded
                 lost = True  # a confirm running right now gets one more poll
             with self._cond:  # A7: the session's end wakes this at once
                 if lost or not self._closed:
