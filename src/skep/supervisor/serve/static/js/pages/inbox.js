@@ -2,18 +2,20 @@
    GET /api/review-queue — worker gates, standalone cards, memory proposals
    and skills awaiting the human gate, each once, grouped by the wall it
    crosses (riskiest first). The sidebar badge counts the same queue, so the
-   two never disagree. Each row has Approve and Deny buttons wired to the
-   item's existing route (I5); an item whose evidence needs more than a row —
-   a landing G10 or V1 warned about, a HIGH card, a tainted or untested skill
-   — sends you where that evidence is instead of approving inline. Keys only
-   move focus; a button press is the only verdict (I7).
+   two never disagree. Each verdict button is wired to the item's existing
+   route (I5). Phase 10 R4 (K1): Approve is inline ONLY for a worker gate or a
+   memory proposal — the items whose whole evidence the row shows (a gate's
+   every command, a memory's full text) — and not even then when a landing's
+   G10 or V1 is warned about. Every chat card (dispatches, landings, PRs,
+   captures, schedules, folds, forge…) and every skill opens where its full
+   evidence is; Deny stays inline. Keys only move focus; a button press is
+   the only verdict (I7).
 
    Phase 10 R2: a run `skep review` walks with no gate yet (an unlanded
    patch, a G10 disagreement) is a row that opens the run — no inline land
-   (H1). A landing card is warned like a gate (H2); a batch gate lists every
-   command its approve grants (H3); a captured draft is approved from its
-   SKILL.md (H4); a card the web cannot confirm is read-only (H5); and a
-   verdict's flash says what the route reported, never just "2xx" (H6).
+   (H1). A batch gate lists every command its approve grants (H3); a card the
+   web cannot confirm says where to answer it (H5); and a verdict's flash says
+   what the operation reported, never just "2xx" (H6, R4 K7).
 
    app.js boots on load, so its helpers come in through the import cycle —
    safe because this module only declares at top level. */
@@ -28,7 +30,8 @@ import { chatTitle, flash, header, relativeTime, route, shortTaskId, shortTitle 
 const BOUNDARY_ORDER = ["tainted-dispatch", "patch-landing", "network-egress", "host-shell",
   "outbound-content", "policy-change", "in-sandbox-locked"];
 const SOURCE_TEXT = { assistant: "proposed by the Queen", operator: "your command", gate: "a run's gate" };
-// H3: a batch longer than this is read on its review page, not in a row.
+// H3: a batch longer than this is listed on its review page, not in a row
+// (console.py INLINE_COMMANDS; whether a row approves is the server's call).
 const INLINE_COMMANDS = 10;
 
 const boundaryRank = gate => {
@@ -76,11 +79,10 @@ function filesLine(item) {
   return `${files.length} file${files.length === 1 ? "" : "s"} changed: ${each}${item.files_note ? ` (${item.files_note})` : ""}`;
 }
 
-// A landing whose G10 or V1 evidence needs reading before it is approved.
-const warnedLanding = item => item.boundary === "patch-landing" && (item.warning || item.tamper);
-
-// The existing route each verdict goes through — [path, body]. An approve
-// that needs its evidence in view is null, with where to go instead.
+// The existing route each verdict goes through — [path, body]. R4 K1 (SD-2):
+// an inline approve exists only when the server's item.inline_approve says
+// so (console.inline_approvable) — never inferred here from the kind; else
+// it is null, with where to go instead.
 function verdicts(item) {
   if (item.kind === "run") {
     // H1: no gate exists until land_run opens one — the run page has the verdict.
@@ -88,52 +90,45 @@ function verdicts(item) {
   }
   if (item.kind === "gate") {
     const commands = item.commands || [];
-    const long = commands.length > INLINE_COMMANDS;
-    const why = warnedLanding(item) ? "Review →" : long ? `Review all ${commands.length} commands →` : null;
+    const why = commands.length > INLINE_COMMANDS ? `Review all ${commands.length} commands →` : "Review →";
     return {
-      approve: why ? null : [`/api/approvals/${item.id}/approve`, {}],
+      approve: item.inline_approve ? [`/api/approvals/${item.id}/approve`, {}] : null,
       label: commands.length > 1 ? `Approve all ${commands.length}` : "Approve",
-      elsewhere: why ? [`#/review/${item.id}`, why] : null,
+      elsewhere: item.inline_approve ? null : [`#/review/${item.id}`, why],
       deny: [`/api/approvals/${item.id}/deny`, {}],
     };
   }
   if (item.kind === "card") {
-    // A typed or gate card resolves on the command route; the Queen's on the
-    // turn route (a stream), keep "once": an approve from the Inbox stores no grant.
+    // R4 K1: a chat card is approved in its thread, where the whole card is —
+    // the row is its headline and evidence. A typed or gate card denies on the
+    // command route; the Queen's on the turn route (a stream, one verdict per
+    // item the card holds).
     const operator = item.source !== "assistant";
     const lane = operator ? "commands" : "actions";
-    const base = `/api/chats/${item.chat_id}/${lane}/${item.id}`;
-    // H2: the full card keeps its proposed branch; H5: so does the refusal's thread.
-    // R3 J1: a card carries G10 / V1 only for runs its execution lands or
-    // publishes (land_run, open_pr…) — any of it sends you to the full card.
-    // R3 J2: a fold runs every item — each is listed and the approve names
-    // how many it saw (the server refuses a card that holds another set);
-    // past the batch-gate cap it is read in its thread.
-    const count = (item.items || []).length || 1;
-    const away = item.high || item.warning || item.tamper || item.web_refusal || count > INLINE_COMMANDS;
     return {
-      approve: away ? null : [`${base}/confirm`, operator ? undefined : { keep: "once", items: count }],
-      label: count > 1 ? `Approve all ${count}` : "Approve",
-      elsewhere: away ? [`#/chat/${item.chat_id}`, "Open the full card in its thread →"] : null,
-      deny: [`${base}/deny`, operator ? undefined : {}],
+      approve: null,
+      elsewhere: [`#/chat/${item.chat_id}`, "Open the full card →"],
+      deny: [`/api/chats/${item.chat_id}/${lane}/${item.id}/deny`, operator ? undefined : {}],
       stream: !operator,
-      items: count,
+      items: (item.items || []).length || 1,
     };
   }
   if (item.kind === "memory") {
     return {
-      approve: [`/api/memory/proposals/${item.id}/approve`, undefined],
+      approve: item.inline_approve ? [`/api/memory/proposals/${item.id}/approve`, undefined] : null,
+      elsewhere: item.inline_approve ? null : ["#/memory", "Open it in Memory →"],
       deny: [`/api/memory/proposals/${item.id}/reject`, "reason"],
     };
   }
-  const blocked = item.taint ? "Read it in the Library, then accept the taint →"
+  // R4 K1: a skill is approved in the Library, from what it would install.
+  const where = item.taint ? "Read it in the Library, then accept the taint →"
     : !item.approvable ? "Test it in the Library first →"
       // H4: a captured draft is approved from its SKILL.md, not its description
       : item.provenance === "captured" && item.status !== "tested" ? "Read its SKILL.md in the Library first →"
-        : null;
+        : "Approve it in the Library →";
   return {
-    approve: blocked ? null : [`/api/skills/${encodeURIComponent(item.id)}/approve`, {}],
-    elsewhere: blocked ? ["#/templates", blocked] : null,
+    approve: null,
+    elsewhere: ["#/templates", where],
     deny: [`/api/skills/${encodeURIComponent(item.id)}/reject`, {}],
   };
 }
@@ -148,6 +143,20 @@ function verdicts(item) {
 // verdicts is a warning about the follow-up, never a failed verdict.
 const warningOf = r => r.warning || r.result?.warning; // a payload is {ok, error | result: {…, warning}}
 
+// R4 K7: the operation's own outcome, not the outer ok — a PR not opened or
+// not merged (after a landing that did happen) is partial, never green.
+export function outcomeTrouble(r) {
+  if (!r || r.denied) return null;
+  if (r.ok === false) return r.error || r.note || "failed";
+  const inner = r.result;
+  if (!inner || typeof inner !== "object") return null;
+  const why = inner.detail || inner.error || inner.note;
+  if (inner.ok === false) return why || "failed";
+  if (inner.opened === false) return `partial — the PR was not opened${why ? `: ${why}` : ""}`;
+  if (inner.merged === false) return `partial — not merged${why ? `: ${why}` : ""}`;
+  return null;
+}
+
 async function send(path, body, stream, items = 1) {
   if (stream) {
     const results = [];
@@ -161,19 +170,23 @@ async function send(path, body, stream, items = 1) {
       },
       error: d => (results.length ? followUp : errors).push(d.detail),
     });
-    const failed = results.filter(r => !r.ok && !r.denied);
     if (errors.length) return { failed: errors.join("; ") };
     if (!results.length) return { failed: "no outcome came back — open its thread to see what happened" };
-    if (failed.length) {
-      const why = failed.map(r => r.error || r.note || "failed").join("; ");
-      return { failed: results.length > 1 ? `${failed.length} of ${results.length} items failed — ${why}` : why };
+    const failed = results.map(outcomeTrouble).filter(Boolean);
+    // R4 T1: fewer verdicts than items is never read as all of them
+    const missing = results.length < items ? `incomplete: ${results.length} of ${items} answered` : null;
+    if (failed.length || missing) {
+      const why = failed.join("; ");
+      const counted = failed.length && results.length > 1 ? `${failed.length} of ${results.length} items failed — ${why}` : why;
+      return { failed: [missing, counted].filter(Boolean).join("; ") };
     }
     const notes = results.map(warningOf).filter(Boolean);
     if (followUp.length) notes.push(`the Queen's follow-up failed: ${followUp.join("; ")}`);
     return { warning: notes.join("; ") };
   }
   const reply = await api("POST", path, body);
-  if (reply && reply.ok === false && !reply.denied) return { failed: reply.error || reply.note || "failed" };
+  const trouble = outcomeTrouble(reply);
+  if (trouble) return { failed: trouble };
   return { warning: reply && warningOf(reply) };
 }
 
@@ -222,7 +235,7 @@ function reviewRow(item) {
     folded.length > 1 && folded.length <= INLINE_COMMANDS
       ? el("ul", { class: "inbox-commands" }, folded.map(line => el("li", {}, el("code", { class: "inbox-command mono" }, line))))
       : null,
-    folded.length > INLINE_COMMANDS ? el("small", {}, `${folded.length} items — every one runs on approve`) : null,
+    folded.length > INLINE_COMMANDS ? el("small", {}, `${folded.length} items — every one runs when the card is approved`) : null,
     mirrored.length
       ? el("small", {}, `also asked in ${mirrored.length} chat card${mirrored.length === 1 ? "" : "s"} — resolved with it: `,
         mirrored.flatMap((m, i) => [i ? ", " : null, el("a", { href: `#/chat/${m.chat_id}` }, m.tool)]))
@@ -250,7 +263,7 @@ function walkable(list) {
 }
 
 export async function viewInbox(main) {
-  header(main, "Inbox", "Everything waiting on you, riskiest wall first. Approve or deny here, or open an item for its full evidence.");
+  header(main, "Inbox", "Everything waiting on you, riskiest wall first. A worker gate or memory proposal whose row shows all its evidence is approved here; chat cards and skills open where their full evidence is. Deny works here on everything but a run.");
   const live = routeLive(main); // H7 (D7): a late queue draws nothing once the operator moved on
   const { items } = await api("GET", "/api/review-queue");
   if (!live()) return;

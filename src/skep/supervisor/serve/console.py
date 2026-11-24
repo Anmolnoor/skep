@@ -50,6 +50,25 @@ REVIEW_ORDER = (
 )
 assert set(REVIEW_ORDER) == set(BOUNDARIES)
 _GATE_CARDS = ("approve_review", "deny_review")
+# H3: a gate whose stored batch is longer than this is read on its review page.
+INLINE_COMMANDS = 10
+
+
+def inline_approvable(item: dict[str, Any]) -> bool:
+    """R4 K1 (SD-2): the ONE allowlist for an Inbox row's inline Approve — a
+    worker gate whose row lists every command it grants (≤ INLINE_COMMANDS)
+    and, for a landing, carries no G10 / V1 warning; or a memory proposal
+    whose full text is the row. Every other kind — each chat card, whatever
+    its tool, a run, a skill, a kind added later — is approved where its full
+    evidence is, so it defaults to False."""
+    if item.get("kind") == "memory":
+        return bool(item.get("content"))
+    if item.get("kind") == "gate":
+        warned = item.get("boundary") == "patch-landing" and (
+            item.get("warning") or item.get("tamper")
+        )
+        return len(item.get("commands") or ()) <= INLINE_COMMANDS and not warned
+    return False
 
 
 def landing_warning(store: RunStore, task_id: str) -> str | None:
@@ -71,12 +90,16 @@ def canonical_task_id(store: RunStore, task_id: str) -> str:
 def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     """R3 J1: the runs whose patch a card's execution lands or publishes —
     read from what the tool does (tools.py), not its boundary label: land_run
-    lands one; open_pr lands each unlanded run and pushes it (branch mode names
-    no run); an approve_review of an apply_patch review lands its run."""
+    lands one; open_pr lands each unlanded run and pushes it (branch mode: the
+    runs already landed on that branch); an approve_review of an apply_patch
+    review lands its run."""
     ids: object = []
     if tool == "land_run":
         ids = [args.get("task_id")]
-    elif tool == "open_pr" and not args.get("branch"):
+    elif tool == "open_pr" and args.get("branch"):
+        # R4 K1 (O2): branch mode publishes the runs whose approved landing named it
+        ids = store.runs_landed_on(str(args["branch"]))
+    elif tool == "open_pr":
         ids = args.get("task_ids") or [args.get("task_id")]
     elif tool == "approve_review":
         approval = store.get_approval(str(args.get("review_id") or ""))
@@ -85,6 +108,19 @@ def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     if not isinstance(ids, list):
         return []
     return list(dict.fromkeys(canonical_task_id(store, str(t)) for t in ids if t))
+
+
+def run_evidence(store: RunStore, tool: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+    """R4 K1: each run a card lands or publishes (card_runs) with its own G10
+    warning and V1 tamper — what the chat card shows where it is approved."""
+    return [
+        {
+            "task_id": task_id,
+            "warning": landing_warning(store, task_id),
+            "tamper": tamper_note(store.reverification_for(task_id)),
+        }
+        for task_id in card_runs(store, tool, args)
+    ]
 
 
 def _patch_unreadable(store: RunStore, task_id: str) -> str | None:
@@ -344,6 +380,9 @@ def review_queue(
                 taint=taint_line(candidate),
             )
         items.append(item)
+    if detail:
+        for item in items:
+            item["inline_approve"] = inline_approvable(item)
     rank = {label: n for n, label in enumerate(REVIEW_ORDER)}
     kinds = ("gate", "card", "run", "memory", "skill")  # a same-second tie: a run's gate first
     items.sort(

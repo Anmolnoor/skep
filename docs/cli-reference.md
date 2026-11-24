@@ -190,7 +190,11 @@ skep review [task_id] [--approve | --deny | --allow-command | --reverify]
   by the boundary each crosses, riskiest first, then oldest. A chat card that
   asks a pending gate's question is listed under that gate, not as a second
   row. `?detail=false` returns membership and order only (`kind`, `id`,
-  `boundary`, `at`), which is what the badge polls. It only reads.
+  `boundary`, `at`), which is what the badge polls. It only reads. The Inbox
+  approves inline only a worker gate or a memory proposal, whose whole
+  evidence its row shows; a chat card is approved in its thread (a landing or
+  PR card there lists each run with its G10 warning and V1 tamper) and a
+  skill in the Library. Every item but a run can be denied from its row.
 - `--approve` applies a completed patch to a `skep/<task_id>` branch, or resumes
   a pending approval. A run with no re-verification record is refused.
 - `--branch NAME` names the landing branch for `--approve` on a completed run;

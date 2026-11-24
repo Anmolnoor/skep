@@ -78,3 +78,29 @@ test("the web's message says it is the web, so the server applies the same rule"
   await main.querySelectorAll(".composer-send")[0].click();
   assert.deepEqual(streamed, [["/api/chats/c1/messages?surface=web", "hello"]]);
 });
+
+// R4 K1: the thread's confirm card is where a landing or a PR is approved, so
+// it lists every run it lands or publishes — single, grouped, branch mode —
+// each with its own G10 warning and V1 tamper.
+test("R4 K1: a land_run / open_pr card lists each run with its G10 warning and V1 tamper", async () => {
+  const runs = [
+    { task_id: "aaaaaaaaaaaa1111", warning: null, tamper: null },
+    { task_id: "bbbbbbbbbbbb2222", warning: "re-verification RAN and FAILED", tamper: null },
+    { task_id: "cccccccccccc3333", warning: "TEST-TAMPER: tests changed", tamper: "TEST-TAMPER: tests changed" },
+  ];
+  const pr = { action_id: "a-pr", chat_id: "c1", tool: "open_pr", args: { branch: "feat" },
+    status: "proposed", source: "assistant", card: { headline: "open_pr — feat", runs } };
+  const land = { action_id: "a-land", chat_id: "c1", tool: "land_run", args: { task_id: "x" },
+    status: "proposed", source: "operator", card: { headline: "land_run — x", runs: runs.slice(1, 2) } };
+  const { main } = await openChat([pr, land]);
+  const [prCard, landCard] = main.querySelectorAll(".confirm-card");
+  const lines = prCard.querySelector(".card-runs").querySelectorAll("li");
+  assert.equal(lines.length, 3);
+  assert.match(texts(prCard, "card-runs-note")[0], /^3 runs this card lands or publishes:/);
+  assert.match(lines[0].textContent, /^run aaaaaaaa · no G10 or V1 warning$/);
+  assert.match(lines[1].textContent, /run bbbbbbbb · ⚠ re-verification RAN and FAILED/);
+  assert.equal(lines[2].querySelector(".banner").className, "banner bad");
+  assert.match(lines[2].textContent, /V1 · TEST-TAMPER: tests changed/);
+  assert.equal(lines[2].textContent.match(/TEST-TAMPER/g).length, 1, "a warning that IS the tamper is said once");
+  assert.match(landCard.querySelector(".card-runs").textContent, /run bbbbbbbb · ⚠ re-verification RAN and FAILED/);
+});

@@ -1,8 +1,10 @@
 // Phase 10 R1 (E2): the Inbox is ONE review queue (GET /api/review-queue) —
 // gates, standalone cards, memory proposals and skills, grouped by the wall
 // each crosses, riskiest first — and the sidebar badge counts that same queue.
-// Each row carries Approve and Deny buttons wired to the item's existing
-// route; keys only move focus (I7).
+// R4 K1: only a worker gate and a memory proposal — whose whole evidence the
+// row shows — approve inline; every chat card and skill opens where its full
+// evidence is. Deny is wired to each item's existing route; keys only move
+// focus (I7).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, texts } from "./harness.mjs";
@@ -10,10 +12,10 @@ import { loadApp, texts } from "./harness.mjs";
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
 
 const AT = "2026-11-24T08:00:00Z";
-const GATE = { kind: "gate", id: "r1", boundary: "network-egress", at: AT, task_id: "abcdef1234567890", action: "network.fetch", reason: "pypi.org", warning: null, tamper: null, stale_base: null, taint: null, mirrored_by: [] };
+const GATE = { kind: "gate", id: "r1", boundary: "network-egress", at: AT, task_id: "abcdef1234567890", action: "network.fetch", reason: "pypi.org", warning: null, tamper: null, stale_base: null, taint: null, mirrored_by: [], inline_approve: true };
 const PATCH = { ...GATE, id: "r2", boundary: "patch-landing", action: "apply_patch", reason: "land it" };
 const CARD = { kind: "card", id: "a1", boundary: "network-egress", at: AT, chat_id: "c1", chat_title: "flaky monitor", tool: "read_url", source: "assistant", headline: "read_url — https://x.dev", risk: null, tamper: null, taint: null, high: null };
-const MEMORY = { kind: "memory", id: "m1", boundary: "policy-change", at: AT, memory_class: "project_fact", content: "uses uv", taint: null };
+const MEMORY = { kind: "memory", id: "m1", boundary: "policy-change", at: AT, memory_class: "project_fact", content: "uses uv", taint: null, inline_approve: true };
 const SKILL = { kind: "skill", id: "learned-one", boundary: "policy-change", at: AT, status: "tested", provenance: "learned", description: "learned procedure: x", source: "t1", approvable: true, taint: null };
 const RUN = { kind: "run", id: "fedcba9876543210", boundary: "patch-landing", at: AT, task_id: "fedcba9876543210", g10: "NOT CONFIRMED", waiting: "completed — patch not landed", summary: "fixed it", warning: "re-verification RAN and FAILED (exit codes [1])", tamper: null, files: [{ path: "app.py", added: 2, removed: 1 }, { path: "b.py", added: 1, removed: 0 }], files_note: null };
 const queue = (...items) => ({ items, count: items.length });
@@ -74,27 +76,22 @@ test("the Inbox renders the one queue in its order, grouped by wall, each row li
   assert.match(main.querySelector(".inbox-heading").textContent, /Waiting on you · 5/);
 });
 
-test("every row has Approve and Deny, each wired to the item's existing route", async () => {
+test("R4 K1: only a gate and a memory proposal approve inline; every row denies on its existing route", async () => {
   const operatorCard = { ...CARD, id: "a2", source: "operator", tool: "setup_project", headline: "setup_project — app" };
   const { app, rows, calls, routed } = await render([GATE, CARD, operatorCard, MEMORY, SKILL], {
     "POST /": {},
   });
-  for (const row of rows) {
-    assert.ok(button(row, "Approve"), row.textContent);
-    assert.ok(button(row, "Deny"), row.textContent);
-  }
-  for (const row of rows) await button(row, "Approve").click();
+  assert.deepEqual(rows.map(row => Boolean(button(row, "Approve"))), [true, false, false, true, false]);
+  assert.deepEqual(rows.map(row => row.querySelector(".inbox-elsewhere")?.getAttribute("href") ?? null),
+    [null, "#/chat/c1", "#/chat/c1", null, "#/templates"]);
+  for (const row of rows) assert.ok(button(row, "Deny"), row.textContent);
+  for (const row of rows) await button(row, "Approve")?.click();
   assert.deepEqual(posts(calls), [
     ["/api/approvals/r1/approve", {}],
-    ["/api/chats/c1/actions/a1/confirm", { keep: "once", items: 1 }], // an inline approve keeps nothing
-    ["/api/chats/c1/commands/a2/confirm", undefined],
     ["/api/memory/proposals/m1/approve", undefined],
-    ["/api/skills/learned-one/approve", {}],
   ]);
-  // H6: the Queen's card lane is a stream, read as one — never buffered by api()
-  assert.deepEqual(streamed(calls), ["/api/chats/c1/actions/a1/confirm"]);
-  assert.equal(routed(), 5); // the list re-renders after each verdict
-  assert.match(app.flashes.at(-1)[1], /approved skill · learned-one/);
+  assert.equal(routed(), 2); // the list re-renders after each verdict
+  assert.match(app.flashes.at(-1)[1], /approved memory · project_fact/);
   calls.length = 0;
   app.prompt = () => "not now";
   for (const row of rows) await button(row, "Deny").click();
@@ -105,7 +102,50 @@ test("every row has Approve and Deny, each wired to the item's existing route", 
     ["/api/memory/proposals/m1/reject", { reason: "not now" }],
     ["/api/skills/learned-one/reject", {}],
   ]);
+  // H6: the Queen's card lane is a stream, read as one — never buffered by api()
+  assert.deepEqual(streamed(calls), ["/api/chats/c1/actions/a1/deny"]);
   assert.ok(app.flashes.every(([kind]) => kind === "ok"), JSON.stringify(app.flashes));
+});
+
+test("R4 K1: no chat card of any kind approves inline — headline, evidence, the full card link and Deny", async () => {
+  const kinds = ["dispatch_run", "batch_dispatch", "land_run", "open_pr", "capture_skill",
+    "propose_schedule", "merge_pr", "read_url", "search_web", "promote_tool", "set_policy"];
+  const cards = kinds.map((tool, n) => ({ ...CARD, id: `k${n}`, tool, headline: `${tool} — x` }));
+  cards[3] = { ...cards[3], warning: "re-verification RAN and FAILED", tamper: "TEST-TAMPER: tests changed" };
+  cards[7] = { ...cards[7], items: ["read_url — https://a.dev", "read_url — https://b.dev"] };
+  cards[8] = { ...cards[8], source: "operator" };
+  const { rows } = await render(cards);
+  rows.forEach((row, n) => {
+    assert.equal(row.querySelectorAll("button").filter(b => b.textContent.startsWith("Approve")).length, 0, kinds[n]);
+    const open = row.querySelector(".inbox-elsewhere");
+    assert.equal(open.getAttribute("href"), "#/chat/c1");
+    assert.equal(open.textContent, "Open the full card →");
+    assert.ok(button(row, "Deny"), kinds[n]);
+    assert.match(row.querySelector(".inbox-title").textContent, new RegExp(`^${kinds[n]} — x`));
+  });
+  assert.match(rows[3].querySelector(".banner").textContent, /V1 · TEST-TAMPER/);
+  assert.match(rows[3].textContent, /⚠ re-verification RAN and FAILED/);
+  assert.deepEqual(rows[7].querySelectorAll("li").map(li => li.textContent), ["read_url — https://a.dev", "read_url — https://b.dev"]);
+});
+
+test("R4 K1 (SD-2): Approve renders only from the server's inline_approve — never from the kind", async () => {
+  const card = { ...CARD, inline_approve: true }; // no card route approves inline, whatever it claims
+  const { rows } = await render([{ ...GATE, inline_approve: false }, { ...MEMORY, inline_approve: false }, card]);
+  for (const row of rows) assert.equal(button(row, "Approve"), undefined, row.textContent);
+  assert.deepEqual(rows.map(r => r.querySelector(".inbox-elsewhere").getAttribute("href")),
+    ["#/review/r1", "#/memory", "#/chat/c1"]);
+  for (const row of rows) assert.ok(button(row, "Deny"));
+});
+
+test("R4 K1: the Inbox header says what can be approved here", async () => {
+  const ctx = inboxApp([GATE]);
+  const said = [];
+  ctx.app.header = (_main, title, line) => said.push([title, line]);
+  await ctx.app.viewInbox(ctx.app.el("main"));
+  assert.equal(said[0][0], "Inbox");
+  assert.match(said[0][1], /worker gate or memory proposal/);
+  assert.match(said[0][1], /chat cards and skills open where their full evidence is/);
+  assert.doesNotMatch(said[0][1], /Approve or deny here/);
 });
 
 test("a memory deny needs a reason: cancelling the prompt sends nothing", async () => {
@@ -116,8 +156,9 @@ test("a memory deny needs a reason: cancelling the prompt sends nothing", async 
 });
 
 test("a patch-landing row with a G10 or V1 warning goes to its review page — no inline approve", async () => {
-  const warned = { ...PATCH, warning: "the supervisor could not re-verify this run" };
-  const tampered = { ...PATCH, id: "r3", tamper: "test-tamper guard: tests deleted" };
+  // the server's inline_approvable says false for both (console.py)
+  const warned = { ...PATCH, warning: "the supervisor could not re-verify this run", inline_approve: false };
+  const tampered = { ...PATCH, id: "r3", tamper: "test-tamper guard: tests deleted", inline_approve: false };
   const { rows } = await render([PATCH, warned, tampered]);
   assert.ok(button(rows[0], "Approve"));
   for (const [row, id] of [[rows[1], "r2"], [rows[2], "r3"]]) {
@@ -153,6 +194,7 @@ test("a HIGH card, a tainted skill and an untested skill are approved where thei
   const open = row => row.querySelectorAll("a").filter(a => a.classList.contains("inbox-elsewhere"))[0];
   assert.equal(button(rows[0], "Approve"), undefined);
   assert.equal(open(rows[0]).getAttribute("href"), "#/chat/c1");
+  assert.equal(open(rows[0]).textContent, "Open the full card →");
   assert.match(rows[0].textContent, /HIGH · it reshapes standing policy/);
   assert.equal(button(rows[1], "Approve"), undefined);
   assert.equal(open(rows[1]).getAttribute("href"), "#/templates");
@@ -237,29 +279,27 @@ test("H1: a run holding an unlanded patch or a G10 disagreement is a row that op
   assert.equal(open.getAttribute("href"), "#/runs/fedcba9876543210");
 });
 
-test("H2: a land_run card with a G10 warning or V1 tamper is approved in its thread, branch and all", async () => {
+test("H2: a land_run card is approved in its thread, branch and all, its G10 and V1 on the row", async () => {
   const landing = { ...CARD, id: "L1", boundary: "patch-landing", tool: "land_run", headline: "land_run — run x", task_id: "fedcba9876543210", branch: "skep/maintain", warning: null };
   const { rows } = await render([
     landing,
     { ...landing, id: "L2", warning: "re-verification RAN and FAILED" },
     { ...landing, id: "L3", tamper: "TEST-TAMPER: the patch changes the tests", warning: "TEST-TAMPER: the patch changes the tests" },
   ]);
-  assert.ok(button(rows[0], "Approve"));
-  for (const row of rows.slice(1)) {
+  for (const row of rows) {
     assert.equal(button(row, "Approve"), undefined);
     const open = row.querySelectorAll("a").find(a => a.classList.contains("inbox-elsewhere"));
     assert.equal(open.getAttribute("href"), "#/chat/c1");
-    assert.match(open.textContent, /Open the full card in its thread/);
     assert.ok(button(row, "Deny"));
+    assert.match(row.textContent, /lands on skep\/maintain/);
   }
-  for (const row of rows) assert.match(row.textContent, /lands on skep\/maintain/);
   assert.match(rows[1].textContent, /⚠ re-verification RAN and FAILED/);
   assert.match(rows[2].querySelector(".banner").textContent, /V1 · TEST-TAMPER/);
 });
 
 test("H3: a batch gate lists every command its approve grants and says 'Approve all N'; too long → its review", async () => {
   const batch = { ...GATE, action: "shell.run", reason: "command: npm install", commands: ["npm install", "npm run build"] };
-  const long = { ...batch, id: "r9", commands: Array.from({ length: 11 }, (_, i) => `cmd ${i}`) };
+  const long = { ...batch, id: "r9", commands: Array.from({ length: 11 }, (_, i) => `cmd ${i}`), inline_approve: false };
   const { rows, calls } = await render([batch, long], { "POST /": {} });
   assert.deepEqual(rows[0].querySelectorAll(".inbox-command").map(n => n.textContent), ["npm install", "npm run build"]);
   await button(rows[0], "Approve all 2").click();
@@ -291,36 +331,52 @@ test("H5: a card the web cannot confirm is read-only with where to answer it; it
   assert.deepEqual(posts(calls), [["/api/chats/c1/commands/a7/deny", undefined]]);
 });
 
-test("H6: an inline verdict reports what really happened — ok:false, a warning, a failed or partial stream", async () => {
+test("H6: a verdict reports what really happened — ok:false, a warning, a failed or silent stream", async () => {
   const operator = { ...CARD, id: "a2", source: "operator", tool: "setup_project", headline: "setup_project — app" };
-  const fold = { ...CARD, id: "a3", items: ["read_url — https://x.dev", "read_url — https://y.dev"] };
   const silent = { ...CARD, id: "a4" };
-  const { app, rows, routed } = await render([GATE, operator, CARD, fold, silent], {
+  const { app, rows, routed } = await render([GATE, operator, CARD, silent], {
     "POST /api/approvals/r1/approve": { action: "resumed", warning: "the base moved" },
-    "POST /api/chats/c1/commands/a2/confirm": { ok: false, error: "no such project" },
+    "POST /api/chats/c1/commands/a2/deny": { ok: false, error: "no such card" },
     sse: {
-      "/api/chats/c1/actions/a1/confirm": [["tool", { result: { ok: false, error: "read_url failed: 404" } }]],
-      "/api/chats/c1/actions/a3/confirm": [
-        ["tool", { result: { ok: true } }],
-        ["tool", { result: { ok: false, error: "second item broke" } }]],
-      "/api/chats/c1/actions/a4/confirm": [["error", { detail: "model offline" }]],
+      "/api/chats/c1/actions/a1/deny": [["error", { detail: "card already resolved" }]],
+      "/api/chats/c1/actions/a4/deny": [["done", {}]],
     },
   });
-  const flashes = [];
-  for (const row of rows) { await row.querySelectorAll("button")[0].click(); flashes.push(app.flashes.at(-1)); }
+  await button(rows[0], "Approve").click();
+  const flashes = [app.flashes.at(-1)];
+  for (const row of rows.slice(1)) { await button(row, "Deny").click(); flashes.push(app.flashes.at(-1)); }
   assert.equal(flashes[0][0], "warn");
   assert.match(flashes[0][1], /approved network\.fetch · run abcdef12 — ⚠ the base moved/);
-  assert.deepEqual(flashes[1], ["bad", "setup_project — app: no such project"]);
-  assert.deepEqual(flashes[2], ["bad", "read_url — https://x.dev: read_url failed: 404"]);
-  assert.deepEqual(flashes[3], ["bad", "read_url — https://x.dev: 1 of 2 items failed — second item broke"]);
-  assert.deepEqual(flashes[4], ["bad", "read_url — https://x.dev: model offline"]);
-  assert.equal(routed(), 5); // each card was resolved — the list redraws to say so
+  assert.deepEqual(flashes[1], ["bad", "setup_project — app: no such card"]);
+  assert.deepEqual(flashes[2], ["bad", "read_url — https://x.dev: card already resolved"]);
+  assert.deepEqual(flashes[3], ["bad", "read_url — https://x.dev: no outcome came back — open its thread to see what happened"]);
+  assert.equal(routed(), 4); // each was answered — the list redraws to say so
 });
 
-test("H6: a card stream that reports no outcome is never a green flash", async () => {
-  const { app, rows } = await render([CARD], { sse: { "/api/chats/c1/actions/a1/confirm": [["done", {}]] } });
+test("R4 K7: the operation's own outcome decides the flash — opened/merged/ok false is never green", async () => {
+  const { app } = await render([]);
+  assert.equal(app.outcomeTrouble({ ok: true, result: { opened: true, url: "u" } }), null);
+  assert.equal(app.outcomeTrouble({ ok: false, denied: true }), null);
+  assert.equal(app.outcomeTrouble({ ok: true, result: { opened: false, detail: "no remote" } }),
+    "partial — the PR was not opened: no remote");
+  assert.equal(app.outcomeTrouble({ ok: true, result: { merged: false, detail: "checks failing" } }),
+    "partial — not merged: checks failing");
+  assert.equal(app.outcomeTrouble({ ok: true, result: { ok: false, error: "push refused" } }), "push refused");
+  assert.equal(app.outcomeTrouble({ ok: false, error: "boom" }), "boom");
+  const { app: inbox, rows } = await render([GATE], {
+    "POST /api/approvals/r1/approve": { ok: true, result: { opened: false, detail: "no remote" } },
+  });
   await button(rows[0], "Approve").click();
-  assert.deepEqual(app.flashes.at(-1), ["bad", "read_url — https://x.dev: no outcome came back — open its thread to see what happened"]);
+  assert.deepEqual(inbox.flashes.at(-1), ["bad", "network.fetch · run abcdef12: partial — the PR was not opened: no remote"]);
+});
+
+test("R4 T1: a stream that answers fewer items than the card holds says it is incomplete", async () => {
+  const fold = { ...CARD, id: "F1", items: ["read_url — https://x.dev", "read_url — https://y.dev"] };
+  const { app, rows } = await render([fold], {
+    sse: { "/api/chats/c1/actions/F1/deny": [["tool", { result: { ok: false, denied: true } }], ["done", {}]] },
+  });
+  await button(rows[0], "Deny").click();
+  assert.deepEqual(app.flashes.at(-1), ["bad", "read_url — https://x.dev: incomplete: 1 of 2 answered"]);
 });
 
 test("H7: a queue that arrives after the operator moved on draws nothing and takes no focus", async () => {
@@ -342,60 +398,51 @@ test("H7: several mirroring cards are separated by commas", async () => {
   assert.match(rows[0].textContent, /resolved with it: approve_review, land_run/);
 });
 
-test("R3 J1: an open_pr card that publishes a warned or tampered run has no inline Approve, whatever its wall", async () => {
+test("R3 J1: an open_pr card is approved in its thread, whatever its wall or evidence", async () => {
   const pr = { ...CARD, id: "P1", boundary: "outbound-content", tool: "open_pr", headline: "open_pr — run x", task_ids: ["fedcba9876543210"], warning: null };
   const { rows } = await render([
     pr,
     { ...pr, id: "P2", warning: "re-verification RAN and FAILED" },
     { ...pr, id: "P3", tamper: "TEST-TAMPER: the patch changes the tests" },
   ]);
-  assert.ok(button(rows[0], "Approve"));
-  for (const row of rows.slice(1)) {
+  for (const row of rows) {
     assert.equal(button(row, "Approve"), undefined);
-    assert.match(row.querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
+    assert.equal(row.querySelector(".inbox-elsewhere").textContent, "Open the full card →");
     assert.ok(button(row, "Deny"));
   }
 });
 
-test("R3 J2: a folded card lists every item, approves 'all N' bound to that count; past 10 → its thread", async () => {
+test("R3 J2: a folded card lists every item (past 10, how many) and is approved in its thread", async () => {
   const urls = n => Array.from({ length: n }, (_, i) => `read_url — https://x.dev/${i}`);
   const fold = { ...CARD, id: "F1", headline: "read_url — https://x.dev/0 (+2 more)", items: urls(3) };
   const big = { ...CARD, id: "F2", headline: "read_url — https://x.dev/0 (+10 more)", items: urls(11) };
   const { rows, calls } = await render([fold, big]);
   assert.deepEqual(rows[0].querySelectorAll("li").map(li => li.textContent), urls(3));
-  await button(rows[0], "Approve all 3").click();
+  for (const row of rows) assert.equal(row.querySelectorAll("button").filter(b => b.textContent.startsWith("Approve")).length, 0);
+  assert.match(rows[1].textContent, /11 items — every one runs when the card is approved/);
+  await button(rows[0], "Deny").click();
   await flush();
-  assert.deepEqual(posts(calls), [["/api/chats/c1/actions/F1/confirm", { keep: "once", items: 3 }]]);
-  assert.equal(button(rows[1], "Approve all 11"), undefined);
-  assert.equal(button(rows[1], "Approve"), undefined);
-  assert.match(rows[1].querySelector(".inbox-elsewhere").textContent, /Open the full card in its thread/);
-  assert.match(rows[1].textContent, /11 items — every one runs on approve/);
-  assert.ok(button(rows[1], "Deny"));
+  assert.deepEqual(posts(calls), [["/api/chats/c1/actions/F1/deny", {}]]);
 });
 
 test("R3 J5: only the card's verdict events count; the Queen's follow-up never turns a verdict red", async () => {
   const land = { ...CARD, id: "L1", tool: "land_run", headline: "land_run — run x", boundary: "patch-landing" };
   const llm = { ...land, id: "L2" };
-  const warned = { ...land, id: "L3" };
-  const { app, rows } = await render([land, llm, warned], {
+  const denied = { ok: false, denied: true, note: "the user denied this action" };
+  const { app, rows } = await render([land, llm], {
     sse: {
       // the verdict, then the continuation: the Queen calls get_run, which "fails"
-      "/api/chats/c1/actions/L1/confirm": [
-        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x" } } }],
+      "/api/chats/c1/actions/L1/deny": [
+        ["tool", { tool: "land_run", result: denied }],
         ["tool", { tool: "get_run", args: { task_id: "x" }, result: { ok: false, error: "no run" } }],
         ["done", {}]],
-      "/api/chats/c1/actions/L2/confirm": [
-        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x" } } }],
+      "/api/chats/c1/actions/L2/deny": [
+        ["tool", { tool: "land_run", result: denied }],
         ["error", { detail: "model offline" }]],
-      // chat.py's real shape: the landing warning rides payload.result, beside ok
-      "/api/chats/c1/actions/L3/confirm": [
-        ["tool", { tool: "land_run", result: { ok: true, result: { action: "applied", branch: "skep/x", warning: "re-verification could not run" } } }],
-        ["done", {}]],
     },
   });
   const flashes = [];
-  for (const row of rows) { await button(row, "Approve").click(); flashes.push(app.flashes.at(-1)); }
-  assert.deepEqual(flashes[0], ["ok", "approved land_run — run x"]);
-  assert.deepEqual(flashes[1], ["warn", "approved land_run — run x — ⚠ the Queen's follow-up failed: model offline"]);
-  assert.deepEqual(flashes[2], ["warn", "approved land_run — run x — ⚠ re-verification could not run"]);
+  for (const row of rows) { await button(row, "Deny").click(); flashes.push(app.flashes.at(-1)); }
+  assert.deepEqual(flashes[0], ["ok", "denied land_run — run x"]);
+  assert.deepEqual(flashes[1], ["warn", "denied land_run — run x — ⚠ the Queen's follow-up failed: model offline"]);
 });

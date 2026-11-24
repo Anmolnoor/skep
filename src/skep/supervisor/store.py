@@ -2222,6 +2222,18 @@ class RunStore:
         return None if row is None else ApprovalRecord(*row)
 
     @_locked
+    def runs_landed_on(self, branch: str) -> list[str]:
+        """R4 K1: the runs whose approved landing named ``branch``, oldest
+        first — a pre-v30 row with no recorded branch landed on skep/<task_id>."""
+        rows = self._conn.execute(
+            "SELECT task_id FROM approvals WHERE action = 'apply_patch' AND status = 'approved'"
+            " AND (landing_branch = ? OR (landing_branch IS NULL AND 'skep/' || task_id = ?))"
+            " ORDER BY resolved_at, review_id",
+            (branch, branch),
+        ).fetchall()
+        return list(dict.fromkeys(str(row[0]) for row in rows))
+
+    @_locked
     def pending_approvals(self) -> list[ApprovalRecord]:
         rows = self._conn.execute(
             "SELECT review_id, task_id, action, reason, status, requested_at, resolved_at,"

@@ -676,6 +676,11 @@ main.chat-view { padding: 0; max-width: none; }
   border-left: 2px solid var(--warn); padding-left: 8px;
 }
 .card-risk-label { color: var(--warn); font-weight: 600; }
+/* R4 K1: each run a landing / PR card lands, with its own G10 and V1 */
+.card-runs { margin: 0 0 8px; font-size: 12px; }
+.card-runs ul { margin: 4px 0 0; padding-left: 18px; }
+.card-runs li { overflow-wrap: anywhere; margin: 0 0 4px; }
+.card-runs .banner { margin: 4px 0 0; }
 .card-details { margin: 0 0 8px; }
 .card-details > summary {
   cursor: pointer; color: var(--muted-2); font-size: 12px;

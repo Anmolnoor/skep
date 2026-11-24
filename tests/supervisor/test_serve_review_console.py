@@ -904,3 +904,146 @@ def test_one_unreadable_patch_is_its_own_rows_note_never_the_queues_500(
             store.close()
     finally:
         (tmp_path / "locked.patch").chmod(0o644)
+
+
+def _landed_on(store: object, task_id: str, branch: str) -> None:
+    review = store.enqueue_approval(task_id, action="apply_patch", reason="land")  # type: ignore[attr-defined]
+    store.resolve_approval(review, approved=True, actor="me", landing_branch=branch)  # type: ignore[attr-defined]
+
+
+def test_land_run_and_open_pr_chat_cards_show_each_runs_warning_and_tamper(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R4 K1: the chat thread's confirm card is where a landing or a PR is
+    approved, so it lists every run it lands or publishes — single, grouped,
+    and branch mode (the runs whose approved landing named that branch) —
+    each with its own G10 warning and V1 tamper. The Inbox row maps the
+    branch the same way."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        tampered = _completed(
+            store, tmp_path, "tampered", patch=True, outcome="tampered", confirmed=False,
+            exit_codes=[0], tamper_flags=("deleted_test:test_x.py",),
+        )  # fmt: skip
+        warned = _completed(
+            store, tmp_path, "warned", patch=True, outcome="unavailable", confirmed=False,
+            detail="no uv", exit_codes=[],
+        )  # fmt: skip
+        fine = _completed(
+            store, tmp_path, "fine", patch=True, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        on_feat = _completed(
+            store, tmp_path, "onfeat", patch=True, outcome="unavailable", confirmed=False,
+            detail="no uv", exit_codes=[],
+        )  # fmt: skip
+        _landed_on(store, on_feat, "feat")
+        _landed_on(store, fine, "other")
+        chat = store.create_chat(title="land", model=None)
+        land = store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": tampered})
+        group = store.add_chat_action(
+            chat.chat_id, tool="open_pr", args={"task_ids": [fine, warned], "title": "t"}
+        )
+        branch = store.add_chat_action(
+            chat.chat_id, tool="open_pr", args={"branch": "feat", "repo": str(tmp_path)}
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    actions = {
+        a["action_id"]: a["card"]
+        for a in client.get(f"/api/chats/{chat.chat_id}").json()["actions"]
+    }
+    (single,) = actions[land]["runs"]
+    assert single["task_id"] == tampered and single["tamper"].startswith("TEST-TAMPER")
+    grouped = {r["task_id"]: r for r in actions[group]["runs"]}
+    assert list(grouped) == [fine, warned]
+    assert grouped[fine]["warning"] is None and grouped[fine]["tamper"] is None
+    assert "re-verify" in grouped[warned]["warning"]
+    (by_branch,) = actions[branch]["runs"]
+    assert by_branch["task_id"] == on_feat and "re-verify" in by_branch["warning"]
+    rows = {i["id"]: i for i in client.get("/api/review-queue").json()["items"]}
+    assert rows[branch]["task_ids"] == [on_feat] and "re-verify" in rows[branch]["warning"]
+
+
+def test_a_resolved_landing_card_reads_its_record_and_asks_nothing_live(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R4 K1: only a pending card reads the runs live; a resolved one renders
+    from what was recorded (W39), so no runs list is invented after the fact."""
+    from skep.supervisor import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        warned = _completed(
+            store, tmp_path, "warned", patch=True, outcome="unavailable", confirmed=False,
+            detail="no uv", exit_codes=[],
+        )  # fmt: skip
+        chat = store.create_chat(title="land", model=None)
+        card = store.add_chat_action(chat.chat_id, tool="land_run", args={"task_id": warned})
+        store.resolve_chat_action(card, status="denied", result={"ok": False, "denied": True})
+    finally:
+        store.close()
+    (action,) = serve_client(config).get(f"/api/chats/{chat.chat_id}").json()["actions"]
+    assert "runs" not in action["card"]
+
+
+def _every_card_tool() -> list[str]:
+    from skep.supervisor.serve.tools import COMMAND_ONLY_TOOLS, COMMAND_TOOL_NAMES, TOOL_SPECS
+
+    names = {t["function"]["name"] for t in TOOL_SPECS} | COMMAND_TOOL_NAMES | COMMAND_ONLY_TOOLS
+    return sorted(names)
+
+
+@pytest.mark.parametrize("tool", _every_card_tool())
+def test_no_chat_card_is_inline_approvable_whatever_its_tool(tool: str) -> None:
+    """R4 K1 (SD-2): the one allowlist is server-side — a chat card of any
+    tool, including one added later, is never approved from an Inbox row,
+    whatever its evidence says."""
+    from skep.supervisor.serve.console import inline_approvable
+
+    card = {"kind": "card", "tool": tool, "boundary": "in-sandbox-locked", "items": None}
+    assert inline_approvable(card) is False
+
+
+def test_inline_approve_is_only_a_gate_or_memory_whose_row_holds_all_its_evidence() -> None:
+    """R4 K1 (SD-2): a worker gate (every stored command listed, ≤ 10; a
+    landing with no G10 / V1 warning) or a memory proposal (its full text);
+    nothing else — a run, a skill, an unknown kind."""
+    from skep.supervisor.serve.console import inline_approvable
+
+    gate = {"kind": "gate", "boundary": "host-shell", "commands": ["npm install", "npm test"]}
+    assert inline_approvable(gate) is True
+    assert inline_approvable({**gate, "commands": [f"c {n}" for n in range(11)]}) is False
+    landing = {"kind": "gate", "boundary": "patch-landing", "commands": []}
+    assert inline_approvable(landing) is True
+    assert inline_approvable({**landing, "warning": "could not re-verify"}) is False
+    assert inline_approvable({**landing, "tamper": "TEST-TAMPER"}) is False
+    assert inline_approvable({"kind": "memory", "content": "uses uv"}) is True
+    assert inline_approvable({"kind": "memory", "content": ""}) is False
+    for kind in ("run", "skill", "something-new"):
+        assert inline_approvable({"kind": kind, "approvable": True}) is False
+
+
+def test_the_queue_sends_inline_approve_on_each_item(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R4 K1: the Inbox renders Approve from the item's own boolean."""
+    from skep.supervisor import RunStore, mint_task
+
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path / "w", instructions="gate")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "pending_approval")
+        review = store.enqueue_approval(
+            task.task_id, action="shell.run", reason="batch", commands=[["npm", "install"]]
+        )
+        chat = store.create_chat(title="c", model=None)
+        card = store.add_chat_action(chat.chat_id, tool="set_role", args={"name": "x"})
+    finally:
+        store.close()
+    rows = {i["id"]: i for i in serve_client(config).get("/api/review-queue").json()["items"]}
+    assert rows[review]["inline_approve"] is True
+    assert rows[card]["inline_approve"] is False

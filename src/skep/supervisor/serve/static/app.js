@@ -269,6 +269,22 @@ function foldItems(card) {
     el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
 }
 
+// R4 K1: the runs a landing or PR card lands or publishes (the server's
+// card_runs: single, grouped, or the runs landed on a branch), each with its
+// own G10 warning and V1 tamper — this card is where they are approved.
+function cardRuns(card) {
+  if (!card || !Array.isArray(card.runs) || !card.runs.length) return null;
+  const n = card.runs.length;
+  return el("div", { class: "card-runs" },
+    el("p", { class: "note card-runs-note" },
+      `${n} run${n === 1 ? "" : "s"} this card lands or publishes:`),
+    el("ul", {}, ...card.runs.map(run => el("li", {},
+      el("span", { class: "mono" }, `run ${shortTaskId(run.task_id)}`),
+      run.tamper ? el("p", { class: "banner bad", role: "alert" }, `⚠ V1 · ${run.tamper}`) : null,
+      run.warning && run.warning !== run.tamper ? ` · ⚠ ${run.warning}` : null,
+      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null))));
+}
+
 // L11 (ADR 0059 D3, V7): a delegated ask is approve-once for that run — the
 // server refuses to remember it (409), so no "& remember" button offers it.
 function offersRemember(approval) {
@@ -2652,6 +2668,7 @@ async function viewChat(main, chatId) {
       tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       foldItems(card),
+      cardRuns(card),
       scheduleNode(card),
       forgeNode(card),
       skillNode(card),
