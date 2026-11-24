@@ -623,3 +623,150 @@ def test_review_cards_name_the_gate_the_disagreement_and_the_tamper(
     out = capsys.readouterr().out
     assert "[a] approve & resume" in out and "card:     review" in out
     assert "V1:       " in out and out.count("still waits") == 3
+
+
+def _after_stale_check(monkeypatch: pytest.MonkeyPatch, meanwhile: Any) -> None:
+    """Phase 10 R2 I1: the other surface acts AFTER the stale check passed —
+    between the check and the verdict, where a re-lookup minted a fresh review."""
+    check = cli_cmds._stale_verdict
+
+    def then(*args: Any) -> str | None:
+        found = check(*args)
+        meanwhile()
+        return found
+
+    monkeypatch.setattr(cli_cmds, "_stale_verdict", then)
+
+
+def test_interactive_approve_never_lands_a_review_denied_after_the_stale_check(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1 (I7, I13): the card showed review X; the web denied X after the
+    stale check — `a` claims exactly X, finds it answered, and lands nothing
+    (no fresh review is minted and approved behind the web's deny)."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+    store = RunStore(db)
+    try:
+        shown = store.enqueue_approval(task_id, action="apply_patch", reason="land it")
+    finally:
+        store.close()
+
+    def denied_on_the_web() -> None:
+        store = RunStore(db)
+        try:
+            store.resolve_approval(shown, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, denied_on_the_web)
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert f"review {shown} is no longer pending (denied by web)" in err
+    assert "nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(db)
+    try:
+        assert [(a.review_id, a.status) for a in store.approvals_for(task_id)] == [
+            (shown, "denied")
+        ]
+    finally:
+        store.close()
+
+
+def test_interactive_approve_refuses_when_a_review_came_and_went_since_the_card(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: the card showed no review; after the stale check the web minted
+    one and denied it — the CLI mints nothing to approve in its place."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    db = build_config(home, None).db_path
+
+    def minted_and_denied() -> None:
+        store = RunStore(db)
+        try:
+            review = store.enqueue_approval(task_id, action="apply_patch", reason="web")
+            store.resolve_approval(review, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, minted_and_denied)
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert "an approval was recorded on this run since you read it; nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied"]
+    finally:
+        store.close()
+
+
+def test_interactive_approve_rebinds_the_patch_after_claiming_the_review(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: the patch's bytes are checked again once the review is claimed —
+    a rewrite that slipped in before the claim is refused and the claim is
+    handed back, pending."""
+    home = tmp_path / "home"
+    task_id = _completed_run(repo, home, capsys)
+    patch = _patch_of(home, task_id)
+    claim = RunStore.claim_approval
+
+    def claim_then_rewrite(self: RunStore, review_id: str, **kw: Any) -> bool:
+        won = claim(self, review_id, **kw)
+        patch.write_text(patch.read_text() + "+sneaked = 1\n")
+        return won
+
+    monkeypatch.setattr(RunStore, "claim_approval", claim_then_rewrite)
+    _interactive(monkeypatch, ["a"])
+    assert _run_cli(home, "review") == 2
+    err = capsys.readouterr().err
+    assert "the patch changed since you read it" in err and "nothing done" in err
+    assert git(repo, "branch", "--list", f"skep/{task_id}").stdout == ""
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["pending"]
+    finally:
+        store.close()
+
+
+def test_interactive_resume_claims_the_shown_gate_only(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 I1: an ASK card's gate denied after the stale check resumes nothing."""
+    home = tmp_path / "home"
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:pending", "--execution-mode",
+             "workspace", "--worker-cmd", _worker_cmd(), "--quiet")  # fmt: skip
+    capsys.readouterr()
+    task_id = _only_task_id(home)
+    db = build_config(home, None).db_path
+    store = RunStore(db)
+    try:
+        (gate,) = [a for a in store.approvals_for(task_id) if a.status == "pending"]
+    finally:
+        store.close()
+
+    def denied_on_the_web() -> None:
+        store = RunStore(db)
+        try:
+            store.resolve_approval(gate.review_id, approved=False, actor="web", note="no")
+        finally:
+            store.close()
+
+    _interactive(monkeypatch, ["a"])
+    _after_stale_check(monkeypatch, denied_on_the_web)
+    assert _run_cli(home, "review") == 2
+    assert f"review {gate.review_id} is no longer pending (denied by web)" in (
+        capsys.readouterr().err
+    )
+    store = RunStore(db)
+    try:
+        assert [a.status for a in store.approvals_for(task_id)] == ["denied"]
+        assert len(store.recent_runs(10)) == 1  # nothing resumed
+    finally:
+        store.close()
