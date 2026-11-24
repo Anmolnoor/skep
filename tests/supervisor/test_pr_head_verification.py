@@ -1399,6 +1399,30 @@ def test_refresh_repo_pr_fetches_the_pr_head_from_chat(
     assert (recorded["base_commit"], recorded["head_commit"]) == ("b" * 40, "a" * 40)
 
 
+def test_rest_refresh_takes_the_same_pr_selector_as_chat_and_cli(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (N8a, ADR 0050): `pr` on the refresh verb has all three faces —
+    chat refresh_repo pr=, `skep repo refresh --pr`, and the REST body —
+    and each hands it to the same fetch."""
+    from skep.cli import _parser
+    from skep.supervisor.serve.tools import TOOL_SPECS
+
+    from .conftest import serve_client
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(github, "fetch_pr_head", _fake_fetch(calls))
+    client = serve_client(config)
+
+    fetched = client.post(f"/api/repos/{repo}/refresh", json={"pr": "#7"})
+
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["ref"] == PR_REF and calls[0]["pr"] == "#7"
+    (spec,) = [t for t in TOOL_SPECS if t["function"]["name"] == "refresh_repo"]
+    assert "pr" in spec["function"]["parameters"]["properties"]
+    assert _parser().parse_args(["repo", "refresh", "x", "--pr", "7"]).pr == "7"
+
+
 def test_refresh_repo_pr_failure_is_an_honest_error(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
