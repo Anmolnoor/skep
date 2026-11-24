@@ -80,6 +80,7 @@ class Dispatcher:
         verify_command: str = "",
         coding_engine: str = "",
         on_created: Callable[[str | None], None] | None = None,
+        chat_id: str | None = None,
     ) -> str:
         """Dispatch a run in the background; return its task id once minted.
 
@@ -93,6 +94,9 @@ class Dispatcher:
         a blocked audit write must not time out a run that already exists
         (a client retry would start a second one) — so it may still be
         running when this returns.
+
+        ``chat_id`` (Phase 04 R2, E4): the chat that dispatched, handed to
+        ``run_task`` — an ACP run's first ask cards there, receipt or not.
         """
         created = threading.Event()
         box: dict[str, str] = {}
@@ -126,6 +130,7 @@ class Dispatcher:
             planning_protocol=planning_protocol,
             verify_command=verify_command,
             coding_engine=coding_engine,
+            chat_id=chat_id,
         )
 
         # Wake on whichever comes first: the id callback, or the run failing

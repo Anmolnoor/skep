@@ -42,7 +42,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .. import landlock
-from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
+from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, alias_key, other_homes
 from .store import RETIRED_STORE_FILES
 
 logger = logging.getLogger(__name__)
@@ -223,8 +223,11 @@ def read_allowlist_for(policy: Mapping[str, Any]) -> tuple[Path, ...] | None:
 def resolved_read_allowlist(paths: Iterable[Path], skep_home: Path) -> tuple[Path, ...]:
     """ADR 0068 (G1): each extra path judged, then resolved ONCE at dispatch.
     The run records these targets, so a link the operator retargets later
-    never moves the wall G10 builds. Refuses like ``write_profile`` does."""
-    return tuple(path.resolve() for path in _validated_extra(paths, skep_home))
+    never moves the wall G10 builds. Refuses like ``write_profile`` does.
+    3I: only the ones that exist, as the worker's profile binds them — one
+    made after dispatch is never in G10's wall."""
+    paths = _validated_extra(paths, skep_home)
+    return tuple(dict.fromkeys(path.resolve() for path in paths if _exists(path)))
 
 
 def strict_read_roots(
@@ -264,6 +267,63 @@ def _in_place(path: Path, skep_home: Path) -> bool:
     return False
 
 
+def _interpreter_chain(executable: Path, limit: int = 8) -> list[Path]:
+    """Each hop in ``executable``'s symlink chain: its env when the hop sits in
+    a verified one (``pyvenv.cfg``), else the interpreter file alone — never a
+    plain bin dir and its siblings (Sol C2-1)."""
+    hops: list[Path] = []
+    current = executable
+    for _ in range(limit):
+        env = current.parent.parent
+        hops.append(env if (env / "pyvenv.cfg").is_file() else current)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    return hops
+
+
+def _interpreter_links(bound: Iterable[Path]) -> list[Path]:
+    """The links on the interpreter's path — a hop that is one, or a dir it is
+    reached through (uv's ``cpython-3.12-…`` minor-version link to its patch
+    dir) — whose target a ``bound`` root already holds. bwrap's empty root
+    gets them as links ONLY (``_alias_links``), never as bind roots: a
+    retarget after this check can leave one dangling, never widen a read
+    (Sol C2-2); without them exec by the linked path is ENOENT."""
+    roots = [Path(root) for root in bound]
+    system = [Path(root) for root in _SYSTEM_ROOTS]
+    links = dict.fromkeys(
+        path
+        for hop in _interpreter_chain(Path(sys.executable))
+        for path in (hop, *hop.parents)
+        # as walked (C3-1: never a name `..` collapsed into); not one the strict
+        # root already makes (C3-2: a second /bin link makes bwrap refuse)
+        if ".." not in path.parts
+        and not any(path.is_relative_to(root) for root in system)
+        and path.is_symlink()
+    )
+    return [link for link in links if any(link.resolve().is_relative_to(r) for r in roots)]
+
+
+def _found_file(found: str | None) -> Path | None:
+    """A PATH lookup's hit, resolved once (C5-1: a ``..`` walked, never
+    collapsed) and kept only as the regular file that passed the check — C6-1:
+    never the link, which a retarget during the build could point at a dir."""
+    if found is None:
+        return None
+    real = Path(found).resolve()
+    return real if real.is_file() else None
+
+
+def _found_link(found: str | None) -> list[Path]:
+    """The hit's written name when it is a link (~/.local/bin/uv to a versioned
+    file): bwrap's empty root gets it as an alias only (``_alias_links``)."""
+    if found is None or ".." in Path(found).parts:
+        return []
+    path = Path(os.path.abspath(found))
+    return [path] if path.is_symlink() else []
+
+
 def _strict_candidates(
     skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
 ) -> list[Path]:
@@ -272,6 +332,12 @@ def _strict_candidates(
     version link, which a venv's python points through) as a symlink to the
     resolved root, so the masks on the resolved path still hold."""
     home = Path.home().resolve()
+    chain = _interpreter_chain(Path(sys.executable))
+    # Sol C-1 (W2): a hop reached through a link is no bind root of its own;
+    # its links are recreated as links only (``_interpreter_links``). C3-1: the
+    # hop as walked, never ``..``-collapsed — a hop is a root only when it is
+    # already its own real path (a ``..`` after a linked dir names another one)
+    linked = [hop for hop in chain if hop.resolve() != hop]
     detected = [
         Path(sys.prefix),
         Path(sys.base_prefix),
@@ -279,6 +345,13 @@ def _strict_candidates(
         Path(__file__).resolve().parents[2],
         # what .pth files chain in (uv's `run --with` overlay env, an editable install)
         *(Path(entry) for entry in sys.path if Path(entry).name in _SITE_DIRS),
+        # every env along the interpreter's link chain: CI's `uv run --with`
+        # overlay python links to an activated .venv's python, which links on
+        # to the base one — an unbound middle hop dangles inside the wall
+        *(hop for hop in chain if hop not in linked),
+        # the uv binary itself (never its directory): G10's pinned
+        # `uv run pytest` needs it wherever it was installed
+        *(uv for uv in [_found_file(shutil.which("uv"))] if uv),
     ]
     toolchains = [
         Path(os.environ.get(env) or home / rel) if env else home / rel
@@ -304,20 +377,43 @@ def _strict_candidates(
         own += [supervisor / name for name in names]
     own = [path for path in own if _in_place(path, skep_home)]
     extra = _validated_extra(extra, skep_home)
-    detected = [Path(os.path.abspath(root)) for root in detected]
-    roots = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own, *extra]
-    return list(dict.fromkeys(path for path in roots if _exists(path)))
+    # R4 (Sol R3-2): ``extra`` is the run's RECORDED wall (resolved, existing at
+    # dispatch). One that vanished since must not just drop out of this
+    # profile — it could return before G10 and widen G10's reads past the
+    # worker's. Refuse instead (the worker: sandbox_unavailable; G10: unavailable).
+    if gone := [str(path) for path in extra if not _exists(path)]:
+        raise SandboxUnavailableError(
+            f"recorded extra read root(s) {', '.join(gone)} vanished after dispatch; "
+            "refusing to build a narrower wall than the run recorded — re-dispatch the run"
+        )
+    # C5-1: a ``..`` is walked through the real dirs, never collapsed first —
+    # after a linked dir it names another path entirely
+    detected = [
+        root.resolve() if ".." in root.parts else Path(os.path.abspath(root)) for root in detected
+    ]
+    found = [*(root for root in detected if _detected_root_ok(root.resolve(), home)), *own]
+    # R5 (Sol): recorded extras are NOT re-filtered — one gone after the check
+    # above makes the bind fail closed instead of narrowing the worker's wall.
+    return list(dict.fromkeys([*(path for path in found if _exists(path)), *extra]))
 
 
 def _etc_reserved(real: Path) -> bool:
-    """/etc itself or one of its hidden entries: binding either reopens them."""
-    etc = Path("/etc")
-    return real == etc or any(real.is_relative_to(etc / name) for name in _ETC_HIDDEN)
+    """/etc, a dir that holds it (3I: /private on macOS, with the host's /tmp
+    and /var), or one of its hidden entries, by either OS's list and every
+    spelling macOS opens it by (/private/etc, case, the data volume):
+    binding any of them reopens them."""
+    key, etc = alias_key(real), alias_key(Path("/etc").resolve())
+    return etc.is_relative_to(key) or any(key.is_relative_to(etc / n) for n in _ALL_ETC_HIDDEN)
+
+
+def _over(real: Path, inner: Path) -> bool:
+    """``real`` is ``inner`` or above it, by any spelling APFS opens."""
+    return alias_key(inner).is_relative_to(alias_key(real))
 
 
 def _detected_root_ok(real: Path, home: Path) -> bool:
     """W2/W11: never the home or above it, never /etc's reserved entries."""
-    return not home.is_relative_to(real) and not _etc_reserved(real)
+    return not _over(real, home) and not _etc_reserved(real)
 
 
 def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
@@ -327,12 +423,12 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
     real = Path(path).resolve()
     home = Path.home().resolve()
     skep = skep_home.resolve()
-    if home.is_relative_to(real):
+    if _over(real, home):
         return (
             f"{path} resolves to {real}, at or above the home {home}: that reopens every file "
             f"strict reads close. Name a subdirectory instead, e.g. {home / 'datasets'}"
         )
-    if real.is_relative_to(skep) or skep.is_relative_to(real):
+    if _over(skep, real) or _over(real, skep):
         return (
             f"{path} resolves to {real}, in or over the skep home {skep} (other runs' "
             "worktrees, results and audit trails). Name a directory outside it"
@@ -340,7 +436,16 @@ def extra_read_path_problem(path: Path, skep_home: Path) -> str | None:
     if _etc_reserved(real):
         return (
             f"{path} resolves to {real}: /etc comes back without "
-            f"{', '.join(sorted(_ETC_HIDDEN))}, and no extra path reopens them"
+            f"{', '.join(sorted(_ALL_ETC_HIDDEN))}, and no extra path reopens them or a "
+            "dir that holds /etc (on macOS, /private holds the host's /tmp and /var too)"
+        )
+    if sys.platform == "darwin" and (
+        var := next((v for v in _HOMEBREW_VAR if _over(Path(v), real)), None)
+    ):  # R4 (Sol): bwrap honours these; only Seatbelt masks them
+        return (
+            f"{path} resolves to {real}, in Homebrew's var/ ({var}): a strict run on macOS "
+            "masks it (local databases and service state), so the path would read as "
+            "missing. Name a directory outside it"
         )
     return None
 
@@ -363,7 +468,9 @@ def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
     bwrap's empty root — unless a bound root already holds it (the link is
     there, read-only). ponytail: only a link in a real parent — one under a
     linked parent dir (Fedora Atomic's /home) stays unreachable by that name."""
-    bound = [Path(root) for root in bound]
+    # C4-1: nor under a system mount (/usr/local/bin/uv) — that mount holds the
+    # link already, and a second one there makes bwrap refuse the wall
+    bound = [*map(Path, bound), *map(Path, _SYSTEM_ROOTS)]
     args: list[str] = []
     for path in paths:
         real = path.resolve()
@@ -385,6 +492,10 @@ _SEATBELT_SYSTEM_ROOTS = (
     "/private/var/select", "/private/var/db/timezone", "/private/var/run/resolv.conf",
 )  # fmt: skip
 _SEATBELT_ETC_HIDDEN = ("master.passwd", "sudoers", "sudoers.d", "ssh", "kcpassword")
+_ALL_ETC_HIDDEN = _ETC_HIDDEN | set(_SEATBELT_ETC_HIDDEN)
+# M8: Homebrew's (Apple silicon, Intel) local databases and service state,
+# under roots reopened whole; masked last with the /etc entries.
+_HOMEBREW_VAR = ("/opt/homebrew/var", "/usr/local/var")
 # /usr/bin/git is xcrun's shim: it runs git from the selected developer dir
 _XCODE_SELECT_LINKS = ("/private/var/select/developer_dir", "/private/var/db/xcode_select_link")
 
@@ -397,12 +508,15 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
     /tmp link spelling (libc stats /etc/localtime's /var/db/timezone target
     by that name). ``/`` itself is read whole: dyld aborts every process
     without it. A denied path is ENOENT, as under bwrap's empty root — git
-    dies on an EPERM ~/.gitconfig, not on a missing one."""
+    dies on an EPERM ~/.gitconfig, not on a missing one.
+    /System/Volumes is closed again last (M4): /System reopened it, with the
+    data volume's entries no firmlink maps back to the root."""
     allowed = [Path(root) for root in _SEATBELT_SYSTEM_ROOTS]
     for link in _XCODE_SELECT_LINKS:
         if os.path.islink(link):
             dev = Path(link).resolve()
-            allowed.append(dev.parents[1] if dev.parent.name == "Contents" else dev)
+            # M10: the link itself too — xcrun reads the selection through it
+            allowed += [Path(link), dev.parents[1] if dev.parent.name == "Contents" else dev]
     allowed += [Path(root).resolve() for root in roots]
     allowed = list(dict.fromkeys(allowed))
     links = [
@@ -425,6 +539,9 @@ def _seatbelt_read_rules(roots: Iterable[Path]) -> list[str]:
         if paths:  # an allow with no filter would reopen every path
             filters = " ".join(f'({kind} "{_sbpl_quote(path)}")' for path in paths)
             rules.append(f"(allow {ops} file-test-existence {filters})")
+    rules.append(
+        '(deny file-read* file-test-existence (subpath "/System/Volumes") (with errno ENOENT))'
+    )
     return rules
 
 
@@ -1223,6 +1340,13 @@ def build_profile(
     lines = [
         "(version 1)",
         "(allow default)",
+        # M9: no process outside the wall — LaunchServices (`open`, an app or
+        # a .command), launchd jobs, Apple events (`tell application
+        # "Terminal" to do script`) — and no Spotlight name/content queries.
+        "(deny lsopen)",
+        "(deny job-creation)",
+        "(deny appleevent-send)",
+        '(deny mach-lookup (global-name "com.apple.metadata.mds"))',
         # ES-F4 (B05) + D6: serve's port never opens, even when a project lists
         # it — dropped from the allows (the loopback deny covers it), never a
         # trailing per-port deny (see _network_rules).
@@ -1334,6 +1458,18 @@ def write_profile(
             "bubblewrap backend, or turn it off for this project: `skep project setup "
             "<repo> --no-strict-reads`."
         )
+    from .worktree import git_metadata_masked, git_walk_links
+
+    if read_allowlist is not None and (links := git_walk_links(workspace)):
+        shown = ", ".join(f"{link} (a link to {os.path.realpath(link)})" for link in links)
+        raise SandboxUnavailableError(
+            f"strict reads (ADR 0068): {shown} in the repo's shared git dir. git's "
+            "reachability walk reads it, and inside the wall the link leads nowhere, so a "
+            "`git prune` there would delete objects only it points to. The run is refused "
+            f"rather than run with hidden pointers. Move the target back into {links[0].parent} "
+            "in place of the link, or turn strict reads off for this project: `skep project "
+            "setup <repo> --no-strict-reads`."
+        )
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     # ES-F264: the mask list holds only files that exist now. relay-secret
     # used to appear on the first relayed dispatch, readable by every run
@@ -1345,7 +1481,16 @@ def write_profile(
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
+    git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
+        # a mount needs its file; a link can't be mounted over (R4, Neon) — so a
+        # linked message file refuses the wall rather than going unmasked (R5, Sol)
+        if linked := [str(p) for p in git_masked if p.is_symlink()]:
+            raise SandboxUnavailableError(
+                f"{', '.join(linked)} is a symlink, so the sandbox cannot mask it and the "
+                "in-progress git message would be readable; replace it with a regular file"
+            )
+        read_denied += [p for p in git_masked if _exists(p)]
         extra_readable = list(extra_readable)
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.
@@ -1357,6 +1502,8 @@ def write_profile(
             else []
         )
         extra_readable += dict.fromkeys(path.resolve() for path in aliases)
+        if read_allowlist is not None:
+            aliases += [*_interpreter_links(extra_readable), *_found_link(shutil.which("uv"))]
     if probe.backend == PODMAN:
         extra_writable = list(extra_writable)
         args = _podman_args(
@@ -1400,6 +1547,7 @@ def write_profile(
     if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
         live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
         read_denied = list(dict.fromkeys([*read_denied, *live]))
+    read_denied = [*read_denied, *git_masked]  # a literal deny holds for a file made later
     strict_roots = None
     if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
         strict_roots = [
@@ -1407,7 +1555,11 @@ def write_profile(
             *extra_readable,
             *unmasked,  # still masked but for the literal allow after the masks
         ]
-        read_denied = [*read_denied, *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN)]
+        read_denied = [
+            *read_denied,
+            *(Path("/private/etc", n) for n in _SEATBELT_ETC_HIDDEN),
+            *map(Path, _HOMEBREW_VAR),
+        ]
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(

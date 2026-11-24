@@ -1097,6 +1097,7 @@ def _engine_tick(
     (stubs / "codex").write_text("#!/bin/sh\n")
     (stubs / "codex").chmod(0o755)
     monkeypatch.setenv("PATH", os.pathsep.join((str(stubs), "/usr/bin", "/bin")))
+    monkeypatch.setenv("UV_TOOL_DIR", str(stubs))  # R2 F5: a root the strict wall binds
     monkeypatch.setenv("OPENAI_API_KEY", "k-fake")
 
     repo = create_audit_toy_repo((managed_repos_root(config) if managed else tmp_path) / "work")

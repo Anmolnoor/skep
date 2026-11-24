@@ -459,3 +459,65 @@ def test_the_store_judges_extra_paths_against_its_own_home(tmp_path: Path) -> No
             )  # fmt: skip
     finally:
         store.close()
+
+
+# --- review round 3 (3I): G10 replays the worker's effective wall, or nothing -
+
+
+def test_dispatch_records_only_the_extra_roots_the_worker_s_wall_binds(
+    repo: Path, strict_config: SupervisorConfig, data: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Sol R3-2: a missing extra path was recorded, though the worker's
+    profile skips it; made before G10, G10 would have read it."""
+    _strict_project(strict_config, repo, [str(tmp_path / "late"), str(data)])
+    _task_id, record, handed = _dispatch(strict_config, repo, monkeypatch)
+    assert record["read_allowlist"] == [str(data.resolve())]
+    assert handed["read_allowlist"] == (data.resolve(),)
+
+
+@needs_bwrap
+def test_g10_never_reads_an_extra_root_made_after_dispatch(
+    repo: Path, strict_config: SupervisorConfig, fake_home: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    late = tmp_path / "late"
+    _strict_project(strict_config, repo, [str(late)])
+    task_id, _record, _handed = _dispatch(strict_config, repo, monkeypatch)
+    late.mkdir()  # after the worker's wall was built without it
+    (late / "canary.txt").write_text("CANARY late\n", encoding="utf-8")
+    command = " ".join(
+        shlex.quote(str(arg))
+        for arg in (sys.executable, "-c", _MUST_AND_NEVER, "existing.py", late / "canary.txt")
+    )
+    outcome = _real_g10(strict_config, repo, task_id, command)
+    assert outcome.outcome == "passed", outcome.detail
+    assert outcome.exit_codes == [0]
+
+
+@pytest.mark.parametrize("field", ["read_allowlist", "g10_read_allowlist"])
+def test_g10_never_runs_a_recorded_wall_on_the_host_with_the_sandbox_off(
+    field: str, repo: Path, strict_config: SupervisorConfig, data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """Sol R3-3: with the sandbox off, G10 ignored the recorded wall and ran
+    the patch's verify on the host."""
+    import importlib
+
+    reverify_module = importlib.import_module("skep.supervisor.reverify")
+    ran: list[Any] = []
+    monkeypatch.setattr(reverify_module, "reverify", lambda **kw: ran.append(kw))
+    store = RunStore(strict_config.db_path)
+    try:
+        store.transition("t-off", "dispatched", json.dumps({field: [str(data.resolve())]}))
+        outcome = reverify_module.reverify_run(
+            store=store, task_id="t-off", worker_outcome="passed", repo=repo, ref=None,
+            config=replace(strict_config, sandbox=False), verify_command="true",
+        )  # fmt: skip
+        record = store.reverification_for("t-off")
+    finally:
+        store.close()
+    assert ran == []
+    assert outcome.outcome == "unavailable" and outcome.exit_codes == []
+    assert "strict read wall" in outcome.detail and "not run on the host" in outcome.detail
+    assert record is not None and record.outcome == "unavailable" and not record.confirmed

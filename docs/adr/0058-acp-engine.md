@@ -7,7 +7,10 @@ read-only — rejected, see D2/D6). C0–C2 are built; C3's patch-card ask
 counts and the `skep approval answer` CLI face are not. Amended by the Phase
 04 review round 1 (4C, 2026-11-23): engine identity by module, strict reads
 required, run-bound stacks, port-aware wall, card expiry at the claim, the
-worker's claim kept beside the supervisor's verdict.
+worker's claim kept beside the supervisor's verdict. Amended by round 2 (4E,
+2026-11-23): the checked read wall carried to launch, race-free cards, one
+terminal verdict. Amended by round 3 (4G, 2026-11-23): a schedule's checked
+wall reaches the launch, and an ACP success is durable too.
 **Depends on:** ADR 0054 (the governor: `acp/proxy.py`, `acp/mapper.py`,
 `acp/govern.py`), ADR 0047 (CLI-agent engines), ADR 0059 (`decide()`),
 ADR 0061 (unlocked mode), ADR 0068 (strict reads).
@@ -68,7 +71,9 @@ unregistered adapter, still an ACP engine. That one answer drives the
 scheduler's external-engine gates, dispatch's sandbox coercion, pin, pipes
 and governor, and the spawner's key masks (no `llm-secret` for an ACP
 worker). Its rows name `acp:<agent>` (the mapper's name for the adapter
-argv); the run record keeps `builtin`, as for any `--worker-cmd`.
+argv). *R2 (R2-3):* the run record names `acp` for such a command (it kept
+`builtin` before), so the scheduler and forensics see what ran; a resume
+handing `acp` back to dispatch runs the worker command again.
 
 ### D2 — amended: the governor is outside the wall
 
@@ -93,10 +98,19 @@ run record unless the project's `strict_read_confinement` is on (the I9
 message names `skep project setup <repo> --strict-reads`) and the backend a
 strict run launches is usable with the sandbox on. Strict reads stay a
 project choice for every other engine; for this one they are the engine's.
+*R2 (E1):* the project's read wall is read once — the A2 check and the
+launch use that one value, so a policy edit in between cannot start the
+adapter denylist-only. *R3 (G1):* a schedule tick hands run_task the wall
+its gates checked (`unattended=True, read_allowlist=`), which dispatch uses
+without reading the policy at all; an unattended external coding run handed
+none is refused `sandbox_unavailable` before its worker starts.
 
 *R1 (A7, A15):* `AcpEngine.finish()` joins the session and every forwarded
 ask; dispatch calls it before the store closes (in its `finally` too). A
 session still running at the timeout is a stated failure, never "none".
+*R2 (E5):* the reader is joined before the asks (only it starts one; its EOF
+wakes them), and a drive, reader or ask thread alive at the deadline is that
+stated failure.
 
 ### D3 — a forwarded ask is an approval card; a timeout denies
 
@@ -130,6 +144,20 @@ the run (open question 2) — and the `forwarded` row's actor is
   `auto:engine-error`, never `human@skep`.
 - A card whose run has ended (the serve that held its engine restarted) is
   superseded by the ticker with the run's state — nobody can answer it.
+
+*R2 (E2, E4):*
+
+- The engine and a confirm compete through conditional updates. When the
+  engine stops waiting on a card a confirm still holds (`executing`), it
+  first settles the card `superseded` ("the engine already answered no"),
+  from `executing` only, and then answers `reject_once`. The confirm's own
+  resolve then loses with a 409 naming that note. If the confirm resolved
+  first, the engine re-reads the card and answers what it says. The card
+  and the `forwarded` row always agree.
+- A chat dispatch (`dispatch_run`, `quick_edit`, `batch_dispatch`,
+  `forge_tool`) hands its chat through `submit_run` → `Dispatcher.submit` →
+  `run_task(chat_id=)`, so the run's first ask cards there even before the
+  dispatch receipt names the run.
 
 *Not built:* `skep approval answer <id>`. REST + chat already satisfy ADR
 0050; a CLI face for `chat_actions` is still overdue.
@@ -192,10 +220,12 @@ never allowed or carded:
   widens a running sandbox. *R1 (A4):* the fetch's URL rides the decision
   (its scheme and port), and the check is the proxy's own admission
   (`netproxy.admit_target`: port pins, loopback ports, serve's port) — its
-  DNS check stays the proxy's at connect time;
+  DNS check stays the proxy's at connect time. *R2 (E8):* an explicit `:0`
+  is port 0, not the scheme's default;
 - *R1 (A12):* a read outside the worktree and outside the run's recorded
   read allowlist (the `dispatched` line's `read_allowlist`), worded as a
-  read;
+  read. *R2 (E6):* judged where the path resolves (`..`, a symlink out of
+  an allowed root), never as spelled; an unresolvable path is outside;
 - any `terminal/create` or `fs/write_text_file`: the engine's client
   advertises neither capability, and running one would run on the host.
   Each is still put to `decide()` (a floor deny stays the floor's) and then
@@ -226,7 +256,18 @@ anything. *R1 (A9):* the worker's own result is ingested as it made it (the
 store's result fields and the audit's `result.json` agree); the
 supervisor's verdict is its own record — a `failed` transition with
 `skep acp: <reason>` and `supervisor_verdict.json` (`status`, `reason`,
-`worker_status`) beside the worker's result.
+`worker_status`) beside the worker's result. *R2 (E3):* the verdict file is
+written before the claim is ingested, and the ingest's one terminal
+transition is `failed` (`ingest_run(supervisor_failure=)`). The run is
+never `completed` first. A crash before the ingest leaves the run in
+flight; restart recovery reads the verdict file and fails it. A failed
+verdict-file write still fails the run in the store. Startup re-verify
+fails a `completed` run that has a verdict file (a pre-R2 crash) instead
+of running G10 on it. *R3 (G2):* the session's success is a verdict too
+(`status: completed`), written before the claim is ingested. Restart
+recovery and startup re-verify accept an ACP run's claim only beside one:
+with no verdict file the session was never judged, so the run is `failed`
+("ACP session outcome unknown"), never `completed` and never re-verified.
 
 ## Mediated vs observed (I8)
 
@@ -249,8 +290,9 @@ the honest record of that, and the sandbox is what bounded them.
   call into a decision.
 - An ACP session does not survive a serve restart (ADR 0060): the governor
   and client lived in the old serve, so the adapter loses its client and
-  stops. Whatever the worker inside then files is re-verified like any other
-  run; asks after that point were never made.
+  stops; asks after that point were never made. *R3 (G2):* whatever the
+  worker inside then files has no session verdict beside it, so recovery
+  fails the run ("ACP session outcome unknown") rather than re-verifying it.
 
 ## Consequences
 

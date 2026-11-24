@@ -4525,9 +4525,18 @@ class RunStore:
     ) -> ChatTaint:
         """Set taint bits that are not yet set (the first message that set a
         bit keeps it); returns the chat's taint after. Nothing clears a bit."""
-        taint = self._add_chat_taint(chat_id, private=private, untrusted=untrusted)
-        self._conn.commit()
-        return taint
+        with self._conn:  # commit, or roll back on a raise
+            self._begin_immediate()
+            return self._add_chat_taint(chat_id, private=private, untrusted=untrusted)
+
+    def _begin_immediate(self) -> None:
+        """Phase 04 review R3 (G4): take the database's write lock BEFORE a
+        read-modify-write of ``chats.taint`` — the instance lock serialises
+        this connection only, so another RunStore on the file could commit
+        between the read and the write and lose its contributor. Inside a
+        write already begun (add_chat_message's insert) the lock is held."""
+        if not self._conn.in_transaction:
+            self._conn.execute("BEGIN IMMEDIATE")
 
     def _add_chat_taint(
         self, chat_id: str, *, private: int | None = None, untrusted: int | None = None
@@ -4537,12 +4546,27 @@ class RunStore:
             private=current.private if current.private is not None else private,
             untrusted=current.untrusted if current.untrusted is not None else untrusted,
         )
-        if merged != current:
-            self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
+        # Phase 04 review R2 (F4): ``untrusted`` names the row that sets the
+        # bit — recorded even once the sticky bit is on (never on an
+        # unreadable value: that stays as it is, both bits unknown).
+        record = untrusted is not None and merged.untrusted != UNKNOWN_TAINT_ORIGIN
+        if merged != current or record:
+            self._write_taint(
+                chat_id,
+                merged,
+                self.chat_trusted_through(chat_id),
+                contributor=untrusted if record else None,
+            )
         return merged
 
     def _write_taint(
-        self, chat_id: str, taint: ChatTaint, through: int, runs: Sequence[str] = ()
+        self,
+        chat_id: str,
+        taint: ChatTaint,
+        through: int,
+        runs: Sequence[str] = (),
+        *,
+        contributor: int | None = None,
     ) -> None:
         payload: dict[str, Any] = {"private": taint.private, "untrusted": taint.untrusted}
         if through:
@@ -4550,6 +4574,12 @@ class RunStore:
         runs = sorted({*self.chat_trusted_runs(chat_id), *runs})
         if runs:
             payload["trusted_runs"] = runs
+        # a cleared bit drops its record; the next setter starts a new one
+        rows = self.chat_untrusted_rows(chat_id) if taint.untrusted is not None else set()
+        if contributor is not None:
+            rows.add(contributor)
+        if rows:
+            payload["untrusted_rows"] = sorted(rows)
         self._conn.execute(
             "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
         )
@@ -4578,6 +4608,37 @@ class RunStore:
         runs = raw.get("trusted_runs") if isinstance(raw, dict) else None
         return {r for r in runs if isinstance(r, str)} if isinstance(runs, list) else set()
 
+    @_locked
+    def chat_untrusted_rows(self, chat_id: str) -> set[int]:
+        """Phase 04 review R2 (F4): every row that set ``untrusted`` — or,
+        the sticky bit already on, would have — since the bit was last set."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return set()
+        rows = raw.get("untrusted_rows") if isinstance(raw, dict) else None
+        return {r for r in rows if type(r) is int} if isinstance(rows, list) else set()
+
+    @_locked
+    def chat_untrusted_sources(self, chat_id: str) -> dict[int, str | None]:
+        """Phase 04 review R3 (G3): each recorded contributor of ``untrusted``
+        (chat_untrusted_rows) with its provenance in THIS chat's transcript —
+        '' for a row with none, None for a row the transcript does not hold.
+        One statement, so the record and the transcript are one snapshot. A
+        record that does not read is {} (the caller fails closed)."""
+        try:
+            rows = self._conn.execute(
+                "SELECT j.value, m.id, m.provenance FROM chats c"
+                " JOIN json_each(c.taint, '$.untrusted_rows') j ON j.type = 'integer'"
+                " LEFT JOIN chat_messages m ON m.chat_id = c.chat_id AND m.id = j.value"
+                " WHERE c.chat_id = ? AND json_type(c.taint, '$.untrusted_rows') = 'array'",
+                (chat_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        return {int(row): None if found is None else str(by or "") for row, found, by in rows}
+
     def covered_by_trust(self, chat_id: str, provenance: str) -> bool:
         """Does a row by this author leave the chat's bits alone? The trusted
         authors, and a run's own notice once /trust covered that run (D3)."""
@@ -4594,13 +4655,14 @@ class RunStore:
         operator's /trust (never a model tool). ``through`` is the newest row
         it covers; ``runs`` the in-flight runs whose finish notice it covers
         (D3). Returns the chat's taint after."""
-        current = self.get_chat_taint(chat_id)
-        cleared = ChatTaint(
-            private=None if "private" in bits else current.private,
-            untrusted=None if "untrusted" in bits else current.untrusted,
-        )
-        self._write_taint(chat_id, cleared, through, runs)
-        self._conn.commit()
+        with self._conn:  # R3 (G4): read and written under one write lock
+            self._begin_immediate()
+            current = self.get_chat_taint(chat_id)
+            cleared = ChatTaint(
+                private=None if "private" in bits else current.private,
+                untrusted=None if "untrusted" in bits else current.untrusted,
+            )
+            self._write_taint(chat_id, cleared, through, runs)
         return cleared
 
     _ACTION_COLS = (

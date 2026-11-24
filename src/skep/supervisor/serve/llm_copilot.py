@@ -45,6 +45,10 @@ def no_exchange() -> Iterator[None]:
         yield
     finally:
         _offline.reset(reset)
+# Phase 03 review R2 (M5): bearer -> GitHub token, as this context resolved
+# them (``copilot_sources``). The shared cache cannot answer that later: a
+# renewal by another run drops or replaces its entry in between.
+_sources: ContextVar[dict[str, str] | None] = ContextVar("copilot_sources", default=None)
 
 
 def exchange_copilot_token(github_token: str, *, timeout: float = 10.0) -> tuple[str, float]:
@@ -81,18 +85,27 @@ def resolve_copilot_bearer(github_token: str) -> str:
     now = time.time()
     with _lock:
         cached = _cache.get(github_token)
-        if cached is not None and cached[1] - now > _REFRESH_SKEW_SECONDS:
-            return cached[0]
-    bearer, expiry = exchange_copilot_token(github_token)
-    with _lock:
-        _cache[github_token] = (bearer, expiry)
+    if cached is not None and cached[1] - now > _REFRESH_SKEW_SECONDS:
+        bearer = cached[0]
+    else:
+        bearer, expiry = exchange_copilot_token(github_token)
+        with _lock:
+            _cache[github_token] = (bearer, expiry)
+    if (seen := _sources.get()) is not None:
+        seen[bearer] = github_token
     return bearer
 
 
-def copilot_github_token(bearer: str) -> str | None:
-    """The GitHub token ``bearer`` was exchanged from, while it is cached."""
-    with _lock:
-        return next((token for token, (b, _) in _cache.items() if b == bearer), None)
+@contextmanager
+def copilot_sources() -> Iterator[dict[str, str]]:
+    """Every bearer resolved inside the block -> the GitHub token it came
+    from, captured when it is resolved."""
+    seen: dict[str, str] = {}
+    reset = _sources.set(seen)
+    try:
+        yield seen
+    finally:
+        _sources.reset(reset)
 
 
 def forget_copilot_bearer(bearer: str) -> None:

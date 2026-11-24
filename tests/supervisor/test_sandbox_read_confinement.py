@@ -330,12 +330,15 @@ def test_a_strict_seatbelt_profile_denies_every_read_then_reopens_the_allowlist(
     git_root = tmp_path / "common" / "config"
     git_root.parent.mkdir()
     git_root.write_text("[core]\n", encoding="utf-8")
+    cargo = fake_home / ".cargo"  # a legal extra path holding a credential
+    cargo.mkdir()
+    (cargo / "credentials.toml").write_text("CANARY\n", encoding="utf-8")
     profile = sandbox.write_profile(
         tmp_path / "p.sb",
         workspace=workspace,
         extra_readable=[git_root],
         skep_home=skep_home,
-        read_allowlist=(fake_home,),  # the operator lists the whole home
+        read_allowlist=(cargo,),
     )
     lines = profile.read_text(encoding="utf-8").splitlines()
     deny = lines.index(_SEATBELT_STRICT)
@@ -345,7 +348,7 @@ def test_a_strict_seatbelt_profile_denies_every_read_then_reopens_the_allowlist(
     reads = "\n".join(lines[i] for i in allows)
     for system in ("/usr", "/System", "/Library", "/bin", "/sbin", "/dev", "/private/etc"):
         assert f'(subpath "{system}")' in reads, system
-    for own in (workspace, git_root, fake_home, Path(sys.prefix)):
+    for own in (workspace, git_root, cargo, Path(sys.prefix)):
         assert f'(subpath "{own.resolve()}")' in reads, own
     for host in ("/", "/Users", "/private/tmp", "/private/var", "/private/var/folders", "/tmp"):
         assert f'(subpath "{host}")' not in reads, host
@@ -355,12 +358,13 @@ def test_a_strict_seatbelt_profile_denies_every_read_then_reopens_the_allowlist(
     for ancestor in ("/private", str(top), str(workspace.resolve().parent)):
         assert f'(literal "{ancestor}")' in metadata, ancestor
     assert "subpath" not in metadata
-    # last match wins: the masks follow every allow, the extra home included
+    # last match wins: the masks follow every allow, the extra path's own included
     ssh = _rule(lines, f'(deny file-read* (subpath "{(fake_home / ".ssh").resolve()}"))')
+    cred = _rule(lines, f'(deny file-read* (literal "{(cargo / "credentials.toml").resolve()}"))')
     token = _rule(lines, str((skep_home / "supervisor" / "serve-token").resolve()))
     sudoers = _rule(lines, '"/private/etc/sudoers")')
     assert lines[sudoers].startswith("(deny file-read* (literal")
-    assert min(ssh, token, sudoers) > max(allows)
+    assert min(ssh, cred, token, sudoers) > max(allows)
 
 
 def test_a_strict_seatbelt_profile_refuses_an_extra_path_that_is_the_root(
@@ -388,7 +392,7 @@ def test_read_allowlist_follows_the_project_policy() -> None:
     ) == (Path("/srv/data"),)
 
 
-def test_a_linked_worktree_reads_its_common_dir_but_not_its_siblings(tmp_path: Path) -> None:
+def test_a_linked_worktree_reads_its_common_dir_and_its_siblings_git_dirs(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -398,12 +402,10 @@ def test_a_linked_worktree_reads_its_common_dir_but_not_its_siblings(tmp_path: P
     for name in ("mine", "sibling"):
         git(repo, "worktree", "add", "-q", "--detach", str(tmp_path / name))
     roots = git_metadata_readable_roots(tmp_path / "mine")
-    common = (repo / ".git").resolve()
-    assert common / "config" in roots
-    assert common / "refs" / "heads" in roots  # refs/ minus the stash (W4)
-    assert all(root.is_relative_to(common) for root in roots)
-    assert common / "worktrees" not in roots  # the siblings' HEAD/index stay out
-    assert common / "objects" not in roots  # bound writable, never walked for sockets
+    # the common dir whole: refs, the stash and the siblings' git dirs, which
+    # git prune reads (3H), live (3I); objects/ is bound writable on top.
+    # Never a sibling's checkout.
+    assert roots == ((repo / ".git").resolve(),)
 
 
 # --- the wall, for real (bubblewrap or Seatbelt) ----------------------------
@@ -962,7 +964,7 @@ def test_a_socket_that_is_a_root_or_in_an_extra_path_is_still_masked(
             sock.bind(str(path))
             sock.close()
         roots = git_metadata_readable_roots(base / "w")
-        assert sockets[0].resolve() in roots
+        assert roots == ((repo / ".git").resolve(),)  # the socket is inside it
         profile = sandbox.write_profile(
             base / "p.profile",
             workspace=base / "w",
