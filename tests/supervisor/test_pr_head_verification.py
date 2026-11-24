@@ -2132,3 +2132,55 @@ def test_the_queen_reads_the_receipt_and_the_forensics_as_evidence(
         f"PR {ORIGIN}#7: head {head} on main {base} (merge-base {base})" in forensics["forensics"]
     )
     assert taint.untrusted is not None
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    [("pyproject.toml", "a=1"), ("package.json", "{}"), ("tox.ini", "[a]"), ("setup.cfg", "[a]")],
+)
+def test_a_runner_config_replaced_by_a_symlink_is_a_flag_and_never_merges(
+    repo: Path, config: SupervisorConfig, path: str, target: str
+) -> None:
+    """R4 (N2): `git show` of a symlink blob is its target string, and
+    "a=1" / "{}" / "[a]" parse as config with no runner section — so a
+    runner config swapped for a symlink compared equal and read clean. A
+    present side that is not a regular file is a flag, and the merge is
+    refused."""
+    _seed(repo)
+    _github_origin(repo)
+    # No runner section on either side: only the mode can tell them apart.
+    (repo / path).write_text(
+        {
+            "pyproject.toml": "[project]\nname = 'toy'\n",
+            "package.json": '{"name": "toy"}\n',
+        }.get(path, "[metadata]\nname = toy\n")
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "runner config")
+    head = _pr_by_index(repo, ["--cacheinfo", f"120000,{_blob(repo, target)},{path}"])
+
+    outcome, record, _task_id = _g10(repo, config, head, pin="true")
+
+    assert f"tamper_check_failed:config_mode:{path}" in record.tamper_flags
+    assert record.confirmed is False, outcome.detail
+    _card, _summary, refused = _propose(config, {"repo": str(repo), "pr": "7"})
+    assert refused is not None and "merge" in refused
+
+
+def test_a_runner_config_that_becomes_a_submodule_is_a_flag(repo: Path) -> None:
+    """R4 (N2): a gitlink (160000) side is no config either."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    seed = _seed(repo)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "pytest config")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    head = _pr_by_index(
+        repo,
+        ["--force-remove", "pyproject.toml"],
+        ["--add", "--cacheinfo", f"160000,{seed},pyproject.toml"],
+    )
+
+    flags = static_tamper_flags(repo, repo.parent / "unused.diff", base, head=head)
+    assert "tamper_check_failed:config_mode:pyproject.toml" in flags

@@ -323,3 +323,26 @@ def test_test_config_changes_read_only_the_runner_section(
     assert test_config_changes(project_repo, patch, base, changed) == (
         changed if expected is None else expected
     )
+
+
+@pytest.mark.parametrize(("name", "target"), [("pyproject.toml", "a=1"), ("package.json", "{}")])
+def test_a_parsed_config_replaced_by_a_symlink_steers_the_pin(
+    project_repo: Path, name: str, target: str
+) -> None:
+    """R4 (N2): a symlink's blob is its target string, which parses as
+    config with nothing in it — a pyproject/package.json swapped for one is
+    pin-control, never "only dependencies changed"."""
+    # Nothing the comparison reads on either side: only the mode differs.
+    (project_repo / name).write_text(
+        "[project]\nname = 'toy'\n" if name == "pyproject.toml" else '{"version": "1.0.0"}\n'
+    )
+    git(project_repo, "commit", "-qam", "plain config")
+    base = git(project_repo, "rev-parse", "HEAD").stdout.strip()
+    (project_repo / name).unlink()
+    (project_repo / name).symlink_to(target)
+    git(project_repo, "add", "-A")
+    patch = project_repo.parent / "change.patch"
+    patch.write_text(git(project_repo, "diff", "--cached", "--binary", base).stdout)
+    git(project_repo, "reset", "-q", "--hard", base)
+
+    assert pin_control_changes(project_repo, patch, base, (name,), ("true",)) == (name,)

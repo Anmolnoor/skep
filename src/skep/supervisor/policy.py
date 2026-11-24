@@ -406,7 +406,10 @@ def pin_control_changes(
         or os.path.normpath(path) in pin_paths
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in ("pyproject.toml", "package.json")]
-    hits += _config_changes(repo, patch_path, base, parsed, runner_only=False)
+    try:
+        hits += _config_changes(repo, patch_path, base, parsed, runner_only=False)
+    except ConfigUnreadable:  # R4 (N2): a side that is no regular file steers it
+        hits += parsed
     return tuple(sorted(set(hits), key=changed_files.index))
 
 
@@ -420,6 +423,17 @@ class ConfigUnreadable(ValueError):
 
 
 _ABSENT_MODE = "000000"  # git's raw-diff mode for a side that does not exist
+_FILE_MODES = frozenset({_ABSENT_MODE, "100644", "100755"})
+
+
+def _mode(repo: Path, treeish: str | None, path: str, env: dict[str, str]) -> str:
+    """``path``'s git mode in ``treeish`` (the scratch index when None);
+    ``_ABSENT_MODE`` when it is not there."""
+    args = ("ls-files", "-s") if treeish is None else ("ls-tree", treeish)
+    out = _git_text(repo, *args, "--", path, env=env)
+    if out is None:
+        raise ConfigUnreadable(f"config_mode:{path}")
+    return out.split(maxsplit=1)[0] if out.strip() else _ABSENT_MODE
 
 
 def test_config_changes(
@@ -462,7 +476,11 @@ def _config_changes(
     modes: dict[str, tuple[str, str]] | None = None,
 ) -> list[str]:
     """``paths`` whose ``_test_config`` differs between ``base`` and the patch
-    applied in a scratch index; every path when the patch does not apply."""
+    applied in a scratch index; every path when the patch does not apply.
+
+    R4 (N2): a side that is a symlink or a gitlink raises
+    ``ConfigUnreadable("config_mode:<path>")`` — ``git show`` of a symlink is
+    its target string, and "a=1" parses as config with no runner in it."""
     if not paths:
         return []
     hits = []
@@ -477,6 +495,15 @@ def _config_changes(
         )
         for path in paths:
             name = os.path.basename(path)
+            if (
+                applied
+                and not {
+                    _mode(repo, base, path, env),
+                    _mode(repo, head, path, env),
+                }
+                <= _FILE_MODES
+            ):
+                raise ConfigUnreadable(f"config_mode:{path}")
             before = _git_text(repo, "show", f"{base}:{path}")
             after = _git_text(repo, "show", f"{head or ''}:{path}", env=env)
             old, new = (modes or {}).get(path, (_ABSENT_MODE, _ABSENT_MODE))
