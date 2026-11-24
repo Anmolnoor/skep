@@ -1410,9 +1410,15 @@ def provider_rollback(store: RunStore, home: Path) -> Iterator[None]:
         for profile in store.list_provider_profiles():
             if profile.provider_id not in kept:
                 store.delete_provider_profile(profile.provider_id)
+        # only what differs is put back: a refused write that never got past
+        # its probe leaves every row, setting and file untouched (timestamps too)
+        current = {row.provider_id: row for row in store.list_provider_profiles()}
         for row in sorted(rows, key=lambda row: row.active):  # the active one last
-            store.upsert_provider_profile(row)
+            if current.get(row.provider_id) != row:
+                store.upsert_provider_profile(row)
         for key, value in settings.items():
+            if store.get_setting(key) == value:
+                continue
             if value is None:  # absent before: deleted, not a JSON null row
                 store.delete_setting(key)
             else:
@@ -1421,6 +1427,8 @@ def provider_rollback(store: RunStore, home: Path) -> Iterator[None]:
             if path not in saved:
                 path.unlink(missing_ok=True)
         for path, data in saved.items():
+            if path.is_file() and path.read_bytes() == data:
+                continue
             path.write_bytes(data)
             if path.name.startswith(SECRET_FILE):
                 path.chmod(0o600)

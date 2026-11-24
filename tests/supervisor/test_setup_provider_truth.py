@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -185,6 +186,7 @@ def test_a_401_key_saved_from_web_settings_is_refused_and_nothing_changes(
         assert active is not None and active.base_url == cloud.base_url
         assert (config.home / f"llm-secret-{active.provider_id}").read_text().strip() == "good1"
         before = _snapshot(config.home)
+        time.sleep(1.1)  # a rewrite of the same values would show in updated_at
 
         refused = client.put("/api/llm/config", json={"api_key": "bad1"})
         tested = client.post("/api/llm/test", json={"api_key": "bad1"}).json()
