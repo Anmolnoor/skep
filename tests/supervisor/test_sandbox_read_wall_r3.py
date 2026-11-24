@@ -502,3 +502,10 @@ def test_an_interpreter_through_bin_adds_no_second_bin_link(
     monkeypatch.setattr(sys, "executable", "/bin/sh")
     links = sandbox._interpreter_links([Path("/usr")])
     assert all(not link.is_relative_to(root) for link in links for root in ("/bin", "/usr"))
+
+
+@pytest.mark.skipif(not Path("/usr/bin/python3").is_symlink(), reason="needs a /usr link")
+def test_no_alias_lands_under_a_system_mount() -> None:
+    """Sol C4-1: the /usr mount already holds a link like /usr/local/bin/uv;
+    a second, absolute one there makes bwrap refuse the wall."""
+    assert sandbox._alias_links([Path("/usr/bin/python3")], []) == []

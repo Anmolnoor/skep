@@ -445,7 +445,9 @@ def _alias_links(paths: Iterable[Path], bound: Iterable[Path]) -> list[str]:
     bwrap's empty root — unless a bound root already holds it (the link is
     there, read-only). ponytail: only a link in a real parent — one under a
     linked parent dir (Fedora Atomic's /home) stays unreachable by that name."""
-    bound = [Path(root) for root in bound]
+    # C4-1: nor under a system mount (/usr/local/bin/uv) — that mount holds the
+    # link already, and a second one there makes bwrap refuse the wall
+    bound = [*map(Path, bound), *map(Path, _SYSTEM_ROOTS)]
     args: list[str] = []
     for path in paths:
         real = path.resolve()
