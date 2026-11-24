@@ -55,19 +55,19 @@ INLINE_COMMANDS = 10
 
 
 def inline_approvable(item: dict[str, Any]) -> bool:
-    """R4 K1 (SD-2): the ONE allowlist for an Inbox row's inline Approve — a
-    worker gate whose row lists every command it grants (≤ INLINE_COMMANDS)
-    and, for a landing, carries no G10 / V1 warning; or a memory proposal
-    whose full text is the row. Every other kind — each chat card, whatever
-    its tool, a run, a skill, a kind added later — is approved where its full
-    evidence is, so it defaults to False."""
+    """R4 K1 (SD-2, SD-2b): the ONE allowlist for an Inbox row's inline
+    Approve — only where the row itself is the whole evidence: a worker gate
+    that lands nothing and lists every command it grants (≤ INLINE_COMMANDS),
+    or a memory proposal whose full text is the row. A landing's evidence is
+    its diff (its review page); every other kind — each chat card, whatever
+    its tool, a run, a skill, a kind added later — defaults to False."""
     if item.get("kind") == "memory":
         return bool(item.get("content"))
     if item.get("kind") == "gate":
-        warned = item.get("boundary") == "patch-landing" and (
-            item.get("warning") or item.get("tamper")
+        return (
+            item.get("boundary") != "patch-landing"
+            and len(item.get("commands") or ()) <= INLINE_COMMANDS
         )
-        return len(item.get("commands") or ()) <= INLINE_COMMANDS and not warned
     return False
 
 

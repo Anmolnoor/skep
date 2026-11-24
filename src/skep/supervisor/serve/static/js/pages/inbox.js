@@ -3,12 +3,12 @@
    and skills awaiting the human gate, each once, grouped by the wall it
    crosses (riskiest first). The sidebar badge counts the same queue, so the
    two never disagree. Each verdict button is wired to the item's existing
-   route (I5). Phase 10 R4 (K1): Approve is inline ONLY for a worker gate or a
-   memory proposal — the items whose whole evidence the row shows (a gate's
-   every command, a memory's full text) — and not even then when a landing's
-   G10 or V1 is warned about. Every chat card (dispatches, landings, PRs,
-   captures, schedules, folds, forge…) and every skill opens where its full
-   evidence is; Deny stays inline. Keys only move focus; a button press is
+   route (I5). Phase 10 R4 (K1, SD-2b): Approve is inline ONLY where the row
+   is the whole evidence — a non-landing worker gate (its every command
+   listed) or a memory proposal (its full text). A landing gate's evidence is
+   its diff, so it is reviewed on its page; every chat card (dispatches,
+   landings, PRs, captures, schedules, folds, forge…) and every skill opens
+   where its full evidence is. Deny stays inline. Keys only move focus; a button press is
    the only verdict (I7).
 
    Phase 10 R2: a run `skep review` walks with no gate yet (an unlanded
@@ -90,7 +90,8 @@ function verdicts(item) {
   }
   if (item.kind === "gate") {
     const commands = item.commands || [];
-    const why = commands.length > INLINE_COMMANDS ? `Review all ${commands.length} commands →` : "Review →";
+    const why = item.boundary === "patch-landing" ? "Review the diff →"
+      : commands.length > INLINE_COMMANDS ? `Review all ${commands.length} commands →` : "Review →";
     return {
       approve: item.inline_approve ? [`/api/approvals/${item.id}/approve`, {}] : null,
       label: commands.length > 1 ? `Approve all ${commands.length}` : "Approve",
@@ -263,7 +264,7 @@ function walkable(list) {
 }
 
 export async function viewInbox(main) {
-  header(main, "Inbox", "Everything waiting on you, riskiest wall first. A worker gate or memory proposal whose row shows all its evidence is approved here; chat cards and skills open where their full evidence is. Deny works here on everything but a run.");
+  header(main, "Inbox", "Everything waiting on you, riskiest wall first. A worker gate or memory proposal whose row shows all its evidence is approved here; landings, chat cards and skills open where their full evidence is. Deny works here on everything but a run.");
   const live = routeLive(main); // H7 (D7): a late queue draws nothing once the operator moved on
   const { items } = await api("GET", "/api/review-queue");
   if (!live()) return;

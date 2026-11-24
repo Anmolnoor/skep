@@ -1008,16 +1008,17 @@ def test_no_chat_card_is_inline_approvable_whatever_its_tool(tool: str) -> None:
 
 
 def test_inline_approve_is_only_a_gate_or_memory_whose_row_holds_all_its_evidence() -> None:
-    """R4 K1 (SD-2): a worker gate (every stored command listed, ≤ 10; a
-    landing with no G10 / V1 warning) or a memory proposal (its full text);
-    nothing else — a run, a skill, an unknown kind."""
+    """R4 K1 (SD-2, SD-2b): a non-landing worker gate (every stored command
+    listed, ≤ 10) or a memory proposal (its full text); never a landing gate,
+    clean or warned (its evidence is the diff) — nor a run, a skill, an
+    unknown kind."""
     from skep.supervisor.serve.console import inline_approvable
 
     gate = {"kind": "gate", "boundary": "host-shell", "commands": ["npm install", "npm test"]}
     assert inline_approvable(gate) is True
     assert inline_approvable({**gate, "commands": [f"c {n}" for n in range(11)]}) is False
     landing = {"kind": "gate", "boundary": "patch-landing", "commands": []}
-    assert inline_approvable(landing) is True
+    assert inline_approvable(landing) is False
     assert inline_approvable({**landing, "warning": "could not re-verify"}) is False
     assert inline_approvable({**landing, "tamper": "TEST-TAMPER"}) is False
     assert inline_approvable({"kind": "memory", "content": "uses uv"}) is True
