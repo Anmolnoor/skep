@@ -179,8 +179,14 @@ def ingest_run(
     result_path: Path,
     contract_range: str,
     delivery_root: Path | None = None,
+    supervisor_failure: str | None = None,
 ) -> IngestOutcome:
-    """Turn one finished worker run into a durable, evidence-linked run record."""
+    """Turn one finished worker run into a durable, evidence-linked run record.
+
+    ``supervisor_failure`` (ADR 0058 D7, Phase 04 R2 E3): the supervisor
+    failed this run whatever the worker claims — the worker's result is
+    still recorded as made, and the ONE terminal transition is ``failed``
+    with this detail (never ``completed`` first, which a crash would keep)."""
     audit_task_dir = audit_dir / task.task_id
     audit_task_dir.mkdir(parents=True, exist_ok=True)
 
@@ -283,8 +289,15 @@ def ingest_run(
             if result.status is TaskState.FAILED
             else None
         )
-        store.transition(task.task_id, result.status.value, failure_detail)
-        if result.status is TaskState.COMPLETED and delivery_root is not None:
+        if supervisor_failure is not None:
+            store.transition(task.task_id, TaskState.FAILED.value, supervisor_failure)
+        else:
+            store.transition(task.task_id, result.status.value, failure_detail)
+        if (
+            result.status is TaskState.COMPLETED
+            and supervisor_failure is None
+            and delivery_root is not None
+        ):
             # v43-F2: reports land where the operator lives. Best-effort — a
             # delivery failure never un-completes an evidenced run.
             try:

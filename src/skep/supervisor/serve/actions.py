@@ -1926,8 +1926,8 @@ def _repo_project_for_view(
     unbound)."""
     resolved_repo = resolve_repo_arg(repo, repos_root(holder), store)
     binding_candidates: list[tuple[str, str]] = [binding] if binding else []
-    if (repos_root(holder) / repo / ".git").exists():
-        binding_candidates.append(("repo_slug", repo))
+    if resolved_repo.parent == repos_root(holder).resolve():  # E7: the slug, never a path
+        binding_candidates.append(("repo_slug", resolved_repo.name))
     project = None
     for kind, value in [*binding_candidates, ("repo_path", str(resolved_repo))]:
         project = store.project_for_binding(kind, value)
@@ -4124,7 +4124,13 @@ def _outside_wall(
         # consulted — such a read is refused here; read sandbox.strict_read_roots
         # if the mapper ever forwards reads.
         wall = _recorded_read_wall(store, task.task_id)
-        if wall is None or any(Path(value).is_relative_to(root) for root in wall):
+        if wall is None:
+            return None
+        try:  # E6: where it resolves (``..``, a symlink out), never as spelled
+            real: Path | None = Path(worktree, value).resolve()
+        except (OSError, RuntimeError, ValueError):
+            real = None  # fail closed: outside the wall
+        if real is not None and any(real.is_relative_to(root) for root in wall):
             return None
         return (
             f"{value} is outside this run's worktree and its read allowlist "
@@ -4143,7 +4149,7 @@ def _outside_wall(
     # pins, loopback ports, serve's port) — its DNS check stays the proxy's.
     split = urllib.parse.urlsplit(url or "")
     try:
-        port = split.port or (80 if split.scheme == "http" else 443)
+        port = split.port if split.port is not None else (80 if split.scheme == "http" else 443)
     except ValueError:
         port = 0
     status, why, _ = admit_target(
@@ -4267,6 +4273,21 @@ def expire_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
         return False
     payload = {"ok": False, "denied": True, "note": note, "auto": True}
     store.resolve_chat_action(action_id, status="denied", result=payload, claimed=True)
+    return True
+
+
+def abandon_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
+    """E2 (Phase 04 R2): the engine stops waiting on a card a confirm still
+    holds (``executing``) and settles it ``superseded`` in ONE conditional
+    update BEFORE it answers the agent no — that confirm's own resolve then
+    loses (409), so the card never says yes to an ask the agent was told
+    no. False: the confirm recorded its verdict first; re-read it."""
+    note = f"the engine already answered no: {note}"
+    payload = {"ok": False, "superseded": True, "note": note, "auto": True}
+    try:
+        store.resolve_chat_action(action_id, status="superseded", result=payload, claimed=True)
+    except ValueError:
+        return False
     return True
 
 
@@ -5096,6 +5117,7 @@ def submit_run(
     deferred_asks: bool = False,
     chat_taint: Sequence[str] = (),
     preanswered: dict[str, Any] | None = None,
+    chat_id: str | None = None,
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -5272,6 +5294,7 @@ def submit_run(
             # --check while verify_command="npm test" sat pinned).
             verify_command=str(resolved_policy.policy.get("verify_command") or ""),
             on_created=record,
+            chat_id=chat_id,  # E4: an ACP run's asks card in the chat that dispatched it
         )
     except DispatchError as exc:
         # the dispatcher owns the rows now: logged at creation, or id-less once

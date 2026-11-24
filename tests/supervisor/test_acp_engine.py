@@ -364,7 +364,7 @@ def test_a_session_failure_keeps_the_workers_claim_beside_the_supervisors_verdic
         store.close()
     claimed = json.loads((config.audit_dir / task_id / "result.json").read_text())
     assert claimed["status"] == "completed"
-    assert transitions[-2:] == ["completed", "failed"]
+    assert transitions[-1] == "failed" and "completed" not in transitions  # E3: one terminal
     assert record is not None and "refusal" not in (record.summary or "")
     verdict = json.loads((config.audit_dir / task_id / "supervisor_verdict.json").read_text())
     assert verdict["status"] == "failed" and verdict["worker_status"] == "completed"
@@ -605,7 +605,7 @@ def test_a_card_that_cannot_be_filed_answers_cancelled_never_hangs(
 
 
 def test_a_timeout_loses_to_a_human_confirm_already_running(config: SupervisorConfig) -> None:
-    from skep.supervisor.serve.actions import expire_acp_permission
+    from skep.supervisor.serve.actions import abandon_acp_permission, expire_acp_permission
 
     store = RunStore(config.db_path)
     try:
@@ -613,6 +613,10 @@ def test_a_timeout_loses_to_a_human_confirm_already_running(config: SupervisorCo
         action_id = store.add_chat_action(chat.chat_id, tool="acp_permission", args={})
         assert store.claim_chat_action(action_id)  # the human's confirm, mid-execution
         assert expire_acp_permission(store, action_id, "auto-denied: card timed out") is False
+        # E2: the confirm records its yes first — the engine's give-up loses and re-reads it
+        store.resolve_chat_action(action_id, status="confirmed", result={}, claimed=True)
+        assert abandon_acp_permission(store, action_id, "card timed out") is False
+        assert store.get_chat_action(action_id).status == "confirmed"  # type: ignore[union-attr]
     finally:
         store.close()
 
@@ -682,6 +686,14 @@ def test_a_worker_command_running_an_unregistered_adapter_is_governed(
     assert [r["verdict"] for r in rows] == ["allow", "allow"]
     assert all(r["engine"].startswith("acp:") and r["actor"].startswith("acp-engine:")
                for r in rows)  # fmt: skip
+    assert outcome.record.coding_engine == "acp"  # R2-3: the run names what ran, not builtin
+    # a resume carries the recorded engine back into run_task: "acp" is not refused
+    shutil.rmtree(config.worktrees_root, ignore_errors=True)
+    again = run_task(
+        repo, "add feature.py", config=config, execution_mode="sandbox", verify_command=VERIFY,
+        project_context=context, coding_engine="acp",
+    )  # fmt: skip
+    assert again.record.state == "completed" and again.record.coding_engine == "acp"
 
 
 @pytest.mark.parametrize("why", ["strict reads off", "sandbox off"])
@@ -743,6 +755,7 @@ def _wall_task(tmp_path: Path, **permissions: Any) -> Any:
     ("network", "loopback", "url", "walled"),
     [
         (["docs.example:443"], [], "http://docs.example:8080/a", True),  # proxy: 8080 denied
+        (["docs.example:443"], [], "https://docs.example:0/a", True),  # E8: :0 is not 443
         (["docs.example:8443"], [], "https://docs.example:8443/a", False),  # declared port
         (["docs.example"], [], "https://docs.example/a", False),
         (["pypi.org"], [3000], "http://localhost:3000/", False),  # an opened loopback port
@@ -925,3 +938,277 @@ def test_finish_states_a_session_that_did_not_end(tmp_path: Path) -> None:
     silent = [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"]
     failure, _, _ = _session(tmp_path, {}, argv=silent, finish=0.5)
     assert failure is not None and "did not end" in failure
+
+
+# --- Phase 04 review R2 (4E) -------------------------------------------------
+
+
+def _transitions(config: SupervisorConfig, task_id: str) -> list[tuple[str, str | None]]:
+    store = RunStore(config.db_path)
+    try:
+        return [(state, detail) for state, detail, _ in store.transitions_for(task_id)]
+    finally:
+        store.close()
+
+
+def test_the_checked_read_wall_is_the_one_the_adapter_launches_behind(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """E1 (I12): strict reads turned off between the A2 check and the launch
+    cannot start the adapter denylist-only — one value, checked then used."""
+    from skep.supervisor.sandbox import read_allowlist_for
+
+    reads: list[Any] = []
+
+    def edited(policy: Any) -> Any:
+        reads.append(policy)
+        return read_allowlist_for(policy) if len(reads) == 1 else None  # the edit lands now
+
+    monkeypatch.setattr("skep.supervisor.dispatch.read_allowlist_for", edited)
+    outcome = _dispatch(config, repo, monkeypatch, tmp_path, [EDIT], unlocked=True)
+    detail = next(d for st, d in _transitions(config, outcome.record.task_id) if st == "dispatched")
+    assert "read_allowlist" in json.loads(detail or "{}")
+
+
+def test_a_card_the_engine_gave_up_on_is_finalised_before_it_answers_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E2: a confirm stuck mid-claim, the deadline passed — the engine settles
+    the card (superseded, "already answered no") in one conditional update
+    BEFORE answering, so the stuck confirm can never record it confirmed."""
+    import skep.supervisor.serve.actions as actions
+
+    real, ids = actions.propose_acp_permission, []
+
+    def stuck(store: RunStore, *args: Any, **kwargs: Any) -> tuple[str, str]:
+        chat_id, action_id = real(store, *args, **kwargs)
+        assert store.claim_chat_action(action_id)  # the confirm that never finished
+        ids.append(action_id)
+        return chat_id, action_id
+
+    monkeypatch.setattr(actions, "propose_acp_permission", stuck)
+    _, rows, (card,) = _session(tmp_path, {"steps": [{"ask": FROB}]}, card_timeout=1, finish=20)
+    (forwarded,) = [r for r in rows if r["source"] == "forwarded"]
+    assert forwarded["outcome"] == "reject_once"
+    assert card.status == "superseded" and "already answered no" in card.result["note"]
+
+
+def test_a_confirm_that_loses_to_the_engines_no_answers_409_and_records_no_yes(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E2: the engine finalises the card while the human's confirm runs —
+    the confirm's own resolve loses, the card stays what the agent was told."""
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.serve.actions import abandon_acp_permission, propose_acp_permission
+    from skep.supervisor.serve.tools import execute_mutation
+
+    client = serve_client(config)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=config.home, instructions="x", budget=DEFAULT_BUDGET)
+        ask = {"scope": "shell", "action": "run", "value": "make x"}
+        chat_id, action_id = propose_acp_permission(
+            store, task, ask, chat_id=None, expires_at=time.time() + 600
+        )
+    finally:
+        store.close()
+
+    def engine_wins(*args: Any, **kwargs: Any) -> Any:
+        other = RunStore(config.db_path)  # the engine's deadline passes mid-confirm
+        try:
+            assert abandon_acp_permission(other, action_id, "card timed out")
+        finally:
+            other.close()
+        return execute_mutation(*args, **kwargs)
+
+    monkeypatch.setattr("skep.supervisor.serve.chat.execute_mutation", engine_wins)
+    answer = client.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm")
+    assert answer.status_code == 409 and "already answered no" in answer.json()["detail"]
+    (card,) = _cards(config)
+    assert card.status == "superseded" and "already answered no" in card.result["note"]
+
+
+class _Crash(Exception):
+    """The supervisor dying mid-finish."""
+
+
+@pytest.mark.parametrize("when", ["before ingest", "after ingest"])
+def test_a_crash_while_finishing_never_leaves_an_acp_failure_completed(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    when: str,
+) -> None:  # fmt: skip
+    """E3 (I2, I8): the supervisor's verdict is on disk before the worker's
+    claim is ingested, and the ingest commits ``failed`` — never
+    ``completed`` then ``failed``. A crash at either step, then a restart:
+    the run is failed and startup re-verify never treats it as ordinary."""
+    from skep.supervisor.dispatch import recover_interrupted_runs, reverify_unverified_runs
+    from skep.supervisor.ingest import ingest_run
+
+    def crashing(**kwargs: Any) -> Any:
+        if when == "before ingest":
+            raise _Crash
+        ingest_run(**kwargs)
+        raise _Crash
+
+    monkeypatch.setattr("skep.supervisor.dispatch.ingest_run", crashing)
+    with pytest.raises(_Crash):
+        _dispatch(config, repo, monkeypatch, tmp_path, [EDIT], stop="refusal", unlocked=True)
+    monkeypatch.setattr("skep.supervisor.dispatch.ingest_run", ingest_run)
+    store = RunStore(config.db_path)
+    try:
+        (run,) = store.recent_runs()
+        recover_interrupted_runs(store, config)
+        reverify_unverified_runs(store, config)
+        record, reverified = store.get_run(run.task_id), store.reverification_for(run.task_id)
+    finally:
+        store.close()
+    assert record is not None and record.state == "failed"
+    states = [state for state, _ in _transitions(config, run.task_id)]
+    assert "completed" not in states and reverified is None
+    assert "refusal" in (_transitions(config, run.task_id)[-1][1] or "")
+
+
+def test_a_verdict_file_that_cannot_be_written_still_fails_the_run(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """E3: the store's terminal is the supervisor's either way (fail closed)."""
+    real = Path.write_text
+
+    def full_disk(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name == "supervisor_verdict.json":
+            raise OSError("No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    outcome = _dispatch(config, repo, monkeypatch, tmp_path, [EDIT], stop="refusal",
+                        unlocked=True)  # fmt: skip
+    assert outcome.record.state == "failed"
+    states = [state for state, _ in _transitions(config, outcome.record.task_id)]
+    assert "completed" not in states
+
+
+def test_startup_reverify_skips_a_completed_run_the_supervisor_failed(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """E3: a run left ``completed`` with the supervisor's verdict beside it
+    (a crash before R2's single terminal) gets the verdict, never G10."""
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.dispatch import reverify_unverified_runs
+
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path, instructions="x", budget=DEFAULT_BUDGET)
+        store.create_run(task, repo=tmp_path, ref="main", execution_mode="sandbox")
+        store.transition(task.task_id, "completed")
+        verdict = {"status": "failed", "reason": "the agent ended its turn: refusal"}
+        (config.audit_dir / task.task_id).mkdir(parents=True)
+        (config.audit_dir / task.task_id / "supervisor_verdict.json").write_text(
+            json.dumps(verdict)
+        )
+        assert reverify_unverified_runs(store, config) == []
+        record = store.get_run(task.task_id)
+    finally:
+        store.close()
+    assert record is not None and record.state == "failed"
+
+
+def test_a_chat_dispatch_hands_its_chat_to_the_run(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4: the chat that dispatched rides submit → run_task(chat_id=), so the
+    run's first ask cards there even before the dispatch receipt exists."""
+    import skep.supervisor.serve.jobs as jobs
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation
+
+    submitted: dict[str, Any] = {}
+    seen: dict[str, Any] = {}
+
+    class _Runner:
+        def submit(self, repo: Path, instructions: str, **kwargs: Any) -> str:
+            submitted.update(kwargs)
+            return "task-1"
+
+    def fake_run_task(*_: Any, on_run_created: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        on_run_created("t")
+
+    monkeypatch.setattr(jobs, "run_task", fake_run_task)
+    _project(config, repo)
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="q", model=None).chat_id
+        store.set_chat_role(chat_id, "operator")
+        execute_mutation(
+            "dispatch_run", {"repo": str(repo), "instructions": "x"}, store=store,
+            holder=ConfigHolder(config, store), runner=_Runner(),  # type: ignore[arg-type]
+            actor="chat-user", chat_id=chat_id,
+        )  # fmt: skip
+        dispatcher = jobs.Dispatcher(ConfigHolder(config, store), store)
+        dispatcher.submit(repo, "x", chat_id=chat_id)
+        dispatcher.shutdown(wait=True)
+    finally:
+        store.close()
+    assert submitted["chat_id"] == chat_id and seen["chat_id"] == chat_id
+
+
+def test_finish_states_an_ask_still_running_at_its_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E5: the session ended and the reader hit EOF, but an ask is still
+    filing its card — finish() says so, never None."""
+    import skep.supervisor.serve.actions as actions
+
+    gate = threading.Event()
+
+    def blocked(*_: Any, **__: Any) -> tuple[str, str]:
+        gate.wait(10)
+        raise OSError("released")
+
+    monkeypatch.setattr(actions, "propose_acp_permission", blocked)
+    try:
+        failure, _, _ = _session(tmp_path, {"steps": [{"ask": FROB, "no_wait": True}]}, finish=1)
+    finally:
+        gate.set()
+    assert failure is not None and "did not end" in failure
+
+
+def test_a_read_is_judged_where_it_resolves_not_as_spelled(tmp_path: Path) -> None:
+    """E6 (I9): ``..`` and a symlink under an allowed root are outside it."""
+    from skep.supervisor.serve.actions import _outside_wall
+
+    allowed, secret = tmp_path / "allowed", tmp_path / "secret"
+    allowed.mkdir()
+    secret.mkdir()
+    (allowed / "link").symlink_to(secret)
+    task = _wall_task(tmp_path)
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        store.create_run(task, repo=tmp_path, ref="main", execution_mode="sandbox")
+        detail = json.dumps({"read_allowlist": [str(allowed.resolve())]})
+        store.transition(task.task_id, "dispatched", detail)
+
+        def wall(value: Path) -> str | None:
+            item = ("filesystem", "read", str(value))
+            return _outside_wall(store, task, item, "", False, url=None, home=tmp_path)
+
+        assert wall(allowed / "a.csv") is None
+        assert wall(allowed / ".." / "secret" / "key") is not None
+        assert wall(allowed / "link" / "key") is not None
+    finally:
+        store.close()
+
+
+def test_a_managed_clone_named_by_its_path_offers_its_slug(config: SupervisorConfig) -> None:
+    """E7: the view's slug candidate is the clone's name, never its path."""
+    from skep.supervisor.serve.actions import _repo_project_for_view
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    clone = config.home.parent / "repos" / "myrepo"
+    (clone / ".git").mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        _, candidates, _ = _repo_project_for_view(ConfigHolder(config, store), store, str(clone))
+    finally:
+        store.close()
+    assert candidates == [("repo_slug", "myrepo")]
