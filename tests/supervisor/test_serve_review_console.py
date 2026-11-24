@@ -685,3 +685,23 @@ def test_a_folded_card_lists_every_item_and_its_confirm_binds_to_that_count(
         assert record is not None and record.status == "proposed"
     finally:
         store.close()
+
+
+def test_an_approval_row_carries_its_own_stored_argv_quoted(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """R3 J8: the review page reads the commands THIS review grants (the
+    stored argv), each joined with shlex quoting — not a run event's list."""
+    from skep.supervisor import RunStore, mint_task
+
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path / "w", instructions="batch")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "pending_approval")
+        argv = [["npm", "install"], ["npm", "run", "build:it", "a b"]]
+        store.enqueue_approval(task.task_id, action="shell.run", reason="batch", commands=argv)
+    finally:
+        store.close()
+    (row,) = serve_client(config).get("/api/approvals").json()["approvals"]
+    assert row["command_lines"] == ["npm install", "npm run build:it 'a b'"]

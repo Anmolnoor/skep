@@ -401,3 +401,15 @@ test("Inbox: gates render in the queue's order, grouped by wall; the warning sho
   await app.viewInbox(again);
   assert.equal(focused.at(-1).getAttribute("href"), "#/review/b");
 });
+
+test("R3 J8: the review page lists the stored argv for this review, quoted as the server joined it", async () => {
+  const gate = { ...GATE, reverification_warning: undefined, action: "shell.run",
+    commands: [["npm", "run", "a", "b"]], // the run event's (lossy, maybe another review's) list
+    command_lines: ["npm install", "npm run build:it 'a b'"] };
+  const { app } = reviewApp({ approvals: [gate] });
+  const main = app.el("main");
+  await app.viewReview(main, "r1");
+  assert.deepEqual(main.querySelector(".command-list").querySelectorAll("code").map(c => c.textContent),
+    ["npm install", "npm run build:it 'a b'"]);
+  assert.ok(main.querySelectorAll("button").some(b => b.textContent === "Approve all 2 commands"));
+});

@@ -199,7 +199,10 @@ export async function viewReview(main, reviewId) {
   }
 
   const root = el("div", { class: "review", tabindex: "-1", "aria-label": "review this approval" });
-  const commands = Array.isArray(gate.commands) ? gate.commands : [];
+  // R3 J8: the stored argv this review grants, shlex-joined by the server;
+  // the run event's list only for a review that stored none.
+  const commands = Array.isArray(gate.command_lines) ? gate.command_lines
+    : Array.isArray(gate.commands) ? gate.commands : [];
   root.append(el("section", { class: "card review-summary", "aria-labelledby": "review-ask" },
     el("h2", { id: "review-ask" }, `${gate.action}${gate.boundary ? ` · ${gate.boundary}` : ""}`),
     el("p", {}, gate.reason || "-"),

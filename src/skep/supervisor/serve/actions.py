@@ -2991,6 +2991,9 @@ def approval_view(
         ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
+    stored = store.approval_commands(approval.review_id)
+    if stored:  # R3 J8: what THIS review grants, quoted as a shell would read it
+        row["command_lines"] = [shlex.join(argv) for argv in stored]
     if approval.status == "pending":  # R1 G6: the card's boundary, one classifier
         from .cards import boundary
 
