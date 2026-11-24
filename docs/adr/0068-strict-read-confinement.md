@@ -617,6 +617,19 @@ the launch path `forged_lane` now shares, so the two cannot drift:
   resolved) refuses before anything is copied or granted — at every
   creation face and again at the run and the wall (Phase 09 R3): a copy
   would carry the masked file to a path no mask covers.
+  Since Phase 09 R4 an input is an ordinary file the operator owns the
+  meaning of (`sandbox.open_read_file`, at every creation face and again
+  at the wall on both backends): a relative path or one with a `..`
+  component refuses before anything normalizes it; a path under `/proc`,
+  `/sys` or `/dev`, or an opened file on a kernel pseudo filesystem (its
+  `st_dev` is that of `/proc`, `/sys` or `/dev`, or on Linux its statfs
+  magic is procfs, sysfs, devpts, cgroup or a kin), refuses —
+  `/proc/<pid>/environ` would hand a script the supervisor's env; a file
+  with more than one hard link refuses (another name for it could be a
+  masked secret: copy the file and name the copy), and the opened file's
+  identity is compared with each masked file's. A redirect such as
+  `> /dev/null` is not an input (`script_inputs` takes regular files
+  only) and keeps working.
   On Linux (bubblewrap) a script therefore sees a **snapshot** of each
   input taken at launch, not live updates: the copies go to a private
   `0700` temp dir outside the workspace that `wall.walled` removes after

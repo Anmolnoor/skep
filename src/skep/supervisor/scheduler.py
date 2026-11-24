@@ -164,9 +164,11 @@ def script_inputs(command: str) -> tuple[Path, ...]:
 def script_input_problem(command: str, skep_home: Path) -> str | None:
     """Phase 09 R3 (N2): why a script's declared inputs (``script_inputs``)
     cannot run — in or over the skep home, at or above the home, or under a
-    secret mask — or None. Every face checks it at creation; the run and the
-    wall check again."""
-    from .sandbox import masked_input_problem
+    secret mask — or None. R4: nor anything but an ordinary file
+    (``sandbox.open_read_file``: no pseudo filesystem, no second hard link,
+    no masked file under another name, no ``..``). Every face checks it at
+    creation; the run and the wall check again."""
+    from .sandbox import masked_input_problem, open_read_file, secret_paths
 
     for path in script_inputs(command):
         problem = extra_read_path_problem(path, skep_home) or masked_input_problem(
@@ -174,6 +176,10 @@ def script_input_problem(command: str, skep_home: Path) -> str | None:
         )
         if problem:
             return f"a script schedule's input {problem}"
+        try:
+            os.close(open_read_file(path, denied=secret_paths(skep_home)))
+        except SandboxUnavailableError as exc:
+            return f"a script schedule's {exc}"
     return None
 
 
