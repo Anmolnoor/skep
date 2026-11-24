@@ -158,6 +158,28 @@ def test_a_script_reaches_its_declared_hosts_and_nothing_else(
     assert hits == ["/ok"]
 
 
+@needs_wall
+def test_a_script_with_hosts_cannot_open_a_raw_socket_to_loopback(
+    home: Path, fake_upstream: tuple[int, list[str]]
+) -> None:
+    """R2 (N1): the hosts pin egress to the proxy — a raw connect() to a
+    loopback listener, past the proxy, never lands."""
+    port, hits = fake_upstream
+    probe = (
+        "import socket\n"
+        "try:\n"
+        f"    s = socket.create_connection(('127.0.0.1', {port}), timeout=5)\n"
+        "    s.sendall(b'GET /raw HTTP/1.0\\r\\n\\r\\n'); print('RAW', s.recv(64))\n"
+        "except OSError as exc:\n"
+        "    print('raw blocked', type(exc).__name__)\n"
+    )
+    output, _ok = run_schedule_script(
+        f'{sys.executable} -c "{probe}"', skep_home=home, hosts=("allowed.test",)
+    )
+    assert "raw blocked" in output and "RAW" not in output, output
+    assert hits == []
+
+
 def test_no_wall_refuses_the_script(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sandbox,

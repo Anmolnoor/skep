@@ -32,12 +32,16 @@ def walled(
     land last. Writes: ``workspace`` (+ ``writable``). Env: PATH and LANG,
     HOME and TMPDIR in the workspace. Egress: deny-all when ``hosts`` is
     empty, else pinned to them through a FilteringProxy (D1) — never
-    allow-all. No backend, or a wall that cannot be built, raises
+    allow-all: an entry that is not a concrete host (``*``) refuses. No
+    backend, or a wall that cannot be built, raises
     ``sandbox.SandboxUnavailableError`` (fail closed, I12)."""
     from . import sandbox
-    from .netproxy import FilteringProxy, control_plane_ports
+    from .netproxy import FilteringProxy, control_plane_ports, host_entry_problem
     from .spawner import proxy_env
 
+    for host in hosts:  # R2 (N1): `*` would make the wall allow-all, past the proxy
+        if (problem := host_entry_problem(host)) is not None:
+            raise sandbox.SandboxUnavailableError(f"the wall's hosts: {problem}")
     probe = sandbox.availability()
     if not probe.usable:
         raise sandbox.SandboxUnavailableError(f"no usable sandbox backend ({probe.reason})")

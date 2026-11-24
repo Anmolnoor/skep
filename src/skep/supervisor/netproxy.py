@@ -26,6 +26,7 @@ import functools
 import hmac
 import http.client
 import ipaddress
+import re
 import socket
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -114,6 +115,23 @@ def _plain_loopback(host: str) -> bool:
         return ipaddress.ip_address(bare).is_loopback
     except ValueError:
         return False
+
+
+# One concrete host pattern: ``api.example.com``, ``*.example.com`` (the
+# domain) or ``host:8443``. Never ``*`` alone, a URL or a blank: the forged
+# tools' ``# skep-hosts:`` and every wall's hosts (Phase 09 R2, N1) use it.
+_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+HOST_ENTRY = re.compile(rf"(?:\*\.)?{_LABEL}(?:\.{_LABEL})*(?::[0-9]{{1,5}})?")
+
+
+def host_entry_problem(raw: str) -> str | None:
+    """Why ``raw`` is not one concrete host pattern (``HOST_ENTRY``), or None."""
+    if HOST_ENTRY.fullmatch(raw.lower()):
+        return None
+    return (
+        f"{raw!r} is not a host name — list hosts like `api.example.com`, "
+        "`*.example.com` or `host:8443`; `*` (every host) is never granted"
+    )
 
 
 def split_authority(value: str, *, default_port: int | None = None) -> tuple[str, int] | None:

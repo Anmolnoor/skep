@@ -398,6 +398,17 @@ def next_fire_times(
     return times
 
 
+def script_network_problem(network: Sequence[str]) -> str | None:
+    """Phase 09 R2 (N1): why a script schedule's ``network`` cannot be its
+    wall's hosts — each must be one concrete host, never ``*`` — or None."""
+    from .netproxy import host_entry_problem
+
+    for host in network:
+        if (problem := host_entry_problem(str(host))) is not None:
+            return f"a script schedule's network: {problem}"
+    return None
+
+
 def make_schedule(
     *,
     name: str,
@@ -417,6 +428,8 @@ def make_schedule(
 ) -> ScheduleRecord:
     if worker_kind in RETIRED_CASTES:  # v127-F11: refused at creation, every face
         raise ValueError(f"caste {worker_kind!r} is retired: {RETIRED_CASTES[worker_kind]}")
+    if worker_kind == "script" and (problem := script_network_problem(network)):
+        raise ValueError(problem)  # R2 (N1): refused at creation, every face
     created = now_ts()
     start = _start_slot(start_at)
     return ScheduleRecord(
