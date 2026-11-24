@@ -238,6 +238,78 @@ def review_queue(
     return {"items": items, "count": len(items)}
 
 
+def forged_tools(store: RunStore, holder: ConfigHolder) -> list[dict[str, Any]]:
+    """Each forged tool as its promotion bound it (Phase 07: source digest,
+    lock digest, approved hosts, venv seal), with two facts re-checked on
+    read the way every launch re-checks them: does the installed copy still
+    hash to the approved digest, and does the venv still match its seal.
+    The pinned wheels are read from the landed lock, and said to be the
+    approved one only when it hashes to the bound lock digest (I8)."""
+    import hashlib
+
+    from .. import forge
+    from ..mcp_client import load_mcp_servers
+    from .actions import applied_branch_for
+
+    skep_home = holder.current.home.parent
+    servers = load_mcp_servers(store)
+    tools = []
+    for record in forge.load_plugins(store).values():
+        installed_file = skep_home / forge.INSTALLED_TOOLS_DIR_NAME / f"{record.plugin_id}.py"
+        if not record.source_sha256:
+            installed = "unbound"  # activated before binding: it refuses to run
+        elif not installed_file.is_file():
+            installed = "missing"
+        else:
+            digest = hashlib.sha256(installed_file.read_bytes()).hexdigest()
+            installed = "matches" if digest == record.source_sha256 else "differs"
+        seal = "none"  # stdlib only: no venv
+        if record.lock_sha256:
+            root = forge.venv_python(skep_home, record.plugin_id, record.lock_sha256).parent.parent
+            try:
+                seal = "sealed" if forge.seal_venv(root) == record.venv_sha256 else "broken"
+            except (OSError, ValueError):
+                seal = "missing" if not root.exists() else "broken"
+        branch = None if record.provenance == "seed" else applied_branch_for(store, record.task_id)
+        locked: list[str] = []
+        try:
+            _source, lock = forge.read_candidate(record, branch)
+        except (OSError, ValueError) as exc:
+            note = f"no landed lock to read: {exc}"
+        else:
+            if lock is None:
+                note = "no lock landed beside the tool: stdlib only"
+            else:
+                locked = list(forge.parse_lock(lock))
+                note = (
+                    "the landed lock is the approved one"
+                    if forge.sha256_text(lock) == record.lock_sha256
+                    else "the landed lock is NOT the approved one: promote_tool asks again"
+                )
+        tools.append(
+            {
+                "plugin_id": record.plugin_id,
+                "name": record.name,
+                "purpose": record.purpose,
+                "state": record.state,
+                "provenance": record.provenance,
+                "task_id": record.task_id,
+                "landed_branch": branch,
+                "registered": record.server_id in servers,
+                "approved_hosts": list(record.approved_hosts),
+                "source_sha256": record.source_sha256,
+                "lock_sha256": record.lock_sha256,
+                "venv_sha256": record.venv_sha256,
+                "installed": installed,
+                "seal": seal,
+                "locked": locked,
+                "lock_note": note,
+                "trial": record.trial,
+            }
+        )
+    return tools
+
+
 def add_console_routes(
     app: FastAPI, *, holder: ConfigHolder, run_store: RunStore, engine: ChatEngine
 ) -> None:
@@ -245,6 +317,11 @@ def add_console_routes(
     def get_review_queue(detail: bool = True) -> dict[str, Any]:
         """The one review queue: the Inbox's rows and the badge's count."""
         return review_queue(run_store, holder, engine, detail=detail)
+
+    @app.get("/api/forge/tools")
+    def get_forged_tools() -> dict[str, Any]:
+        """The Library's Forged Tools: each binding, its copy and its seal re-checked."""
+        return {"tools": forged_tools(run_store, holder)}
 
     @app.get("/api/ledger/verify")
     def get_ledger_verify() -> dict[str, Any]:

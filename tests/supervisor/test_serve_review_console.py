@@ -239,3 +239,73 @@ def test_review_queue_count_only_is_the_same_membership_the_list_has(
         (i["kind"], i["id"]) for i in full["items"]
     ]
     assert set(light["items"][0]) == {"kind", "id", "boundary", "at"}  # nothing costly
+
+
+# ---------- E3: the forged tools, as their records bind them ----------
+
+
+def test_forged_tools_route_shows_each_binding_and_rechecks_copy_and_seal(
+    config: SupervisorConfig,
+) -> None:
+    import hashlib
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.forge import ForgedPlugin, save_plugin, seal_venv
+
+    skep_home = config.home.parent
+    tools = skep_home / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "word-count.py").write_text("print('hi')\n")
+    approved = hashlib.sha256(b"print('hi')\n").hexdigest()
+    lock = "ab" * 32
+    venv = tools / ".venvs" / "pdf" / lock
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "tool").write_text("x")
+    sealed = seal_venv(venv)
+    store = RunStore(config.db_path)
+    try:
+        repo = str(skep_home / "forge")
+        save_plugin(
+            store,
+            ForgedPlugin(
+                plugin_id="word-count",
+                name="word-count",
+                purpose="counts words",
+                state="active",
+                rel_path="tools/word-count.py",
+                server_id="forge-word-count",
+                approved_hosts=("api.example.com",),
+                source_sha256=approved,
+                repo=repo,
+                task_id="t-unlanded",
+            ),
+        )
+        save_plugin(
+            store,
+            ForgedPlugin(
+                plugin_id="pdf",
+                name="pdf",
+                purpose="reads pdfs",
+                state="active",
+                rel_path="tools/pdf.py",
+                server_id="forge-pdf",
+                source_sha256="ef" * 32,
+                lock_sha256=lock,
+                venv_sha256=sealed,
+                repo=repo,
+                task_id="t-unlanded",
+            ),
+        )
+    finally:
+        store.close()
+    client = serve_client(config)
+    found = {t["plugin_id"]: t for t in client.get("/api/forge/tools").json()["tools"]}
+    word, pdf = found["word-count"], found["pdf"]
+    assert word["state"] == "active" and word["approved_hosts"] == ["api.example.com"]
+    assert word["source_sha256"] == approved and word["installed"] == "matches"
+    assert word["seal"] == "none" and word["locked"] == []
+    assert "has not landed" in word["lock_note"]  # the pins come from the landed lock
+    assert pdf["installed"] == "missing" and pdf["seal"] == "sealed"
+    assert pdf["lock_sha256"] == lock and pdf["venv_sha256"] == sealed
+    (venv / "bin" / "tool").write_text("swapped")
+    assert client.get("/api/forge/tools").json()["tools"][1]["seal"] == "broken"

@@ -353,6 +353,8 @@ export async function viewTemplates(main) {
   const tabs = buildTabBar([
     { key: "templates", label: "Templates", render: renderTemplatesTab },
     { key: "skills", label: "Skills", render: renderSkillsTab },
+    { key: "captures", label: "Captured skills", render: renderCapturesTab },
+    { key: "forged", label: "Forged tools", render: renderForgedTab },
   ], { initial: activeTemplatesTab, onActivate: (key) => { activeTemplatesTab = key; } });
   main.append(tabs.bar, tabs.content);
 }
@@ -560,5 +562,139 @@ async function renderSkillsTab(panel) {
       el("div", { class: "note" }, skill.template.instructions.slice(0, 90)),
       el("div", { class: "note" }, `${skill.occurrences} runs; test: ${skill.test_outcome || "-"}`),
       actions));
+  }
+}
+
+// ---------- Phase 10 R1 (E3): Safe Skill Capture review ----------
+
+const TAINT_WORDS = { private: "private data", untrusted: "outside content" };
+const taintWords = bits => bits.slice().sort().map(bit => TAINT_WORDS[bit] || bit).join(", ");
+
+// The SKILL.md a capture drafted, re-rendered by skill_md.render_skill_md's
+// rule (one-line, double-quoted frontmatter values) around the body that is
+// stored verbatim — the recipe approving puts in the registry.
+function captureMarkdown(c) {
+  const front = {
+    name: c.name,
+    description: c.template.description,
+    captured_from: c.source_task_ids[0],
+    taint: (c.taint || []).join(", "),
+  };
+  const head = Object.entries(front).filter(([, v]) => v)
+    .map(([k, v]) => `${k}: ${JSON.stringify(String(v).split(/\s+/).filter(Boolean).join(" "))}\n`).join("");
+  return `---\n${head}---\n\n${c.template.instructions.trim()}\n`;
+}
+
+// Pending captured drafts, each in full. Approve and Reject are the existing
+// skill verbs (POST /api/skills/<name>/approve|reject); a tainted draft is
+// refused by the server unless its taint is accepted, so the box that sends
+// accept_taint is the same choice as `skep skill approve <name> --accept-taint`.
+async function renderCapturesTab(panel) {
+  const { skills } = await api("GET", "/api/skills");
+  const pending = skills.filter(c => c.template.provenance === "captured" && c.status === "draft");
+  panel.append(el("p", { class: "note" },
+    "A captured skill grants nothing: approving adds its recipe to the registry, and the policy "
+    + "in force when it runs decides every step. Read it in full before you approve it."));
+  if (!pending.length) {
+    panel.append(el("p", { class: "empty-state" },
+      "No captured skill is waiting. `skep skill capture <run-or-chat> --name <slug>` drafts one."));
+    return;
+  }
+  for (const c of pending) {
+    const tainted = (c.taint || []).length > 0;
+    const approve = el("button", { type: "button", class: "primary" },
+      tainted ? "Approve, accepting the taint" : "Approve");
+    approve.disabled = tainted; // the taint is accepted with the box, never by default
+    const reject = el("button", { type: "button", class: "danger ghost" }, "Reject");
+    const accept = tainted ? el("input", { type: "checkbox", "aria-label": "accept the taint" }) : null;
+    accept?.addEventListener("change", () => { approve.disabled = !accept.checked; });
+    const name = encodeURIComponent(c.name);
+    const decide = (button, verb, body) => button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { await api("POST", `/api/skills/${name}/${verb}`, body()); flash("ok", `${c.name}: ${verb === "approve" ? "approved" : "rejected"}`); route(); }
+      catch (e) { flash("bad", e.message); button.disabled = verb === "approve" && tainted && !accept.checked; }
+    });
+    decide(approve, "approve", () => ({ accept_taint: tainted && accept.checked }));
+    decide(reject, "reject", () => ({}));
+    panel.append(el("div", { class: "item-card capture-card searchable", "data-name": c.name },
+      el("div", { class: "row" },
+        el("span", { class: "mono" }, c.name),
+        el("span", { class: "note grow" }, `captured from ${c.source_task_ids.join(", ")} · ${relativeTime(c.created_at)}`)),
+      tainted
+        ? el("p", { class: "banner warn" },
+          `⚠ tainted — captured from ${c.source_task_ids.join(", ")}, which carries: ${taintWords(c.taint)}`)
+        : null,
+      el("pre", { class: "capture-md mono" }, captureMarkdown(c)),
+      tainted
+        ? el("label", { class: "row capture-accept" }, accept,
+          `I read it: accept the taint (the server refuses a tainted draft without this — skep skill approve ${c.name} --accept-taint)`)
+        : null,
+      el("div", { class: "actions" }, approve, reject)));
+  }
+}
+
+// ---------- Phase 10 R1 (E3): Forged tools ----------
+
+const INSTALLED_TEXT = {
+  matches: ["tone-ok", "installed copy matches the approved digest"],
+  differs: ["tone-bad", null],
+  missing: ["tone-warn", "no installed copy: not promoted, or removed"],
+  unbound: ["tone-bad", null],
+};
+const SEAL_TEXT = {
+  sealed: ["tone-ok", "venv sealed"],
+  none: ["tone-muted", null],
+  missing: ["tone-warn", "venv not built yet"],
+  broken: ["tone-bad", null],
+};
+
+// Each forged tool as its promotion card bound it — source digest, lock
+// digest and pinned wheels, approved hosts, venv seal — with the copy and the
+// seal re-checked on read, as every launch re-checks them. Read-only here:
+// promote_tool and suspend_tool stay carded verbs.
+async function renderForgedTab(panel) {
+  const { tools } = await api("GET", "/api/forge/tools");
+  panel.append(el("p", { class: "note" },
+    "Every launch runs only the bound source, under the approved hosts, in the sealed venv; "
+    + "anything else refuses. Promote or suspend a tool from chat (promote_tool / suspend_tool): each is a card."));
+  if (!tools.length) {
+    panel.append(el("p", { class: "empty-state" }, "No forged tools yet. forge_tool authors one in a sandboxed run."));
+    return;
+  }
+  for (const t of tools) {
+    const [installedTone, installedText] = INSTALLED_TEXT[t.installed] || ["tone-muted", t.installed];
+    const [sealTone, sealText] = SEAL_TEXT[t.seal] || ["tone-muted", t.seal];
+    const pins = t.locked || [];
+    panel.append(el("div", { class: "item-card forge-card searchable" },
+      el("div", { class: "row" },
+        el("span", { class: "mono" }, t.name),
+        stateChip(t.state),
+        el("span", { class: "chip tone-info" }, t.provenance),
+        el("span", { class: "note grow" }, t.purpose)),
+      t.installed === "differs"
+        ? el("p", { class: "banner bad", role: "alert" }, "⚠ The installed copy is NOT the approved source: it will not run until promote_tool asks again.") : null,
+      t.installed === "unbound"
+        ? el("p", { class: "banner bad", role: "alert" }, "⚠ Activated before tools were bound to a card: no approved digest, so it does not run.") : null,
+      t.seal === "broken"
+        ? el("p", { class: "banner bad", role: "alert" }, "⚠ Its venv no longer matches its seal: it will not run until promote_tool rebuilds it.") : null,
+      el("p", { class: "mono forge-digest" }, `source sha256 ${t.source_sha256 || "— none approved"}`),
+      installedText ? el("span", { class: `chip ${installedTone}` }, installedText) : null,
+      t.lock_sha256
+        ? el("p", { class: "mono forge-digest" }, `lock sha256 ${t.lock_sha256} · ${pins.length} pinned wheel${pins.length === 1 ? "" : "s"}`)
+        : el("p", { class: "note" }, "stdlib only: no lock, no venv"),
+      pins.length
+        ? el("details", { class: "forge-pins" }, el("summary", {}, "pinned wheels"),
+          el("pre", { class: "mono" }, pins.join("\n")))
+        : null,
+      el("p", { class: "note" }, t.lock_note),
+      el("p", {}, `network: ${t.approved_hosts.length ? t.approved_hosts.join(", ") : "none (deny-all egress)"}`),
+      sealText ? el("span", { class: `chip ${sealTone}`, title: t.venv_sha256 || "" },
+        t.seal === "sealed" ? `${sealText} · sha256 ${t.venv_sha256}` : sealText) : null,
+      el("p", { class: "note" }, `authored by run ${t.task_id || "—"}`, t.landed_branch ? ` · landed on ${t.landed_branch}` : "",
+        t.registered ? " · registered" : " · not registered"),
+      t.trial
+        ? el("details", {}, el("summary", {}, "last trial evidence"),
+          el("pre", { class: "mono" }, JSON.stringify(t.trial, null, 2)))
+        : null));
   }
 }
