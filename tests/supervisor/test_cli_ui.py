@@ -153,6 +153,53 @@ def test_badges_cover_the_four_verdicts() -> None:
     assert cli_ui.badge("observed").plain == "OBSERVED"
 
 
+def test_brackets_print_literally_and_never_raise(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 10 R1 D5: values are data, never rich markup — `[id]`, `[/tmp]`
+    and `[b]` print as typed, and a stray closing tag cannot crash a table."""
+    _on_a_terminal(monkeypatch)
+    cli_ui.print_table(("id", "value"), [("[id]", "[/tmp] [b]x")], title="[t]")
+    cli_ui.print_panel("[/tmp] in [b]a panel", title="[review] card", style="green")
+    out = capsys.readouterr().out
+    for literal in ("[id]", "[/tmp] [b]x", "[t]", "[/tmp] in [b]a panel", "[review] card"):
+        assert literal in out, literal
+    _on_a_terminal(monkeypatch, color=True)  # a console built with markup on
+    cli_ui.print_table(("id",), [("[/tmp]",)])
+    assert "[/tmp]" in capsys.readouterr().out
+
+
+def test_decisions_badge_the_verdict_and_note_rows_their_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5: a decision row's badge is its verdict — a row that also carries a
+    source (a run's dispatch row says source="run") is still DENY; only the
+    note rows (observed / forwarded / delegated / alarm) badge their source,
+    as actions.py and policies.js read them."""
+    home = tmp_path / "home"
+    audit = build_config(home, None).audit_dir
+    base = {"at": "2026-11-24T10:00:00Z", "actor": "worker:t1", "scope": "shell",
+            "action": "run", "task_id": "t1"}  # fmt: skip
+    log_decision(audit, {**base, "value": "[/tmp]/rm", "verdict": "deny", "source": "run"})
+    log_decision(audit, {**base, "value": "ls", "verdict": "allow", "source": "observed"})
+    _on_a_terminal(monkeypatch)
+    assert _run_cli(home, "policy", "decisions") == 0
+    out = capsys.readouterr().out
+    assert "DENY" in out and "OBSERVED" in out and "RUN" not in out
+    assert "[/tmp]/rm" in out
+
+
+def test_skep_chat_help_keeps_its_brackets_on_a_terminal(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep import cli_chat
+
+    _on_a_terminal(monkeypatch)
+    cli_chat._print_help()
+    out = capsys.readouterr().out
+    assert "/runs [n]" in out and "/policy [repo]" in out
+
+
 def test_doctor_json_stays_plain_and_the_panel_carries_the_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

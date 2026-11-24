@@ -26,9 +26,11 @@ def rich_enabled(stream: TextIO | None = None) -> bool:
 
 
 def console() -> Console:
+    """Phase 10 R1 D5: markup off — every value skep prints is data, so `[id]`,
+    `[/tmp]` and `[b]` print as typed and a stray closing tag cannot raise."""
     from rich.console import Console
 
-    return Console(highlight=False)
+    return Console(highlight=False, markup=False)
 
 
 # ALLOW / ASK / DENY / TAMPER, plus the review card's G10 words.
@@ -49,10 +51,17 @@ def badge(verdict: str) -> Text:
 
 def print_table(columns: Sequence[str], rows: Sequence[Sequence[Any]], title: str = "") -> None:
     from rich.table import Table
+    from rich.text import Text
 
-    table = Table(*columns, title=title or None, header_style="bold", expand=False)
+    # D5: strings become Text, so no console's markup setting can parse a value.
+    def cell(value: Any) -> Any:
+        return Text(value) if isinstance(value, str) else value
+
+    table = Table(title=cell(title) if title else None, header_style="bold")
+    for column in columns:
+        table.add_column(cell(column))
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*map(cell, row))
     console().print(table)
 
 
@@ -62,7 +71,7 @@ def print_panel(text: str, *, title: str, style: str) -> None:
     from rich.panel import Panel
     from rich.text import Text
 
-    console().print(Panel(Text(text), title=title, border_style=style, title_align="left"))
+    console().print(Panel(Text(text), title=Text(title), border_style=style, title_align="left"))
 
 
 def print_diff(patch: str) -> None:
@@ -112,11 +121,16 @@ def print_report(text: str) -> None:
 
 
 def print_decisions(view: dict[str, Any]) -> None:
-    """``skep policy decisions`` on a terminal: newest first, badged."""
+    """``skep policy decisions`` on a terminal: newest first, badged. D5: the
+    badge is the decision's verdict; only a note row (observed / forwarded /
+    delegated / alarm) is badged by its source — as actions.py and
+    policies.js read a row. A decision's source ("run") is not its verdict."""
+    from .supervisor.forensics import NOTES
+
     rows = [
         (
             str(row.get("at", "-")),
-            badge(str(row.get("source") or row.get("verdict") or "-")),
+            badge(str(row["source"] if row.get("source") in NOTES else row.get("verdict") or "-")),
             f"{row.get('scope', '-')}.{row.get('action', '-')}",
             str(row.get("value", "")),
             str(row.get("actor", "-")),
