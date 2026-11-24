@@ -1279,6 +1279,8 @@ def test_status_reprints_the_banner_mid_session(
     out = capsys.readouterr().out
     assert out.count("nothing waiting on you") == 2  # entry banner + /status
     assert "daemon: http://unused" in out
+    # Test 10.5: the same status text the web deck and a messenger print.
+    assert "skep: 0 running · 0 approval(s) waiting" in out
 
 
 def test_model_no_arg_names_the_effective_model_and_meter(

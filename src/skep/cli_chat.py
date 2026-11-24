@@ -922,6 +922,8 @@ class ChatRepl:
         if name == "status":
             # v77-F3: re-print the banner on demand — "what needs me?" mid-session.
             _print_banner(self.client)
+            # Test 10.5: then the status text the web deck and messengers print.
+            print(self.client.get("/api/status").get("summary", ""))
             print(_c(DIM, f"daemon: {self.url}"))
             return
         if name == "model":
