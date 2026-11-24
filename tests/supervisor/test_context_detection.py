@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -631,3 +632,34 @@ def test_the_meter_and_its_budget_read_one_window(store: RunStore) -> None:
     floor = 1000 + len("[]") + RESPONSE_RESERVE_CHARS
     got = ChatEngine._history_budget(engine, 1000, None, window)  # type: ignore[arg-type]
     assert got == 32768 * 4 - floor
+
+
+def test_a_slow_dns_lookup_never_holds_the_probe_or_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R5 (Sol R5-1): asyncio.run waited on its resolver thread (and the
+    interpreter joins executor threads at exit), so a 2 s DNS lookup held a
+    0.3 s probe — and shutdown — well past the deadline. The pending lookup
+    runs on a daemon thread nothing waits for."""
+    import socket
+    import threading
+    import time
+
+    release = threading.Event()
+    real = socket.getaddrinfo
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        release.wait(2.0)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    try:
+        began = time.monotonic()
+        got = llm._fetch_json("http://slow-dns.invalid/v1/models", None, time.monotonic() + 0.3)
+        assert got is llm._UNREACHABLE and time.monotonic() - began < 0.6
+        blockers = [
+            t for t in threading.enumerate()
+            if t is not threading.main_thread() and not t.daemon and t.is_alive()
+            and "asyncio" in t.name
+        ]  # fmt: skip
+        assert blockers == []  # nothing an interpreter exit would join
+    finally:
+        release.set()

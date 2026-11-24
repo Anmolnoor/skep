@@ -17,6 +17,7 @@ adapter at this boundary so the rest of chat sees the same message/tool shape.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import dataclasses
 import ipaddress
@@ -602,10 +603,43 @@ def _http_body(
                 return True, b""
             return False, b"".join([chunk async for chunk in response.aiter_bytes()])
 
+    # R5 (Sol R5-1): asyncio.run waits on its resolver threads (and the
+    # interpreter joins executor threads at exit), so a slow DNS lookup held
+    # the probe — and shutdown — past the deadline. The loop's executor runs
+    # each lookup on a daemon thread, and the loop closes without waiting.
+    loop = asyncio.new_event_loop()
+    loop.set_default_executor(_DaemonExecutor())
     try:
-        return asyncio.run(asyncio.wait_for(read(), timeout))
+        return loop.run_until_complete(asyncio.wait_for(read(), timeout))
     except TimeoutError as exc:
         raise httpx.ReadTimeout("context probe deadline") from exc
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+class _DaemonExecutor(concurrent.futures.ThreadPoolExecutor):
+    """Each call on its own daemon thread: a lookup still pending at the
+    probe's deadline is abandoned, never joined (not by the loop, not at exit).
+    A ThreadPoolExecutor only because asyncio insists on one; its pool is
+    never used."""
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None  # nothing pooled; a pending daemon lookup is abandoned
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> concurrent.futures.Future[Any]:
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # handed to the awaiting coroutine
+                future.set_exception(exc)
+
+        threading.Thread(target=run, name="skep-ctx-resolve", daemon=True).start()
+        return future
 
 
 def _fetch_json(url: str, api_key: str | None, deadline: float, body: Any = None) -> Any:
