@@ -29,6 +29,11 @@ class FakeOpenAI:
         self.echo_key = False
         # OpenRouter-style: the model list is served to anyone.
         self.public_listing = False
+        # Phase 06 (6.1): extra fields per /v1/models entry (OpenRouter's
+        # context_length/top_provider, vLLM's max_model_len) and llama.cpp's
+        # GET /props body; None = 404, like every server that is not llama.cpp.
+        self.model_fields: dict[str, dict[str, Any]] = {}
+        self.props: dict[str, Any] | None = None
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
@@ -149,8 +154,10 @@ class FakeOpenAI:
                 if not (self._authorized() or fake.public_listing):
                     self._refuse()
                 elif self.path == "/v1/models":
-                    models = [{"id": model} for model in fake.models]
+                    models = [{"id": m, **fake.model_fields.get(m, {})} for m in fake.models]
                     self._send(200, json.dumps({"data": models}).encode())
+                elif self.path == "/props" and fake.props is not None:
+                    self._send(200, json.dumps(fake.props).encode())
                 else:
                     self._send(404, b'{"error": "not found"}')
 

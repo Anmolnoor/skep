@@ -953,6 +953,12 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
             lines.extend(_codex_login_lines(login))
     for queen in status.get("queen_chatgpt_login", []):
         lines.append(_queen_login_line(queen))
+    context = status.get("queen_context", {})
+    if context:
+        lines.append(
+            f"- queen context: window {context['model_window']} ({context['source']}), "
+            f"replay cap {context['replay_cap']}"
+        )
 
     approvals = status.get("approvals", {})
     stale = approvals.get("stale", 0)
@@ -1198,6 +1204,27 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     return {"on": True, "relayed": True, "label": label + not_relayed}
 
 
+def _queen_context_check(home: Path) -> dict[str, Any]:
+    """Phase 06 (6.1): the window chat budgets with and what set it — the
+    cached probe, the catalog, or the default said as "default" (I8). Reads
+    the store only; the probe runs where the model changes."""
+    from dataclasses import asdict
+
+    from .supervisor.serve.llm import assistant_llm, resolve_context_window
+    from .supervisor.store import RunStore
+
+    db = home / "supervisor" / "supervisor.sqlite3"
+    if not db.is_file():
+        return {}
+    store = RunStore(db, readonly=True)
+    try:
+        if assistant_llm(store)[1] is None:
+            return {}
+        return asdict(resolve_context_window(store))
+    finally:
+        store.close()
+
+
 def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:
     """v13: the single durable memory system is the sqlite store (curated
     memory_items with FTS search), not the inert ``~/.skep/memory`` directory.
@@ -1269,6 +1296,7 @@ def _status_payload(
         "coding_engines": _coding_engine_checks(home),
         "provider_key_relay": _provider_key_relay_check(home),
         "queen_chatgpt_login": _queen_login_check(home),
+        "queen_context": _queen_context_check(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
         "sandbox": sandbox,

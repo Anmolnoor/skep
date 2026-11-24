@@ -383,3 +383,29 @@ def preset_view(preset: ProviderPreset) -> dict[str, object]:
         "auth_note": preset.auth_note,
         "egress": preset_egress_note(preset, base_url) if base_url else "depends on --base-url",
     }
+
+
+# Phase 06 (6.1): published context windows (tokens) of known models, by
+# EXACT model id — never a family guess: "gpt-5-mini-x" is not "gpt-5-mini".
+# Consulted only when the endpoint's own API did not answer; an id missing
+# here resolves to the honest default (I8). Add a row only from the
+# provider's own published limit.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4.1": 1_047_576,
+    "gpt-4.1-mini": 1_047_576,
+    "gpt-4.1-nano": 1_047_576,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+    "gpt-5": 400_000,
+    "gpt-5-mini": 400_000,
+    "gpt-5-nano": 400_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-opus-4-1": 200_000,
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+}
