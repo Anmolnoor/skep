@@ -289,3 +289,45 @@ def test_propose_schedule_caste_help_names_the_worker_castes_and_the_role_rule()
     assert "these four dispatch no worker" in help_text
     assert "'coding', 'audit', 'researcher' and 'document' dispatch a worker" in help_text
     assert "in this chat's role" in help_text
+
+
+# --- Phase 09 R1: a script schedule runs inside the wall (9D's wall.py) ---------
+
+
+def test_a_chat_created_script_schedule_keeps_the_hosts_it_declares(tmp_path: Path) -> None:
+    """The chat face stores a script schedule's `network` (its only egress
+    inside the wall, none by default), as the REST and CLI faces do; other
+    repo-less kinds reach nothing and store none."""
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS, execute_mutation
+
+    config = SupervisorConfig(home=tmp_path / "skep-home", worker_command=("true",))
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None).chat_id
+        for args in (
+            {**SCRIPT, "name": "wx", "network": ["api.weather.gov"]},
+            {**SCRIPT, "name": "quiet"},
+            {"name": "memo", "caste": "note", "instructions": "hi", "every": "1d",
+             "network": ["x.example"]},
+        ):  # fmt: skip
+            execute_mutation(
+                "propose_schedule",
+                args,
+                store=store,
+                holder=ConfigHolder(config, store),
+                runner=None,  # type: ignore[arg-type]
+                actor="tester",
+                chat_id=chat_id,
+            )
+        stored = {name: store.get_schedule(name) for name in ("wx", "quiet", "memo")}
+    finally:
+        store.close()
+
+    assert {name: s.network for name, s in stored.items() if s} == {
+        "wx": ["api.weather.gov"], "quiet": [], "memo": []
+    }  # fmt: skip
+    spec = next(t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "propose_schedule")
+    described = spec["function"]["parameters"]["properties"]["network"]["description"]
+    assert "script schedule" in described and "none by default" in described

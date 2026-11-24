@@ -2059,7 +2059,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "hosts a worker schedule may reach; this chat's role "
-                "drops any it does not allow",
+                "drops any it does not allow. Also a script schedule's only reachable "
+                "hosts inside its wall (none by default)",
             },
             "once": {
                 "type": "boolean",
@@ -6158,6 +6159,8 @@ def _execute_mutation(
                 chain=schedule_chain,
                 # v123-F1: repo-less kinds store none; one named here refuses
                 role=None if args.get("role") is None else str(args["role"]),
+                # Phase 09 R1: a script's only egress inside its wall (wall.py)
+                network=[str(h) for h in args.get("network") or []] if caste == "script" else (),
             )
             actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
