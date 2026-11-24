@@ -243,6 +243,8 @@ function settingsApp(extra = {}) {
     "GET /api/workers": { castes: [], engines: [] },
     "GET /api/channels": { channels: {} },
     "GET /api/webhooks": { webhooks: [] },
+    "GET /api/providers": { providers: [] },
+    "GET /api/providers/health": { health: [] },
     ...extra,
   };
   app.api = async (method, path, body) => {
@@ -300,7 +302,10 @@ test("Models: the chat model and the worker model, one form each, each saying wh
     .filter(s => s.children.some(o => o.getAttribute("value") === "openai-responses"));
   assert.equal(protocolSelects.length, 1);
   assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Save provider").length, 1);
-  assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Test & save connection").length, 1);
+  // Phase 10 R1 (E4): the connection is tested, then saved — two buttons, never one.
+  assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Test connection").length, 1);
+  assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Save connection").length, 1);
+  assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Test & save connection").length, 0);
 });
 
 // The router rewrites #/setup and #/projects to these tabs (shell.test.mjs pins the aliases).
@@ -320,7 +325,7 @@ test("the setup and projects tabs render their page in place", async () => {
 // that has one (Workers is a read-only roster: nothing to save there).
 test("a save on each page re-renders that page: route() runs with the hash untouched", async () => {
   const saves = {
-    models: ["Test & save connection", { "PUT /api/llm/config": {}, "POST /api/llm/test": { ok: true, models: 2 } }],
+    models: ["Save context window", { "PUT /api/llm/config": {} }],
     projects: ["Use default workspace", {
       "GET /api/setup/status": { ...SETUP, workspace_project: { ready: false } },
       "POST /api/setup/default-workspace": {},

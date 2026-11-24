@@ -776,7 +776,12 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     chat_model = source[source.index("async function renderAssistantTab") :]
     chat_model = chat_model[: chat_model.index("// -- worker provider")]
     assert 'api("GET", "/api/llm/config")' in chat_model
-    assert 'api("POST", "/api/llm/test", {})' in chat_model
+    # Phase 10 R1 (E4): the connection is staged, probed (nothing saved), then
+    # saved by its own button — js/pages/settings-provider.js, mounted here.
+    assert "stagedConnection({ protocol, baseUrl, apiKey })" in chat_model
+    provider = (STATIC_DIR / "js" / "pages" / "settings-provider.js").read_text()
+    assert 'api("POST", "/api/llm/probe", body)' in provider
+    assert 'api("PUT", "/api/llm/config", body)' in provider
     assert 'api("GET", "/api/llm/models")' in chat_model
     assert 'api("PUT", "/api/llm/config"' in chat_model
     assert 'api("PUT", "/api/llm/config"' not in page  # not a second time

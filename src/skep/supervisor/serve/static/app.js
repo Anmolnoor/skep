@@ -13,6 +13,7 @@ import { viewInbox } from "./js/pages/inbox.js";
 import { forensicsSection, viewReview } from "./js/pages/run-detail.js";
 import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
 import { viewSchedules } from "./js/pages/schedules.js";
+import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js";
 
 // ---------- tiny view helpers ----------
 
@@ -4420,18 +4421,8 @@ async function renderAssistantTab(panel) {
     type: "password", autocomplete: "off",
     placeholder: llm.api_key_set ? "key saved — paste to replace" : "API key (cloud only)",
   });
-  const probe = el("button", { class: "primary" }, "Test & save connection");
-  probe.addEventListener("click", async () => {
-    probe.disabled = true;
-    try {
-      const body = { base_url: baseUrl.value.trim(), protocol: protocol.value };
-      if (apiKey.value.trim()) body.api_key = apiKey.value.trim();
-      await api("PUT", "/api/llm/config", body);
-      const verdict = await api("POST", "/api/llm/test", {});
-      if (verdict.ok) { flash("ok", `connected — ${verdict.models} model(s) available`); route(); }
-      else { flash("bad", `connection failed: ${verdict.detail}`); probe.disabled = false; }
-    } catch (e) { flash("bad", e.message); probe.disabled = false; }
-  });
+  // Phase 10 R1 (E4): staged → probed (nothing saved) → a separate Save.
+  const connection = stagedConnection({ protocol, baseUrl, apiKey });
   const llmCard = el("div", { class: "card" },
     el("div", { class: "row" },
       el("div", { class: "field" }, el("label", {}, "preset"), buildPresetPicker(protocol, baseUrl)),
@@ -4439,7 +4430,8 @@ async function renderAssistantTab(panel) {
       el("div", { class: "field grow" }, el("label", {}, "assistant base URL"), baseUrl),
       el("div", { class: "field grow" },
         el("label", {}, keyFieldLabel(llm)), apiKey),
-      probe));
+      connection.buttons),
+    connection.result);
   if (llm.api_key_set) {
     const clearKey = el("button", { class: "ghost" }, "Clear saved key");
     clearKey.addEventListener("click", async () => {
@@ -4489,6 +4481,7 @@ async function renderAssistantTab(panel) {
       ".");
   }).catch(() => {});
   panel.append(llmCard);
+  panel.append(providerShelf());
   if (llm.configured) {
     const modelRow = el("div", { class: "row" },
       el("p", { class: "note" }, "Loading available models..."));

@@ -1872,3 +1872,14 @@ th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
 .capture-accept { align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); }
 .forge-digest { overflow-wrap: anywhere; font-size: var(--text-sm); margin: var(--space-1) 0; }
 .forge-card .chip { margin: 0 var(--space-1) var(--space-1) 0; white-space: normal; overflow-wrap: anywhere; }
+/* Phase 10 R1 (E4): the staged probe's verdict and the provider shelf. */
+.probe-result { margin: var(--space-2) 0 0; overflow-wrap: anywhere; }
+.probe-result.tone-ok { color: var(--ok); }
+.probe-result.tone-warn { color: var(--warn); }
+.probe-result.tone-bad { color: var(--bad); }
+.provider-shelf { margin-top: var(--space-3); }
+.provider-shelf-title { margin: 0 0 var(--space-1); }
+.provider-row { padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft); }
+.provider-row .row { flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.provider-where { overflow-wrap: anywhere; margin: var(--space-1) 0; }
+.provider-row .chip { white-space: normal; overflow-wrap: anywhere; }

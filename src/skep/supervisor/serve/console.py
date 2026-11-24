@@ -20,6 +20,7 @@ from ..skills import DRAFT, TESTED
 from ..store import RunStore
 from .actions import approval_views, policy_decisions, tamper_note
 from .cards import BOUNDARIES, boundary
+from .llm import LlmTestRequest, probe_staged
 from .settings import ConfigHolder
 
 if TYPE_CHECKING:
@@ -317,6 +318,12 @@ def add_console_routes(
     def get_review_queue(detail: bool = True) -> dict[str, Any]:
         """The one review queue: the Inbox's rows and the badge's count."""
         return review_queue(run_store, holder, engine, detail=detail)
+
+    @app.post("/api/llm/probe")
+    def post_llm_probe(body: LlmTestRequest) -> dict[str, Any]:
+        """Settings' Test step: /api/llm/test's staged probe (nothing saved)
+        plus the model it asked and the context window the save would get."""
+        return probe_staged(run_store, holder.current.home, body, window=True)
 
     @app.get("/api/forge/tools")
     def get_forged_tools() -> dict[str, Any]:

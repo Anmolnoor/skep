@@ -2347,6 +2347,75 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
     # profile is the source (save_assistant_llm) and these are its mirrors.
 
 
+def probe_staged(
+    run_store: RunStore, home: Path, body: LlmTestRequest, *, window: bool = False
+) -> dict[str, Any]:
+    """The staged probe of /api/llm/test: the candidate's listing and one
+    1-token completion with ITS key, nothing saved. ``window`` (Phase 10 R1,
+    the Settings flow's probe): also the model the token asked and its
+    context window as the save would resolve it — provider-api (asked of the
+    endpoint now), catalog, or default; the key never comes back."""
+    saved_url, saved_model, saved_protocol = assistant_llm(run_store)
+    base_url = (body.base_url or "").strip().rstrip("/") or saved_url
+    if not base_url:
+        return {"ok": False, "detail": "no base URL configured"}
+    protocol = body.protocol or saved_protocol
+    same = base_url.rstrip("/") == (saved_url or "").rstrip("/")
+    from ..codex_login import uses_codex_login
+
+    try:
+        # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
+        # P2: a saved key only for the endpoint it was saved for.
+        pasted = (body.api_key or "").strip()
+        api_key = (
+            _codex_login_key(base_url)
+            if uses_codex_login(base_url)
+            # R2 (F10): a pasted key as the wire takes it (Copilot: exchanged)
+            else wire_key(base_url, pasted)
+            if pasted
+            else saved_key_for(run_store, home, base_url)
+        )
+    except OllamaError as exc:
+        return {"ok": False, "detail": str(exc)}
+    # Phase 05 (5.1): the listing AND one 1-token completion — the probe
+    # a dead key cannot pass (ollama.com lists models to anyone). P8: the
+    # saved model only for its own endpoint; another lists its own.
+    named = (body.default_model or "").strip() or (saved_model if same else None)
+    health = probe_candidate(
+        run_store,
+        home,
+        base_url=base_url,
+        model=named,
+        protocol=protocol,
+        api_key=api_key,
+    )
+    if not health.ok:
+        return {"ok": False, "detail": health.error, "http_status": health.http_status}
+    verdict: dict[str, Any] = {"ok": True, "models": len(health.models)}
+    if window:
+        from ..provider_presets import MODEL_CONTEXT_WINDOWS
+
+        model = named or (health.models[0] if health.models else "")
+        # v118-F1: no context endpoint behind the Codex login (refresh_model_ctx)
+        detected = (
+            None
+            if not model or uses_codex_login(base_url)
+            else detect_model_ctx(base_url, api_key, model=model, protocol=protocol)
+        )
+        if detected is not None:
+            context = {"window": detected[0], "max_output": detected[1], "source": "provider-api"}
+        elif model in MODEL_CONTEXT_WINDOWS:
+            context = {
+                "window": MODEL_CONTEXT_WINDOWS[model],
+                "max_output": None,
+                "source": "catalog",
+            }
+        else:
+            context = {"window": DEFAULT_NUM_CTX, "max_output": None, "source": "default"}
+        verdict.update(model=model, context_window=context)
+    return verdict
+
+
 def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
     @app.get("/api/llm/config")
     def get_llm_config() -> dict[str, Any]:
@@ -2417,42 +2486,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
     @app.post("/api/llm/test")
     def test_llm(body: LlmTestRequest) -> dict[str, Any]:
         """Always 200: the verdict is the payload, so the UI shows it inline."""
-        saved_url, saved_model, saved_protocol = assistant_llm(run_store)
-        base_url = (body.base_url or "").strip().rstrip("/") or saved_url
-        if not base_url:
-            return {"ok": False, "detail": "no base URL configured"}
-        protocol = body.protocol or saved_protocol
-        same = base_url.rstrip("/") == (saved_url or "").rstrip("/")
-        try:
-            from ..codex_login import uses_codex_login
-
-            # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
-            # P2: a saved key only for the endpoint it was saved for.
-            pasted = (body.api_key or "").strip()
-            api_key = (
-                _codex_login_key(base_url)
-                if uses_codex_login(base_url)
-                # R2 (F10): a pasted key as the wire takes it (Copilot: exchanged)
-                else wire_key(base_url, pasted)
-                if pasted
-                else saved_key_for(run_store, home, base_url)
-            )
-        except OllamaError as exc:
-            return {"ok": False, "detail": str(exc)}
-        # Phase 05 (5.1): the listing AND one 1-token completion — the probe
-        # a dead key cannot pass (ollama.com lists models to anyone). P8: the
-        # saved model only for its own endpoint; another lists its own.
-        health = probe_candidate(
-            run_store,
-            home,
-            base_url=base_url,
-            model=(body.default_model or "").strip() or (saved_model if same else None),
-            protocol=protocol,
-            api_key=api_key,
-        )
-        if not health.ok:
-            return {"ok": False, "detail": health.error, "http_status": health.http_status}
-        return {"ok": True, "models": len(health.models)}
+        return probe_staged(run_store, home, body)
 
     @app.get("/api/llm/usage")
     def get_llm_usage(chat_id: str | None = None) -> dict[str, Any]:

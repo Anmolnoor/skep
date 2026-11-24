@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from skep.supervisor import SupervisorConfig, policy_v3
 from skep.supervisor.policy_v3 import log_decision
 
 from .conftest import serve_client
+from .fake_ollama import FakeOllama
 
 
 def _live(config: SupervisorConfig) -> Path:
@@ -309,3 +311,56 @@ def test_forged_tools_route_shows_each_binding_and_rechecks_copy_and_seal(
     assert pdf["lock_sha256"] == lock and pdf["venv_sha256"] == sealed
     (venv / "bin" / "tool").write_text("swapped")
     assert client.get("/api/forge/tools").json()["tools"][1]["seal"] == "broken"
+
+
+# ---------- E4: the staged provider probe — test first, save separately ----------
+
+
+@pytest.fixture()
+def ollama() -> Iterator[FakeOllama]:
+    server = FakeOllama(api_key="sk-fake").start()
+    yield server
+    server.stop()
+
+
+def test_staged_probe_saves_nothing_and_reports_the_detected_context_window(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    ollama.show_context_lengths = {"llama3.2": 131072}
+    client = serve_client(config)
+    before = client.get("/api/llm/config").json()
+    good = client.post(
+        "/api/llm/probe", json={"base_url": ollama.base_url, "api_key": "sk-fake"}
+    ).json()
+    assert good["ok"] is True and good["models"] == 2 and good["model"] == "llama3.2"
+    assert good["context_window"] == {
+        "window": 131072,
+        "max_output": None,
+        "source": "provider-api",
+    }
+    assert "sk-fake" not in json.dumps(good)  # the key never comes back
+    bad = client.post("/api/llm/probe", json={"base_url": ollama.base_url, "api_key": "x"}).json()
+    assert bad["ok"] is False and "401" in bad["detail"] and "context_window" not in bad
+    # A probe is not a save (I8): the connection in use is exactly as it was.
+    assert client.get("/api/llm/config").json() == before
+    unknown = client.post(
+        "/api/llm/probe",
+        json={"base_url": ollama.base_url, "api_key": "sk-fake", "default_model": "qwen3:8b"},
+    ).json()
+    assert unknown["model"] == "qwen3:8b"
+    assert unknown["context_window"]["source"] == "default"  # nothing reported it
+
+
+def test_staged_probe_and_test_share_one_verdict(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client = serve_client(config)
+    body = {"base_url": ollama.base_url, "api_key": "sk-fake"}
+    tested = client.post("/api/llm/test", json=body).json()
+    probed = client.post("/api/llm/probe", json=body).json()
+    assert tested == {"ok": True, "models": 2}  # /api/llm/test is unchanged
+    assert {k: probed[k] for k in tested} == tested
+    assert client.post("/api/llm/probe", json={}).json() == {
+        "ok": False,
+        "detail": "no base URL configured",
+    }
