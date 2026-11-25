@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import re
 import threading
 import time
@@ -2557,6 +2558,18 @@ class ChatEngine:
                     yield self._go_ahead(chat_id, refused)
                     refused = []
                 yield event, data
+        except Exception as exc:
+            # v134-F1 (S3, I8): only provider errors had a path out; anything
+            # else killed the stream with no stored reply and the chat went
+            # silent (live test: ENAMETOOLONG in a policy probe, twice).
+            logging.getLogger("skep.serve").exception("chat turn %s failed", chat_id)
+            yield self._line(
+                chat_id,
+                f"skep hit an internal error and stopped this turn ({type(exc).__name__}: "
+                f"{redact(str(exc))[:300]}). The details are in serve.log; send your "
+                "message again to retry.",
+            )
+            yield ("error", {"detail": f"internal error: {type(exc).__name__}"})
         finally:
             inner.close()
             marks.discard(chat_id)
