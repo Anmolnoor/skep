@@ -2691,6 +2691,11 @@ async function viewChat(main, chatId) {
   // that stream's rows and must not spend its rule.
   let streamRule = null;
   let streamEpoch = 0;
+  // v133 R2 (S16): reads are numbered as they start; a response older than
+  // the last one applied is stale and is dropped, never drawn over a newer
+  // snapshot (nor allowed to free the queue).
+  let readsStarted = 0;
+  let readApplied = 0;
   // v133-F24 (G7): what the operator sent in this chat, oldest first — the
   // ↑ recall walks it. Filled by replay (their own rows only) and by deliver.
   const sentHistory = [];
@@ -2702,9 +2707,11 @@ async function viewChat(main, chatId) {
   const reconcile = async () => {
     if (!activeChatId || chatStreamActive) return;
     const epoch = streamEpoch;
+    const read = ++readsStarted;
     const fresh = await api("GET", `/api/chats/${activeChatId}`);
     // a stream began meanwhile (or ran start to finish): its finally reconciles
-    if (chatStreamActive || epoch !== streamEpoch) return;
+    if (chatStreamActive || epoch !== streamEpoch || read < readApplied) return;
+    readApplied = read;
     const readingAt = log.scrollHeight - log.scrollTop - log.clientHeight > 40 ? log.scrollTop : null;
     // The context panel redraws only when what it shows moved — a quiet poll
     // touches nothing on screen.

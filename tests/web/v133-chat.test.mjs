@@ -677,3 +677,49 @@ test("R2 S14: a card back at proposed after Running drops the verdict and gets i
   assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "drawn once");
   assert.equal(chat.main.querySelector(".composer-send").disabled, true, "it holds the composer again");
 });
+
+// S16: two overlapping reads — the older one answering last must not
+// overwrite the newer snapshot (and so must not free the queue).
+test("R2 S16: an older read resolving after a newer one is discarded; the queued message stays", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "start";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "queued while it runs";
+  chat.press("Enter");
+  await settle();
+  chat.server.actions.push(card("a1"));
+  finish();
+  await settle();
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 1);
+  // Two polls overlap: the older read sees the card answered (stale), the
+  // newer one sees it pending (current) and answers first.
+  const api = chat.app.api;
+  const gates = [];
+  chat.app.api = async (method, path, body) => {
+    if (method === "GET" && path === "/api/chats/c1") {
+      const snapshot = await api(method, path, body);
+      await new Promise(r => gates.push(r));
+      return snapshot;
+    }
+    return api(method, path, body);
+  };
+  chat.server.actions[0].status = "denied";
+  const older = chat.app.poll();
+  await settle();
+  chat.server.actions[0].status = "proposed";
+  const newer = chat.app.poll();
+  await settle();
+  assert.equal(gates.length, 2, "both reads are in flight");
+  gates[1]();
+  await newer;
+  gates[0]();
+  await older;
+  await settle();
+  assert.deepEqual(chat.streams.map(([, b]) => b.content), ["start"], "nothing queued was sent");
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 1);
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true);
+  assert.equal(chat.log.querySelector(".confirm-card").classList.contains("resolved"), false);
+});
