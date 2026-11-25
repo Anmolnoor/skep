@@ -422,7 +422,13 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     card_json TEXT,
     -- D18: who clicked, while the model's follow-up for this verdict waits
     -- its turn; cleared when that follow-up starts (a restart resumes it).
-    follow_up TEXT
+    follow_up TEXT,
+    -- v133-F11 (J3, I13): at the verdict, the actor string skep can name
+    -- ('policy' when a rule decided with no human), the surface as a hint,
+    -- and the evidence the card carried. NULL = unknown (an older row).
+    resolved_by TEXT,
+    resolved_surface TEXT,
+    evidence_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -621,6 +627,8 @@ _SCHEDULE_HEALTH_WINDOW = 20
 # v132-F8: the schedule names an operator deleted; setup never re-seeds them.
 DELETED_SCHEDULES_KEY = "deleted_schedules"
 PROVIDER_BLOCKED_STATE = "provider_blocked"
+# v133-F11 (J2): a chat_actions row a policy rule resolved with no human.
+POLICY_RESOLVER = "policy"
 # v111-F5: store files from retired layouts, relative to the skep home. Each
 # migration left its sqlite behind silently; two independent investigations
 # (doctor's own memory check pre-F2, and the 2026-08-12 forensics session)
@@ -873,6 +881,13 @@ class ChatActionRecord:
     # ``tier``/``high`` (HIGH and why), ``items`` (folded calls beyond this
     # row's own: ``{"args", "tool_call_id"}``), ``manifest`` (a dispatch's).
     card: dict[str, Any] | None = None
+    # v133-F11 (J3, I13): who resolved it — the actor string as given, or
+    # POLICY_RESOLVER for a row a rule decided with no human; the surface as
+    # a client hint; the evidence the card carried at the verdict. None =
+    # unknown (a row from before v133, or a path that did not say).
+    resolved_by: str | None = None
+    resolved_surface: str | None = None
+    evidence: dict[str, Any] | None = None
 
     def fold_items(self) -> list[dict[str, Any]]:
         """Every call this card answers: its own first, then the folded ones."""
@@ -1375,6 +1390,11 @@ class RunStore:
         if "follow_up" not in action_columns:
             # D18: a queued follow-up turn survives a serve restart.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN follow_up TEXT")
+        for column in ("resolved_by", "resolved_surface", "evidence_json"):
+            if column not in action_columns:
+                # v133-F11: who resolved a card, where, on what evidence. Old
+                # rows stay NULL — unknown, never a guessed actor (I8).
+                self._conn.execute(f"ALTER TABLE chat_actions ADD COLUMN {column} TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -4911,7 +4931,8 @@ class RunStore:
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
-        " source, decided_by, tool_call_id, card_json"
+        " source, decided_by, tool_call_id, card_json, resolved_by, resolved_surface,"
+        " evidence_json"
     )
 
     @staticmethod
@@ -4929,6 +4950,9 @@ class RunStore:
             decided_by=None if row[9] is None else str(row[9]),
             tool_call_id=None if row[10] is None else str(row[10]),
             card=None if row[11] is None else dict(json.loads(str(row[11]))),
+            resolved_by=None if row[12] is None else str(row[12]),
+            resolved_surface=None if row[13] is None else str(row[13]),
+            evidence=None if row[14] is None else dict(json.loads(str(row[14]))),
         )
 
     @_locked
@@ -5011,8 +5035,8 @@ class RunStore:
         self._conn.execute(
             "INSERT INTO chat_actions"
             " (action_id, chat_id, tool, args_json, status, result_json,"
-            "  created_at, resolved_at, source, decided_by)"
-            " VALUES (?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?)",
+            "  created_at, resolved_at, source, decided_by, resolved_by)"
+            " VALUES (?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?)",
             (
                 action_id,
                 chat_id,
@@ -5023,6 +5047,9 @@ class RunStore:
                 now,
                 source,
                 decided_by,
+                # v133-F11 (J2): a rule decided, no human — the status stays
+                # 'confirmed' (chat_for_task and the routing filter on it)
+                POLICY_RESOLVER,
             ),
         )
         self._conn.commit()
@@ -5252,7 +5279,15 @@ class RunStore:
 
     @_locked
     def resolve_chat_action(
-        self, action_id: str, *, status: str, result: Any, claimed: bool = False
+        self,
+        action_id: str,
+        *,
+        status: str,
+        result: Any,
+        claimed: bool = False,
+        actor: str | None = None,
+        surface: str | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> None:
         """Record the verdict; like approvals, resolution is final.
 
@@ -5263,12 +5298,35 @@ class RunStore:
         (The v63-F2/v87-F2 superseded→confirmed exception is gone: the
         reconciliation only supersedes 'proposed' cards, and a card being
         executed is 'executing'.)
+
+        v133-F11 (J3, I13): the same UPDATE records ``actor`` (as given —
+        None stays unknown), ``surface`` (a client hint; a ``channel:<name>:…``
+        actor names its own) and the evidence the card carried: ``evidence``,
+        else what the card recorded as its ``evidence`` when proposed.
         """
         expected = "executing" if claimed else "proposed"
+        if surface is None and actor is not None and actor.startswith("channel:"):
+            surface = actor.split(":")[1] or None
+        if evidence is None:
+            row = self._conn.execute(
+                "SELECT card_json FROM chat_actions WHERE action_id = ?", (action_id,)
+            ).fetchone()
+            shown = None if row is None or row[0] is None else json.loads(str(row[0]))
+            evidence = shown.get("evidence") if isinstance(shown, dict) else None
         cursor = self._conn.execute(
-            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?"
+            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?,"
+            " resolved_by = ?, resolved_surface = ?, evidence_json = ?"
             " WHERE action_id = ? AND status = ?",
-            (status, json.dumps(result, ensure_ascii=True), _now(), action_id, expected),
+            (
+                status,
+                json.dumps(result, ensure_ascii=True),
+                _now(),
+                actor,
+                surface,
+                None if evidence is None else json.dumps(evidence, ensure_ascii=True),
+                action_id,
+                expected,
+            ),
         )
         self._conn.commit()
         if cursor.rowcount == 1:

@@ -4480,7 +4480,9 @@ def expire_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
     if not store.claim_chat_action(action_id):
         return False
     payload = {"ok": False, "denied": True, "note": note, "auto": True}
-    store.resolve_chat_action(action_id, status="denied", result=payload, claimed=True)
+    store.resolve_chat_action(
+        action_id, status="denied", result=payload, claimed=True, actor="auto:timeout"
+    )  # v133-F11: the deadline denied it, no human (I6)
     return True
 
 
@@ -4493,7 +4495,9 @@ def abandon_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
     note = f"the engine already answered no: {note}"
     payload = {"ok": False, "superseded": True, "note": note, "auto": True}
     try:
-        store.resolve_chat_action(action_id, status="superseded", result=payload, claimed=True)
+        store.resolve_chat_action(
+            action_id, status="superseded", result=payload, claimed=True, actor="auto:engine"
+        )  # v133-F11: the engine's own answer settled it, no human
     except ValueError:
         return False
     return True
