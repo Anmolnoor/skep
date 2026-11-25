@@ -926,6 +926,10 @@ TOOL_REPLAY_CAP = 2000  # prior-turn tool results replay truncated to this
 # v58-F6: current-turn tool results stay detailed but bounded — one oversized
 # result must never evict the question it is meant to answer.
 CURRENT_TOOL_REPLAY_CAP = 8000
+# v134-F8 (T1): a prior turn's tool-call argument strings replay cut to this
+# (a dispatch_run brief is ~3.6k; live test: call arguments were 32% of a
+# 279k-token request and never cut). The stored call stays whole.
+TOOL_CALL_ARG_REPLAY_CAP = 500
 SUMMARY_MAX_CHARS = 4000  # rolling digest cap; oldest lines drop first
 RESPONSE_RESERVE_CHARS = 8000  # window headroom left for the model's answer
 MIN_HISTORY_BUDGET_CHARS = 8000  # replay never squeezed below this
@@ -1868,7 +1872,18 @@ def _malformed_args(call: dict[str, Any]) -> str | None:
         return arguments
 
 
-def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
+def _cut_arguments(arguments: dict[str, Any], cap: int) -> dict[str, Any]:
+    """v134-F8 (T1): each string argument longer than ``cap`` cut to it."""
+    return {
+        key: f"{value[:cap]}… [{len(value) - cap} chars cut for context; the call is whole "
+        "in the transcript]"
+        if isinstance(value, str) and len(value) > cap
+        else value
+        for key, value in arguments.items()
+    }
+
+
+def _replayable_call(call: dict[str, Any], cap: int | None = None) -> dict[str, Any]:
     """ES-F10 (B84): a stored call replays with object arguments — ``{}``
     when they are not a JSON object. Resent verbatim, ES-F8's garbled string
     drew a 400 from ollama.com on both protocols on every later turn: one bad
@@ -1882,6 +1897,8 @@ def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
             arguments = None
     if not isinstance(arguments, dict):
         arguments = {}
+    if cap is not None:
+        arguments = _cut_arguments(arguments, cap)
     return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
 
 
@@ -2272,7 +2289,12 @@ class ChatEngine:
                     {
                         "role": "assistant",
                         "content": record.content,
-                        "tool_calls": [_replayable_call(c) for c in record.tool_calls],
+                        "tool_calls": [
+                            _replayable_call(
+                                c, TOOL_CALL_ARG_REPLAY_CAP if record.id < last_user_id else None
+                            )
+                            for c in record.tool_calls
+                        ],
                     }
                 )
                 open_calls = len(record.tool_calls)
@@ -2308,7 +2330,10 @@ class ChatEngine:
         total = 0
         keep_from = len(messages)
         for index in range(len(messages) - 1, -1, -1):
+            # v134-F8 (T1): the calls' arguments are sent too — count them
+            calls = messages[index].get("tool_calls")
             cost = len(str(messages[index].get("content") or "")) + 64
+            cost += len(json.dumps(calls)) if calls else 0
             if total + cost > budget and keep_from < len(messages):
                 break
             total += cost
@@ -2384,6 +2409,9 @@ class ChatEngine:
             size = len(record.content or "")
             if record.role == "tool":
                 size = min(size, TOOL_REPLAY_CAP + len(_TOOL_TRUNCATION_MARKER))
+            if record.tool_calls:  # v134-F8 (T1): sent too, cut as replay cuts them
+                calls = [_replayable_call(c, TOOL_CALL_ARG_REPLAY_CAP) for c in record.tool_calls]
+                size += len(json.dumps(calls))
             return size + 64
 
         total = sum(replay_cost(record) for record in records)

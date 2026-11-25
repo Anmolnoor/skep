@@ -4,10 +4,13 @@ F1 (S3, I8) a turn that raises anything still ends with a stored reply.
 F2 (S2) skep's own secrets never enter a chat; titles never carry a credential.
 F3 (D1) the worktree TTL sweep never counts a tree that is already gone.
 F4 (S1, I2 I8) a landing card never shows a syntax-only G10 pass as clean.
+F5 (N3) short run ids name one run.
+F8 (T1) the replay budget counts tool-call arguments; old ones are cut.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -229,3 +232,55 @@ def test_a_pr_title_names_the_run_by_a_prefix_that_does_not_collide() -> None:
     a = default_pr_title("bump", "01a211bf-5927-75b4-86ce-63b084010555")
     b = default_pr_title("bump", "01a211bf-9697-703e-b864-d0aefa52c9eb")
     assert a != b and a.endswith("(skep 01a211bf-5927)")
+
+
+# ---------- F8 (T1): tool-call arguments count, and old ones are cut ----------
+
+
+def _engine(rig: Rig) -> ChatEngine:
+    holder = ConfigHolder(rig.config, rig.store)
+    return ChatEngine(
+        store=rig.store, holder=holder, runner=Dispatcher(store=rig.store, holder=holder),
+        home=rig.config.home,
+    )  # fmt: skip
+
+
+def _dispatch_turn(rig: Rig, chat_id: str, instructions: str, ask: str) -> None:
+    rig.store.add_chat_message(chat_id, role="user", content=ask)
+    rig.store.add_chat_message(
+        chat_id, role="assistant", content="",
+        tool_calls=[{"function": {"name": "dispatch_run", "arguments": {
+            "repo": "r", "instructions": instructions}}}],
+    )  # fmt: skip
+    rig.store.add_chat_message(chat_id, role="tool", tool_name="dispatch_run", content="{}")
+
+
+def test_old_turns_replay_their_tool_call_arguments_cut_and_the_current_turn_whole(
+    rig: Rig,
+) -> None:
+    chat_id = rig.store.create_chat(title="f8", model=None).chat_id
+    _dispatch_turn(rig, chat_id, "old " * 2000, "first")
+    _dispatch_turn(rig, chat_id, "new " * 2000, "second")
+
+    messages = _engine(rig)._turn_messages(chat_id)
+
+    calls = [m for m in messages if m.get("tool_calls")]
+    old, new = (c["tool_calls"][0]["function"]["arguments"]["instructions"] for c in calls)
+    assert len(old) < 700 and "cut" in old
+    assert new == "new " * 2000
+    stored = next(m for m in rig.store.chat_messages(chat_id) if m.tool_calls)
+    assert stored.tool_calls is not None
+    assert stored.tool_calls[0]["function"]["arguments"]["instructions"] == "old " * 2000
+
+
+def test_the_replay_budget_counts_tool_call_arguments(rig: Rig) -> None:
+    chat_id = rig.store.create_chat(title="f8b", model=None).chat_id
+    for n in range(6):
+        _dispatch_turn(rig, chat_id, f"turn {n} " + "x" * 400, f"ask {n}")
+    engine = _engine(rig)
+    chat = rig.store.get_chat(chat_id)
+
+    kept, dropped = engine._replay(chat_id, chat, budget=2000)
+
+    sent = sum(len(json.dumps(m)) for m in kept)
+    assert dropped > 0 and sent < 4000, (dropped, sent)
