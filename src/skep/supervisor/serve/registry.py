@@ -1162,9 +1162,14 @@ def _carry_forward_existing(
     # move into a phase that turns it on may.
     # v133-F35 (J9, I6): the same for a stored "auto-dispatch off" — the
     # strategy default (on) must not quietly reopen the lane on a re-setup.
-    for key in ("auto_apply_verified_patch", "auto_dispatch_allowed"):
-        if stored.policy.get(key) is False and key not in overrides and stored.phase == phase:
-            merged[key] = False
+    # v133 R3 (U3): and for where auto-landing commits — a stored branch
+    # survives a re-setup that does not name it. One rule: a same-phase
+    # re-setup keeps the stored value of a key it does not name, except an
+    # "on", which the defaults still decide (keeping one never opens a lane).
+    for key in ("auto_apply_verified_patch", "auto_dispatch_allowed", "auto_apply_branch"):
+        value = stored.policy.get(key)
+        if value not in (None, True) and key not in overrides and stored.phase == phase:
+            merged[key] = value
     # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
     # A binding the project did not have (a same-named folder elsewhere: the
     # id is the basename) is a new target, so the unlock stays behind unless

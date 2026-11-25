@@ -385,7 +385,7 @@ def high_tier(
         from .tools import setup_card_facts
 
         landing = (setup_card_facts(store, safe) or {}).get("auto_landing") or {}
-        if landing.get("new") is True:
+        if landing.get("new") is True and landing.get("old") is not True:
             return (
                 f"it turns auto-landing on: G10-confirmed patches land on {landing['branch']} "
                 "with no human approval"
@@ -821,13 +821,20 @@ def setup_line(setup: dict[str, Any]) -> str | None:
     if pin.get("syntax_only"):
         parts.append(f"{pin['syntax_only']} — it cannot qualify a patch for auto-landing")
     landing = setup.get("auto_landing")
-    if landing:
+    if landing and landing.get("old") != landing.get("new"):
         asked = landing.get("asked")
         if landing.get("new"):  # unasked, only a phase default turns it on
             how = "asked for" if asked else "from the phase default"
             parts.append(f"auto-landing: off → ON ({how}), lands on {landing['branch']}")
         else:
             parts.append(f"auto-landing: on → off ({'asked for' if asked else 'derived'})")
+    elif landing and landing.get("old_branch") != landing.get("branch"):
+        # R3 (U3): a destination-only change, in plain words
+        how = "asked for" if landing.get("asked") else "derived"
+        parts.append(
+            f"auto-landing stays on: lands on {landing['branch']} instead of "
+            f"{landing['old_branch']} ({how})"
+        )
     return "; ".join(parts) or None
 
 

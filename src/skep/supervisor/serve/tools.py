@@ -4825,16 +4825,25 @@ def setup_card_facts(store: RunStore, args: dict[str, Any]) -> dict[str, Any] | 
             "syntax_only": syntax_only_verify(new_pin) if new_pin else None,
         }
     }
-    if _auto_landing(old) != _auto_landing(new):
-        asked = {"auto_apply_verified_patch", "unlocked"} & set(setup_overrides(args))
-        branch = new.get("auto_apply_branch") if _auto_landing(new) else None
+    if _auto_landing(old) or _auto_landing(new):
+        # R3 (U3): whenever it is on before or after, the destination before
+        # and after — the confirm refuses a card whose destination moved
+        asked = {"auto_apply_verified_patch", "unlocked", "auto_apply_branch"}
         facts["auto_landing"] = {
             "old": _auto_landing(old),
             "new": _auto_landing(new),
-            "asked": bool(asked),
-            "branch": str(branch or "skep/<task_id>") if _auto_landing(new) else None,
+            "asked": bool(asked & set(setup_overrides(args))),
+            "old_branch": _landing_branch(old),
+            "branch": _landing_branch(new),
         }
     return facts
+
+
+def _landing_branch(policy: dict[str, Any]) -> str | None:
+    """Where auto-landing commits under ``policy``; None when it is off."""
+    if not _auto_landing(policy):
+        return None
+    return str(policy.get("auto_apply_branch") or "skep/<task_id>")
 
 
 def _g10_shown(card: dict[str, Any] | None, run: dict[str, Any]) -> list[Any] | None:

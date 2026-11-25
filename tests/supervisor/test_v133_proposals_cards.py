@@ -369,7 +369,10 @@ def test_a_setup_card_that_turns_auto_landing_on_is_high_and_names_the_branch(
         args = {"project_id": "proj", "name": "proj", "phase": "maintain"}  # derived, not asked
         recorded, summary = _setup_card(store, args)
         landing = recorded["setup"]["auto_landing"]
-        assert landing == {"old": False, "new": True, "asked": False, "branch": "skep/maintain"}
+        assert landing == {
+            "old": False, "new": True, "asked": False,
+            "old_branch": None, "branch": "skep/maintain",
+        }  # fmt: skip
         assert recorded["tier"] == "high" and "auto-landing on" in recorded["high"]
         assert summary["tier"] == "high"
         assert "auto-landing: off → ON (from the phase default), lands on skep/maintain" in str(
@@ -744,5 +747,100 @@ def test_a_cli_merge_records_who_resolved_its_card(
     try:
         [action] = [a for c in store.list_chats() for a in store.chat_actions(c.chat_id)]
         assert (action.resolved_by, action.resolved_surface) == (getpass.getuser(), "cli")
+    finally:
+        store.close()
+
+
+# ---------- v133 R3 (U3): a re-setup keeps where auto-landing commits ----------
+
+_RELEASE = {
+    "verify_command": "uv run pytest",
+    "auto_apply_verified_patch": True,
+    "auto_apply_branch": "skep/release",
+}
+
+
+@pytest.mark.parametrize("route", ["setup", "preview"])
+def test_r3_u3_a_same_phase_re_setup_keeps_a_stored_auto_landing_branch(
+    config: SupervisorConfig, repo: Path, route: str
+) -> None:
+    from skep.supervisor.serve.registry import (
+        preview_project_setup,
+        repos_root,
+        setup_project_record,
+    )
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, _RELEASE, phase="maintain")
+        common: dict[str, Any] = {
+            "run_store": store, "root": repos_root(holder), "project_id": "proj",
+            "name": "proj", "strategy": "trusted_local_dev", "phase": "maintain",
+            "repo_path": str(repo), "policy_overrides": {"coding_engine": "builtin"},
+        }  # fmt: skip
+        if route == "setup":
+            result = setup_project_record(**common)
+            policy = result["policy"]
+        else:
+            result = preview_project_setup(
+                **common, pack_name=None, repo_slug=None, template_names=[]
+            )
+            policy = result["effective_policy"]
+        assert policy["auto_apply_branch"] == "skep/release"
+        assert "auto_apply_branch" not in {c["key"] for c in result["policy_changes"]}
+    finally:
+        store.close()
+
+
+def test_r3_u3_a_setup_card_whose_landing_branch_moved_since_it_was_shown_is_refused(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    from fastapi import HTTPException
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, {**_RELEASE, "auto_apply_branch": "skep/maintain"}, phase="maintain")
+        args = {
+            "project_id": "proj", "name": "proj", "phase": "maintain", "repo_path": str(repo),
+            "policy_overrides": {"coding_engine": "builtin"},
+        }  # fmt: skip
+        recorded, summary = _setup_card(store, args)
+        assert "auto-landing:" not in str(summary.get("risk"))  # nothing about it changes
+        assert "tier" not in recorded or "auto-landing on" not in str(recorded.get("high"))
+        moved = {**args, "policy_overrides": {"auto_apply_branch": "skep/release"}}
+        _confirm(store, holder, "setup_project", moved)  # a second setup moves it
+        with pytest.raises(HTTPException) as refused:
+            execute_mutation(
+                "setup_project", args, store=store, holder=holder,
+                runner=None, actor="tester", card=recorded,  # type: ignore[arg-type]
+            )  # fmt: skip
+        assert refused.value.status_code == 409
+        stored = store.get_project_policy("proj")
+        assert stored is not None and stored.policy["auto_apply_branch"] == "skep/release"
+    finally:
+        store.close()
+
+
+def test_r3_u3_a_setup_card_that_moves_only_the_landing_branch_says_so(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    store, _holder = _parts(config)
+    try:
+        _bind(store, repo, {**_RELEASE, "auto_apply_branch": "skep/maintain"}, phase="maintain")
+        args = {
+            "project_id": "proj", "name": "proj", "phase": "maintain",
+            "policy_overrides": {"auto_apply_branch": "skep/release"},
+        }  # fmt: skip
+        recorded, summary = _setup_card(store, args)
+        assert recorded["setup"]["auto_landing"] == {
+            "old": True, "new": True, "asked": True,
+            "old_branch": "skep/maintain", "branch": "skep/release",
+        }  # fmt: skip
+        risk = str(summary["risk"])
+        assert "auto-landing stays on: lands on skep/release instead of skep/maintain" in risk
+        # HIGH by the existing rule for a card that writes policy_overrides; it
+        # does not claim to turn auto-landing on
+        assert recorded["tier"] == "high" and summary["tier"] == "high"
+        assert "policy_overrides" in recorded["high"]
     finally:
         store.close()
