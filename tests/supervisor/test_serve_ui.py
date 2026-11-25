@@ -1242,18 +1242,20 @@ def test_user_facing_vocabulary_names_gates_and_templates() -> None:
 def test_badge_poll_refreshes_what_it_counts() -> None:
     """v56-F6 (ADR 0038): the approvals list / Home panel re-render when the
     pending count changes, and a card-locked chat unlocks within one poll
-    cycle when its cards were resolved on another surface."""
+    cycle when its cards were resolved on another surface. v133-F20: the
+    open chat reconciles itself in place (tests/web/v133-chat.test.mjs runs
+    it); the poll only calls the view's reconcile."""
     source = (STATIC_DIR / "app.js").read_text()
     assert "let lastPendingApprovals = null;" in source
-    assert "let pendingCardChatId = null;" in source
     poll_body = source[
         source.index("async function poll()") : source.index("function schedulePoll")
     ]
     assert "status.pending_approvals !== lastPendingApprovals" in poll_body
     assert 'hash === "#/approvals"' in poll_body
-    assert 'action.status === "proposed"' in poll_body
-    # the chat view registers its lock with the poll
-    assert "pendingCardChatId = locked ? activeChatId : null;" in source
+    # the chat view registers its reconcile with the poll, and drops it on teardown
+    assert "chatReconcile = reconcile;" in source
+    assert "chatReconcile = null;" in source
+    assert "await chatReconcile();" in poll_body
 
 
 def test_poll_never_reroutes_while_a_chat_stream_is_active() -> None:
@@ -1264,7 +1266,7 @@ def test_poll_never_reroutes_while_a_chat_stream_is_active() -> None:
     2026-07-18: flicker, the follow-up card invisible until it auto-denied).
     The poll now defers to the stream, which reconciles the composer itself."""
     source = (STATIC_DIR / "app.js").read_text()
-    assert "pendingCardChatId && !chatStreamActive" in source
+    assert "chatReconcile && !chatStreamActive" in source  # v133-F20
     assert "chatStreamActive = true" in source
     # Cleared in the stream's finally — a thrown stream must never leave the
     # poll muzzled forever.
@@ -1630,8 +1632,9 @@ def test_command_palette_navigates_and_never_mutates() -> None:
 def test_pending_cards_reconcile_without_a_reload() -> None:
     """v81-F13: a pending card reaches an open chat through exactly one live
     channel (the SSE `action` event) — so every other path reconciles: the
-    stream's finally re-draws what the drop lost, and the poll routes when an
-    undrawn card exists. Both key off data-action-id on the card DOM."""
+    stream's finally re-draws what the drop lost, and the poll reconciles the
+    open view in place (v133-F19/F20, was a route()). Both key off
+    data-action-id on the card DOM."""
     source = (STATIC_DIR / "app.js").read_text()
 
     # The id rides the DOM on ALL card kinds (assistant, command, v87-F2 gate,
@@ -1643,12 +1646,14 @@ def test_pending_cards_reconcile_without_a_reload() -> None:
     finally_start = source.index("chatStreamActive = false")
     finally_block = source[finally_start : source.index("updateContextMeter()", finally_start)]
     assert "renderPendingCards()" in finally_block
-    # The poll routes when the open chat holds a card the DOM does not.
-    poll = source[source.index("const openChatMatch") :]
-    assert '.confirm-card[data-action-id="${action.action_id}"]' in poll
-    assert "if (undrawn) route();" in poll
+    # The view's reconcile draws what the DOM does not hold, through the same loop.
+    reconcile = source[source.index("const reconcile = async") :]
+    reconcile = reconcile[: reconcile.index("\n  };")]
+    assert "renderPendingCards();" in reconcile
+    assert '.confirm-card[data-action-id="${action.action_id}"]' in source
     # v60-F1 stands: never reconcile while a stream is appending to the log.
-    assert "!chatStreamActive && hash.match" in source
+    assert "chatReconcile && !chatStreamActive" in source
+    assert "if (!activeChatId || chatStreamActive) return;" in reconcile
 
 
 def test_dead_cards_drop_their_buttons() -> None:
@@ -1686,8 +1691,9 @@ def test_worker_loader_ticks_from_dispatch_and_announces_terminals_once() -> Non
     # completions announce too, once — never re-flashed by a stream reconnect
     assert "if (notifiedTerminalRuns.has(d.task_id)) return;" in source
     assert 'flash("ok", `run ${d.task_id.slice(0, 13)}… completed`)' in source
-    # the stored terminal line appears via redraw — never mid-stream or over a draft
-    assert "if (!chatStreamActive && !input.value.trim()) route();" in source
+    # the stored terminal line is drawn in place (v133-F20: no rebuild, so a
+    # draft survives); mid-stream the stream's finally draws it
+    assert "if (!chatStreamActive) reconcile().catch(() => {});" in source
     assert ".worker-loader:empty { display: none; }" in styles
 
 
@@ -1891,9 +1897,10 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
     chat = source[source.index("async function viewChat") :]
     chat = chat[: chat.index("// ---------- Assign")]
 
-    # The drop is gone: a disabled send QUEUES.
+    # The drop is gone: a disabled send QUEUES. v133-F22: one entry per
+    # message, never merged into the first.
     assert "if (!content || send.disabled || !assistantReady) return;" not in chat
-    assert "queuedMessage = queuedMessage ? `${queuedMessage}\\n${content}` : content;" in chat
+    assert "queued.push(content);" in chat
     # Feedback, both transient and persistent — a queue nobody can see is the
     # same defect wearing a queue (I8).
     assert 'flash("ok", "queued — sends when this turn finishes")' in chat
@@ -1906,12 +1913,12 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
 
     # The TDZ trap: setComposerLocked runs during the first render and calls
     # flushQueued, so the queue state must be declared ABOVE it.
-    assert chat.index("let queuedMessage") < chat.index("const setComposerLocked")
-    assert chat.index("let queuedMessage") < chat.index("setComposerLocked(anyCardPending())")
+    assert chat.index("let queued = []") < chat.index("const setComposerLocked")
+    assert chat.index("let queued = []") < chat.index("setComposerLocked(anyCardPending())")
     # And the empty-queue guard must come before any use of `deliver`.
     flush = chat[chat.index("const flushQueued") :]
     flush = flush[: flush.index("\n  };")]
-    assert flush.index("if (!queuedMessage") < flush.index("deliver()")
+    assert flush.index("if (!queued.length") < flush.index("deliver(content)")
 
 
 def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
