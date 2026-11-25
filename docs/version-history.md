@@ -3485,8 +3485,8 @@ differently.
   `--prefix X` / `-C X`, or pnpm's `-C X`, when that directory is inside the
   worktree. This covers the baseline install and the re-install after a
   patched lockfile. Other forms (yarn `--cwd`, pnpm `--dir`, workspaces,
-  `pushd`) are not followed: the worktree root, or the last literal `cd`, is
-  primed instead. A directory that is not a literal path inside the worktree
+  `pushd`) are not followed: the worktree root, or the directory the literal
+  `cd` steps before the command reach, is primed instead. A directory that is not a literal path inside the worktree
   primes nothing, and the record says so.
 - A dependency install that fails is recorded as "could not install
   dependencies", outcome `unavailable`, with no exit codes. Before, the
@@ -3516,8 +3516,8 @@ differently.
 - Changed files under `node_modules`, `.venv` or `site-packages` are no
   longer labelled test tampering. A patch that vendors files under those
   directories or `vendor/` still cannot land by itself. Test files and
-  `conftest.py`, `pytest.ini`, `jest.config.*` and `vitest.config.*` under
-  `vendor/` are still flagged, because pytest collects from it; manifests
+  `conftest.py`, `pytest.ini`, `jest.config.*`, `vitest.config.*` and the
+  like under `vendor/` are still flagged, because pytest collects from it; manifests
   there (`pyproject.toml`, `package.json`, `setup.cfg`, `tox.ini`) are not.
 
 ### Workers and grants
