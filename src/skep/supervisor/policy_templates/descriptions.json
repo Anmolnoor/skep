@@ -31,7 +31,7 @@
     "shell-pnpm-install": "A worker may run pnpm install without a card to install the project's packages; the Queen's own shell still asks.",
     "shell-cargo-test": "A worker may run cargo test without a card to test its change; the Queen's own shell still asks.",
     "shell-go-test": "A worker may run go test without a card to test its change; the Queen's own shell still asks.",
-    "shell-learnable": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+    "shell-learnable": "Any other shell command asks first. A worker approval can be remembered as a command prefix, which also covers longer commands that start with it (a remembered Queen command covers only that exact line); a bare interpreter or its eval flag (node, node -e, python -c) is never remembered, and the floor's denies still apply.",
     "fs-workspace": "Writes inside the run's workspace are allowed: it is a disposable copy, and changes reach your repo only as an approved patch.",
     "fs-write-gated": "A write anywhere outside the workspace asks first, so nothing beyond the copy changes without you.",
     "net-pypi": "Workers may connect to pypi.org (that host only, not its subdomains) to install Python packages.",

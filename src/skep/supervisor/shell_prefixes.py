@@ -164,7 +164,25 @@ def _launch_index(tokens: Sequence[str]) -> int | None:
     return index if index < len(tokens) and not tokens[index].startswith("-") else None
 
 
-_BROAD_INTERPRETERS: frozenset[str] = frozenset({"bash", "sh", "zsh", "fish", "python", "python3"})
+_BROAD_INTERPRETERS: frozenset[str] = frozenset(
+    {"bash", "sh", "zsh", "fish", "python", "python3"}
+    # v133-F2 (A6): a remembered bare `node` let a worker run any `node -e`
+    | {"node", "deno", "bun", "ruby", "perl", "php", "lua", "pwsh", "awk"}
+)
+
+# v133-F2 (A6): each interpreter's eval form, refused like `python -c` — the
+# grant would cover every program the model hands it. pwsh reads its own
+# parameters case-insensitively, so they are compared casefolded.
+_INTERPRETER_EVAL_FLAGS: dict[str, frozenset[str]] = {
+    "node": frozenset({"-e", "--eval", "-p", "--print"}),
+    "bun": frozenset({"-e", "--eval", "-p", "--print"}),
+    "deno": frozenset({"eval"}),
+    "ruby": frozenset({"-e"}),
+    "perl": frozenset({"-e", "-E"}),
+    "php": frozenset({"-r"}),
+    "lua": frozenset({"-e"}),
+    "pwsh": frozenset({"-c", "-command", "-e", "-ec", "-encodedcommand"}),
+}
 
 # v84-F4 (ADR 0044): outbound-content prefixes are never-grantable — the git
 # precedent applied to posting. A wrong post is public and permanent, so the
@@ -530,7 +548,7 @@ def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | No
     layout ``<SKEP_HOME>/supervisor``, so ``<SKEP_HOME>`` minus its ``repos``
     clones), relative names judged against ``cwd``. The Queen's lanes only:
     the hook and REST keep the narrower ``skep trust`` floor."""
-    from .secret_floor import names_path_under
+    from .secret_floor import SERVE_ENV, SERVE_ENV_MANUAL_STEP, names_path_under
 
     segments = command_line_segments(command) or []
     if any(is_skep_trust_command(argv) for argv in segments):
@@ -538,6 +556,9 @@ def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | No
     if any(_skep_subcommands(argv) for argv in segments):
         return SKEP_SELF_REFUSAL
     root = home.parent if home.name == "supervisor" else home
+    if names_path_under(command, root / SERVE_ENV, cwd=cwd, except_under=root / "repos"):
+        # v133-F6 (C2): the one skep file an operator edits by hand
+        return f"the chat's shell never touches skep's own files; {SERVE_ENV_MANUAL_STEP}"
     if names_path_under(command, root, cwd=cwd, except_under=root / "repos"):
         return SKEP_SELF_REFUSAL
     return None
@@ -1034,7 +1055,7 @@ def argv_segments(argv: Sequence[str]) -> list[list[str]] | None:
 # acceptable shape in-line.
 _TOO_BROAD_TEACH = (
     "; narrow it with arguments (e.g. 'npm run build', 'uv sync') - bare "
-    "interpreters and -c/-lc forms can never be allowlisted, and a task's "
+    "interpreters and their -c/-e (eval) forms can never be allowlisted, and a task's "
     "verify commands never need the allowlist"
 )
 
@@ -1150,6 +1171,9 @@ def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     ):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if len(canon) <= 2 and canon[0] in {"python", "python3"} and canon[1:] == ["-c"]:
+        return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
+    eval_flags = _INTERPRETER_EVAL_FLAGS.get(canon[0], frozenset())
+    if len(canon) == 2 and (canon[1].casefold() if canon[0] == "pwsh" else canon[1]) in eval_flags:
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if canon in (["npm", "run"], ["uv", "run"]):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
