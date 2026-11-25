@@ -179,3 +179,56 @@ test("F21: with a card pending, typing works and Enter posts nothing until the c
     ["/api/chats/c1/messages?surface=web", "next, do this"],
   ]);
 });
+
+// ---------- F22 (G3): nothing typed is lost ----------
+
+test("F22: queue one message, type a new draft, answer the card: the queued one is sent once and the draft stays", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "queued first";
+  chat.press("Enter");
+  chat.input.value = "queued second";
+  chat.press("Enter");
+  await settle();
+  const chips = () => chat.main.querySelectorAll(".queued-steer-item");
+  assert.equal(chips().length, 2, "a second queued message does not overwrite the first");
+  assert.deepEqual(chips().map(c => c.querySelector(".queued-steer-text").textContent), ["queued first", "queued second"]);
+  // Cancel the second; edit nothing yet.
+  await chips()[1].querySelectorAll("button").find(b => b.textContent === "Cancel").click();
+  assert.equal(chips().length, 1);
+  chat.input.value = "a draft I am still writing";
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  await settle();
+  const sent = chat.streams.filter(([path]) => path.includes("/messages")).map(([, body]) => body.content);
+  assert.deepEqual(sent, ["queued first"], "the queued message is sent once; the cancelled one never");
+  assert.equal(chat.input.value, "a draft I am still writing", "the draft is still in the box");
+  assert.equal(chips().length, 0);
+});
+
+test("F22: Edit moves a queued message back into the box without losing the draft", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "fix the typo";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "and more";
+  await chat.main.querySelector(".queued-steer-item").querySelectorAll("button").find(b => b.textContent === "Edit").click();
+  assert.equal(chat.input.value, "fix the typo\nand more");
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+});
+
+test("F22: a message refused with 409 comes back to the box", async () => {
+  const chat = await openChat();
+  chat.app.streamSse = async () => {
+    throw Object.assign(new Error("a turn is already running in this chat"), { status: 409 });
+  };
+  chat.input.value = "please do X";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "please do X", "the refused message is back in the box");
+  assert.equal(chat.textCount("please do X"), 0, "and not shown as sent");
+  assert.ok(chat.app.flashes.some(([, text]) => /already running/.test(text)));
+});
+

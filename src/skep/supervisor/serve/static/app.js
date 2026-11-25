@@ -2427,27 +2427,42 @@ async function viewChat(main, chatId) {
   // v103-F1: the queued-steer receipt. A message taken mid-turn is SHOWN until
   // it is sent — "queued" that the operator cannot see is indistinguishable
   // from the drop this replaced (I8).
-  const queuedText = el("span", { class: "queued-steer-text" });
-  const queuedNote = el("div", { class: "queued-steer", hidden: true },
-    el("span", { class: "chip tone-info" }, "queued"), queuedText);
+  // v133-F22 (G3): one chip per queued message, each with Edit (back into
+  // the box, beside any draft) and Cancel — a second message never
+  // overwrites or merges into the first.
+  const queuedNote = el("div", { class: "queued-steer", hidden: true });
   // Declared HERE, above setComposerLocked, on purpose: that function calls
   // flushQueued and runs during the first render, before the composer handlers
   // further down have initialized. Declared beside them it would be a temporal
   // dead zone and the chat would fail to render at all. The empty-queue guard
   // is the first line for the same reason — the startup calls return before
   // they can reach `deliver`.
-  let queuedMessage = "";
-  const renderQueued = () => {
-    queuedNote.hidden = !queuedMessage;
-    queuedText.textContent = queuedMessage;
+  let queued = [];
+  // Text handed back to the box goes in front of whatever the operator is
+  // typing now — nothing in the box is overwritten.
+  const returnToBox = (text) => {
+    input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+    input.focus();
   };
+  const renderQueued = () => {
+    queuedNote.hidden = queued.length === 0;
+    queuedNote.replaceChildren(...queued.map((text, index) => {
+      const take = () => { queued.splice(index, 1); renderQueued(); };
+      return el("div", { class: "queued-steer-item" },
+        el("span", { class: "chip tone-info" }, "queued"),
+        el("span", { class: "queued-steer-text", title: text }, text),
+        el("button", { type: "button", class: "ghost queued-steer-action",
+          onclick: () => { take(); returnToBox(text); } }, "Edit"),
+        el("button", { type: "button", class: "ghost queued-steer-action", onclick: take }, "Cancel"));
+    }));
+  };
+  // The first queued message goes when the composer frees; the turn it
+  // starts flushes the next one in its own finally. The box is not touched.
   const flushQueued = () => {
-    if (!queuedMessage || send.disabled || !assistantReady) return;
-    const content = queuedMessage;
-    queuedMessage = "";
+    if (!queued.length || send.disabled || !assistantReady) return;
+    const content = queued.shift();
     renderQueued();
-    input.value = content;
-    deliver();
+    deliver(content);
   };
   // Phase 10 10.3: completion, /help and refusals read the registry's web slice.
   let deck = { commands: [], refusals: {} };
@@ -3191,8 +3206,7 @@ async function viewChat(main, chatId) {
         const button = el("button", { class: "ghost" }, choice);
         button.addEventListener("click", () => {
           row.remove();
-          input.value = choice;
-          deliver();
+          deliver(choice); // v133-F22: the box (a draft) is left alone
         });
         return button;
       }));
@@ -3413,10 +3427,13 @@ async function viewChat(main, chatId) {
   // Queued, not blocked: mid-turn is exactly when an operator most wants to
   // say something, and the honest thing is to take the message and send it at
   // the first moment the composer is free. Nothing is ever silently dropped.
-  const deliver = async () => {
-    const content = input.value.trim();
+  // v133-F22: `text` is a queued message or a clicked choice — sent as is,
+  // with the box (the operator's draft) left alone; no argument reads the box.
+  const deliver = async (text = null) => {
+    const fromBox = text === null;
+    const content = fromBox ? input.value.trim() : text;
     if (!content || !assistantReady) return;
-    if (content.startsWith("/") && anyCardPending()) {
+    if (fromBox && content.startsWith("/") && anyCardPending()) {
       // v133-F21: a /command typed under a pending card is never queued to
       // run later on its own (a /deny meant for this card would hit the next
       // one) — it stays in the box until the operator sends it again.
@@ -3424,15 +3441,15 @@ async function viewChat(main, chatId) {
       return;
     }
     if (send.disabled) {
-      // A second steer while one is already queued appends rather than
-      // replaces — losing the first would be the same bug wearing a queue.
-      queuedMessage = queuedMessage ? `${queuedMessage}\n${content}` : content;
-      input.value = "";
+      // A second steer while one is already queued is its own chip —
+      // losing the first would be the same bug wearing a queue.
+      queued.push(content);
+      if (fromBox) input.value = "";
       renderQueued();
       flash("ok", "queued — sends when this turn finishes");
       return;
     }
-    input.value = "";
+    if (fromBox) input.value = "";
     suggest.hidden = true;
     // v25-F1: a /command is intercepted BEFORE the LLM chat loop — parsed
     // here, executed against the HTTP API, never sent to the model.
@@ -3446,7 +3463,7 @@ async function viewChat(main, chatId) {
     }
     await ensureChat();
     const attachments = pendingImages.length ? await uploadPendingImages() : [];
-    renderChatMessage(log, "user", content, {
+    const bubble = renderChatMessage(log, "user", content, {
       label: "You",
       onResend: fillInput,
       scroll: scrollBottom,
@@ -3456,11 +3473,18 @@ async function viewChat(main, chatId) {
     const payload = attachments.length ? { content, attachments } : { content };
     // D1: the surface hint, so the server's 409 follows the web's lock rule.
     try { await runStream(`/api/chats/${activeChatId}/messages?surface=web`, payload); }
-    catch (e) { flash("bad", e.message); send.disabled = false; }
+    catch (e) {
+      // v133-F22: a refused message (409: a background turn is running) was
+      // never stored — it leaves the transcript and comes back to the box.
+      bubble.remove();
+      returnToBox(content);
+      flash("bad", e.message);
+      send.disabled = false;
+    }
     watchStatus();  // v43-F4: a dispatched run keeps reporting after the turn
     input.focus();
   };
-  send.addEventListener("click", deliver);
+  send.addEventListener("click", () => deliver());
   // v56-F3: the meter is server truth — typing does not move it; it refreshes
   // when the chat detail does (after each turn).
   input.addEventListener("input", updateSuggest);
