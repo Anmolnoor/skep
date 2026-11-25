@@ -2290,6 +2290,16 @@ def _compiled_rule_source(rule: Any, resolved: ResolvedRunPolicy) -> str:
     return "compiled"
 
 
+def _shell_entry_source(argv: list[str], resolved: ResolvedRunPolicy) -> str:
+    """v133-F18: which knob or grant put one argv on the effective shell list."""
+    if argv in [list(a) for a in resolved.policy.get("allowed_shell_commands") or []]:
+        return (
+            f"allowed_shell_commands@{resolved.provenance.get('allowed_shell_commands', 'global')}"
+        )
+    grant = resolved.shell_grants.get(shlex.join(argv)) or resolved.shell_grants.get(" ".join(argv))
+    return f"learned@{grant}" if grant is not None else "compiled"
+
+
 def _operator_rule_sources(store: RunStore) -> dict[str, str]:
     base = (
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
@@ -2360,6 +2370,18 @@ def rsop_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any
             entry["source_name"] = None
             entry["note"] = "not configured at any layer — the resolver's fallback"
         keys.append(entry)
+    for entry in keys:
+        if entry["key"] == "allowed_shell_commands":
+            # v133-F18 (A7, I8): the effective list, grants included, under the
+            # key the Queen is asked about — each entry with where it came from
+            entry["effective"] = [
+                {"command": shlex.join(argv), "source": _shell_entry_source(list(argv), resolved)}
+                for argv in resolved.permissions.shell_allowlist
+            ]
+            entry["effective_note"] = (
+                "the shell list a run here gets, grants included: this key's value "
+                "plus every learned grant that holds here"
+            )
     view["keys"] = keys
     view["scopes"] = {
         scope: [

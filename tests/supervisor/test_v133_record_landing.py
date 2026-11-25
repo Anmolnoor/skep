@@ -520,3 +520,37 @@ def test_forensics_labels_decisions_observations_and_what_is_not_listed(
     text = render_forensics(report, markdown=False)
     assert "[observation]" in text and "[policy decision]" in text
     assert "confined by the sandbox and not listed" in text
+
+
+# ---------- F18: a policy view says which layer it is (A7) ----------
+
+
+def test_policy_views_name_their_layer_and_put_grants_under_the_asked_key(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    from skep.supervisor.serve.settings import ConfigHolder, global_policy_view
+
+    store = _store(config)
+    try:
+        store.add_project_policy(
+            project_id="app", name="app", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+        store.set_setting("default_execution_mode", "workspace")
+        holder = ConfigHolder(config, store)
+        actions.allow_shell_command_scoped(store, holder, "npm test", repo)
+
+        shown = global_policy_view(store, config)
+        assert shown["allowed_shell_commands"] == []
+        assert shown["layer"] == "global"
+        assert "global layer only" in shown["layer_note"]
+
+        rsop = actions.rsop_view(holder, store, str(repo))
+        assert "error" not in rsop, rsop.get("error")
+        key = next(e for e in rsop["keys"] if e["key"] == "allowed_shell_commands")
+        assert {"command": "npm test", "source": "learned@grant:project"} in key["effective"]
+        assert "grants included" in key["effective_note"]
+    finally:
+        store.close()
