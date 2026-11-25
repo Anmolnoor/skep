@@ -31,6 +31,7 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from fnmatch import fnmatch
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -429,6 +430,10 @@ _TARBALL_URL = r"https://[^\s\"'#?,}]+\.tgz"
 _YARN_PATH = re.compile(r"""^\s*(?:yarn-path|yarnPath:)\s*["']?([^"'\s]+)""", re.MULTILINE)
 _SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|]")
 _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# v133-F7 (A2): a pin's directory is primed only when every part of it is a
+# literal path (no `$`, `~`, glob or quote for the shell to rewrite).
+_LITERAL_DIR = re.compile(r"[A-Za-z0-9._@+/][A-Za-z0-9._@+/-]*")
+_NODE_DIR_FLAGS = ("--prefix", "-C")
 
 
 def _pin_uses(commands: list[str], tools: frozenset[str]) -> bool:
@@ -445,23 +450,71 @@ def _pin_uses(commands: list[str], tools: frozenset[str]) -> bool:
     return False
 
 
+def _node_dir(worktree: Path, commands: list[str]) -> str | None:
+    """v133-F7 (A2): the directory the pin's first Node command runs in,
+    relative to the worktree ("" for its root) — the `cd X` segments before
+    it, then its own `--prefix X`, `--prefix=X` or `-C X`. None when that is
+    not a literal path resolving inside the worktree (symlinks followed):
+    nothing is primed for a directory skep cannot place."""
+    for command in commands:
+        parts: list[str] = []
+        for segment in _SHELL_SEPARATORS.split(command):
+            words = segment.split()
+            while words and (words[0] == "env" or _ENV_ASSIGNMENT.match(words[0])):
+                words.pop(0)
+            if words[:1] == ["cd"]:
+                parts.append(words[1] if len(words) == 2 else "")
+            elif words[:1] and words[0] in _NODE_TOOLS:
+                parts += [value for flag, value in pairwise(words) if flag in _NODE_DIR_FLAGS]
+                parts += [word.split("=", 1)[1] for word in words if word.startswith("--prefix=")]
+                if not all(_LITERAL_DIR.fullmatch(part) for part in parts):
+                    return None
+                root = worktree.resolve()
+                target = root.joinpath(*parts).resolve()
+                if not target.is_relative_to(root):
+                    return None
+                relative = target.relative_to(root).as_posix()
+                return "" if relative == "." else relative
+    return ""
+
+
 def _node_prime(worktree: Path, commands: list[str]) -> tuple[str, str] | str | None:
-    """v127-A0: ``(lockfile, install command)`` when this re-verify runs a Node
-    pin in a repo whose package.json declares dependencies; the reason when it
-    does but there is no lockfile to install from; None when nothing needs
-    priming (not a Node pin, no package.json, or no dependencies)."""
+    """v127-A0: ``(directory, install command)`` when this re-verify runs a
+    Node pin whose package.json declares dependencies; the reason when it does
+    but there is no lockfile to install from, or (v133-F7) the pin's directory
+    is not one skep can place; None when nothing needs priming (not a Node
+    pin, no package.json, or no dependencies)."""
     if not _pin_uses(commands, _NODE_TOOLS):
         return None
-    manifest = _manifest(worktree)
+    node_dir = _node_dir(worktree, commands)
+    if node_dir is None:
+        return (
+            "the directory the Node command runs in is not a literal directory "
+            "inside the worktree, so nothing was primed for it"
+        )
+    manifest = _manifest(worktree / node_dir)
     if not any(manifest.get(k) for k in _NODE_DEPENDENCY_KEYS):
         return None
     for lockfile, install in _NODE_INSTALLS:
-        if (worktree / lockfile).is_file():
-            return lockfile, install
+        if (worktree / node_dir / lockfile).is_file():
+            return node_dir, install
+    where = f" in {node_dir}/" if node_dir else ""
     return (
-        "no lockfile to prime from — package.json declares dependencies but there is "
-        "no package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml or yarn.lock"
+        f"no lockfile to prime from — package.json{where} declares dependencies but there "
+        "is no package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml or yarn.lock"
     )
+
+
+def _package_manager(worktree: Path, node_dir: str) -> object:
+    """v133-F7: what corepack obeys for an install in ``node_dir`` — the
+    nearest package.json naming a ``packageManager``, from there up to the
+    worktree root."""
+    parts = PurePosixPath(node_dir).parts
+    for depth in range(len(parts), -1, -1):
+        value = _manifest(worktree.joinpath(*parts[:depth])).get("packageManager")
+        if value is not None:
+            return value
+    return None
 
 
 def _manifest(worktree: Path) -> dict[str, Any]:
@@ -527,7 +580,12 @@ def _corepack_missing(install: str, output: str, package_manager: object) -> str
 
 
 def _node_install_refusal(
-    worktree: Path, touched: set[str], *, package_manager: object, protected: set[str]
+    worktree: Path,
+    touched: set[str],
+    *,
+    package_manager: object,
+    protected: set[str],
+    node_dir: str = "",
 ) -> str:
     """Why the PATCHED package.json/lockfile may not be installed; empty when
     it may. Where packages come from is the registry-only proxy's job (with
@@ -543,7 +601,7 @@ def _node_install_refusal(
     )
     if config:
         return f"it changes the package manager's config ({', '.join(config)})"
-    if (changed := _manifest(worktree).get("packageManager")) != package_manager:
+    if (changed := _package_manager(worktree, node_dir)) != package_manager:
         return f"it changes packageManager to {changed!r} (corepack would fetch and run it)"
     return ""
 
@@ -610,7 +668,7 @@ class _PrimeWall:
         self._proxy: FilteringProxy | None = None
         self._profile: Path | None = None
 
-    def run(self, command: str, env: dict[str, str]) -> tuple[int, str]:
+    def run(self, command: str, env: dict[str, str], cwd: Path | None = None) -> tuple[int, str]:
         if self._proxy is None:
             try:
                 self._start()
@@ -626,7 +684,7 @@ class _PrimeWall:
         # meets the wall (egress pinned to the proxy port) and fails closed.
         proxy["npm_config_proxy"] = proxy["npm_config_https_proxy"] = proxy["HTTPS_PROXY"]
         code, output, _stdout = _run_command(
-            command, cwd=self._worktree, env={**env, **proxy}, profile_path=self._profile
+            command, cwd=cwd or self._worktree, env={**env, **proxy}, profile_path=self._profile
         )
         return code, output
 
@@ -690,26 +748,39 @@ def _run_command(
 
 
 _OUTPUT_TAIL_CHARS = 2000
+# v133-F8 (F-I5): a dependency install that fails is not the pin failing — the
+# record leads with this and carries no exit code (the pin never ran; the
+# installer's code is in the text), so no surface reads it as "ran and failed".
+INSTALL_FAILED = "could not install dependencies"
+# ... and a pin that failed on a name lookup failed because the replay is
+# offline by design, which the record says (Alfin run 01a211e5: EAI_AGAIN).
+OFFLINE_NOTE = (
+    "the replay runs offline (no network, by design) and this output shows a failed "
+    "network lookup: a check that installs or downloads for itself fails here — pin "
+    "a command that uses the dependencies primed from the lockfile"
+)
+_NETWORK_LOOKUP_FAILURES = ("EAI_AGAIN", "ENOTFOUND", "Temporary failure in name resolution")
 # Review R1 (F1): what survives the clean after the baseline run — the primed
 # environments (uv's .venv, node_modules, the worktree-local caches) and the
 # re-verify scratch dir; nothing the baseline's tests wrote.
 _BASELINE_KEEP = (".venv", "node_modules", ".reverify-tmp", ".uv-cache", ".node-cache")
 
 
-def _untracked(worktree: Path) -> set[str]:
+def _untracked(worktree: Path, keep: tuple[str, ...] = _BASELINE_KEEP) -> set[str]:
     """Untracked and ignored FILES in ``worktree`` — one entry per file, so a
     file the baseline adds inside a directory the prime made is seen (review
-    R3) — minus the primed environments and re-verify scratch."""
+    R3) — minus the primed environments and re-verify scratch (``keep``:
+    worktree-relative paths; v133-F7 adds a subfolder's node_modules)."""
     out = subprocess.run(
         ["git", "-C", str(worktree), "ls-files", "-o", "-z", "--", "."]
-        + [f":(top,exclude){keep}" for keep in _BASELINE_KEEP],
+        + [f":(top,exclude){path}" for path in keep],
         capture_output=True,
         check=False,
     ).stdout.decode("utf-8", "surrogateescape")
     return {
         path
         for path in out.split("\0")
-        if path and path.rstrip("/").split("/")[0] not in _BASELINE_KEEP
+        if path and not any(path.rstrip("/") == k or path.startswith(f"{k}/") for k in keep)
     }
 
 
@@ -848,6 +919,10 @@ def reverify(
         primed = ""
         node_pin = _pin_uses(commands, _NODE_TOOLS)
         node_prime = _node_prime(worktree, commands)
+        # v133-F7 (A2): the directory the pin runs in decides the manifest,
+        # the lockfile (and the hosts it names), the install and what stays.
+        node_dir = (_node_dir(worktree, commands) or "") if node_pin else ""
+        keep = (*_BASELINE_KEEP, f"{node_dir}/node_modules") if node_dir else _BASELINE_KEEP
         if isinstance(node_prime, str):
             if _pin_uses(commands, _NODE_PACKAGE_MANAGERS):
                 return ReverifyOutcome(
@@ -868,15 +943,17 @@ def reverify(
             uv_index = r'(?:registry|url|git) = "([^"]+)"'
             hosts |= {*_PYPI_HOSTS, *_lock_hosts(worktree, ["uv.lock"], uv_index)}
         if node_pin:
-            node_lockfiles = [lockfile for lockfile, _ in _NODE_INSTALLS]
+            node_lockfiles = [str(PurePosixPath(node_dir, lock)) for lock, _ in _NODE_INSTALLS]
             hosts |= {*_NPM_HOSTS, *_lock_hosts(worktree, node_lockfiles, f"({_TARBALL_URL})")}
             env.update(_node_env(node_cache, reverify_tmp))
-        package_manager = _manifest(worktree).get("packageManager")
+        package_manager = _package_manager(worktree, node_dir)
         protected: set[str] = set()
-        for rc in (".yarnrc", ".yarnrc.yml"):
+        for rc in {str(PurePosixPath(base, name)) for base in ("", node_dir)
+                   for name in (".yarnrc", ".yarnrc.yml")}:  # fmt: skip
             with contextlib.suppress(OSError):
                 text = (worktree / rc).read_text(encoding="utf-8")
-                protected |= {str(PurePosixPath(p)) for p in _YARN_PATH.findall(text)}
+                base = PurePosixPath(rc).parent
+                protected |= {str(base / p) for p in _YARN_PATH.findall(text)}
         wall = _PrimeWall(
             stack,
             tuple(sorted(hosts)),
@@ -922,8 +999,8 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [prime_code],
-                    "could not prime the baseline uv environment for offline "
+                    [],
+                    f"{INSTALL_FAILED} — could not prime the baseline uv environment for offline "
                     f"re-verification (uv sync exited {prime_code}); the "
                     "verification command was not run",
                 )
@@ -933,22 +1010,24 @@ def reverify(
         if isinstance(node_prime, tuple):
             # v127-A0: the same shape for Node — the BASELINE lockfile installs
             # under the prime wall; patch code stays offline below.
-            node_install = node_prime[1]
-            prime_code, prime_output = wall.run(node_install, env)
+            prime_dir, node_install = node_prime
+            prime_code, prime_output = wall.run(node_install, env, cwd=worktree / prime_dir)
             if prime_code != 0:
                 missing = _corepack_missing(node_install, prime_output, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [prime_code],
-                    "could not prime the baseline Node dependencies for offline "
-                    f"re-verification ({node_install} exited {prime_code})"
+                    [],
+                    f"{INSTALL_FAILED} — could not prime the baseline Node dependencies "
+                    f"for offline re-verification ({node_install} exited {prime_code})"
                     f"{': ' + missing if missing else ''}; the "
                     "verification command was not run\n--- install output (tail) ---\n"
                     f"{_output_tail(prime_output) or '(no output)'}",
                 )
+            where = f" in {prime_dir}/" if prime_dir else ""
             primed = (
-                f"{primed}; node deps primed from the baseline ({node_install}), verify ran offline"
+                f"{primed}; node deps primed from the baseline ({node_install}{where}), "
+                "verify ran offline"
             )
         network = sandbox.DENY_ALL_NETWORK
         proxy: FilteringProxy | None = None
@@ -994,7 +1073,7 @@ def reverify(
             # Review R2 (Opus): what the prime already put in the tree (an
             # in-place editable build, a yarn PnP map) stays; only what the
             # baseline run adds is removed afterwards.
-            pre_baseline = _untracked(worktree)
+            pre_baseline = _untracked(worktree, keep)
             code, _output, stdout = _run_command(
                 commands[0],
                 cwd=worktree,
@@ -1015,10 +1094,10 @@ def reverify(
             reset = subprocess.run(
                 ["git", "-C", str(worktree), "reset", "-q", "--hard", "HEAD"], check=False
             )
-            for path in _untracked(worktree) - pre_baseline:
+            for path in _untracked(worktree, keep) - pre_baseline:
                 with contextlib.suppress(OSError):  # what stays is caught below
                     (worktree / path).unlink()
-            leftover = baseline_tmp.exists() or _untracked(worktree) - pre_baseline
+            leftover = baseline_tmp.exists() or _untracked(worktree, keep) - pre_baseline
             if reset.returncode or leftover:
                 # Review R2 (Terra): a tree git could not reset is not a clean
                 # baseline for the patched run — confirm nothing (I2).
@@ -1080,15 +1159,16 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [resync_code],
-                    "the patch changes the lockfile and its packages could not be "
-                    f"primed (uv sync exited {resync_code}); the verification command "
+                    [],
+                    f"{INSTALL_FAILED} — the patch changes the lockfile and its packages "
+                    f"could not be primed (uv sync exited {resync_code}); the verification command "
                     "was not run — a dependency change is never confirmed against the "
                     "old dependencies\n--- uv sync output (tail) ---\n"
                     f"{_output_tail(resync_output) or '(no output)'}",
                 )
             primed = f"{primed}; re-primed against the patched lockfile"
-        patched_prime = _node_prime(worktree, commands) if touched & _NODE_PRIME_INPUTS else None
+        node_inputs = {str(PurePosixPath(node_dir, name)) for name in _NODE_PRIME_INPUTS}
+        patched_prime = _node_prime(worktree, commands) if touched & node_inputs else None
         if isinstance(patched_prime, str) and not isinstance(node_prime, str):
             # The patch takes the lockfile away, or adds the first dependencies
             # without one: nothing to install them from, so no verdict either
@@ -1106,9 +1186,13 @@ def reverify(
             # patch data reaching the network before approval: through the
             # baseline's registry hosts alone, scripts off, and only when the
             # installer itself is unchanged (I12, I11).
-            _lockfile, install = patched_prime
+            patched_dir, install = patched_prime
             refusal = _node_install_refusal(
-                worktree, touched, package_manager=package_manager, protected=protected
+                worktree,
+                touched,
+                package_manager=package_manager,
+                protected=protected,
+                node_dir=patched_dir,
             )
             if refusal:
                 return ReverifyOutcome(
@@ -1120,16 +1204,18 @@ def reverify(
                     "change is never confirmed against the old dependencies",
                 )
             reprime_code, reprime_output = patched_wall.run(
-                install, {**env, **_node_env(reverify_tmp / "node-patched", reverify_tmp)}
+                install,
+                {**env, **_node_env(reverify_tmp / "node-patched", reverify_tmp)},
+                cwd=worktree / patched_dir,
             )
             if reprime_code != 0:
                 missing = _corepack_missing(install, reprime_output, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [reprime_code],
-                    "the patch changes the lockfile and its packages could not be "
-                    f"primed ({install} exited {reprime_code})"
+                    [],
+                    f"{INSTALL_FAILED} — the patch changes the lockfile and its packages "
+                    f"could not be primed ({install} exited {reprime_code})"
                     f"{': ' + missing if missing else ''}; the verification "
                     "command was not run — a dependency change is never confirmed "
                     "against the old dependencies\n--- install output (tail) ---\n"
@@ -1194,11 +1280,12 @@ def reverify(
             evidence = f"; full output: {output_path}"
         failed = next((o for c, o in zip(exit_codes, outputs, strict=True) if c != 0), "")
         failed_tail = _output_tail(failed)
+        offline = f"; {OFFLINE_NOTE}" if any(e in failed for e in _NETWORK_LOOKUP_FAILURES) else ""
         return ReverifyOutcome(
             "failed",
             commands,
             exit_codes,
-            f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
+            f"re-run exit codes {exit_codes} (expected all 0){primed}{offline}{evidence}\n"
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
             test_counts=test_counts,
         )

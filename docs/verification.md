@@ -52,6 +52,21 @@ pin runs `node`, `npm`, `npx`, `pnpm` or `yarn` (`package-lock.json`,
 command (`cd web && npm test`). Other ecosystems are not primed: their pin
 re-runs only with what the host already has.
 
+A Node pin is primed in the directory its first Node command runs in: the
+`cd X` steps before that command (`cd web && npm test`,
+`cd apps && cd web && node --test`), then the command's own `--prefix X`,
+`--prefix=X` or `-C X` (`npm --prefix web test`, `pnpm -C web test`). The
+`package.json`, the lockfile, the hosts that lockfile names, the install, the
+kept `node_modules` and the re-install after a patched lockfile all come from
+that directory. Each part must be a literal path (letters, digits, `.`, `_`,
+`@`, `+`, `-` and `/`; no `$`, `~`, glob or quote) and the result, symlinks
+followed, must sit inside the worktree. Otherwise nothing is primed: an `npm`,
+`npx`, `pnpm` or `yarn` pin is `unavailable` and a bare `node` pin runs
+unprimed, and the detail says why. Not read: yarn's `--cwd`, pnpm's `--dir`,
+`npm -w`/`--workspace`, `pushd`, a `cd` inside `sh -c`, and every Node command
+after the first (a pin that runs Node in two directories primes only the
+first).
+
 **A patched lockfile is installed before anyone approves the patch.** That
 install never gets open network: it reaches the package registries alone
 (`pypi.org` and `files.pythonhosted.org` for uv; `registry.npmjs.org` and
@@ -101,8 +116,8 @@ one it is `unavailable`, never `failed`.
 | Outcome | Meaning |
 | --- | --- |
 | `passed` | Patch applied and every command exited `0`. |
-| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. The tail of the output is kept (from pytest's short summary on, when there is one), and the whole output, up to its last 200 KB, is written to `reverify.output.txt` in the run's evidence directory. |
-| `unavailable` | Skep could not honestly re-run the check: the command was not installed (exit 127), the sandbox could not be built, the dependency install failed or was refused (see above), the worker claimed changed files but left no patch, or there was no command to run. |
+| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. The tail of the output is kept (from pytest's short summary on, when there is one), and the whole output, up to its last 200 KB, is written to `reverify.output.txt` in the run's evidence directory. When that output shows a failed name lookup (`EAI_AGAIN`, `ENOTFOUND`, `Temporary failure in name resolution`), the detail adds that the replay runs offline by design, so a check that installs or downloads for itself fails there. |
+| `unavailable` | Skep could not honestly re-run the check: the command was not installed (exit 127), the sandbox could not be built, the dependency install failed (the detail then starts `could not install dependencies` and names the installer and its exit code; no exit code is recorded, because the command never ran) or was refused (see above), the worker claimed changed files but left no patch, or there was no command to run. |
 | `not_applicable` | The run changed no files or produced no patch, so there is nothing to re-verify. Shown as `nothing to re-verify`, without an alarm. |
 
 A run is `confirmed` only when the worker reported verification `passed` and

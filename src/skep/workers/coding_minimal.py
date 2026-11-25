@@ -1167,6 +1167,9 @@ def _execute_llm_plan(
                 ),
                 usage=_tallied_usage(tokens, provider_calls),
             )
+        # v133-F9 (A4): the repair rounds bound a STREAK of bad replies; a
+        # valid plan ends it. The provider-call budget still bounds the total.
+        invalid_replies = 0
         # v19-F7: allow ONE recovery replan when a command fails or a step is
         # denied, but only if the budget affords another provider call and we
         # have not already recovered this run.
@@ -1653,6 +1656,7 @@ def _execute_react(
                 usage=_tallied_usage(tokens, provider_calls),
             )
         provider_calls += 1
+        invalid_replies = 0  # v133-F9 (A4): a streak, reset by a valid reply
         if isinstance(reply, ReactDone):
             done = reply
             break
