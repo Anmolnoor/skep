@@ -438,7 +438,8 @@ def _setup(config: SupervisorConfig, repo: Path, route: str = "setup", **body: o
 
 
 def _policy(body: dict[str, Any]) -> dict[str, Any]:
-    return (body.get("project") or body)["policy"]
+    policy: dict[str, Any] = (body.get("project") or body)["policy"]
+    return policy
 
 
 def _changes(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
