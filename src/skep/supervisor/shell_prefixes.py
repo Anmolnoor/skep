@@ -548,7 +548,7 @@ def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | No
     layout ``<SKEP_HOME>/supervisor``, so ``<SKEP_HOME>`` minus its ``repos``
     clones), relative names judged against ``cwd``. The Queen's lanes only:
     the hook and REST keep the narrower ``skep trust`` floor."""
-    from .secret_floor import names_path_under
+    from .secret_floor import SERVE_ENV, SERVE_ENV_MANUAL_STEP, names_path_under
 
     segments = command_line_segments(command) or []
     if any(is_skep_trust_command(argv) for argv in segments):
@@ -556,6 +556,9 @@ def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | No
     if any(_skep_subcommands(argv) for argv in segments):
         return SKEP_SELF_REFUSAL
     root = home.parent if home.name == "supervisor" else home
+    if names_path_under(command, root / SERVE_ENV, cwd=cwd, except_under=root / "repos"):
+        # v133-F6 (C2): the one skep file an operator edits by hand
+        return f"the chat's shell never touches skep's own files; {SERVE_ENV_MANUAL_STEP}"
     if names_path_under(command, root, cwd=cwd, except_under=root / "repos"):
         return SKEP_SELF_REFUSAL
     return None

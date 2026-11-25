@@ -97,6 +97,13 @@ HOME_DIRS: tuple[str, ...] = (
 CODEX_RUN_LOGIN = "codex-login.json"
 SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret", CODEX_RUN_LOGIN)
 SERVE_ENV = "serve.env"
+# v133-F6 (C2): what a serve.env refusal tells the operator to do instead —
+# the chat never reads or writes it, so the step is theirs.
+SERVE_ENV_MANUAL_STEP = (
+    "only the operator edits serve.env: open it in an editor on this machine, add or "
+    "change the line, then restart skep serve so the daemon loads it (the chat cannot "
+    "do this step)"
+)
 
 
 def _fold(path: Path) -> Path:
@@ -215,9 +222,10 @@ def _reason(
     if folded in {alias_key(spelling) for spelling in path_spellings(codex_auth_file())}:
         return f"{path} is the Codex login ($CODEX_HOME/auth.json)"
     for home in skep_homes:
-        if folded == alias_key(home.parent / SERVE_ENV) or (
-            _under(folded, alias_key(home))
-            and any(fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES)
+        if folded == alias_key(home.parent / SERVE_ENV):
+            return f"{path} is skep's serve.env, which holds its keys; {SERVE_ENV_MANUAL_STEP}"
+        if _under(folded, alias_key(home)) and any(
+            fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES
         ):
             return f"{path} is one of skep's own secrets"
     return None

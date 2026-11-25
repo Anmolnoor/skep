@@ -65,9 +65,10 @@ def test_f1_protected_path_beside_long_token_still_refused(tmp_path: Path) -> No
     home = _skep_home(tmp_path)
     serve_env = tmp_path / "skep" / "serve.env"
     command = f'echo "{_LONG}" {serve_env}'
-    assert queen_skep_refusal(command, home=home, cwd=str(tmp_path)) == SKEP_SELF_REFUSAL
+    refusal = queen_skep_refusal(command, home=home, cwd=str(tmp_path))
+    assert refusal is not None and "serve.env" in refusal
     reason = shell_secret_floor_reason(command, cwd=str(tmp_path), skep_home=home)
-    assert reason is not None and "skep's own secrets" in reason
+    assert reason is not None and "secret floor" in reason
 
 
 def test_f1_other_probe_error_keeps_the_word_judged(
@@ -85,9 +86,8 @@ def test_f1_other_probe_error_keeps_the_word_judged(
 
     monkeypatch.setattr(os, "stat", stat)
     # a bare relative word, run from the skep home's parent
-    assert queen_skep_refusal("cat serve.env", home=home, cwd=str(home.parent)) == (
-        SKEP_SELF_REFUSAL
-    )
+    refusal = queen_skep_refusal("cat serve.env", home=home, cwd=str(home.parent))
+    assert refusal is not None and "serve.env" in refusal
 
 
 # --- F2 (A6): no standing grant for a bare interpreter or its eval flag -----
@@ -532,3 +532,51 @@ def test_f5_the_unlocked_carry_forward_is_unchanged(config: SupervisorConfig, re
     finally:
         store.close()
     assert same["unlocked"] is True and moved["unlocked"] is False
+
+
+# --- F6 (C2): a serve.env refusal names the operator's manual step ---------
+
+
+def _names_the_manual_step(text: str) -> bool:
+    return (
+        "serve.env" in text and "only the operator edits" in text and "restart skep serve" in text
+    )
+
+
+def test_f6_secret_floor_refusal_names_the_manual_step(tmp_path: Path) -> None:
+    home = _skep_home(tmp_path)
+    serve_env = home.parent / "serve.env"
+    serve_env.write_text("SKEP_X=never-shown\n")
+    reason = shell_secret_floor_reason(f"cat {serve_env}", cwd=str(tmp_path), skep_home=home)
+    assert reason is not None and _names_the_manual_step(reason), reason
+    assert "never-shown" not in reason and "secret floor" in reason
+
+
+def test_f6_skep_self_refusal_names_the_manual_step(tmp_path: Path) -> None:
+    home = _skep_home(tmp_path)
+    line = f"echo 'CLAUDE_CODE_OAUTH_TOKEN=x' >> {home.parent / 'serve.env'}"
+    refusal = queen_skep_refusal(line, home=home, cwd=str(tmp_path))
+    assert refusal is not None and _names_the_manual_step(refusal), refusal
+    # another skep file keeps the plain refusal
+    other = queen_skep_refusal(f"cat {home}/settings.json", home=home, cwd=str(tmp_path))
+    assert other == SKEP_SELF_REFUSAL
+
+
+def test_f6_the_queen_shell_still_denies_serve_env(tmp_path: Path) -> None:
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import queen_shell_decision
+
+    config = build_config(tmp_path / "skephome", None)
+    config.home.mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        for line in (
+            f"cat {config.home.parent / 'serve.env'}",
+            f"echo 'K=v' >> {config.home.parent / 'serve.env'}",
+        ):
+            decision = queen_shell_decision(store, holder, command=line, cwd=str(tmp_path))
+            assert decision is not None and decision.verdict == "deny", (line, decision)
+            assert _names_the_manual_step(str(decision.detail)), decision.detail
+    finally:
+        store.close()
