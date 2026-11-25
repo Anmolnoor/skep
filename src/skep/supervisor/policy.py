@@ -276,6 +276,17 @@ _TEST_CONFIG_GLOBS = (
 )
 # Compared section by section (``_test_config(..., runner_only=True)``).
 _TEST_CONFIG_PARSED = ("pyproject.toml", "package.json", "setup.cfg", "tox.ini")
+# v133-F3 (A3): directories that hold installed dependencies. A manifest in
+# one is a dependency's own, not the project's test config (a repo without a
+# .gitignore put ~200 node_modules package.json files in one patch, each
+# labelled tampering). The files still block auto-landing
+# (``vendored_files``): a vendored runner is code the check may load (I2).
+_VENDORED_DIRS = frozenset({"node_modules", "vendor", ".venv", "site-packages"})
+
+
+def vendored_files(changed_files: tuple[str, ...]) -> tuple[str, ...]:
+    """The changed files under a vendored dependency directory."""
+    return tuple(p for p in changed_files if _VENDORED_DIRS & set(p.split("/")[:-1]))
 
 
 def _dig(node: object, *keys: str) -> object:
@@ -458,7 +469,12 @@ def test_config_changes(
         if any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
         or path.startswith(".github/workflows/")
     ]
-    parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
+    vendored = vendored_files(changed_files)
+    parsed = [
+        p
+        for p in changed_files
+        if os.path.basename(p) in _TEST_CONFIG_PARSED and p not in vendored
+    ]
     hits += _config_changes(
         repo, patch_path, base, parsed, runner_only=True, head=head, modes=modes
     )
@@ -595,6 +611,15 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
                 "The patch is still landable by hand"
             )
         return f"{cannot_land_on(why)}. The patch is still landable by hand"
+    vendored = vendored_files(ctx.changed_files)
+    if vendored:
+        # v133-F3 (A3): not tampering, but code the check may load (I2)
+        return (
+            f"this patch vendors {len(vendored)} dependency file"
+            f"{'' if len(vendored) == 1 else 's'} ({vendored[0]}"
+            f"{', ...' if len(vendored) > 1 else ''}), which the check may load, so skep "
+            "can't land it by itself; the patch is still landable by hand"
+        )
     if ctx.pin_control_files:
         return (
             "the patch changes files that decide what the pinned check runs "

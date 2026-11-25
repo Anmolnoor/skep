@@ -175,3 +175,91 @@ def test_f2_learnable_description_says_prefix() -> None:
         (Path(policy_templates.__file__).parent / "descriptions.json").read_text()
     )["builder"]["shell-learnable"]
     assert "prefix" in text, text
+
+
+# --- F3 (A3): a vendored manifest is not test tampering, and still blocks ---
+
+import json  # noqa: E402
+
+from skep.supervisor.policy import (  # noqa: E402
+    VERIFIED_PATCH_RULE,
+    AutoApprovalContext,
+    rule_block_reason,
+)
+from skep.supervisor.policy import (  # noqa: E402
+    test_config_changes as runner_config_changes,  # not collected as a test
+)
+
+from .conftest import git  # noqa: E402
+
+_PKG = {"name": "dep", "version": "1.0.0", "scripts": {"test": "mocha"}}
+
+
+def _config_changes(repo: Path, edits: dict[str, str]) -> tuple[str, ...]:
+    (repo / "web").mkdir()
+    (repo / "web" / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    for name, text in edits.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    git(repo, "add", "-A")
+    patch = repo.parent / "change.patch"
+    patch.write_text(git(repo, "diff", "--cached", "--binary", base).stdout)
+    git(repo, "reset", "-q", "--hard", base)
+    git(repo, "clean", "-qfd")
+    return runner_config_changes(repo, patch, base, tuple(sorted(edits)))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "node_modules/a/package.json",
+        "web/node_modules/@scope/b/package.json",
+        "vendor/c/setup.cfg",
+        ".venv/lib/python3.12/site-packages/d/pyproject.toml",
+        "lib/site-packages/e/tox.ini",
+    ],
+)
+def test_f3_vendored_manifest_is_not_tampering(repo: Path, path: str) -> None:
+    section = "tool:pytest" if path.endswith("setup.cfg") else "pytest"
+    body = json.dumps(_PKG) if path.endswith(".json") else f"[{section}]\naddopts = -q\n"
+    assert _config_changes(repo, {path: body}) == ()
+
+
+def test_f3_project_manifest_test_script_still_tampered(repo: Path) -> None:
+    edited = json.dumps({"scripts": {"test": "true"}})
+    assert _config_changes(repo, {"web/package.json": edited}) == ("web/package.json",)
+
+
+def test_f3_vendored_runner_config_still_tampered(repo: Path) -> None:
+    """Only manifests are exempt: a conftest a runner may collect is not."""
+    assert _config_changes(repo, {"vendor/conftest.py": "x = 1\n"}) == ("vendor/conftest.py",)
+
+
+def test_f3_vendored_files_block_auto_landing() -> None:
+    files = ("node_modules/a/package.json", "node_modules/a/index.js", "src/app.js")
+    ctx = AutoApprovalContext(
+        verification_outcome="passed",
+        reverify_confirmed=True,
+        changed_files=files,
+        verify_pinned=True,
+        reverify_commands=("npm test",),
+        pin_control_files=("node_modules/a/package.json",),
+    )
+    blocked = rule_block_reason(VERIFIED_PATCH_RULE, ctx)
+    assert blocked is not None and "vendors 2 dependency files" in blocked, blocked
+    assert "tamper" not in blocked
+
+
+def test_f3_no_vendored_files_no_vendored_reason() -> None:
+    ctx = AutoApprovalContext(
+        verification_outcome="passed",
+        reverify_confirmed=True,
+        changed_files=("src/vendors.js",),
+        verify_pinned=True,
+        reverify_commands=("npm test",),
+    )
+    blocked = rule_block_reason(VERIFIED_PATCH_RULE, ctx)
+    assert blocked is None or "vendors" not in blocked, blocked
