@@ -291,3 +291,69 @@ def test_a_policy_allowed_row_lists_as_allowed_by_policy(config: SupervisorConfi
         assert human.verdict == "confirmed"
     finally:
         store.close()
+
+
+# ---------- F14: an open_pr push is a ledger row (J3, I13) ----------
+
+
+def _landed_run(store: RunStore, repo: Path, tmp_path: Path, branch: str) -> str:
+    task_id = _run_with_g10(store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0])
+    review_id = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+    store.resolve_approval(review_id, approved=True, actor="chat-user", landing_branch=branch)
+    return task_id
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_open_pr_writes_a_ledger_row_even_when_the_pr_fails_after_the_push(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    opened: bool,
+) -> None:  # fmt: skip
+    from skep.supervisor import github
+
+    def fake(**kwargs: Any) -> github.PullRequestResult:
+        url = "https://github.com/me/repo/pull/7" if opened else None
+        detail = "opened PR" if opened else "gh pr create failed: boom"
+        return github.PullRequestResult(opened, url, detail, pushed=True, head="c0ffee12")
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        task_id = _landed_run(store, repo, tmp_path, "skep/x")
+        result = actions.open_pr_for_run(
+            store, config.audit_dir, actions.require_run(store, task_id), "chat-user"
+        )
+        assert result["head_commit"] == "c0ffee12" and result["pushed"] is True
+        [row] = store.pr_pushes()
+        assert (row["actor"], row["branch"], row["base"], row["head_commit"]) == (
+            "chat-user", "skep/x", "main", "c0ffee12",
+        )  # fmt: skip
+        assert row["pushed"] is True and row["opened"] is opened and row["at"]
+        assert row["url"] == ("https://github.com/me/repo/pull/7" if opened else None)
+        assert row["task_ids"] == [task_id]
+        if not opened:
+            assert "gh pr create failed" in row["detail"]
+    finally:
+        store.close()
+
+
+def test_open_pull_request_says_what_it_pushed_when_gh_then_fails(tmp_path: Path) -> None:
+    import subprocess
+
+    from skep.supervisor.github import open_pull_request
+
+    def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        def done(code: int, out: str = "") -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, code, out, "gh error" if code else "")
+
+        if "remote.origin.url" in args:
+            return done(0, "git@github.com:me/repo.git\n")
+        if "ls-remote" in args:
+            return done(0, "abc\trefs/heads/main\n")
+        if "rev-parse" in args:
+            return done(0, "c0ffee1234\n")
+        return done(1) if args[0] == "gh" else done(0)
+
+    result = open_pull_request(
+        repo=tmp_path, branch="skep/x", base="main", title="t", body="b", runner=run
+    )
+    assert (result.opened, result.pushed, result.head) == (False, True, "c0ffee1234")

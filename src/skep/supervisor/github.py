@@ -31,6 +31,10 @@ class PullRequestResult:
     opened: bool
     url: str | None
     detail: str
+    # v133-F14 (J3, I13): whether the branch reached origin, and the commit
+    # it pushed — a push that succeeds before gh fails is still a push.
+    pushed: bool = False
+    head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -395,10 +399,12 @@ def open_pull_request(
             f"then retry (or push once yourself: git -C {repo} push -u origin "
             f"{base}); skep never updates an existing default branch",
         )
+    tip = _run(runner, ["git", "-C", str(repo), "rev-parse", "--verify", f"refs/heads/{branch}"])
+    head = tip.stdout.strip() or None if tip.returncode == 0 else None
     push = _run(runner, ["git", "-C", str(repo), "push", "-u", "origin", branch])
     if push.returncode != 0:
         why = (push.stderr or push.stdout).strip()
-        return PullRequestResult(False, None, f"git push failed: {why}")
+        return PullRequestResult(False, None, f"git push failed: {why}", head=head)
     created = _run(
         runner,
         ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
@@ -407,10 +413,12 @@ def open_pull_request(
     )  # fmt: skip
     if created.returncode != 0:
         why = (created.stderr or created.stdout).strip()
-        return PullRequestResult(False, None, f"gh pr create failed: {why}")
+        return PullRequestResult(False, None, f"gh pr create failed: {why}", pushed=True, head=head)
     lines = [line for line in created.stdout.splitlines() if line.strip()]
     url = lines[-1].strip() if lines else None
-    return PullRequestResult(True, url, f"opened PR: {url}" if url else "opened PR")
+    return PullRequestResult(
+        True, url, f"opened PR: {url}" if url else "opened PR", pushed=True, head=head
+    )
 
 
 _MERGE_METHODS = frozenset({"merge", "squash", "rebase"})

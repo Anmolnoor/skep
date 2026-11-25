@@ -212,6 +212,22 @@ CREATE TABLE IF NOT EXISTS test_count_baselines (
 -- Phase 09 R1 (D2, D3): the PR the supervisor last fetched into a repo's
 -- refs/skep/pr/<number>/ (refresh_repo pr=), base branch included: what a
 -- review run is pinned to at dispatch and its merge re-checks.
+-- v133-F14 (J3, I13): every supervisor push an open_pr made — who, when,
+-- which branch and commit, and the PR it opened (or the failure after it).
+CREATE TABLE IF NOT EXISTS pr_pushes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    actor TEXT,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base TEXT NOT NULL,
+    head_commit TEXT,
+    pushed INTEGER NOT NULL,
+    opened INTEGER NOT NULL,
+    url TEXT,
+    detail TEXT NOT NULL,
+    task_ids_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pr_fetches (
     repo TEXT NOT NULL,
     number INTEGER NOT NULL,
@@ -1832,6 +1848,62 @@ class RunStore:
             ),
         )
         self._conn.commit()
+
+    @_locked
+    def record_pr_push(
+        self,
+        *,
+        actor: str | None,
+        repo: str,
+        branch: str,
+        base: str,
+        head_commit: str | None,
+        pushed: bool,
+        opened: bool,
+        url: str | None,
+        detail: str,
+        task_ids: Sequence[str] = (),
+    ) -> None:
+        """v133-F14 (J3, I13): one open_pr push attempt, as it ended. ``actor``
+        None = the caller did not say (never a guessed person)."""
+        self._conn.execute(
+            "INSERT INTO pr_pushes (at, actor, repo, branch, base, head_commit, pushed,"
+            " opened, url, detail, task_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _now(),
+                actor,
+                repo,
+                branch,
+                base,
+                head_commit,
+                int(pushed),
+                int(opened),
+                url,
+                detail,
+                json.dumps(list(task_ids)),
+            ),
+        )
+        self._conn.commit()
+
+    @_locked
+    def pr_pushes(self) -> list[dict[str, Any]]:
+        """v133-F14: every recorded open_pr push, oldest first."""
+        rows = self._conn.execute(
+            "SELECT at, actor, repo, branch, base, head_commit, pushed, opened, url, detail,"
+            " task_ids_json FROM pr_pushes ORDER BY id"
+        ).fetchall()
+        keys = ("at", "actor", "repo", "branch", "base", "head_commit")
+        return [
+            {
+                **dict(zip(keys, row[:6], strict=True)),
+                "pushed": bool(row[6]),
+                "opened": bool(row[7]),
+                "url": row[8],
+                "detail": row[9],
+                "task_ids": list(json.loads(row[10])),
+            }
+            for row in rows
+        ]
 
     @_locked
     def record_pr_fetch(

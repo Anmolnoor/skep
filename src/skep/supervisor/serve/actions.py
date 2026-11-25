@@ -3397,6 +3397,34 @@ def _changed_files(audit_dir: Path, task_id: str) -> list[str]:
     return []
 
 
+def record_pr(
+    store: RunStore | None,
+    result: Any,
+    *,
+    actor: str | None,
+    repo: Path,
+    branch: str,
+    base: str,
+    task_ids: list[str],
+) -> dict[str, Any]:
+    """v133-F14 (J3, I13): the ledger row for one open_pr push, and the
+    result fields every open_pr face returns."""
+    if store is not None:
+        store.record_pr_push(
+            actor=actor, repo=str(repo), branch=branch, base=base, head_commit=result.head,
+            pushed=result.pushed, opened=result.opened, url=result.url,
+            detail=result.detail, task_ids=task_ids,
+        )  # fmt: skip
+    return {
+        "opened": result.opened,
+        "url": result.url,
+        "detail": result.detail,
+        "branch": branch,
+        "pushed": result.pushed,
+        "head_commit": result.head,
+    }
+
+
 def open_pr_from_branch(
     store: RunStore,
     audit_dir: Path,
@@ -3404,6 +3432,7 @@ def open_pr_from_branch(
     *,
     branch: str,
     base: str,
+    actor: str | None = None,
 ) -> dict[str, Any]:
     """Push an applied branch and open the PR, evidence in the body (U1 land)."""
     from .. import github
@@ -3424,12 +3453,10 @@ def open_pr_from_branch(
             changed_files=changed_files,
         ),
     )
-    return {
-        "opened": result.opened,
-        "url": result.url,
-        "detail": result.detail,
-        "branch": branch,
-    }
+    return record_pr(
+        store, result, actor=actor, repo=Path(str(run["repo"])), branch=branch, base=base,
+        task_ids=[task_id],
+    )  # fmt: skip
 
 
 def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) -> str:
@@ -3476,6 +3503,7 @@ def open_pr_for_branch(
     branch: str,
     base: str = "main",
     title: str | None = None,
+    actor: str | None = None,
 ) -> dict[str, Any]:
     """v96-F4: open a PR for an existing local branch — the composer's button.
 
@@ -3512,7 +3540,9 @@ def open_pr_for_branch(
         "operator-approved landings or the operator's own work; merging stays "
         "a separate confirmed step.",
     )
-    return {"opened": result.opened, "url": result.url, "detail": result.detail, "branch": branch}
+    return record_pr(
+        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=[]
+    )
 
 
 def open_pr_for_run(
@@ -3540,7 +3570,7 @@ def open_pr_for_run(
     if branch is None:
         landed = land_run(store, run, actor, note=note or "approved via PR")
         branch = str(landed["branch"])
-    return open_pr_from_branch(store, audit_dir, run, branch=branch, base=base)
+    return open_pr_from_branch(store, audit_dir, run, branch=branch, base=base, actor=actor)
 
 
 def _grouped_branch(title: str | None, first_task_id: str) -> str:
@@ -3655,13 +3685,14 @@ def open_pr_for_runs(
         ),
         body=github.default_grouped_pr_body(runs=entries, changed_files=changed),
     )
+    ids = [entry.task_id for entry in entries]
     grouped: dict[str, Any] = {
-        "opened": result.opened,
-        "url": result.url,
-        "detail": result.detail,
-        "branch": branch,
-        "task_ids": [entry.task_id for entry in entries],
-    }
+        **record_pr(
+            store, result, actor=actor, repo=Path(str(first["repo"])), branch=branch,
+            base=base, task_ids=ids,
+        ),
+        "task_ids": ids,
+    }  # fmt: skip
     if skipped_no_patch:
         # v60-F3: the honest note — these runs produced no patch and are NOT
         # in the PR; the card still landed everything landable.
