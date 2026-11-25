@@ -3606,18 +3606,43 @@ def open_pr_for_branch(
     expected_head = expected_head or (None if store is None else shown_head(store, branch))
     if store is not None and (moved := shown_head_moved(store, resolved, branch, expected_head)):
         raise HTTPException(status_code=409, detail=moved)
+    body = (
+        f"Branch `{branch}` from the skep composer. Commits on it are "
+        "operator-approved landings or the operator's own work; merging stays "
+        "a separate confirmed step."
+    )
+    # R1 (Sol S13): the runs the card named (console.card_runs), each with
+    # the worker's result and G10's, from the store — as the card showed them
+    from .console import card_runs
+
+    args = {"branch": branch, "repo": str(resolved), "base": base}
+    ids = [] if store is None else card_runs(store, "open_pr", args)
+    if store is not None and ids:
+        entries = [
+            github.GroupedRun(
+                task_id=task_id,
+                summary=(record.summary or "") if (record := store.get_run(task_id)) else "",
+                verification=worker_result(store, task_id),
+                reverified=None if (g10 := store.reverification_for(task_id)) is None
+                else g10.confirmed,
+                supervisor=g10_line(g10),
+            )
+            for task_id in ids
+        ]  # fmt: skip
+        changed = list(
+            dict.fromkeys(path for t in ids for path in _changed_files(holder.current.audit_dir, t))
+        )
+        body = f"{body}\n\n" + github.default_grouped_pr_body(runs=entries, changed_files=changed)
     result = github.open_pull_request(
         repo=resolved,
         branch=branch,
         base=base,
         expected_head=expected_head,
         title=title or f"skep: {branch}",
-        body=f"Branch `{branch}` from the skep composer. Commits on it are "
-        "operator-approved landings or the operator's own work; merging stays "
-        "a separate confirmed step.",
+        body=body,
     )
     return record_pr(
-        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=[]
+        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=ids
     )
 
 

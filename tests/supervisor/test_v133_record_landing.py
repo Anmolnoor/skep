@@ -749,6 +749,45 @@ def test_card_and_pr_body_state_worker_and_supervisor_results_apart(
         store.close()
 
 
+# ---------- R1 (Sol S13): a branch PR's body carries the card's run evidence ----
+
+
+def test_r1_s13_a_branch_pr_body_names_each_landed_run_with_both_results(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.console import run_evidence
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import git
+
+    bodies: list[str] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        bodies.append(str(kw["body"]))
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head="h")
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        git(repo, "switch", "-qc", "skep/stack")
+        _approve(store, task_id, "skep/stack", _commit(repo, f"Apply skep task {task_id}", "a"))
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        [shown] = run_evidence(store, "open_pr", args)  # what the card shows
+        actions.open_pr_for_branch(
+            ConfigHolder(config, store), store, str(repo), branch="skep/stack", base="main"
+        )
+        [body] = bodies
+        assert f"`{task_id}`" in body, body
+        assert "worker's result: passed" in body and shown["supervisor"] in body, body
+    finally:
+        store.close()
+
+
 # ---------- F17: forensics says what each row is and where it comes from (J4) ----------
 
 
