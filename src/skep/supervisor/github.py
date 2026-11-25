@@ -629,6 +629,10 @@ def _reverify_label(reverified: bool | None) -> str:
     )
 
 
+def _supervisor_words(supervisor: str | None, reverified: bool | None) -> str:
+    return supervisor or f"{_reverify_label(reverified)} (G10)"
+
+
 def default_pr_body(
     *,
     task_id: str,
@@ -636,12 +640,17 @@ def default_pr_body(
     verification: str | None,
     reverified: bool | None,
     changed_files: list[str],
+    supervisor: str | None = None,
 ) -> str:
+    """v133-F16 (F-I3, I2, I8): the worker's result and the supervisor's are
+    two lines, each from the store — ``supervisor`` is G10's own line
+    (``actions.g10_line``: command, source, exit codes); no model text."""
     files = "\n".join(f"- `{path}`" for path in changed_files) or "- (none)"
     return (
         f"Opened by **skep** from task `{task_id}`.\n\n"
         f"**Summary:** {summary or '-'}\n\n"
-        f"**Verification:** {verification or '-'} — {_reverify_label(reverified)} (G10).\n\n"
+        f"**Worker's result:** {verification or 'not reported'} (the worker's own report)\n\n"
+        f"**Supervisor's result:** {_supervisor_words(supervisor, reverified)}\n\n"
         f"**Changed files:**\n{files}\n\n"
         "_This branch is the worker's patch artifact applied verbatim; "
         "review the diff before merging._"
@@ -656,13 +665,15 @@ class GroupedRun:
     summary: str
     verification: str | None
     reverified: bool | None
+    supervisor: str | None = None  # v133-F16: G10's own line
 
 
 def default_grouped_pr_body(*, runs: list[GroupedRun], changed_files: list[str]) -> str:
     """The multi-run PR body: every run's evidence travels, same as single."""
     lines = "\n".join(
-        f"- `{run.task_id}`: {run.summary or '-'} — {run.verification or '-'} — "
-        f"{_reverify_label(run.reverified)} (G10)"
+        f"- `{run.task_id}`: {run.summary or '-'} — worker's result: "
+        f"{run.verification or 'not reported'} — supervisor's result: "
+        f"{_supervisor_words(run.supervisor, run.reverified)}"
         for run in runs
     )
     files = "\n".join(f"- `{path}`" for path in changed_files) or "- (none)"

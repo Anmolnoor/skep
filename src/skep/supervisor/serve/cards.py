@@ -1149,4 +1149,7 @@ def card_summary(
         runs = run_evidence(store, tool, safe_args)
         if runs:
             summary["runs"] = runs
+    elif ((recorded or {}).get("evidence") or {}).get("runs"):
+        # v133-F11/F16: a resolved card shows the runs it recorded when proposed
+        summary["runs"] = (recorded or {})["evidence"]["runs"]
     return summary

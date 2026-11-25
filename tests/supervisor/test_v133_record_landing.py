@@ -444,3 +444,47 @@ def test_a_branch_pr_whose_head_moved_after_the_card_was_drawn_is_refused(
         assert pushed == []
     finally:
         store.close()
+
+
+# ---------- F16: the worker's result and the supervisor's, apart (F-I3) ----------
+
+
+def test_card_and_pr_body_state_worker_and_supervisor_results_apart(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+
+    bodies: list[str] = []
+
+    def fake(**kwargs: Any) -> github.PullRequestResult:
+        bodies.append(str(kwargs["body"]))
+        return github.PullRequestResult(True, "https://github.com/me/repo/pull/1", "opened")
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        store.transition(task_id, "completed", None)
+        worker_words = "worker's own verification: passed"
+        g10_words = (
+            "G10 failed: `cd web && node smoke.cjs` (the project's pinned verify_command), "
+            "exit codes [1]"
+        )
+        args = {"task_id": task_id}
+        recorded = recorded_card("land_run", args, None, store) or {}
+        [run] = card_summary("land_run", args, store=store, recorded=recorded)["runs"]
+        assert (run["worker"], run["supervisor"]) == (worker_words, g10_words)
+        # a resolved card shows the runs it recorded, asking the store nothing
+        [kept] = card_summary("land_run", args, recorded=recorded, live_tier=False)["runs"]
+        assert kept["supervisor"] == g10_words
+
+        _approve(store, task_id, "skep/x", None)
+        actions.open_pr_for_run(store, config.audit_dir, actions.require_run(store, task_id), "u")
+        [body] = bodies
+        assert "**Worker's result:** passed (the worker's own report)" in body
+        assert f"**Supervisor's result:** {g10_words}" in body
+    finally:
+        store.close()

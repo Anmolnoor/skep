@@ -25,6 +25,7 @@ from ..store import RunStore
 from .actions import (
     approval_views,
     g10_facts,
+    g10_line,
     never_reverified_error,
     patch_digest,
     patch_path,
@@ -32,6 +33,7 @@ from .actions import (
     require_run,
     reverification_warning,
     tamper_note,
+    worker_result,
 )
 from .cards import BOUNDARIES, boundary
 from .commands import WEB
@@ -205,6 +207,10 @@ def run_evidence(store: RunStore, tool: str, args: dict[str, Any]) -> list[dict[
             # v133-F12 (J1, I8): G10's command, source, run, exit codes, outcome
             "g10": g10_facts(store.reverification_for(task_id)),
             "landing": landing_line(store, task_id),
+            # v133-F16 (F-I3): the two results apart, each in the store's words
+            "worker": "worker's own verification: "
+            + (worker_result(store, task_id) or "not reported"),
+            "supervisor": g10_line(store.reverification_for(task_id)),
         }
         for task_id in card_runs(store, tool, args)
     ]

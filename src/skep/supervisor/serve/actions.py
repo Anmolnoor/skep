@@ -681,6 +681,16 @@ def g10_line(reverify: Any) -> str:
     return f"G10 {facts['outcome']}: `{command}`{source}, {ran}"
 
 
+def worker_result(store: RunStore, task_id: str) -> str | None:
+    """v133-F16 (F-I3): the worker's own verification outcome as the store
+    recorded it (its result, else what G10 recorded the worker claimed)."""
+    run = store.get_run(task_id)
+    reverify = store.reverification_for(task_id)
+    return (run.verification_outcome if run else None) or (
+        reverify.worker_outcome if reverify else None
+    )
+
+
 def g10_note_line(reverify: Any) -> str | None:
     """v133-F12 (J1, I13): the line a landing approval's note starts with when
     G10 did not confirm it — written from the store's record, never from the
@@ -3448,9 +3458,10 @@ def open_pr_from_branch(
         body=github.default_pr_body(
             task_id=task_id,
             summary=str(run["summary"] or ""),
-            verification=run["verification_outcome"],
+            verification=worker_result(store, task_id),
             reverified=None if reverify is None else reverify.confirmed,
             changed_files=changed_files,
+            supervisor=g10_line(reverify),  # v133-F16: G10's words, not the model's
         ),
     )
     return record_pr(
@@ -3681,12 +3692,13 @@ def open_pr_for_runs(
         github.GroupedRun(
             task_id=str(run["task_id"]),
             summary=str(run["summary"] or ""),
-            verification=run["verification_outcome"],
+            verification=worker_result(store, str(run["task_id"])),
             reverified=(
                 None
                 if (reverify := store.reverification_for(str(run["task_id"]))) is None
                 else reverify.confirmed
             ),
+            supervisor=g10_line(reverify),  # v133-F16
         )
         for run in runs
     ]
