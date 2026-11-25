@@ -421,7 +421,8 @@ _NODE_PRIME_INPUTS = frozenset({"package.json", *(lockfile for lockfile, _ in _N
 # What a patch must not change before an install (by basename, anywhere in
 # the tree): `.npmrc` can re-enable scripts or reroute the registry, a
 # yarn-path, a pnpmfile or pnpm-workspace.yaml settings are code or config
-# the installer obeys. `.yarn/` (yarn's releases) is matched as a prefix.
+# the installer obeys. A `.yarn/` directory (yarn's releases) is matched at
+# any depth too (v133 R1, Sol S2: yarn reads rc files up the tree).
 _NODE_INSTALLER_CONFIG = frozenset(
     {".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnpmfile.mjs", "pnpm-workspace.yaml"}
 )
@@ -601,7 +602,7 @@ def _node_install_refusal(
         path
         for path in touched
         if PurePosixPath(path).name in _NODE_INSTALLER_CONFIG
-        or path.startswith(".yarn/")
+        or ".yarn" in PurePosixPath(path).parts[:-1]
         or path in protected
     )
     if config:
@@ -953,7 +954,13 @@ def reverify(
             env.update(_node_env(node_cache, reverify_tmp))
         package_manager = _package_manager(worktree, node_dir)
         protected: set[str] = set()
-        for rc in {str(PurePosixPath(base, name)) for base in ("", node_dir)
+        # v133 R1 (Sol S2): yarn merges every rc file from the install
+        # directory up to the root, so each one's yarnPath is protected
+        node_parts = PurePosixPath(node_dir).parts
+        ancestors = {
+            str(PurePosixPath(*node_parts[:depth])) for depth in range(len(node_parts) + 1)
+        }
+        for rc in {str(PurePosixPath(base, name)) for base in ancestors
                    for name in (".yarnrc", ".yarnrc.yml")}:  # fmt: skip
             with contextlib.suppress(OSError):
                 text = (worktree / rc).read_text(encoding="utf-8")

@@ -567,3 +567,56 @@ def test_f10_a_plan_with_cwd_is_repaired_before_any_step_runs(
     finally:
         store.close()
     assert not any("npm" in str(command) for command in commands), commands
+
+
+# ---------- R1 (Sol S2): installer files on the whole path to the install ----
+
+
+def _apps_web_project(repo: Path) -> None:
+    """The install directory two levels down, with yarn config in between."""
+    web = repo / "apps" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        '{"name": "web", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    (web / "package-lock.json").write_text(_npm_lock("1.0.0") + "\n", encoding="utf-8")
+    (repo / "apps" / ".yarnrc.yml").write_text("yarnPath: tools/yarn.cjs\n", encoding="utf-8")
+    (repo / "apps" / "tools").mkdir()
+    (repo / "apps" / "tools" / "yarn.cjs").write_text("// release\n", encoding="utf-8")
+    _commit(repo, "apps/web with yarn config in apps/")
+
+
+def _apps_web_lock_bump() -> str:
+    return _web_lock_bump().replace("web/package-lock.json", "apps/web/package-lock.json")
+
+
+def _new_file(path: str) -> str:
+    return (
+        f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+        "@@ -0,0 +1 @@\n+// patched installer\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "installer",
+    [
+        # a yarn release directory between the root and the install
+        _new_file("apps/.yarn/releases/yarn-9.cjs"),
+        _new_file("apps/web/.yarn/releases/yarn-9.cjs"),
+        # the yarnPath an intermediate .yarnrc.yml resolves to
+        "diff --git a/apps/tools/yarn.cjs b/apps/tools/yarn.cjs\n"
+        "--- a/apps/tools/yarn.cjs\n+++ b/apps/tools/yarn.cjs\n"
+        "@@ -1 +1 @@\n-// release\n+// patched installer\n",
+    ],
+    ids=["intermediate-.yarn", "install-dir-.yarn", "intermediate-yarnPath"],
+)
+def test_r1_s2_a_patched_installer_on_the_path_is_never_installed_with(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, installer: str
+) -> None:
+    _apps_web_project(repo)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    patch = _marker_patch(tmp_path, _apps_web_lock_bump() + installer)
+    outcome = _run(repo, config, patch, bin_dir, log, "cd apps/web && npm test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "package manager's config" in outcome.detail, outcome.detail
+    assert [line.split()[:2] for line in _log(log)] == [["npm", "ci"]]  # baseline only
