@@ -186,7 +186,9 @@ def test_f7_the_prime_reaches_only_the_web_lockfiles_hosts(
     assert wall.proxies and all(proxy == hosts for proxy in wall.proxies[:1]), wall.proxies
 
 
-@pytest.mark.parametrize("pin", ["cd .. && npm test", "npm --prefix /abs/web test"])
+@pytest.mark.parametrize(
+    "pin", ["cd .. && npm test", "npm --prefix /abs/web test", "cd $APP && npm test"]
+)
 def test_f7_a_pin_directory_outside_the_worktree_is_not_primed(
     repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str
 ) -> None:
