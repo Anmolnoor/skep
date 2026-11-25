@@ -98,6 +98,9 @@ sudo systemctl start qemu-guest-agent   # VM only; the unit starts itself on lat
 `qemu-guest-agent` only matters on a VM. `nodejs` and `npm` are only needed for
 the Codex CLI.
 
+That is the minimum. For the tools a full setup uses (ripgrep, `uv`, `gh`, a
+project's test runner), see [`prerequisites.md`](prerequisites.md).
+
 ## 3. Let bubblewrap run under Ubuntu 24.04's AppArmor rules
 
 Ubuntu 24.04 stops unprivileged programs from creating user namespaces

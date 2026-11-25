@@ -6,6 +6,9 @@ that), so if you can't find it below, it doesn't exist yet.
 ## Start here
 
 - [`quickstart.md`](quickstart.md) — first run in 5 minutes
+- [`prerequisites.md`](prerequisites.md) — everything to have ready before
+  the first run: what is required, what each optional feature needs, the
+  install commands and the checks
 - [`onboarding.md`](onboarding.md) — `skep onboard`: model, work directory,
   sandbox, locked policy baseline, role — and `--check`
 - [`how-to-use-on-new-machine.md`](how-to-use-on-new-machine.md) — full
