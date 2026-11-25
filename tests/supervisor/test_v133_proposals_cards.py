@@ -792,6 +792,28 @@ def test_r3_u3_a_same_phase_re_setup_keeps_a_stored_auto_landing_branch(
         store.close()
 
 
+def test_r4_v1_a_stored_per_task_destination_survives_an_unrelated_re_setup(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """Sol V1: an explicitly stored ``auto_apply_branch: null`` (auto-landing on
+    per-task branches) is the operator's choice too; a maintain re-setup that
+    does not name it must not move landings to skep/maintain."""
+    from skep.supervisor.serve.registry import repos_root, setup_project_record
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, {**_RELEASE, "auto_apply_branch": None}, phase="maintain")
+        result = setup_project_record(
+            run_store=store, root=repos_root(holder), project_id="proj", name="proj",
+            strategy="trusted_local_dev", phase="maintain", repo_path=str(repo),
+            policy_overrides={"coding_engine": "builtin"},
+        )  # fmt: skip
+        assert result["policy"]["auto_apply_branch"] is None
+        assert "auto_apply_branch" not in {c["key"] for c in result["policy_changes"]}
+    finally:
+        store.close()
+
+
 def test_r3_u3_a_setup_card_whose_landing_branch_moved_since_it_was_shown_is_refused(
     config: SupervisorConfig, repo: Path
 ) -> None:

@@ -1166,9 +1166,13 @@ def _carry_forward_existing(
     # survives a re-setup that does not name it. One rule: a same-phase
     # re-setup keeps the stored value of a key it does not name, except an
     # "on", which the defaults still decide (keeping one never opens a lane).
+    # R4 (Sol V1): a stored `auto_apply_branch: null` is a choice too (land on
+    # per-task branches), so for that key a stored null is kept.
     for key in ("auto_apply_verified_patch", "auto_dispatch_allowed", "auto_apply_branch"):
-        value = stored.policy.get(key)
-        if value not in (None, True) and key not in overrides and stored.phase == phase:
+        if key not in stored.policy or key in overrides or stored.phase != phase:
+            continue
+        value = stored.policy[key]
+        if value is not True and (value is not None or key == "auto_apply_branch"):
             merged[key] = value
     # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
     # A binding the project did not have (a same-named folder elsewhere: the
