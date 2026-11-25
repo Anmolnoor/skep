@@ -431,6 +431,12 @@ def starts_on_landing_branch(
 _AUTH_MINT = {"claude_code": ("run `claude setup-token` and copy the token it prints", "token")}
 
 
+def refreshes_before_dispatch(config: SupervisorConfig, repo: Path) -> bool:
+    """v55-F2: a managed clone fetches when its run starts, so the commit it
+    starts from may be newer than the one a card read (R2, Sol T8)."""
+    return repo.parent == (config.home.parent / "repos").resolve()
+
+
 def launches_external_engine(worker_kind: str, engine: Any) -> bool:
     """Whether a run of this caste starts ``engine``'s external agent — only
     a coding run does. The proposal-time auth check asks the same (R2, T2)."""
@@ -524,7 +530,7 @@ def run_task(
     # v55-F2 (ADR 0035): a managed clone fetches before the baseline resolves —
     # the "is it on the latest code?" step. Managed clones only; workon dirs
     # are the operator's own. Offline dispatch keeps working from the clone.
-    if repo.parent == (config.home.parent / "repos").resolve():
+    if refreshes_before_dispatch(config, repo):
         try:
             refreshed = refresh_clone(repo)
             logger.info("refreshed %s before dispatch: %s", repo.name, refreshed["detail"])

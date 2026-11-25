@@ -1257,6 +1257,8 @@ def card_summary(
     if manifest is not None and manifest.get("base_ref"):
         # v133-F30 (F-I2): what the worker will start from, on the line read first
         commit = str(manifest.get("base_commit") or "")[:7]
+        if commit and manifest.get("base_before_refresh"):  # R2 (Sol T8)
+            commit += ", before the clone refreshes"
         summary["headline"] += f" @ {manifest['base_ref']}" + (f" ({commit})" if commit else "")
     if len(folded) > 1:
         summary["items"] = [headline(tool, item, limit=None) for item in folded]

@@ -485,6 +485,46 @@ def test_the_dispatch_card_shows_the_base_ref_and_commit(
         store.close()
 
 
+def test_r2_t8_a_managed_clone_card_says_its_commit_is_before_the_refresh(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The managed clone fast-forwards when the run starts, so the card's
+    commit is the one before that refresh, and the result names the start."""
+    import shutil
+
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+    from skep.supervisor.serve.tools import dispatch_manifest_for
+
+    from .conftest import git
+
+    store, holder = _parts(config)
+    try:
+        clone = config.home.parent / "repos" / "app"
+        shutil.copytree(repo, clone)
+        _bind(store, clone.resolve(), {})
+        head = git(clone, "rev-parse", "HEAD").stdout.strip()
+        args = {"repo": str(clone.resolve()), "instructions": "x"}
+        manifest = dispatch_manifest_for(store, holder, args, None)
+        recorded = recorded_card("dispatch_run", args, None, store, manifest) or {}
+        summary = card_summary("dispatch_run", args, store=store, recorded=recorded)
+        assert summary["headline"].endswith(f"@ main ({head[:7]}, before the clone refreshes)")
+
+        started = "f" * 40  # what the run row recorded after the refresh
+
+        def submit(*_a: Any, **_k: Any) -> str:
+            task = mint_task(workspace=clone, instructions="x")
+            store.create_run(
+                task, repo=clone, ref=None, execution_mode="workspace", base_commit=started
+            )
+            return str(task.task_id)
+
+        monkeypatch.setattr(actions, "submit_run", submit)
+        result = _confirm(store, holder, "dispatch_run", args)
+        assert result["base_commit"] == started
+    finally:
+        store.close()
+
+
 def test_dispatch_run_says_what_it_cannot_do() -> None:
     from skep.supervisor.serve.tools import tool_description
 

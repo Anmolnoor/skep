@@ -3269,7 +3269,7 @@ def _dispatch_base(holder: ConfigHolder, manifest: dict[str, Any], ref: Any) -> 
     branch it will land on, ES-F6; else the repo's default branch), so the
     card shows what the worker will see."""
     from ..apply import repo_default_branch, resolve_commit
-    from ..dispatch import starts_on_landing_branch
+    from ..dispatch import refreshes_before_dispatch, starts_on_landing_branch
 
     repo = Path(str(manifest["repo"]))
     base = str(ref or "") or None
@@ -3279,7 +3279,10 @@ def _dispatch_base(holder: ConfigHolder, manifest: dict[str, Any], ref: Any) -> 
     ):  # fmt: skip
         base = str(manifest["auto_apply_branch"])
     base = base or repo_default_branch(repo)
-    return {"base_ref": base, "base_commit": resolve_commit(repo, base)}
+    facts: dict[str, Any] = {"base_ref": base, "base_commit": resolve_commit(repo, base)}
+    if refreshes_before_dispatch(holder.current, repo):  # R2 (Sol T8): said, not hidden
+        facts["base_before_refresh"] = True
+    return facts
 
 
 def fetch_grant_decision(
@@ -6262,11 +6265,15 @@ def _execute_mutation(
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
         # additive only, same field set on both paths.
+        started = store.get_run(task_id)
         result_view = {
             "task_id": task_id,
             "state": "dispatched",
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
+            # R2 (Sol T8): the commit the run started from (a managed clone
+            # refreshes first, so it may be newer than the card's)
+            "base_commit": None if started is None else started.base_commit,
         }
         if chain or role:
             # R3: the chat card shows who delegated, under which role.
