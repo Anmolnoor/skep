@@ -1,0 +1,239 @@
+"""v133 B2: the worker and re-verify fixes from the Alfin live test.
+
+F7 (A2): re-verify primes Node deps in the directory the pin runs in.
+"""
+
+from __future__ import annotations
+
+import importlib
+from pathlib import Path
+
+import pytest
+
+from skep.supervisor import SupervisorConfig
+from skep.supervisor.reverify import ReverifyOutcome, reverify
+
+from .conftest import git
+from .test_reverify import _npm_lock, _RecordingWall
+
+reverify_mod = importlib.import_module("skep.supervisor.reverify")
+
+# ---------- F7 (A2): the pin's own directory is primed ----------
+
+
+def _pwd_stubs(tmp_path: Path) -> tuple[Path, Path]:
+    """Fake `npm`/`pnpm`/`yarn`/`node` logging argv and the directory they ran in."""
+    bin_dir = tmp_path / "nodebin"
+    bin_dir.mkdir()
+    log = tmp_path / "node.log"
+    for tool in ("npm", "pnpm", "yarn", "node"):
+        stub = bin_dir / tool
+        stub.write_text(
+            f'#!/bin/sh\necho "{tool} $* pwd=$PWD" >> "$NODE_LOG"\nexit 0\n', encoding="utf-8"
+        )
+        stub.chmod(0o755)
+    return bin_dir, log
+
+
+def _commit(repo: Path, message: str) -> None:
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message)
+
+
+def _web_project(
+    repo: Path, lockfile: str = "package-lock.json", *, host: str = "registry.npmjs.org"
+) -> None:
+    """The Alfin shape: the app lives in web/, the repo root has no package.json."""
+    web = repo / "web"
+    web.mkdir()
+    (web / "package.json").write_text(
+        '{"name": "web", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    (web / lockfile).write_text(_npm_lock("1.0.0", host=host) + "\n", encoding="utf-8")
+    _commit(repo, "web app")
+
+
+def _marker_patch(tmp_path: Path, extra: str = "") -> Path:
+    patch = tmp_path / "marker.patch"
+    patch.write_text(
+        "diff --git a/patched_marker.txt b/patched_marker.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/patched_marker.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+patched\n" + extra,
+        encoding="utf-8",
+    )
+    return patch
+
+
+def _web_lock_bump(old_host: str = "registry.npmjs.org") -> str:
+    return (
+        "diff --git a/web/package-lock.json b/web/package-lock.json\n"
+        "--- a/web/package-lock.json\n"
+        "+++ b/web/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        f"-{_npm_lock('1.0.0', host=old_host)}\n"
+        f"+{_npm_lock('2.0.0', host=old_host)}\n"
+    )
+
+
+def _run(
+    repo: Path,
+    config: SupervisorConfig,
+    patch: Path,
+    bin_dir: Path,
+    log: Path,
+    pin: str,
+    profile_path: Path | None = None,
+) -> ReverifyOutcome:
+    return reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=[pin],
+        config=config,
+        profile_path=profile_path,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+
+
+def _log(log: Path) -> list[str]:
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize(
+    ("pin", "lockfile", "install"),
+    [
+        ("cd web && npm test", "package-lock.json", "npm ci --ignore-scripts"),
+        ("cd web && node --test", "package-lock.json", "npm ci --ignore-scripts"),
+        ("CI=1 npm --prefix web test", "package-lock.json", "npm ci --ignore-scripts"),
+        ("npm --prefix=web test", "package-lock.json", "npm ci --ignore-scripts"),
+        (
+            "pnpm -C web test",
+            "pnpm-lock.yaml",
+            "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
+        ),
+    ],
+)
+def test_f7_the_baseline_prime_installs_where_the_pin_runs(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str, lockfile: str, install: str
+) -> None:
+    """A2: the app in web/, no root package.json — G10 never installed, so the
+    worker's pass became DISAGREED with `Cannot find module`."""
+    _web_project(repo, lockfile)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = _log(log)
+    assert lines[0].startswith(f"{install} "), lines
+    assert lines[0].endswith("/web"), lines
+    assert "node deps primed from the baseline" in outcome.detail
+    assert len(lines) == 2  # one install, then the pin
+
+
+def test_f7_a_patch_that_bumps_the_web_lockfile_reprimes_in_web(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _web_project(repo)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    patch = _marker_patch(tmp_path, _web_lock_bump())
+    outcome = _run(repo, config, patch, bin_dir, log, "cd web && npm test")
+    assert outcome.outcome == "passed", outcome.detail
+    lines = _log(log)
+    assert [line.split()[:2] for line in lines] == [["npm", "ci"], ["npm", "ci"], ["npm", "test"]]
+    assert all(line.endswith("/web") for line in lines), lines
+    assert "re-primed against the patched lockfile" in outcome.detail
+
+
+def test_f7_the_prime_reaches_only_the_web_lockfiles_hosts(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No new network reach (I12): the hosts come from the lockfile beside
+    the manifest that is installed, plus the default registries."""
+    _web_project(repo, host="npm.example.com")
+    wall = _RecordingWall(monkeypatch)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    outcome = _run(
+        repo,
+        config,
+        _marker_patch(tmp_path),
+        bin_dir,
+        log,
+        "cd web && npm test",
+        profile_path=tmp_path / "reverify.profile.sb",
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    hosts = ("npm.example.com", "registry.npmjs.org", "registry.yarnpkg.com")
+    assert wall.proxies and all(proxy == hosts for proxy in wall.proxies[:1]), wall.proxies
+
+
+@pytest.mark.parametrize("pin", ["cd .. && npm test", "npm --prefix /abs/web test"])
+def test_f7_a_pin_directory_outside_the_worktree_is_not_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str
+) -> None:
+    """A root project would have been primed and the pin run elsewhere: a
+    directory that is not literally inside the worktree primes nothing."""
+    (repo / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    (repo / "package-lock.json").write_text(_npm_lock("1.0.0") + "\n", encoding="utf-8")
+    _commit(repo, "root app")
+    bin_dir, log = _pwd_stubs(tmp_path)
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "not a literal directory inside the worktree" in outcome.detail
+    assert _log(log) == []  # no install, and the pin was not run
+
+
+def test_f7_a_symlinked_directory_that_leaves_the_worktree_is_not_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "package.json").write_text(
+        '{"name": "o", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    (outside / "package-lock.json").write_text(_npm_lock("1.0.0") + "\n", encoding="utf-8")
+    (repo / "web").symlink_to(outside)
+    _commit(repo, "web is a symlink out")
+    bin_dir, log = _pwd_stubs(tmp_path)
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, "cd web && node check.js")
+    # A bare node pin runs unprimed, and the record says why.
+    assert outcome.outcome == "passed", outcome.detail
+    assert "ran unprimed" in outcome.detail
+    assert "not a literal directory inside the worktree" in outcome.detail
+    assert [line.split()[0] for line in _log(log)] == ["node"]
+
+
+def test_f7_a_web_lockfile_patch_that_changes_web_package_manager_is_refused(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The install refusal reads the manifest that is installed."""
+    _web_project(repo)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    manifest = (
+        "diff --git a/web/package.json b/web/package.json\n"
+        "--- a/web/package.json\n"
+        "+++ b/web/package.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"name": "web", "devDependencies": {"jest": "1.0.0"}}\n'
+        '+{"name": "web", "packageManager": "npm@99.0.0", "devDependencies": {"jest": "2.0.0"}}\n'
+    )
+    patch = _marker_patch(tmp_path, _web_lock_bump() + manifest)
+    outcome = _run(repo, config, patch, bin_dir, log, "cd web && npm test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert "packageManager" in outcome.detail
+    assert [line.split()[:2] for line in _log(log)] == [["npm", "ci"]]  # baseline only
+
+
+def test_f7_the_baseline_clean_keeps_the_primed_web_node_modules(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    git(wt, "init", "-q")
+    for path in ("web/node_modules/jest/index.js", "node_modules/a.js", "web/state.txt"):
+        (wt / path).parent.mkdir(parents=True, exist_ok=True)
+        (wt / path).write_text("x", encoding="utf-8")
+    keep = (*reverify_mod._BASELINE_KEEP, "web/node_modules")
+    assert reverify_mod._untracked(wt, keep) == {"web/state.txt"}
+    assert "web/node_modules/jest/index.js" in reverify_mod._untracked(wt)

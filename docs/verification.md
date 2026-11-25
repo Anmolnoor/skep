@@ -52,6 +52,21 @@ pin runs `node`, `npm`, `npx`, `pnpm` or `yarn` (`package-lock.json`,
 command (`cd web && npm test`). Other ecosystems are not primed: their pin
 re-runs only with what the host already has.
 
+A Node pin is primed in the directory its first Node command runs in: the
+`cd X` steps before that command (`cd web && npm test`,
+`cd apps && cd web && node --test`), then the command's own `--prefix X`,
+`--prefix=X` or `-C X` (`npm --prefix web test`, `pnpm -C web test`). The
+`package.json`, the lockfile, the hosts that lockfile names, the install, the
+kept `node_modules` and the re-install after a patched lockfile all come from
+that directory. Each part must be a literal path (letters, digits, `.`, `_`,
+`@`, `+`, `-` and `/`; no `$`, `~`, glob or quote) and the result, symlinks
+followed, must sit inside the worktree. Otherwise nothing is primed: an `npm`,
+`npx`, `pnpm` or `yarn` pin is `unavailable` and a bare `node` pin runs
+unprimed, and the detail says why. Not read: yarn's `--cwd`, pnpm's `--dir`,
+`npm -w`/`--workspace`, `pushd`, a `cd` inside `sh -c`, and every Node command
+after the first (a pin that runs Node in two directories primes only the
+first).
+
 **A patched lockfile is installed before anyone approves the patch.** That
 install never gets open network: it reaches the package registries alone
 (`pypi.org` and `files.pythonhosted.org` for uv; `registry.npmjs.org` and
