@@ -2820,7 +2820,8 @@ async function viewChat(main, chatId) {
         // R5-2 (K2): a confirm names how many items this card rendered — the
         // server refuses (409, nothing ran) a card that now holds another set.
         const items = (d.card?.items || []).length || 1;
-        await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`,
+        // v133-F37: the surface hint, so the store records who answered (not authorization)
+        await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}?surface=web`,
           verb === "confirm" ? { ...(keep ? { keep: keep.value } : {}), items } : {});
       }
       catch (e) {
@@ -3037,7 +3038,7 @@ async function viewChat(main, chatId) {
       await followProject(card.tool, result);
       refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {
-      await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);
+      await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}?surface=web`); // v133-F37
     }
     await reconcile(); // v133 R1 (S15): the card shows its verdict; the lock follows the server
     return true;

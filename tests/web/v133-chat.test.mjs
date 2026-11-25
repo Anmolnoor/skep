@@ -174,12 +174,12 @@ test("F21: with a card pending, typing works and Enter posts nothing until the c
   // Answering the card sends the queued message, once.
   chat.app.streamSse = async (path, body) => {
     chat.streams.push([path, body]);
-    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+    if (path.includes("/confirm")) chat.server.actions[0].status = "confirmed";
   };
   await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
   await settle();
   assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content]), [
-    ["/api/chats/c1/actions/a1/confirm", undefined],
+    ["/api/chats/c1/actions/a1/confirm?surface=web", undefined],
     ["/api/chats/c1/messages?surface=web", "next, do this"],
   ]);
 });
@@ -202,7 +202,7 @@ test("F22: queue one message, type a new draft, answer the card: the queued one 
   chat.input.value = "a draft I am still writing";
   chat.app.streamSse = async (path, body) => {
     chat.streams.push([path, body]);
-    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+    if (path.includes("/confirm")) chat.server.actions[0].status = "confirmed";
   };
   await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
   await settle();
@@ -498,7 +498,7 @@ test("R1 S15: /approve <id> typed under the pending card resolves it at once", a
   chat.input.value = "/approve a1";
   chat.press("Enter");
   await settle();
-  assert.deepEqual(chat.streams.map(([path]) => path), ["/api/chats/c1/actions/a1/confirm"]);
+  assert.deepEqual(chat.streams.map(([path]) => path), ["/api/chats/c1/actions/a1/confirm?surface=web"]);
   assert.equal(chat.input.value, "");
   assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0, "not queued");
   assert.ok(chat.log.querySelector(".confirm-card").classList.contains("resolved"));
@@ -575,4 +575,20 @@ test("R1 S6: F38's go-ahead line — text and id on one event — is drawn once"
   assert.equal(chat.textCount("the answer"), 1);
   assert.equal(chat.textCount("could not run in this turn"), 1);
   assert.equal(chat.textCount("do the thing"), 1);
+});
+
+// ---------- F37: the web says which surface answered a chat card ----------
+
+test("F37: Approve, Deny and a typed /approve <id> on an assistant card send ?surface=web", async () => {
+  for (const [how, verb] of [["Approve", "confirm"], ["Deny", "deny"], ["typed", "confirm"]]) {
+    const chat = await openChat({ actions: [card("a1")] });
+    chat.app.streamSse = async (path, body) => {
+      chat.streams.push([path, body]);
+      if (path.includes("/actions/a1/")) chat.server.actions[0].status = verb === "confirm" ? "confirmed" : "denied";
+    };
+    if (how === "typed") { chat.input.value = "/approve a1"; chat.press("Enter"); }
+    else await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === how).click();
+    await settle();
+    assert.deepEqual(chat.streams.map(([path]) => path), [`/api/chats/c1/actions/a1/${verb}?surface=web`], how);
+  }
 });
