@@ -3389,7 +3389,7 @@ async function viewChat(main, chatId) {
         }
         return false;
       };
-      chatStreamActive = false;
+      // No await above: the rule is set before any poll can reconcile.
       // v133 R1 (S16): the lock — and with it the queue — waits for the
       // server's card state: reconcile draws the rows above (by the rule),
       // then any card whose `action` event the stream lost, and only then

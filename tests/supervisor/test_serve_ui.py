@@ -1645,7 +1645,8 @@ def test_pending_cards_reconcile_without_a_reload() -> None:
     assert source.count("renderPendingCards();") >= 2
     finally_start = source.index("chatStreamActive = false")
     finally_block = source[finally_start : source.index("updateContextMeter()", finally_start)]
-    assert "renderPendingCards()" in finally_block
+    # v133 R1 (S6/S16): the finally goes through reconcile (and so renderPendingCards)
+    assert "await reconcile();" in finally_block
     # The view's reconcile draws what the DOM does not hold, through the same loop.
     reconcile = source[source.index("const reconcile = async") :]
     reconcile = reconcile[: reconcile.index("\n  };")]
@@ -1900,7 +1901,7 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
     # The drop is gone: a disabled send QUEUES. v133-F22: one entry per
     # message, never merged into the first.
     assert "if (!content || send.disabled || !assistantReady) return;" not in chat
-    assert "queued.push(content);" in chat
+    assert "queued.push({ text: content, held: false });" in chat  # v133 R1 (S17): held per message
     # Feedback, both transient and persistent — a queue nobody can see is the
     # same defect wearing a queue (I8).
     assert 'flash("ok", "queued — sends when this turn finishes")' in chat
@@ -1918,7 +1919,7 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
     # And the empty-queue guard must come before any use of `deliver`.
     flush = chat[chat.index("const flushQueued") :]
     flush = flush[: flush.index("\n  };")]
-    assert flush.index("if (!queued.length") < flush.index("deliver(content)")
+    assert flush.index("if (at < 0") < flush.index("deliver(text)")
 
 
 def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
