@@ -3443,13 +3443,13 @@ differently.
   supervisor ran, whether it ran, its exit codes and the outcome. The
   approval note begins with a line the store writes from that record. The
   landing is not refused: the human verdict decides.
-- A landing, a branch PR push and a `setup_project` confirm are checked
-  against the card that was clicked. If the re-verification record, the
-  branch head, or the pin or auto-landing effect of the setup changed after
-  the card was drawn, the confirm is refused and a new proposal shows the
-  current state. This holds for cards from chat, including typed `/land`,
-  `/approve`, `/pr` and `/setup`; the REST approve endpoints and
-  `skep review --approve` act on the current record, as before.
+- For a card proposed in chat (the Queen's, or a typed `/land`, `/approve`,
+  `/pr` or `/setup`), the confirm is checked against what that card recorded
+  when it was drawn: the re-verification record for a landing, the branch
+  head for a branch PR, the pin and the auto-landing effect for a setup. If
+  that changed, the confirm is refused and a new proposal shows the current
+  state. A gate's mirror card, the Approvals view, the REST approve endpoints
+  and `skep review --approve` act on the current record, as before.
 - A branch PR card lists the runs whose landing commit is between the base
   and the branch head, each with the worker's own result and the
   supervisor's result on separate lines. A pending card shows the runs it
@@ -3486,10 +3486,16 @@ differently.
   installed: the replay is `unavailable` and says why.
 - A syntax-only or version-only pin (`node --check`, `python -m py_compile`,
   `bash -n`, `ruby -c`, `php -l`, `--version`, `--help`), also after `cd`,
-  `env`, `timeout` or a variable assignment, cannot qualify a patch for
-  auto-landing, cannot be saved together with auto-landing, and closes the
-  verify-pin gate of an unattended external-engine schedule. It can still be
-  the pin for a run a human lands. The run page marks it.
+  `env`, `timeout` or a variable assignment, no longer counts as a real
+  check where skep acts without a human:
+  - a run whose re-run commands are all such checks is not auto-landed;
+  - a setup call that asks for auto-landing or for `unlocked` with such a
+    pin is refused, and auto-landing that comes from a phase default or a
+    stored value is switched off with a note;
+  - a schedule on an external engine is paused, naming the verify-pin gate.
+
+  It can still be the pin for a run a human lands, and it still satisfies
+  the pin an external engine needs to be dispatched. The run page marks it.
 - Re-running project setup in the same phase keeps a stored "off" for
   auto-landing and for auto-dispatch, and the stored auto-landing branch (a
   named branch, or per-task branches), unless the call names that key. A
