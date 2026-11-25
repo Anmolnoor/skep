@@ -313,10 +313,15 @@ repository. Then, by task:
   run and opens its PR; `skep pr open <repo> --branch <branch>` opens one for
   a local branch that already exists. Your git credentials must be able to
   push a branch to `origin`: skep pushes it with `git push`, then calls
-  `gh pr create`. The base branch must exist on GitHub. If the repository
-  was created empty, create it first with `skep repo push-baseline <repo>`
-  (or the `push_baseline` card in chat), then retry. That command only
-  creates a missing base branch.
+  `gh pr create`. The PR's base branch must exist on GitHub before you
+  approve. Both commands use `main` as the base unless you pass another
+  (`--pr-base <base>` on `skep review`, `--base <base>` on `skep pr open`).
+  If the base exists locally and is missing on GitHub, as in a repository
+  that was created empty, create it first with
+  `skep repo push-baseline <repo> --base <base>` (or the `push_baseline` card
+  in chat). That command only creates a missing base branch. If an approval
+  already landed the run before the base existed, open the PR afterwards
+  with `skep pr open <repo> --branch <landed-branch> --base <base>`.
 - **Reviewing a pull request at its exact head.** skep reads the PR through
   `gh` and fetches its head and base from `origin` with git, so both need
   read access. The project also needs a pinned verify command (section 3):
