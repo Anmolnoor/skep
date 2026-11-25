@@ -620,3 +620,35 @@ def test_r1_s2_a_patched_installer_on_the_path_is_never_installed_with(
     assert outcome.outcome == "unavailable", outcome.detail
     assert "package manager's config" in outcome.detail, outcome.detail
     assert [line.split()[:2] for line in _log(log)] == [["npm", "ci"]]  # baseline only
+
+
+# ---------- R1 (Sol S10): only the package manager's own directory flags ----
+
+
+@pytest.mark.parametrize(
+    ("pin", "lockfile"),
+    [
+        ("npm test -- --prefix fixtures", "package-lock.json"),  # the script's argument
+        ("npx jest --prefix fixtures", "package-lock.json"),  # jest's, after the command
+        ("pnpm test -C fixtures", "pnpm-lock.yaml"),  # pnpm hands it to the script
+        ("node -C development test.js", "package-lock.json"),  # node's --conditions
+    ],
+)
+def test_r1_s10_a_script_argument_is_not_the_install_directory(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str, lockfile: str
+) -> None:
+    (repo / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    (repo / lockfile).write_text(_npm_lock("1.0.0") + "\n", encoding="utf-8")
+    _commit(repo, "root app")
+    bin_dir, log = _pwd_stubs(tmp_path)
+    npx = bin_dir / "npx"
+    npx.write_text((bin_dir / "npm").read_text().replace('"npm ', '"npx '), encoding="utf-8")
+    npx.chmod(0o755)
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = _log(log)
+    assert lines[0].split()[1] in ("ci", "install"), lines  # the package that owns the test
+    # installed where the pin runs (the worktree root), not in the argument
+    assert lines[0].rsplit("pwd=", 1)[1] == lines[1].rsplit("pwd=", 1)[1], lines
