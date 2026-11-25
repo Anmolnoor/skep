@@ -3674,6 +3674,47 @@ def _grouped_branch(title: str | None, first_task_id: str) -> str:
     return f"skep/{first_task_id}"
 
 
+def grouped_landing(
+    store: RunStore, runs: list[dict[str, Any]], title: str | None
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    """A grouped PR's runs as its confirm resolves them — those that land,
+    those skipped, and the shared branch the first one that lands names.
+    The proposal asks the same (R2, Sol T1). v60-F3: only runs with a patch
+    can land — a script run (artifact only) must not fail the whole card
+    AFTER the operator approved it (field test 2026-07-18: one grouped card
+    burned its approval on "nothing to land", then the retry card timed out).
+    Already-landed runs stay: they need no patch to join their branch."""
+    landable: list[dict[str, Any]] = []
+    skipped_no_patch: list[str] = []
+    for run in runs:
+        task_id = str(run["task_id"])
+        if applied_branch_for(store, task_id) is not None or patch_path(store, task_id) is not None:
+            landable.append(run)
+        else:
+            skipped_no_patch.append(task_id)
+    if not landable:
+        raise HTTPException(
+            status_code=409,
+            detail="nothing to land: none of these runs produced a patch "
+            f"({', '.join(skipped_no_patch)})",
+        )
+    return landable, skipped_no_patch, _grouped_branch(title, str(landable[0]["task_id"]))
+
+
+def landed_elsewhere(store: RunStore, runs: list[dict[str, Any]], branch: str) -> str | None:
+    """Why a grouped PR cannot land on ``branch``: a run already landed on
+    another branch cannot also join it. None when every run can."""
+    for run in runs:
+        task_id = str(run["task_id"])
+        existing = applied_branch_for(store, task_id)
+        if existing is not None and existing != branch:
+            return (
+                f"run {task_id} already landed on {existing!r}; it cannot also join "
+                f"{branch!r} — open its PR from that branch instead (open_pr task_id={task_id})"
+            )
+    return None
+
+
 def open_pr_for_runs(
     store: RunStore,
     audit_dir: Path,
@@ -3700,26 +3741,7 @@ def open_pr_for_runs(
         raise HTTPException(
             status_code=400, detail="runs must be from the same repo to group into one PR"
         )
-    # v60-F3: only runs with a patch can land — a script run (artifact only)
-    # must not fail the whole card AFTER the operator approved it (field test
-    # 2026-07-18: one grouped card burned its approval on "nothing to land",
-    # then the retry card timed out). Already-landed runs stay: they need no
-    # patch to join their branch.
-    landable: list[dict[str, Any]] = []
-    skipped_no_patch: list[str] = []
-    for run in runs:
-        task_id = str(run["task_id"])
-        if applied_branch_for(store, task_id) is not None or patch_path(store, task_id) is not None:
-            landable.append(run)
-        else:
-            skipped_no_patch.append(task_id)
-    if not landable:
-        raise HTTPException(
-            status_code=409,
-            detail="nothing to land: none of these runs produced a patch "
-            f"({', '.join(skipped_no_patch)})",
-        )
-    runs = landable
+    runs, skipped_no_patch, branch = grouped_landing(store, runs, title)
     # ES-F291 follow-up (I2 I8): refuse the group before any of it lands — a
     # never-re-verified run found mid-loop left the earlier runs landed on a
     # branch no PR was opened for.
@@ -3729,7 +3751,8 @@ def open_pr_for_runs(
             shown = (g10_bound or {}).get(str(run["task_id"]))  # the clicked card's
             if (moved := shown_g10_moved(store, str(run["task_id"]), shown=shown)) is not None:
                 raise HTTPException(status_code=409, detail=moved)  # v133-F12: before any lands
-    branch = _grouped_branch(title, str(runs[0]["task_id"]))
+    if (elsewhere := landed_elsewhere(store, runs, branch)) is not None:
+        raise HTTPException(status_code=409, detail=elsewhere)  # R2 (T1): before any lands
     for run in runs:
         task_id = str(run["task_id"])
         if run["state"] == "pending_approval":
@@ -3738,15 +3761,8 @@ def open_pr_for_runs(
                 detail=f"run {task_id} is waiting on a mid-run gate; resume past "
                 "the gate first (approve), then open the PR",
             )
-        existing = applied_branch_for(store, task_id)
-        if existing == branch:
+        if applied_branch_for(store, task_id) == branch:
             continue  # already on the shared branch — never re-apply a patch
-        if existing is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"run {task_id} already landed on {existing!r}; it cannot "
-                f"also join {branch!r} — open its PR from that branch instead",
-            )
         land_run(
             store, run, actor, note=note or f"grouped PR on {branch}", branch=branch,
             g10_shown=(g10_bound or {}).get(task_id),

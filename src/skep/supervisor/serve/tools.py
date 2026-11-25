@@ -4580,17 +4580,17 @@ def landing_card_error(
             ids = args.get("task_ids") or [args.get("task_id")]
             if args.get("task_ids") and isinstance(ids, list) and ids:
                 # v133-F25 (F-I7): the 08:30 "already landed" — a run landed on
-                # its own branch cannot join the grouped PR's shared branch
+                # its own branch cannot join the grouped PR's shared branch;
+                # R2 (Sol T1): resolved exactly as the confirm resolves it
                 title = None if args.get("title") is None else str(args["title"])
-                shared = actions._grouped_branch(title, str(ids[0]))
-                for task_id in ids:
-                    landed = actions.applied_branch_for(store, str(task_id))
-                    if landed is not None and landed != shared:
-                        return (
-                            f"run {task_id} already landed on {landed!r}; it cannot also "
-                            f"join {shared!r} — open its PR from that branch instead "
-                            f"(open_pr task_id={task_id})"
-                        )
+                try:
+                    runs = [actions.require_run(store, str(task_id)) for task_id in ids]
+                    landable, _skipped, shared = actions.grouped_landing(store, runs, title)
+                except HTTPException:
+                    pass  # an unknown run or nothing to land: the confirm reports it
+                else:
+                    if (elsewhere := actions.landed_elsewhere(store, landable, shared)) is not None:
+                        return elsewhere
             for task_id in ids if isinstance(ids, list) else []:
                 if (
                     task_id

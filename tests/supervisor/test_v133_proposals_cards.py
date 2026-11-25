@@ -184,6 +184,32 @@ def test_open_pr_grouping_an_already_landed_run_is_refused_at_proposal(
         store.close()
 
 
+def test_r2_t1_the_grouped_pr_proposal_resolves_runs_as_its_confirm_does(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    """A patchless first entry does not name the shared branch (the confirm
+    skips it), and an abbreviated id still finds a run landed elsewhere."""
+    from skep.supervisor.policy_write import PolicyWriteRejected
+    from skep.supervisor.serve.tools import policy_write_preview
+
+    store, holder = _parts(config)
+    try:
+        script = mint_task(workspace=repo, instructions="report only")
+        store.create_run(script, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(script.task_id, "completed")
+        retried = _landed(store, repo, tmp_path, "")  # landed on its own default branch
+        args = {"task_ids": [script.task_id, retried]}
+        # a retry: the confirm skips the script run and lands on skep/<retried>
+        assert policy_write_preview(store, holder, "open_pr", args) == {}
+
+        elsewhere = _landed(store, repo, tmp_path, "skep/xxxx")
+        short = {"task_ids": [elsewhere[:-6]], "title": "bump deps"}  # abbreviated
+        with pytest.raises(PolicyWriteRejected, match="already landed on 'skep/xxxx'"):
+            policy_write_preview(store, holder, "open_pr", short)
+    finally:
+        store.close()
+
+
 # ---------- F26: NO AUTH ENV names the operator's manual steps (C1) ----------
 
 
