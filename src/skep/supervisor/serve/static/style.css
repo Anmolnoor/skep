@@ -798,12 +798,6 @@ main.chat-view { padding: 0; max-width: none; }
 /* v55-F7: the between-events activity line — same pulse, honest label. */
 .chat-working { padding: 2px 4px 0; }
 .chat-stop { margin-left: var(--space-2); font-size: 12px; padding: 0 var(--space-2); }
-/* v92-F1: the worker loader — one pulsing row per live run, above the composer. */
-.worker-loader { display: flex; flex-direction: column; gap: 2px; padding: 2px 12px; }
-.worker-loader:empty { display: none; }
-.worker-loader-row { text-decoration: none; }
-.worker-loader-row .streaming-indicator { font-family: var(--font-mono); font-size: 12px; }
-.worker-loader-row:hover .streaming-indicator { color: var(--text); }
 .agent-thread {
   align-self: flex-start; width: 100%; max-width: 100%;
   padding-left: 18px; position: relative;
@@ -851,49 +845,23 @@ main.chat-view { padding: 0; max-width: none; }
 .activity-group.open .agent-thread-chevron { transform: rotate(90deg); }
 .activity-group-body { display: none; }
 .activity-group.open .activity-group-body { display: block; }
-/* v40-F3: the worker activity block — run telemetry inline, read-only. */
-.worker-activity {
-  align-self: flex-start; width: 100%; max-width: 100%;
-  border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
-  background: transparent; padding: 10px 13px;
+/* v134-F6 (W1): one line per worker — what, state or live progress, Open ↗. */
+.worker-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 4px 2px; font-size: 13px; color: var(--muted);
 }
-.worker-activity-header { display: flex; align-items: center; gap: 8px; }
-.worker-activity-toggle {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  background: transparent; border: none; padding: 0; text-align: left;
-  color: var(--text); font-size: 13px; cursor: pointer;
-}
-.worker-activity-toggle:hover { filter: none; color: var(--text); }
-.worker-activity-title {
-  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.worker-activity-link { margin-left: auto; flex: none; font-size: 12px; color: var(--muted); }
-.worker-activity-link:hover { color: var(--text); }
-.worker-activity-diff { font-size: 12px; flex: none; }
-.worker-activity-diff .diff-add { color: var(--ok); }
-.worker-activity-diff .diff-del { color: var(--bad); }
-.worker-activity .agent-thread-chevron { transition: transform .15s; }
-.worker-activity.open .worker-activity-toggle .agent-thread-chevron { transform: rotate(90deg); }
-.worker-activity-body { display: none; margin-top: 6px; }
-.worker-activity.open .worker-activity-body {
-  display: flex; flex-direction: column; gap: 2px;
-}
-.worker-activity-row-header {
-  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-  background: transparent; border: none; padding: 3px 0; color: var(--muted);
-  font-size: 13px; cursor: pointer;
-}
-.worker-activity-row-header.static { cursor: default; }
-.worker-activity-row-header:hover { color: var(--text); filter: none; }
-.worker-activity-row-summary {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.worker-activity-row .agent-thread-chevron { transition: transform .15s; }
-.worker-activity-row.open .agent-thread-chevron { transform: rotate(90deg); }
-.worker-activity-row-detail { display: none; margin: 2px 0 6px; }
-.worker-activity-row.open .worker-activity-row-detail { display: block; }
-.worker-command-line { font-size: 12px; color: var(--text); }
-.worker-command.failed .worker-command-line { color: var(--bad); }
+.worker-row-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-run-status { flex: none; font-family: var(--font-mono); font-size: 12px; }
+.live-run-status.running { color: var(--accent); }
+.live-run-status.completed { color: var(--ok); }
+.live-run-status.failed, .live-run-status.worker_crashed,
+.live-run-status.worker_timeout, .live-run-status.rejected { color: var(--bad); }
+.live-run-status.pending_approval { color: var(--warn); }
+.open-run { flex: none; font-size: 12px; color: var(--muted); text-decoration: none; }
+.open-run:hover { color: var(--text); }
+/* v134-F6 (W2): the side panel's "Running now" group above the history. */
+.context-running { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.context-sublabel { color: var(--muted-2); font-size: 11px; }
 .worker-command-output {
   margin: 2px 0 6px; padding: 8px 10px; max-height: 200px; overflow: auto;
   background: var(--panel-2); border: 1px solid var(--border-soft);
@@ -902,11 +870,6 @@ main.chat-view { padding: 0; max-width: none; }
 /* first-run O3: the explain table is wide — scroll it, never wrap it. */
 .onboard-table { white-space: pre; max-height: 320px; }
 .onboard-table:empty { display: none; }
-.worker-activity-gate {
-  padding: 6px 8px; border-radius: var(--radius-sm); font-size: 13px;
-  background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn);
-}
-.worker-plan { margin: 4px 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
 .composer {
   display: flex; gap: 8px; align-items: center; padding: 8px;
   margin: 12px; border: 1px solid var(--border); border-radius: var(--radius-pill);

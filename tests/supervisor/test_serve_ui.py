@@ -1137,47 +1137,25 @@ def test_tool_summaries_cover_the_supervisor_tools() -> None:
     assert "dispatched worker ${shortTaskId(result.task_id)}" in source
 
 
-def test_worker_activity_block_streams_run_telemetry_inline() -> None:
-    """v40-F3 (v35): a dispatched worker renders live IN the chat, by
-    reference to the existing run endpoints — read-only, capped, and closed
-    on route change."""
+def test_worker_activity_is_one_line_with_an_open_link() -> None:
+    """v134-F6 (W1, the operator's ask; was v40-F3's expanding block): a
+    dispatched worker is one line in the chat — what it is, its state or
+    live progress, and Open ↗ for the run page in a new tab. Read-only."""
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
     assert "function renderWorkerActivity" in source
-    assert "function workerRow" in source
-    assert "function diffstat" in source
-    # pure diffstat: body lines only, file headers skipped
-    assert 'if (line.startsWith("+++") || line.startsWith("---")) continue;' in source
-    # the mount condition — live and replay both route through it
+    # the mount condition — live and replay both route through it; only the
+    # stream's own dispatch is live (N2)
     assert "DISPATCHED_RESULT_STATES.has(result.state)" in source
-    assert "maybeMountWorkerActivity(d.result);" in source
+    assert "maybeMountWorkerActivity(d.result, { live: true });" in source
     assert "maybeMountWorkerActivity(result);" in source
-    # feed: one replay for terminal runs, EventSource until done for live ones
-    assert "new EventSource(`/api/runs/${taskId}/events?stream=1`)" in source
-    assert 'source.addEventListener("done"' in source
-    # lifecycle: route changes close the streams (v92-F1 folds the status
-    # stream and loader ticker into the same teardown); live blocks are capped
-    assert "closeLiveWorkerSources();" in source
-    assert "const MAX_LIVE_WORKER_BLOCKS = 3;" in source
-    assert "liveWorkerSources.size >= MAX_LIVE_WORKER_BLOCKS" in source
-    # the operator's asks, verbatim: the running line, the failed-command
-    # count, line-by-line output, the approval pointer
-    assert "worker running \\u2014 phase:" in source
-    assert "` (${failures} failed)`" in source
-    assert "stderr_tail" in source
-    assert '"waiting for your approval"' in source
-    # READ-ONLY: the block never posts — no approve/deny surface here
-    block = source[source.index("function workerRow") : source.index("// ---------- Home")]
+    assert 'target: "_blank", rel: "noopener"' in source
+    # READ-ONLY: the row never posts — no approve/deny surface here
+    block = source[source.index("function runStateWords") : source.index("// ---------- Home")]
     assert 'api("POST"' not in block
     assert "streamSse(" not in block
-
-    for selector in (
-        ".worker-activity",
-        ".worker-activity-gate",
-        ".worker-command-output",
-        ".worker-activity-diff .diff-add",
-    ):
+    for selector in (".worker-row", ".live-run-status", ".open-run", ".context-running"):
         assert selector in styles, selector
 
 
@@ -1215,9 +1193,6 @@ def test_flat_reading_styles_prose_and_mobile_output() -> None:
     # mobile: expanded output scrolls inside the 720px breakpoint
     mobile = styles[styles.index("@media (max-width: 720px)") :]
     assert ".worker-command-output { white-space: pre; overflow-x: auto; }" in mobile
-    # diff stats ride the existing ok/bad tokens — no new palette
-    assert ".worker-activity-diff .diff-add { color: var(--ok); }" in styles
-    assert ".worker-activity-diff .diff-del { color: var(--bad); }" in styles
 
 
 def test_user_facing_vocabulary_names_gates_and_templates() -> None:
@@ -1673,29 +1648,25 @@ def test_dead_cards_drop_their_buttons() -> None:
     assert "resolveCardUI(drawn, ...cardVerdict(action))" in reconciler
 
 
-def test_worker_loader_ticks_from_dispatch_and_announces_terminals_once() -> None:
-    """v92-F1 (field test 2026-07-26): the run status is a per-run loader row
-    — phase plus a browser-side timer counting from dispatch — not a single
-    line that only moves on heartbeat boundaries. Terminals flash once
-    (completions too, deduped across the v56-F7 replay window) and redraw the
-    transcript so the stored call-to-action line shows without a reload."""
+def test_worker_status_ticks_from_dispatch_and_announces_terminals_once() -> None:
+    """v92-F1 (field test 2026-07-26): a live run's status is its phase plus
+    a browser-side timer counting from dispatch. v134-F6 (W1, W2): written
+    into every status span of that run (transcript row and side panel), not
+    a stack of rows under the chat. Terminals flash once (deduped across the
+    v56-F7 replay window) and redraw the transcript without a reload."""
     source = (STATIC_DIR / "app.js").read_text()
-    styles = (STATIC_DIR / "style.css").read_text()
-    assert 'class: "worker-loader"' in source
+    assert 'class: "worker-loader"' not in source
     # the browser ticks every second; teardown clears ticker AND status stream
     assert "const runRowsTick = setInterval(drawRunRows, 1000);" in source
     assert "clearInterval(runRowsTick);" in source
     # the server stays the clock authority — each status event resyncs it
     assert "startedAt: Date.now() - (d.elapsed_seconds || 0) * 1000," in source
-    # a live dispatch seeds its row instantly; replay leaves it to the stream
-    assert "if (chatStreamActive) trackRun(String(result.task_id));" in source
     # completions announce too, once — never re-flashed by a stream reconnect
     assert "if (notifiedTerminalRuns.has(d.task_id)) return;" in source
     assert 'flash("ok", `run ${d.task_id.slice(0, 13)}… completed`)' in source
     # the stored terminal line is drawn in place (v133-F20: no rebuild, so a
     # draft survives); mid-stream the stream's finally draws it
     assert "if (!chatStreamActive) reconcile().catch(() => {});" in source
-    assert ".worker-loader:empty { display: none; }" in styles
 
 
 def test_working_line_shows_turn_status_with_elapsed_seconds() -> None:
@@ -1924,11 +1895,12 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
 
 def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
     """v106-F9: no-patch completions were a steady GET /diff 404 drumbeat in
-    serve.log — both fetch sites now check the run's artifacts first."""
+    serve.log — every fetch site checks the run's artifacts first (v134-F6:
+    the run page is the one left; the chat's worker row is one line)."""
     app_js = (STATIC_DIR / "app.js").read_text()
     guards = app_js.count('(detail.artifacts || []).some((a) => a.kind === "patch")')
     fetches = app_js.count("`/api/runs/${taskId}/diff`")
-    assert guards == fetches == 2
+    assert guards == fetches == 1
 
 
 def test_the_receipt_endpoint_is_the_cli_receipt_read_only_and_redacted(
