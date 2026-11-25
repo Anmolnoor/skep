@@ -319,7 +319,8 @@ repository. Then, by task:
   If the base exists locally and is missing on GitHub, as in a repository
   that was created empty, create it first with
   `skep repo push-baseline <repo> --base <base>` (or the `push_baseline` card
-  in chat). That command only creates a missing base branch. If an approval
+  in chat). That command checks whether the base branch exists on `origin`
+  and refuses to push when it finds it. If an approval
   already landed the run before the base existed, open the PR afterwards
   with `skep pr open <repo> --branch <landed-branch> --base <base>`.
 - **Reviewing a pull request at its exact head.** skep reads the PR through
