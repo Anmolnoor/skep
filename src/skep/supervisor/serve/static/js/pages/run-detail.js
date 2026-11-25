@@ -45,6 +45,21 @@ export function g10Provenance(g10) {
   return rows;
 }
 
+// v133-F34 (F-I5, I8): a G10 that could not install the dependencies ran no
+// check, and its record's lead line says so (reverify.INSTALL_FAILED); a check
+// that failed on a network lookup carries reverify.OFFLINE_NOTE. Each is
+// quoted from the record's detail, on its own row.
+export function g10Notes(g10) {
+  const detail = String(g10.detail || "");
+  const lead = detail.split("\n")[0];
+  const offline = detail.match(/the replay runs offline[^;\n]*/);
+  return [
+    g10.outcome === "unavailable" && lead.includes("could not install dependencies")
+      ? ["re-verify did not run", lead] : null,
+    offline ? ["offline replay", offline[0]] : null,
+  ].filter(Boolean);
+}
+
 function g10Box(g10) {
   if (!g10) return el("p", { class: "note" }, "G10: no re-verification recorded for this run.");
   const tampered = String(g10.v1 || "").startsWith("tampered");
@@ -57,7 +72,7 @@ function g10Box(g10) {
   if (ran) rows.push(["ran", commands || "-"], ["exit codes", g10.exit_codes.join(", ")]);
   else if (commands) rows.push(["recorded verify (not run)", commands]);
   rows.push(...g10Provenance(g10));
-  if (!nothing) rows.push(["V1 (test tamper)", g10.v1]);
+  if (!nothing) rows.push(...g10Notes(g10), ["V1 (test tamper)", g10.v1]);
   if (g10.detail && !nothing) rows.push(["detail", g10.detail]);
   return el("div", {},
     tampered ? el("p", { class: "banner bad", role: "alert" },
