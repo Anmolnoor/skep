@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from ..roles import Role
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
+from ..secret_floor import own_secret_in, own_secret_refusal
 from . import actions
 from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
@@ -1602,9 +1603,15 @@ def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterat
         yield (event, data)
 
 
+# v134-F2 (S2): a long mixed-case word with digits reads as a credential (a
+# token_urlsafe, an API key); a git SHA or a uuid is lowercase and stays.
+_KEY_SHAPED = re.compile(r"(?=[\w-]*\d)(?=[\w-]*[a-z])(?=[\w-]*[A-Z])[\w-]{24,}")
+
+
 def _title_from(content: str) -> str:
     first_line = content.strip().splitlines()[0] if content.strip() else DEFAULT_TITLE
-    return first_line[:60]
+    title = _KEY_SHAPED.sub("***", redact(first_line))[:60].strip()
+    return title if title.strip("* ") else DEFAULT_TITLE
 
 
 def _message_thinking(message: dict[str, Any]) -> str:
@@ -4676,6 +4683,8 @@ def add_chat_routes(
                 or not (attachments_dir(home, chat_id) / name).is_file()
             ):
                 raise HTTPException(status_code=400, detail=f"unknown attachment {name!r}")
+        if leaked := own_secret_in(body.content, home):  # v134-F2 (S2)
+            raise HTTPException(status_code=400, detail=own_secret_refusal(leaked))
         # ES-F2 (B14): the pending-card check happens under the turn lock —
         # checked outside it, two POSTs both passed and both ran turns.
         lock = take_turn(chat_id)

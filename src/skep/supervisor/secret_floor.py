@@ -462,3 +462,45 @@ def names_path_under(command: str, root: Path, *, cwd: str | None, except_under:
     except (OSError, ValueError, RuntimeError):  # v133 R1 (Sol S7): fail closed
         return True
     return False
+
+
+# v134-F2 (S2): skep's own secrets, by value. A value this short is no secret.
+_MIN_SECRET_LEN = 16
+_CREDENTIAL_KEY = re.compile(r"(?i)KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL")
+
+
+def own_secret_in(text: str, home: Path) -> str | None:
+    """The name of a skep secret (``home``'s serve-token, llm-secret*,
+    ``*-secret`` files, a serve.env value) whose value appears in ``text``,
+    else None. Live test: the serve token pasted as a chat's first message
+    went to the model provider and became the sidebar title."""
+    if len(text) < _MIN_SECRET_LEN:
+        return None
+    found: list[tuple[str, str]] = []
+    for pattern in SKEP_SECRET_NAMES:
+        for path in home.glob(pattern):
+            try:
+                found.append((path.name, path.read_text(encoding="utf-8").strip()))
+            except (OSError, UnicodeDecodeError):
+                continue
+    try:
+        env_lines = (home.parent / SERVE_ENV).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        env_lines = []
+    for line in env_lines:
+        key, sep, value = line.strip().removeprefix("export ").partition("=")
+        # review R1 (S3): a comment, or a config value (a host URL), is no
+        # secret — only a credential-named key's value is
+        if sep and not key.startswith("#") and _CREDENTIAL_KEY.search(key):
+            found.append((f"{SERVE_ENV} {key.strip()}", value.strip().strip("'\"")))
+    return next(
+        (name for name, value in found if len(value) >= _MIN_SECRET_LEN and value in text), None
+    )
+
+
+def own_secret_refusal(name: str) -> str:
+    """What the operator reads when a message carried skep secret ``name``."""
+    return (
+        f"that message contains your skep {name}, so it was not stored or sent to the "
+        "model. If it went anywhere else (a messenger, a paste), rotate it."
+    )

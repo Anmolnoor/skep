@@ -32,6 +32,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from ...codex_login import QUEEN_LOGIN_NAME
+from ...secret_floor import own_secret_in, own_secret_refusal
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
     TURN_BUSY,
@@ -469,6 +470,8 @@ def run_channel_turn(
             engine=engine, message=message, config=config, web_ui_url=web_ui_url, status=status
         )
         return run_command(ctx, *command)
+    if leaked := own_secret_in(message.text, engine.home):  # v134-F2 (S2)
+        return (f"skep: {own_secret_refusal(leaked)}", [])
     binding = store.channel_session(message.session_key)
     chat = store.get_chat(binding.chat_id) if binding is not None else None
     if chat is None:
