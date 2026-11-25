@@ -617,6 +617,60 @@ def test_r1_s12_an_automatic_landing_records_its_commit(
         store.close()
 
 
+@pytest.mark.parametrize("face", ["manual", "cli", "auto"])
+def test_r2_s12_the_ledger_records_the_commit_the_landing_made_not_a_later_tip(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    face: str,
+) -> None:  # fmt: skip
+    """Another landing moves the branch between the apply worktree's release
+    and the ledger write: the row still names the commit this landing made."""
+    from skep.cli import main
+    from skep.supervisor import apply as apply_module
+    from skep.supervisor import policy as policy_module
+
+    from .conftest import git
+
+    made: list[str] = []
+    real = apply_module.apply_patch_on_branch
+
+    def land_then_race(repo_: Path, branch: str, *a: Any, **k: Any) -> str | None:
+        failure = real(repo_, branch, *a, **k)
+        tip = git(repo_, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+        made.append(tip)
+        tree = git(repo_, "rev-parse", f"{tip}^{{tree}}").stdout.strip()
+        later = git(repo_, "commit-tree", tree, "-p", tip, "-m", "a later landing").stdout
+        git(repo_, "update-ref", f"refs/heads/{branch}", later.strip())
+        return failure
+
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", land_then_race)
+    monkeypatch.setattr(policy_module, "apply_patch_on_branch", land_then_race)
+    if face == "cli":  # the CLI's --home holds the supervisor home as supervisor/
+        import dataclasses
+
+        config = dataclasses.replace(config, home=tmp_path / "cli" / "supervisor")
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        if face == "manual":
+            actions.land_run(store, actions.require_run(store, task_id), "chat-user")
+        elif face == "cli":
+            home = str(config.home.parent)
+            assert main(["--home", home, "review", task_id, "--approve", "--actor", "t"]) == 0
+        else:
+            approved = policy_module.maybe_auto_approve(
+                store=store, rules=(policy_module.VERIFIED_PATCH_RULE,), repo=repo,
+                task_id=task_id, verification_outcome="passed", risk_flags=(),
+                verify_pinned=True,
+            )  # fmt: skip
+            assert approved is not None
+        assert len(made) == 1
+        assert store.landing_commits()[task_id] == made[0]
+    finally:
+        store.close()
+
+
 # ---------- F15: a branch PR card names every run the push publishes (J5) ----------
 
 

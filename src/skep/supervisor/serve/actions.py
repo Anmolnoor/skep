@@ -3893,10 +3893,12 @@ def apply_patch(
     # review that had just landed, telling the operator to re-run it.
     if not store.claim_approval(review_id):
         raise landing_taken(store, review_id)
+    made: list[str] = []
     try:
         failure = land_patch(
             store, repo, target, patch, task_id=task_id, actor=actor,
             verified_base=reverify.base_commit if reverify and reverify.confirmed else None,
+            commit_out=made,
         )  # fmt: skip
     except BaseException:
         store.unclaim_approval(review_id)
@@ -3926,7 +3928,7 @@ def apply_patch(
         note = f"{line}; {note}" if note else line
     store.resolve_approval(
         review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True,
-        landing_commit=resolve_commit(repo, f"refs/heads/{target}"),  # v133-F15 (J5)
+        landing_commit=next(iter(made), None),  # v133-F15 (J5); R2 (S12): the commit it made
     )  # fmt: skip
     return target
 

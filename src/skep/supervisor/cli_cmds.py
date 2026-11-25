@@ -27,7 +27,7 @@ from typing import Any
 
 from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
-from .apply import land_patch, resolve_commit, validate_landing_branch
+from .apply import land_patch, validate_landing_branch
 from .autonomy import (
     approval_decision_for_action,
     project_policy_dispatch_match,
@@ -1847,9 +1847,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
             )
         try:
+            made: list[str] = []
             failure = land_patch(
-                store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
-            )
+                store, Path(record.repo), branch, patch_path, task_id=record.task_id,
+                actor=actor, commit_out=made,
+            )  # fmt: skip
         except BaseException:
             store.unclaim_approval(review_id)
             raise
@@ -1879,7 +1881,7 @@ def cmd_review(args: argparse.Namespace) -> int:
             actor=actor,
             note=args.note,
             landing_branch=branch,
-            landing_commit=resolve_commit(Path(record.repo), f"refs/heads/{branch}"),  # v133-F15
+            landing_commit=next(iter(made), None),  # v133-F15; R2 (S12): the commit it made
             claimed=True,
         )
         print(f"approved: task {record.task_id} (by {actor})")
