@@ -144,6 +144,30 @@ def test_a_dispatch_whose_engine_has_no_auth_env_is_refused_at_proposal(
         store.close()
 
 
+def test_r2_t2_a_dispatch_that_never_starts_the_engine_is_not_refused_for_its_auth(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a coding run launches the project's external engine (the
+    dispatcher's own condition), so only it needs the engine's login."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    store, holder = _parts(config)
+    try:
+        _bind(
+            store, repo,
+            {"coding_engine": "claude_code", "verify_command": "uv run pytest",
+             "default_execution_mode": "sandbox"},
+        )  # fmt: skip
+        script = {"repo": str(repo), "instructions": "count lines", "caste": "script"}
+        fine = mutation_execution_decision("dispatch_run", script, store=store, holder=holder)
+        assert fine is None or "NO AUTH ENV" not in str(fine.detail)
+        coding = {"repo": str(repo), "instructions": "do a thing", "caste": "coding"}
+        refused = mutation_execution_decision("dispatch_run", coding, store=store, holder=holder)
+        assert refused is not None and "NO AUTH ENV" in str(refused.detail)
+    finally:
+        store.close()
+
+
 def _landed(store: RunStore, repo: Path, tmp_path: Path, branch: str) -> str:
     task = mint_task(workspace=repo, instructions="land me")
     store.create_run(task, repo=repo, ref=None, execution_mode="workspace")

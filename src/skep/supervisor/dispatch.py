@@ -431,6 +431,12 @@ def starts_on_landing_branch(
 _AUTH_MINT = {"claude_code": ("run `claude setup-token` and copy the token it prints", "token")}
 
 
+def launches_external_engine(worker_kind: str, engine: Any) -> bool:
+    """Whether a run of this caste starts ``engine``'s external agent — only
+    a coding run does. The proposal-time auth check asks the same (R2, T2)."""
+    return worker_kind == "coding" and bool(engine.external)
+
+
 def no_auth_env_refusal(engine: CodingEngine, *, serve_env: Path | None = None) -> str | None:
     """v116-F1: the NO AUTH ENV refusal for an engine with none of its auth
     env set in this process, else None. v133-F25: the chat asks it when a
@@ -585,7 +591,7 @@ def run_task(
     # (a hand-edited task, a stray caller) loses it here.
     if dispatch_decision is None or dispatch_decision.delegation is None:
         permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
-    if worker_kind == "coding" and engine.external:
+    if launches_external_engine(worker_kind, engine):
         # v132-F16 (v94-F3, ADR 0047 §3): what an engine cannot work without
         # is merged on every creation path, like its API host — `skep run
         # --minimal --engine …` resolves no policy and ran it with none.
@@ -597,7 +603,7 @@ def run_task(
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
-    worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    worker_argv = engine.argv if launches_external_engine(worker_kind, engine) else None
     # ADR 0058: an ACP engine's adapter runs in the sandbox; its governor here.
     adapter = acp_adapter(engine) if worker_argv is not None else None
     if wrapped == ACP_UNREGISTERED:

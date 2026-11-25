@@ -6795,14 +6795,16 @@ def _no_auth_refusal(
     """v133-F25 (A9, C1): a dispatch whose external engine has no way to log
     in, from the manifest its card would show (engine and login, compiled as
     the confirm compiles them). run_task refuses the same dispatch."""
-    from ..dispatch import no_auth_env_refusal
+    from ..dispatch import launches_external_engine, no_auth_env_refusal
     from ..engines import resolve_engine
 
     manifest = dispatch_manifest_for(store, holder, args, chat_id)
     if "error" in manifest or manifest.get("engine_auth") is not None:
         return None
     engine = resolve_engine(str(manifest.get("engine") or "builtin"))
-    if not engine.external:
+    # R2 (Sol T2): the dispatcher's own launch condition, on the caste the
+    # confirm submits
+    if not launches_external_engine(str(args.get("caste") or "coding"), engine):
         return None
     return no_auth_env_refusal(engine, serve_env=holder.current.home.parent / "serve.env")
 
