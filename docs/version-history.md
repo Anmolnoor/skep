@@ -3344,3 +3344,33 @@ you upgrade a home that is in use.
 - The Inbox approves inline only where the row is the whole evidence: a
   worker gate that is not a patch landing, or a memory proposal. A patch
   landing always opens the review page (#133).
+
+## v2.0.1 — a refused key during onboarding names steps that work (2026-11-24)
+
+One fix since 2.0.0 (#136):
+
+- When onboarding tests a provider you named and its model-list or completion
+  request answers 401 or 403, the refusal now names a fix that fits the
+  provider. 2.0.0 always said to run `skep provider set-key <id>`, which is
+  refused for a provider that is not registered yet. (The check that keeps
+  the provider already configured, when you name none, is unchanged.)
+  - An endpoint that uses the ChatGPT plan login: it says to sign in with
+    `codex login`. Bedrock: it says to set working AWS credentials. Neither
+    takes a stored key.
+  - Any other provider that is already registered keeps the 2.0.0 text.
+    Under a `--home` that is not the default one, its `set-key` command now
+    carries that home.
+  - Any other provider that is not registered yet, with a key variable named
+    (by you, on any onboarding face, or by the provider's preset): it says to
+    set that variable to a working key.
+  - Any other provider that is not registered yet, with no key variable
+    named: the refusal prints the `skep provider add` command for it
+    (protocol, endpoint and model), then `skep provider set-key`, then says
+    to run the same `skep onboard` command again, or to pass
+    `--api-key-env NAME`.
+- Those `skep provider` commands carry `--home` when the home is not the
+  default one, and their values are shell-quoted where they need it. When the
+  endpoint URL holds a login, a query or a fragment, or anything the redactor
+  masks, the `provider add` command shows a placeholder where the URL goes:
+  put your URL there, quoted for the shell, before you run it. The provider's
+  own error text earlier in the same refusal is unchanged.
