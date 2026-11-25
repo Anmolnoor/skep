@@ -355,6 +355,64 @@ def test_a_gate_settled_across_a_restart_still_gets_its_turn(rig: Rig, repo: Pat
     assert len(_seeds(rig, chat_id)) == 2
 
 
+def test_r2_t4_a_pause_turn_with_no_model_keeps_the_final_turn_owed(
+    rig: Rig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi import HTTPException
+
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    with monkeypatch.context() as m:
+
+        def no_model(self: Any, chat: Any) -> Any:
+            raise HTTPException(status_code=409, detail="no default model is set")
+
+        m.setattr(ChatEngine, "resolved_llm", no_model)
+        assert not _continue(rig, task_id)[1]  # the pause turn could not run
+    assert rig.store.queued_run_follow_ups() == [(task_id, chat_module.GATED)]
+
+    rig.store.resolve_approval(review_id, approved=False, actor="chat-user")
+    rig.ollama.script_reply("You denied npm test, so the run stopped.")
+    _sweep(rig)
+    seeds = _seeds(rig, chat_id)
+    assert len(seeds) == 1 and "state=rejected" in seeds[0]  # the final turn ran
+    assert rig.store.queued_run_follow_ups() == []
+
+
+class _Stopped(BaseException):
+    """serve stopping mid-turn: nothing in the turn catches it."""
+
+
+def test_r2_t4_a_pause_turn_cut_off_by_a_restart_is_resumed_as_the_pause(
+    rig: Rig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    with monkeypatch.context() as m:
+
+        def stopped(self: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
+            raise _Stopped
+            yield  # pragma: no cover
+
+        m.setattr(ChatEngine, "turn_events", stopped)
+        with pytest.raises(_Stopped):
+            _continue(rig, task_id)  # the pause seed is written, its turn is cut off
+    chat_module._CONTINUED.clear()  # serve stopped and started again
+    rig.store.resolve_approval(review_id, approved=False, actor="cli-user")
+    rig.store.transition(task_id, "rejected")  # the run settled meanwhile
+
+    rig.ollama.script_reply("It was waiting at a gate.")
+    before = set(threading.enumerate())
+    assert chat_module.resume_follow_ups(rig.engine) == 1
+    _join_new_threads(before)
+    rig.ollama.script_reply("You denied npm test, so the run stopped.")
+    _sweep(rig)
+
+    seeds = _seeds(rig, chat_id)
+    assert len(seeds) == 2 and "state=rejected" in seeds[-1]  # the final turn is its own
+    assert rig.store.queued_run_follow_ups() == []
+
+
 # ---------- F32: a turn that cannot go on says why (G8, B2) ----------
 
 

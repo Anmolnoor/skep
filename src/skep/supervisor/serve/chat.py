@@ -763,7 +763,10 @@ def resume_follow_ups(engine: ChatEngine) -> int:
         threading.Thread(
             target=run_completion_turn,
             args=(engine.store, engine.holder, engine.runner, engine.home, task_id),
-            kwargs={"seeded": stage == "seeded"},
+            kwargs={
+                "seeded": stage.endswith("seeded"),
+                "gate": stage.startswith(_GATE_STAGE),  # R2 (T4): a pause stays one
+            },
             name=f"skep-continue-{task_id[:8]}",
             daemon=True,
         ).start()
@@ -4155,6 +4158,9 @@ _CONTINUE_LOCK = threading.Lock()
 # owed one more when the gate settles — kept on the run row, so a restart
 # keeps the debt, and paid by ``continue_settled_gates`` on the ticker.
 GATED = "gated"
+# R2 (Sol T4): a pause turn in flight is stored apart from a final one
+# ("gate-queued", "gate-seeded"), so a restart resumes it as the pause.
+_GATE_STAGE = "gate-"
 # A settled gate whose run reaches one of these gets its continuation; a
 # superseded run handed the work to its resumed successor, which gets its own.
 _SETTLED = frozenset(s.value for s in TERMINAL_STATES) - {"pending_approval", "superseded"}
@@ -4213,8 +4219,10 @@ def run_completion_turn(
     task_id: str,
     *,
     seeded: bool = False,
+    gate: bool = False,
 ) -> tuple[str, bool]:
     """One Queen turn after a run reaches a terminal state. (reply, ok).
+    ``gate``: a resumed pause turn (R2, T4), whatever the run's state now.
 
     ES-F242 (D18): it is owed on the run row until its turn ends, so a serve
     stopped before then runs it at the next start (``resume_follow_ups``) —
@@ -4224,7 +4232,8 @@ def run_completion_turn(
     run = store.get_run(task_id)
     # v133-F31 (G8): waiting at a gate is not the run's final state — that
     # turn is its own, so the final state still gets one.
-    gated = run is not None and run.state == "pending_approval"
+    gated = gate or (run is not None and run.state == "pending_approval")
+    stage = _GATE_STAGE if gated else ""
     with _CONTINUE_LOCK:
         # notify_run_terminal is wired from two call sites and a done-callback
         # can be re-entered on resume; one continuation per run and state.
@@ -4246,7 +4255,7 @@ def run_completion_turn(
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
     except HTTPException as exc:
-        store.clear_run_follow_up(task_id)
+        _turn_done(store, task_id, gated=gated)  # R2 (T4): a pause still owes the final turn
         say_continuation_failed(store, task_id, str(exc.detail))  # v133-F32
         return (f"continuation could not run: {exc.detail}", False)
 
@@ -4288,7 +4297,7 @@ def run_completion_turn(
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
     if not seeded:
-        store.queue_run_follow_up(task_id, "queued")
+        store.queue_run_follow_up(task_id, f"{stage}queued")
     with chat_turn_lock(chat_id):
         tail = store.chat_messages(chat_id)[-1:] if seeded else []
         if tail and tail[0].role == "assistant" and not tail[0].tool_calls:
@@ -4304,7 +4313,7 @@ def run_completion_turn(
             )  # fmt: skip
         if not seeded:
             store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
-            store.queue_run_follow_up(task_id, "seeded")
+            store.queue_run_follow_up(task_id, f"{stage}seeded")
         try:
             for event, data in engine.turn_events(
                 chat_id,
