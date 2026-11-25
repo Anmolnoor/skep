@@ -636,7 +636,7 @@ def default_pr_title(summary: str, task_id: str) -> str:
     head = summary.splitlines()[0].strip() if summary.strip() else "automated change"
     if len(head) > 64:
         head = head[:61] + "..."
-    return f"{head} (skep {task_id[:8]})"
+    return f"{head} (skep {task_id[:13]})"
 
 
 def _reverify_label(reverified: bool | None) -> str:

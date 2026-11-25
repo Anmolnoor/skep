@@ -103,7 +103,7 @@ def test_run_terminals_feed_the_lane_once(store: RunStore, tmp_path: Path) -> No
     created = harvest_observations(store)
     assert len(created) == 1
     (content,) = _observations(store)
-    assert content.startswith(f"observation: run {task.task_id[:8]} on myrepo failed")
+    assert content.startswith(f"observation: run {task.task_id[:13]} on myrepo failed")
     assert harvest_observations(store) == []  # watermark holds
     # A still-running run is not an observation.
     running = mint_task(workspace=tmp_path / "ws2", instructions="x", budget=DEFAULT_BUDGET)

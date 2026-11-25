@@ -1420,7 +1420,12 @@ function unwrapToolResult(raw) {
   return raw;
 }
 
-function shortTaskId(id) { return String(id || "").slice(0, 8); }
+// v134-F5 (N3): 13, not 8 — a UUIDv7's first 8 hex chars change only every
+// ~65 s, so runs started together shared one (01a211bf three times).
+// ponytail: 13 = the full millisecond; runs minted in the same ms (not the
+// dispatch path, which makes a worktree per run) still share one — go to 18
+// (adds 12 random bits) if that ever shows.
+function shortTaskId(id) { return String(id || "").slice(0, 13); }
 
 // v128-F11: a confirmed /workon set up a project — the chat moves onto it.
 // The server binds only an EMPTY slot, and a new chat already sits on the

@@ -76,3 +76,13 @@ test("F4: a real G10 pass still reads clean", async () => {
   assert.ok(card.textContent.includes("no G10 or V1 warning"));
   assert.ok(!card.querySelector(".card-run-supervisor").classList.contains("bad"));
 });
+
+// ---------- F5 (N3): short run ids never collide within a minute ----------
+
+test("F5: runs started seconds apart get different short ids (UUIDv7: the first 8 hex are coarse time)", () => {
+  const app = loadApp();
+  const a = app.shortTaskId("01a211bf-5927-75b4-86ce-63b084010555");
+  const b = app.shortTaskId("01a211bf-9697-703e-b864-d0aefa52c9eb");
+  assert.notEqual(a, b);
+  assert.equal(a, "01a211bf-5927");
+});

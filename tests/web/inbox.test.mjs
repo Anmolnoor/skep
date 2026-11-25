@@ -70,7 +70,7 @@ test("the Inbox renders the one queue in its order, grouped by wall, each row li
   assert.deepEqual(rows.map(r => r.querySelector(".inbox-open").getAttribute("href")),
     ["#/review/r2", "#/review/r1", "#/chat/c1", "#/memory", "#/templates"]);
   assert.deepEqual(texts(main, "inbox-title"), [
-    "apply_patch · run abcdef12", "network.fetch · run abcdef12", "read_url — https://x.dev",
+    "apply_patch · run abcdef1234567", "network.fetch · run abcdef1234567", "read_url — https://x.dev",
     "memory · project_fact", "skill · learned-one"]);
   assert.match(rows[2].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
   assert.match(rows[3].querySelector("small").textContent, /^uses uv · /);
@@ -270,7 +270,7 @@ test("H1: a run holding an unlanded patch or a G10 disagreement is a row that op
   const { rows } = await render([RUN]);
   const row = rows[0];
   assert.equal(row.querySelector(".inbox-open").getAttribute("href"), "#/runs/fedcba9876543210");
-  assert.equal(row.querySelector(".inbox-title").textContent, "NOT CONFIRMED · run fedcba98");
+  assert.equal(row.querySelector(".inbox-title").textContent, "NOT CONFIRMED · run fedcba9876543");
   assert.match(row.textContent, /completed — patch not landed/);
   assert.match(row.textContent, /2 files changed: app\.py \+2 −1, b\.py \+1 −0/);
   assert.match(row.textContent, /⚠ re-verification RAN and FAILED/);
@@ -346,7 +346,7 @@ test("H6: a verdict reports what really happened — ok:false, a warning, a fail
   const flashes = [app.flashes.at(-1)];
   for (const row of rows.slice(1)) { await button(row, "Deny").click(); flashes.push(app.flashes.at(-1)); }
   assert.equal(flashes[0][0], "warn");
-  assert.match(flashes[0][1], /approved network\.fetch · run abcdef12 — ⚠ the base moved/);
+  assert.match(flashes[0][1], /approved network\.fetch · run abcdef1234567 — ⚠ the base moved/);
   assert.deepEqual(flashes[1], ["bad", "setup_project — app: no such card"]);
   assert.deepEqual(flashes[2], ["bad", "read_url — https://x.dev: card already resolved"]);
   assert.deepEqual(flashes[3], ["bad", "read_url — https://x.dev: no outcome came back — open its thread to see what happened"]);
@@ -367,7 +367,7 @@ test("R4 K7: the operation's own outcome decides the flash — opened/merged/ok 
     "POST /api/approvals/r1/approve": { ok: true, result: { opened: false, detail: "no remote" } },
   });
   await button(rows[0], "Approve").click();
-  assert.deepEqual(inbox.flashes.at(-1), ["bad", "network.fetch · run abcdef12: partial — the PR was not opened: no remote"]);
+  assert.deepEqual(inbox.flashes.at(-1), ["bad", "network.fetch · run abcdef1234567: partial — the PR was not opened: no remote"]);
 });
 
 test("R4 T1: a stream that answers fewer items than the card holds says it is incomplete", async () => {

@@ -4753,7 +4753,7 @@ def propose_acp_permission(
     ``(chat_id, action_id)``."""
     if chat_id is None or store.get_chat(chat_id) is None:
         chat_id = store.create_chat(
-            title=f"ACP asks · run {task.task_id[:8]}", model=None, source="acp",
+            title=f"ACP asks · run {task.task_id[:13]}", model=None, source="acp",
             role=ROLE_LESS_CHAT_ROLE,
         ).chat_id  # fmt: skip
     from .cards import boundary

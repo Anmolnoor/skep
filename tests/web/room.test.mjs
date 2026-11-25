@@ -43,7 +43,7 @@ test("context panel: role, model, only the cards still waiting, this thread's ru
   assert.match(cards[0].textContent, /^dispatch_run/);
   const [run] = panel.querySelectorAll(".context-run");
   assert.equal(run.getAttribute("href"), "#/runs/abcdef1234567890");
-  assert.match(run.textContent, /^abcdef12running/);
+  assert.match(run.textContent, /^abcdef1234567running/);
   assert.match(panel.querySelector(".context-spend").textContent, /5h 1,200 tok · 7d 45,000 tok/);
 });
 

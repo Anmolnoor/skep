@@ -636,7 +636,7 @@ def cmd_skill_propose(args: argparse.Namespace) -> int:
         return 0
     print(f"proposed {len(drafts)} draft skill candidate(s):")
     for candidate in drafts:
-        sources = ", ".join(t[:8] for t in candidate.source_task_ids)
+        sources = ", ".join(t[:13] for t in candidate.source_task_ids)
         print(f"\n  {candidate.name}  [draft]  ({candidate.occurrences} runs: {sources})")
         print(f"    caste:        {candidate.template.worker_kind}")
         print(f"    instructions: {candidate.template.instructions}")

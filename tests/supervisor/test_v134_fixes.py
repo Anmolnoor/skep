@@ -218,3 +218,14 @@ def test_a_syntax_only_pass_on_untouched_files_is_marked_on_the_card(
         assert run["g10_weak"] is None and run["supervisor"].startswith("G10 passed: ")
     finally:
         store.close()
+
+
+# ---------- F5 (N3): short run ids name one run ----------
+
+
+def test_a_pr_title_names_the_run_by_a_prefix_that_does_not_collide() -> None:
+    from skep.supervisor.github import default_pr_title
+
+    a = default_pr_title("bump", "01a211bf-5927-75b4-86ce-63b084010555")
+    b = default_pr_title("bump", "01a211bf-9697-703e-b864-d0aefa52c9eb")
+    assert a != b and a.endswith("(skep 01a211bf-5927)")

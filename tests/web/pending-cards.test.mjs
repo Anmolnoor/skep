@@ -100,12 +100,12 @@ test("R4 K1: a land_run / open_pr card lists each run with its G10 warning and V
   const lines = prCard.querySelector(".card-runs").querySelectorAll("li");
   assert.equal(lines.length, 3);
   assert.match(texts(prCard, "card-runs-note")[0], /^3 runs this card lands or publishes:/);
-  assert.match(lines[0].textContent, /^run aaaaaaaa · no G10 or V1 warning$/);
-  assert.match(lines[1].textContent, /run bbbbbbbb · ⚠ re-verification RAN and FAILED/);
+  assert.match(lines[0].textContent, /^run aaaaaaaaaaaa1 · no G10 or V1 warning$/);
+  assert.match(lines[1].textContent, /run bbbbbbbbbbbb2 · ⚠ re-verification RAN and FAILED/);
   assert.equal(lines[2].querySelector(".banner").className, "banner bad");
   assert.match(lines[2].textContent, /V1 · TEST-TAMPER: tests changed/);
   assert.equal(lines[2].textContent.match(/TEST-TAMPER/g).length, 1, "a warning that IS the tamper is said once");
-  assert.match(landCard.querySelector(".card-runs").textContent, /run bbbbbbbb · ⚠ re-verification RAN and FAILED/);
+  assert.match(landCard.querySelector(".card-runs").textContent, /run bbbbbbbbbbbb2 · ⚠ re-verification RAN and FAILED/);
 });
 
 // R5-2: the web confirm binds to the items the card rendered (K2's server

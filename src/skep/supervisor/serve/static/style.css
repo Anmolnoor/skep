@@ -658,7 +658,9 @@ main.chat-view { padding: 0; max-width: none; }
   content: ""; width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--warn);
 }
 .context-card, .context-run { cursor: pointer; }
-.context-run { flex-wrap: nowrap; white-space: nowrap; }
+.context-run { flex-wrap: nowrap; white-space: nowrap; min-width: 0; }
+/* v134-F5: 13-char ids — the age gives way, never the panel's width */
+.context-run small { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .context-card:hover, .context-run:hover { background: transparent; color: var(--text-strong); }
 .context-card:hover small, .context-run:hover small { color: var(--text); }
 .chat-context .note { font-size: 12px; margin: 0; }
