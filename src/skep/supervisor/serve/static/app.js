@@ -3038,7 +3038,7 @@ async function viewChat(main, chatId) {
     } else {
       await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);
     }
-    setComposerLocked(anyCardPending());
+    await reconcile(); // v133 R1 (S15): the card shows its verdict; the lock follows the server
     return true;
   };
 
@@ -3500,14 +3500,19 @@ async function viewChat(main, chatId) {
     const fromBox = text === null;
     const content = fromBox ? input.value.trim() : text;
     if (!content || !assistantReady) return;
-    if (fromBox && content.startsWith("/") && anyCardPending()) {
+    // v133 R1 (S15): a verdict addressed by id (/approve <id>, /deny <id>) is
+    // the decision itself, asked once — it goes to the resolver now; so does
+    // /btw, a read-only turn the server runs beside a pending card. Neither
+    // waits on the card's lock, only on a turn still streaming.
+    const beside = fromBox && !chatStreamActive && /^\/(?:approve|deny|btw)\s+\S/.test(content);
+    if (fromBox && content.startsWith("/") && anyCardPending() && !beside) {
       // v133-F21: a /command typed under a pending card is never queued to
       // run later on its own (a /deny meant for this card would hit the next
       // one) — it stays in the box until the operator sends it again.
       flash("bad", "a card is waiting — answer it first; your command stays in the box");
       return;
     }
-    if (send.disabled) {
+    if (send.disabled && !beside) {
       // A second steer while one is already queued is its own chip —
       // losing the first would be the same bug wearing a queue.
       queued.push(content);

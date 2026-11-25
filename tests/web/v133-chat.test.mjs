@@ -4,7 +4,10 @@
 // without their action.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { loadApp } from "./harness.mjs";
+
+const DECK = JSON.parse(readFileSync(new URL("./fixtures/commands-web.json", import.meta.url), "utf8"));
 
 const settle = async (n = 8) => { for (let i = 0; i < n; i += 1) await new Promise(r => setTimeout(r, 0)); };
 
@@ -43,6 +46,7 @@ async function openChat({ messages = [], actions = [] } = {}) {
     if (path === "/api/projects") return { projects: [] };
     if (path === "/api/status") return { status: "ok", pending_approvals: 0, machine: "m" };
     if (path === "/api/tasks") return { tasks: [] };
+    if (path === "/api/commands") return DECK;
     throw new Error(`unexpected ${method} ${path}`);
   };
   app.streamSse = async (path, body, handlers) => { streams.push([path, body]); };
@@ -481,3 +485,51 @@ for (const [status, final] of [["confirmed", /Approved/], ["failed", /Failed —
     assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1);
   });
 }
+
+// S15: an explicitly addressed verdict is the decision, asked once — it goes
+// to the resolver now; /btw (read-only, which the server runs beside a
+// pending card) goes too; any other slash command stays in the box.
+test("R1 S15: /approve <id> typed under the pending card resolves it at once", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.includes("/actions/a1/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  chat.input.value = "/approve a1";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.streams.map(([path]) => path), ["/api/chats/c1/actions/a1/confirm"]);
+  assert.equal(chat.input.value, "");
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0, "not queued");
+  assert.ok(chat.log.querySelector(".confirm-card").classList.contains("resolved"));
+});
+
+test("R1 S15: /deny <id> under a pending command card denies it on the commands endpoint and the card resolves", async () => {
+  const chat = await openChat({ actions: [card("o1", { source: "operator", tool: "set_role" })] });
+  const api = chat.app.api;
+  chat.app.api = async (method, path, body) => {
+    if (method === "POST" && path.endsWith("/commands/o1/deny")) chat.server.actions[0].status = "denied";
+    return api(method, path, body);
+  };
+  chat.input.value = "/deny o1";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.posts.map(([path]) => path), ["/api/chats/c1/commands/o1/deny"]);
+  assert.ok(chat.log.querySelector(".confirm-card").classList.contains("resolved"), "the card shows the verdict");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, false, "nothing waits any more");
+});
+
+test("R1 S15: /btw runs beside a pending card; /approve with no id stays in the box", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "/btw what does this card do";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content, body.read_only]),
+    [["/api/chats/c1/messages", "what does this card do", true]]);
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "the card still holds the composer");
+  chat.input.value = "/approve";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "/approve");
+  assert.equal(chat.streams.length, 1);
+});
