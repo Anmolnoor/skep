@@ -6,6 +6,7 @@ F3 (D1) the worktree TTL sweep never counts a tree that is already gone.
 F4 (S1, I2 I8) a landing card never shows a syntax-only G10 pass as clean.
 F5 (N3) short run ids name one run.
 F8 (T1) the replay budget counts tool-call arguments; old ones are cut.
+F9 (T2) the context dial sizes the model's window, not how much history is resent.
 """
 
 from __future__ import annotations
@@ -284,3 +285,24 @@ def test_the_replay_budget_counts_tool_call_arguments(rig: Rig) -> None:
 
     sent = sum(len(json.dumps(m)) for m in kept)
     assert dropped > 0 and sent < 4000, (dropped, sent)
+
+
+# ---------- F9 (T2): the context dial never turns compaction off ----------
+
+
+def test_a_huge_context_dial_still_caps_the_resent_history(rig: Rig) -> None:
+    """Live test: llm_num_ctx = 996000 made the replay budget ~4M chars, so
+    compaction never ran and a chat sent 279k tokens a call."""
+    from skep.supervisor.serve.llm import (
+        AUTO_NUM_CTX_CAP,
+        LLM_NUM_CTX,
+        chat_num_ctx,
+        resolve_context_window,
+    )
+
+    rig.store.set_setting(LLM_NUM_CTX, 996_000)
+    window = resolve_context_window(rig.store)
+    assert (window.model_window, window.replay_cap) == (996_000, AUTO_NUM_CTX_CAP)
+    assert chat_num_ctx(rig.store) == 996_000  # ollama still gets the window asked for
+    view = rig.client.get("/api/llm/config").json()
+    assert (view["num_ctx"], view["replay_cap"]) == (996_000, AUTO_NUM_CTX_CAP)
