@@ -1449,6 +1449,57 @@
     "value": []
    },
    {
+    "effective": [
+     {
+      "command": "git status",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "git diff",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "git log",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pytest",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "uv run pytest",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "uv sync",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "npm test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "npm install",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pnpm test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pnpm install",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "cargo test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "go test",
+      "source": "allowed_shell_commands@template:builder"
+     }
+    ],
+    "effective_note": "the shell list a run here gets, grants included: this key's value plus every learned grant that holds here",
     "key": "allowed_shell_commands",
     "overridden": [
      {

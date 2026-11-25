@@ -248,6 +248,22 @@ def policy_view(store: RunStore, config: SupervisorConfig) -> dict[str, Any]:
     }
 
 
+def global_policy_view(store: RunStore, config: SupervisorConfig) -> dict[str, Any]:
+    """v133-F18 (A7, I8): ``policy_view`` labelled as what it is — the global
+    layer only. A project's overlay, its phase and every learned grant are
+    not in it; the effective policy for a repo is effective_policy / RSoP.
+    (``policy_view`` itself stays unlabelled: the resolver composes from it.)"""
+    return {
+        **policy_view(store, config),
+        "layer": "global",
+        "layer_note": (
+            "global layer only: projects, phases and learned grants (incl. "
+            "allowed_shell_commands grants) are not in this view — read "
+            "effective_policy or policy_rsop for a repo's effective lists"
+        ),
+    }
+
+
 def workers_view() -> dict[str, Any]:
     """v101-F9: the roster, read-only — every caste and every coding engine.
 

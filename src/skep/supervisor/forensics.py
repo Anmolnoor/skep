@@ -289,6 +289,20 @@ def _known(values: list[Any]) -> str:
     return ", ".join(seen) if seen else UNKNOWN
 
 
+def _coverage(engine: str | None) -> str:
+    """v133-F17 (J4, ADR 0047): which log holds what, and what none holds."""
+    line = (
+        "policy decisions and observations are read from decisions.jsonl; the worker's own "
+        "capability refusals from its events.ndjson"
+    )
+    if engine and engine != "builtin":
+        line += (
+            f"; this run's engine {engine} ran its own commands, which are confined by the "
+            "sandbox and not listed (ADR 0047)"
+        )
+    return line
+
+
 def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[str, Any]:
     """The report behind ``skep run forensics`` and ``GET /api/runs/<id>/forensics``.
     An unknown (or ambiguous) id raises ``require_run``'s 404 (409)."""
@@ -375,12 +389,22 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
         },
         "ledger": _ledger(audit_dir, task_id),
         "resume_chain": chain,
-        "policy_trail": trail,
+        # v133-F17 (J4, I8): each row says what it is and where it was read —
+        # an observed or forwarded row authorized nothing
+        "policy_trail": [
+            {
+                **row,
+                "kind": "observation" if row.get("source") in NOTES else "policy decision",
+                "origin": "decisions.jsonl",
+            }
+            for row in trail
+        ],
         "policy_blocks": [
-            block
+            {**block, "kind": "worker capability decision", "origin": "events.ndjson"}
             for tid in chain
             for block in _policy_blocks(_events_path(audit_dir, store, tid), tid)
         ],
+        "coverage": _coverage(run["coding_engine"]),
         "worker": {
             "log_tail": _log_tail(audit / "worker.log"),
             "result": _result(audit / "result.json"),
@@ -476,15 +500,18 @@ def render_forensics(report: dict[str, Any], *, markdown: bool) -> str:
     if ledger["checkpoints_missing"]:
         lines.append(f"{item}{ledger['checkpoints_missing']} checkpoints were never kept")
     lines.append(head(f"Policy trail (resume chain: {' -> '.join(report['resume_chain'])})"))
+    lines.append(f"{item}{report['coverage']}")
     lines += [
-        f"{item}{row.get('at', '?')} {row.get('task_id')} {row.get('actor', '?')} "
+        f"{item}[{row.get('kind', '?')}] {row.get('at', '?')} {row.get('task_id')} "
+        f"{row.get('actor', '?')} "
         f"{row.get('verdict', row.get('source', '?'))} "
         f"{row.get('scope', '?')}.{row.get('action', '?')} "
         f"{row.get('value', '')!r} decided_by={row.get('decided_by', '?')}"
         for row in report["policy_trail"]
     ]
     lines += [
-        f"{item}BLOCKED {block['task_id']} worker {block['decision']['verdict']} "
+        f"{item}[{block.get('kind', '?')}] BLOCKED {block['task_id']} worker "
+        f"{block['decision']['verdict']} "
         f"{block['capability_id']} {block['command']!r} reason={block['decision']['reason']} "
         f"decided_by={block['decision']['decided_by'] or '?'}: {block['detail']}"
         for block in report["policy_blocks"]

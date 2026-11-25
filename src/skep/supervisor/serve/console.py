@@ -8,6 +8,7 @@ that was there before it.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -23,6 +24,8 @@ from ..skills import DRAFT, TESTED
 from ..store import RunStore
 from .actions import (
     approval_views,
+    g10_facts,
+    g10_line,
     never_reverified_error,
     patch_digest,
     patch_path,
@@ -30,6 +33,7 @@ from .actions import (
     require_run,
     reverification_warning,
     tamper_note,
+    worker_result,
 )
 from .cards import BOUNDARIES, boundary
 from .commands import WEB
@@ -114,6 +118,52 @@ def _same_dir(repo: Path, recorded: str) -> bool:
         return False
 
 
+_LANDED_SUBJECT = re.compile(r"^Apply skep task (\S+)$")  # apply.apply_patch_on_branch's
+
+
+def _branch_landings(store: RunStore, repo: Path | None, branch: str, base: Any) -> list[str]:
+    """v133-F15 (J5): the runs whose landing commit is in base..branch, oldest
+    first: by the commit each landing recorded, or — for a landing from
+    before v133, which recorded none — by its commit's subject. With no base
+    ref to read, the runs whose approved landing named the branch (R4 K1)."""
+    from ..apply import _git
+
+    if repo is None:
+        return []
+    base_ref = next(
+        (
+            ref
+            for ref in (f"refs/remotes/origin/{base or 'main'}", f"refs/heads/{base or 'main'}")
+            if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
+        ),
+        None,
+    )
+    if base_ref is None:
+        return store.runs_landed_on(branch)
+    log = _git(repo, "log", "--reverse", "--format=%H %s", f"{base_ref}..refs/heads/{branch}")
+    if log.returncode != 0:
+        return []
+    landed = store.landing_commits()
+    by_commit = {commit: task_id for task_id, commit in landed.items() if commit}
+    ids: list[str] = []
+    for line in log.stdout.splitlines():
+        commit, _, subject = line.partition(" ")
+        legacy = _LANDED_SUBJECT.match(subject)
+        if commit in by_commit:
+            ids.append(by_commit[commit])
+        elif legacy and legacy.group(1) in landed and landed[legacy.group(1)] is None:
+            ids.append(legacy.group(1))
+    return ids
+
+
+def landing_line(store: RunStore, task_id: str) -> str | None:
+    """v133-F15: a landed run with no recorded landing commit says so."""
+    landed = store.landing_commits()
+    if task_id in landed and landed[task_id] is None:
+        return "landing commit not recorded (landed before v133)"
+    return None
+
+
 def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     """R3 J1: the runs whose patch a card's execution lands or publishes —
     read from what the tool does (tools.py), not its boundary label: land_run
@@ -124,13 +174,13 @@ def card_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
     if tool == "land_run":
         ids = [args.get("task_id")]
     elif tool == "open_pr" and args.get("branch"):
-        # R4 K1 (O2): branch mode publishes the runs whose approved landing
-        # named it — R5-1: in the repo open_pr resolves (skep/maintain is the
-        # same name in every maintain-phase repo)
+        # v133-F15 (J5): branch mode publishes every landing in base..head —
+        # stacked ones included, commits already on the base not — in the
+        # repo open_pr resolves (R5-1: skep/maintain is in every repo)
         repo = _branch_repo(store, args)
         ids = [
             task_id
-            for task_id in store.runs_landed_on(str(args["branch"]))
+            for task_id in _branch_landings(store, repo, str(args["branch"]), args.get("base"))
             if repo is not None
             and (record := store.get_run(task_id)) is not None
             and _same_dir(repo, record.repo)
@@ -154,6 +204,13 @@ def run_evidence(store: RunStore, tool: str, args: dict[str, Any]) -> list[dict[
             "task_id": task_id,
             "warning": landing_warning(store, task_id),
             "tamper": tamper_note(store.reverification_for(task_id)),
+            # v133-F12 (J1, I8): G10's command, source, run, exit codes, outcome
+            "g10": g10_facts(store.reverification_for(task_id)),
+            "landing": landing_line(store, task_id),
+            # v133-F16 (F-I3): the two results apart, each in the store's words
+            "worker": "worker's own verification: "
+            + (worker_result(store, task_id) or "not reported"),
+            "supervisor": g10_line(store.reverification_for(task_id)),
         }
         for task_id in card_runs(store, tool, args)
     ]

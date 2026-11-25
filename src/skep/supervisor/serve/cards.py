@@ -414,6 +414,13 @@ def high_tier(
                 return f"it picks the coding agent itself (engine {task['engine']!r})"
     if tool == "start_research" and _wildcard_network(safe):
         return "the run may reach any host on the internet (network '*')"
+    if store is not None and (label := landing_label(store, tool, safe)) is not None:
+        # v133-F12 (J1, I1, I2): a landing G10 did not confirm stays the
+        # human's to make — one card, HIGH, saying what G10 found
+        from .actions import g10_line
+
+        failed = [store.reverification_for(task_id) for task_id in _landed_runs(store, tool, safe)]
+        return f"{label}: " + "; ".join(g10_line(r) for r in failed if r and not r.confirmed)
     if tool in ("run_shell", "start_process"):
         from ..secret_floor import UNRESOLVED_READ, shell_read_target_unresolved
 
@@ -421,6 +428,24 @@ def high_tier(
         command = str(safe.get("command") or "")
         if command and shell_read_target_unresolved(command, cwd=None if cwd is None else str(cwd)):
             return UNRESOLVED_READ  # L3 (D44): the floor could not read it
+    return None
+
+
+def _landed_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
+    from .console import card_runs
+
+    return card_runs(store, tool, args) if tool in _LANDING_TOOLS else []
+
+
+def landing_label(store: RunStore, tool: str, args: dict[str, Any]) -> str | None:
+    """v133-F12 (J1): a land_run / approve_review (landing) card's action
+    label when G10 did not confirm a run it lands — None otherwise."""
+    from .actions import g10_landing_label
+
+    for task_id in _landed_runs(store, tool, args):
+        label = g10_landing_label(store.reverification_for(task_id))
+        if label is not None:
+            return label
     return None
 
 
@@ -726,6 +751,32 @@ def recorded_card(
         record["capture"] = capture_card(store, args)
     if tool == "merge_pr":  # R3 (S6): the pin the proposal already validated
         record["merge"] = merge_pin(store, args) if merge is None else merge
+    if tool in ("land_run", "approve_review", "open_pr"):
+        # v133-F11/F12 (J1, J3, I7): the runs it lands or publishes, each
+        # with its G10 facts, kept on the row; the confirm is bound to the
+        # G10 record each was drawn on (actions.shown_g10_moved)
+        from .actions import g10_fingerprint
+        from .console import run_evidence
+
+        runs = run_evidence(store, tool, args)
+        if runs:
+            record["evidence"] = {"runs": runs}
+            record["g10_bound"] = {
+                run["task_id"]: g10_fingerprint(store.reverification_for(run["task_id"]))
+                for run in runs
+            }
+        label = landing_label(store, tool, args)
+        if label is not None:
+            record["action_label"] = label
+    if tool == "open_pr" and args.get("branch"):
+        # v133-F15 (J5, I7): the push is bound to the head this card shows
+        from ..apply import resolve_commit
+        from .console import _branch_repo
+
+        repo = _branch_repo(store, args)
+        head = None if repo is None else resolve_commit(repo, f"refs/heads/{args['branch']}")
+        if head is not None:
+            record["head"] = head
     return record or None
 
 
@@ -1083,6 +1134,13 @@ def card_summary(
     if high is not None:
         summary["tier"] = "high"
         summary["high"] = high
+    label = (
+        landing_label(store, tool, safe_args)
+        if recorded is None and store is not None and live_tier
+        else (recorded or {}).get("action_label")
+    )
+    if label is not None:  # v133-F12 (J1): the button says what approving does
+        summary["action_label"] = label
     if store is not None and live_tier:
         # R4 K1: the thread's card is where a landing or PR is approved — it
         # names every run it lands or publishes, each with its G10 and V1.
@@ -1091,4 +1149,7 @@ def card_summary(
         runs = run_evidence(store, tool, safe_args)
         if runs:
             summary["runs"] = runs
+    elif ((recorded or {}).get("evidence") or {}).get("runs"):
+        # v133-F11/F16: a resolved card shows the runs it recorded when proposed
+        summary["runs"] = (recorded or {})["evidence"]["runs"]
     return summary
