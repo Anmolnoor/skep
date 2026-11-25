@@ -2562,10 +2562,19 @@ class ChatEngine:
         one thing to type. Typing it starts an attended turn, which may only
         propose, as ever: the line grants nothing."""
         names = ", ".join(dict.fromkeys(refused))
+        # R2 (Sol T5): from the turn's final state — an open card holds the
+        # chat's replies, so the line names that card instead of a reply
+        holding = blocking_cards(self.store, chat_id)
+        then = (
+            f"Your open card holds this chat: {holding[-1].tool} — "
+            f"{headline(holding[-1].tool, holding[-1].args)}. Approve or Deny it "
+            "and I'll pick up from there."
+            if holding
+            else "Reply “go ahead” and I'll continue in a turn you start."
+        )
         line = (
             f"{names} could not run in this turn: it started on its own (a run "
-            "finished, or skep restarted) and nobody was there to approve it. "
-            "Reply “go ahead” and I'll continue in a turn you start."
+            f"finished, or skep restarted) and nobody was there to approve it. {then}"
         )
         row = self.store.add_chat_message(chat_id, role="assistant", content=line)
         return (None, {"content": f"\n\n{line}", "message_id": row})  # v133-F38
@@ -3268,7 +3277,11 @@ class ChatEngine:
                         previous_read_tool = name
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
-                        result = {"error": f"{name} {UNATTENDED_WRITE_REFUSAL}"}
+                        write_refusal: dict[str, Any] = {
+                            "error": f"{name} {UNATTENDED_WRITE_REFUSAL}",
+                            "unattended": True,  # R2 (T5): marked like every refusal
+                        }
+                        result = write_refusal
                         previous_read_tool = name
                     elif off_store:  # S8: a scheduled turn calls its allowlist only
                         result = {"error": f"{name} {SCHEDULED_STORE_ONLY_REFUSAL}"}

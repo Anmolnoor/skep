@@ -469,6 +469,36 @@ def test_an_unattended_refusal_ends_the_turn_with_what_to_type(rig: Rig, repo: P
     assert rig.store.queued_run_follow_ups() == []
 
 
+def test_r2_t5_a_refused_store_write_ends_the_turn_with_what_to_type(rig: Rig, repo: Path) -> None:
+    chat_id, task_id, _ = _gated_run(rig, repo)
+    rig.store.transition(task_id, "completed")
+    rig.ollama.script_tool_call("add_note", {"text": "the run finished"})
+    rig.ollama.script_reply("Noted.")
+
+    _continue(rig, task_id)
+
+    last = _assistant_lines(rig, chat_id)[-1]
+    assert "add_note" in last and "go ahead" in last
+
+
+def test_r2_t5_a_turn_that_raised_a_card_names_the_card_not_a_reply(rig: Rig, repo: Path) -> None:
+    """A pending card holds the chat's replies, so 'reply go ahead' would be
+    a dead end: the line names the card to answer instead."""
+    chat_id, task_id, _ = _gated_run(rig, repo)
+    rig.store.transition(task_id, "completed")
+    rig.ollama.script_tool_call("add_note", {"text": "the run finished"})
+    rig.ollama.script_tool_call("set_personality", {"value": "concise"})
+    rig.ollama.script_reply("I proposed a change.")
+
+    _continue(rig, task_id)
+
+    [card] = rig.store.pending_chat_actions(chat_id)
+    assert card.tool == "set_personality"
+    last = _assistant_lines(rig, chat_id)[-1]
+    assert "add_note" in last and "set_personality" in last, last
+    assert "Approve or Deny" in last and "go ahead" not in last, last
+
+
 def test_a_continuation_that_could_not_start_says_so_in_the_chat(
     rig: Rig, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
