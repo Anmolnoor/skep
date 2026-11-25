@@ -264,3 +264,37 @@ test("F39 (R1 S6): without the field, a reply the stream never showed is drawn; 
   assert.equal(chat.textCount("a background turn's reply"), 1, "an unmarked row the stream did not show is drawn");
   assert.equal(chat.textCount("go"), 1);
 });
+
+// ---------- R1: a syntax-only check is said beside its command ----------
+
+const SYNTAX = "the pinned check only proves the code parses (node --check): it runs no test";
+
+test("R1: run detail marks a syntax-only check on its own row beside the command; absent, no row", async () => {
+  const rv = { outcome: "passed", confirmed: true, commands: ["node --check index.js"], exit_codes: [0],
+    commands_source: "project", detail: "" };
+  const marked = await runPage({ ...rv, syntax_only: SYNTAX });
+  assert.equal(marked.rows["re-verify ran"], "node --check index.js → exit 0");
+  assert.equal(marked.rows["syntax-only check"], SYNTAX);
+  const keys = Object.keys(marked.rows);
+  assert.equal(keys.indexOf("syntax-only check"), keys.indexOf("command from") + 1, "beside the command rows");
+  for (const value of [null, undefined]) {
+    const { rows } = await runPage({ ...rv, syntax_only: value });
+    assert.equal(rows["syntax-only check"], undefined);
+  }
+});
+
+test("R1: the forensics G10 box marks a syntax-only check too; absent, no row", () => {
+  const app = loadApp();
+  const box = g10 => {
+    const node = app.forensicsPanel({ task_id: "t1", identity: { taint: "unknown" }, outcome: { alarms: [], g10 },
+      ledger: null, resume_chain: ["t1"], policy_trail: [], worker: { log_tail: [] } });
+    const kv = node.querySelector(".kv");
+    const dts = kv.querySelectorAll("dt").map(n => n.textContent);
+    const dds = kv.querySelectorAll("dd").map(n => n.textContent);
+    return Object.fromEntries(dts.map((k, i) => [k, dds[i]]));
+  };
+  const base = { outcome: "passed", confirmed: true, commands: ["node --check index.js"], exit_codes: [0],
+    commands_source: "project", tamper_flags: [], v1: "clean", test_counts: null };
+  assert.equal(box({ ...base, syntax_only: SYNTAX })["syntax-only check"], SYNTAX);
+  assert.equal(box(base)["syntax-only check"], undefined);
+});
