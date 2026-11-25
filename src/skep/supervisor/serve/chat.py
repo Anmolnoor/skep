@@ -4737,12 +4737,19 @@ def add_chat_routes(
                     "already_pending": True,
                 }
             run_store.supersede_chat_action(pending.action_id, note=_SUPERSEDED_BY_NEWER)
-        recorded = None
+        # v133 R1 (S3; J1, I7): a typed /land, /approve or /pr records the runs
+        # and the G10 record it showed, like the Queen's card, so its confirm
+        # is bound to them (actions.shown_g10_moved).
+        recorded = (
+            recorded_card(body.tool, body.args, None, run_store)
+            if body.tool in ("land_run", "approve_review", "open_pr")
+            else None
+        ) or {}
         if body.tool in _GATE_TOOLS:  # R2 (Neon): the label survives the gate's resolution
             label, remedy = boundary(body.tool, body.args, store=run_store)
-            recorded = {"boundary": label, **({"remediation": remedy} if remedy else {})}
+            recorded |= {"boundary": label, **({"remediation": remedy} if remedy else {})}
         action_id = run_store.add_chat_action(
-            chat_id, tool=body.tool, args=body.args, source="operator", card=recorded
+            chat_id, tool=body.tool, args=body.args, source="operator", card=recorded or None
         )
         return {
             "action_id": action_id,
