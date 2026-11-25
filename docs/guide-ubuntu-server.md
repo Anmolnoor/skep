@@ -98,6 +98,9 @@ sudo systemctl start qemu-guest-agent   # VM only; the unit starts itself on lat
 `qemu-guest-agent` only matters on a VM. `nodejs` and `npm` are only needed for
 the Codex CLI.
 
+That is the minimum. For the tools a full setup uses (ripgrep, `uv`, `gh`, a
+project's test runner), see [`prerequisites.md`](prerequisites.md).
+
 ## 3. Let bubblewrap run under Ubuntu 24.04's AppArmor rules
 
 Ubuntu 24.04 stops unprivileged programs from creating user namespaces
@@ -191,6 +194,12 @@ npm config set prefix ~/.npm-global
 npm install -g @openai/codex
 ~/.npm-global/bin/codex --version
 ```
+
+Strict reads are the default for a new sandboxed project since this guide
+was tested, and `~/.npm-global` is outside what a strict-read run can read
+by default. A worker on such a project cannot start this copy of Codex until
+the directory is in the project's `extra_read_paths`.
+[`prerequisites.md`](prerequisites.md), section 4, has the options.
 
 Ubuntu's Node 18 was new enough for the tested Codex version. To sign Codex in
 to your ChatGPT plan on a machine with no browser, run

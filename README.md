@@ -89,6 +89,11 @@ macOS uses Seatbelt out of the box. All state lives locally under `~/.skep`:
 no skep account, no skep service, no telemetry. With a hosted model, prompts
 (including code) go to that provider.
 
+Before a first run, read [`docs/prerequisites.md`](docs/prerequisites.md): it
+lists every program skep works with (the sandbox, your project's test runner,
+`gh`, the optional coding agents), which ones are required, and how to
+install and check each.
+
 ## 60-second quickstart
 
 ```sh

@@ -8,7 +8,9 @@ This is the shortest path from a new machine to a supervised coding run.
 pipx install skep && skep onboard
 ```
 
-You need Python 3.12 or newer and Git. `skep onboard` is the guided first
+You need Python 3.12 or newer and Git; [prerequisites.md](prerequisites.md)
+lists everything else a full first run uses (the sandbox, your project's
+test runner, `gh`, the optional coding agents). `skep onboard` is the guided first
 run: it connects a model, registers a work directory (default `~/workspace`)
 as a project, records the sandbox backend, locks a policy baseline after you
 type `yes`, records a role, then starts `skep serve` and opens `skep chat`.
