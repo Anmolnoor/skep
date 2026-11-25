@@ -195,6 +195,11 @@ npm install -g @openai/codex
 ~/.npm-global/bin/codex --version
 ```
 
+A project with strict reads, the default for a new sandboxed project since
+this guide was tested, cannot read `~/.npm-global`, so a worker there cannot
+start this copy of Codex. [`prerequisites.md`](prerequisites.md), section 4,
+has the ways around it.
+
 Ubuntu's Node 18 was new enough for the tested Codex version. To sign Codex in
 to your ChatGPT plan on a machine with no browser, run
 `~/.npm-global/bin/codex login --device-auth` and approve the code it prints in
