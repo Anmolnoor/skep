@@ -486,3 +486,25 @@ def test_a_broken_run_finish_callback_posts_a_line_instead_of_nothing(
         assert str(task.task_id)[:12] in lines[0]
     finally:
         store.close()
+
+
+# ---------- F38: the stream names the rows it drew (G8) ----------
+
+
+def test_the_streams_message_events_carry_the_stored_message_ids(rig: Rig) -> None:
+    from .test_serve_chat import sse_events
+
+    chat_id = rig.client.post("/api/chats", json={}).json()["chat_id"]
+    rig.ollama.script_tool_call("list_runs", {})
+    rig.ollama.script_reply("No runs yet.")
+
+    response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "any runs?"})
+    assert response.status_code == 200
+    events = sse_events(response.text)
+
+    stored = [m.id for m in rig.store.chat_messages(chat_id) if m.role == "assistant"]
+    named = [d["message_id"] for e, d in events if e is None and "message_id" in d]
+    assert len(stored) == 2 and named == stored  # the tool round's row, then the reply's
+    assert all("content" in d for e, d in events if e is None)  # additive: content stays
+    deltas = "".join(str(d["content"]) for e, d in events if e is None)
+    assert "No runs yet." in deltas

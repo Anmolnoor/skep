@@ -2564,8 +2564,15 @@ class ChatEngine:
             "finished, or skep restarted) and nobody was there to approve it. "
             "Reply “go ahead” and I'll continue in a turn you start."
         )
-        self.store.add_chat_message(chat_id, role="assistant", content=line)
-        return (None, {"content": f"\n\n{line}"})
+        row = self.store.add_chat_message(chat_id, role="assistant", content=line)
+        return (None, {"content": f"\n\n{line}", "message_id": row})  # v133-F38
+
+    def _said(self, chat_id: str, **row: Any) -> ChatEvent:
+        """v133-F38 (G8): store one assistant row of this turn, and the
+        message event that names its id — content empty, the deltas already
+        streamed — so a page knows which stored rows its stream drew."""
+        message_id = self.store.add_chat_message(chat_id, role="assistant", **row)
+        return (None, {"content": "", "message_id": message_id})
 
     def _turn_events(
         self,
@@ -2675,9 +2682,8 @@ class ChatEngine:
                         continue
                     # Keep whatever arrived — the transcript should not lose a half-reply.
                     if parts:
-                        self.store.add_chat_message(
+                        yield self._said(
                             chat_id,
-                            role="assistant",
                             content="".join(parts),
                             thinking="".join(thinking_parts) or None,
                         )
@@ -2688,7 +2694,7 @@ class ChatEngine:
                         # test 2026-07-19: three "hung" turns in a row).
                         line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                         yield (None, {"content": line})
-                        self.store.add_chat_message(chat_id, role="assistant", content=line)
+                        yield self._said(chat_id, content=line)
                     yield ("error", {"detail": str(exc)})
                     return
                 break
@@ -2720,9 +2726,8 @@ class ChatEngine:
             if content or thinking_text or tool_calls:
                 # v70-F1: an all-empty round persists nothing — an empty row
                 # is noise, and its old silent done/complete was the bug.
-                self.store.add_chat_message(
+                yield self._said(
                     chat_id,
-                    role="assistant",
                     content=content,
                     thinking=thinking_text or None,
                     tool_calls=tool_calls or None,
@@ -2832,7 +2837,7 @@ class ChatEngine:
                             formatted += "\n" + "\n".join(
                                 f"{index}. {choice}" for index, choice in enumerate(choices, 1)
                             )
-                        self.store.add_chat_message(chat_id, role="assistant", content=formatted)
+                        yield self._said(chat_id, content=formatted)
                         yield (None, {"content": formatted})
                         yield ("clarification", {"question": question, "choices": choices})
                         yield ("done", {"state": "complete"})
@@ -3394,7 +3399,7 @@ class ChatEngine:
     def _stopped(self, chat_id: str, face: str) -> Iterator[ChatEvent]:
         """v130-F10: the turn's honest last word (I8)."""
         line = f"stopped by {face}"
-        self.store.add_chat_message(chat_id, role="assistant", content=line)
+        yield self._said(chat_id, content=line)
         yield (None, {"content": line})
         yield ("done", {"state": "stopped"})
 
@@ -3484,9 +3489,8 @@ class ChatEngine:
                     )
                     continue
                 if parts:
-                    self.store.add_chat_message(
+                    yield self._said(
                         chat_id,
-                        role="assistant",
                         content="".join(parts),
                         thinking="".join(thinking_parts) or None,
                     )
@@ -3494,7 +3498,7 @@ class ChatEngine:
                     # v62-F1: same silent-death branch as the main loop.
                     line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                     yield (None, {"content": line})
-                    self.store.add_chat_message(chat_id, role="assistant", content=line)
+                    yield self._said(chat_id, content=line)
                 yield ("error", {"detail": str(exc)})
                 return
             break
@@ -3522,12 +3526,7 @@ class ChatEngine:
             # ends with a persisted, honest line.
             content = _NO_SUMMARY_LINE
             yield (None, {"content": content})
-        self.store.add_chat_message(
-            chat_id,
-            role="assistant",
-            content=content,
-            thinking=thinking_text or None,
-        )
+        yield self._said(chat_id, content=content, thinking=thinking_text or None)
         yield ("done", {"state": "complete"})
 
     def verdict_events(
