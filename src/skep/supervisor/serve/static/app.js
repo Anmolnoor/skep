@@ -2449,11 +2449,11 @@ async function viewChat(main, chatId) {
   // dead zone and the chat would fail to render at all. The empty-queue guard
   // is the first line for the same reason — the startup calls return before
   // they can reach `deliver`.
-  let queued = [];
+  let queued = []; // { text, held }
   // v133-F23 (G6): Stop holds the queue — nothing queued is sent because
-  // Stop was pressed; the chips say "held" with Send and Discard.
-  let queueHeld = false;
-  const holdQueue = () => { queueHeld = true; renderQueued(); };
+  // Stop was pressed; the chips say "held" with Send and Discard. v133 R1
+  // (S17): held per message — a chip's Send releases that message only.
+  const holdQueue = () => { for (const item of queued) item.held = true; renderQueued(); };
   // Text handed back to the box goes in front of whatever the operator is
   // typing now — nothing in the box is overwritten.
   const returnToBox = (text) => {
@@ -2461,30 +2461,31 @@ async function viewChat(main, chatId) {
     input.focus();
   };
   const renderQueued = () => {
-    if (!queued.length) queueHeld = false; // an empty queue holds nothing
     queuedNote.hidden = queued.length === 0;
     const action = (label, onclick) =>
       el("button", { type: "button", class: "ghost queued-steer-action", onclick }, label);
-    queuedNote.replaceChildren(...queued.map((text, index) => {
-      const take = () => { queued.splice(index, 1); renderQueued(); };
-      return el("div", { class: `queued-steer-item${queueHeld ? " held" : ""}` },
-        el("span", { class: `chip ${queueHeld ? "tone-warn" : "tone-info"}` },
-          queueHeld ? "held" : "queued"),
+    queuedNote.replaceChildren(...queued.map((item) => {
+      const { text, held } = item;
+      const take = () => { queued.splice(queued.indexOf(item), 1); renderQueued(); };
+      return el("div", { class: `queued-steer-item${held ? " held" : ""}` },
+        el("span", { class: `chip ${held ? "tone-warn" : "tone-info"}` },
+          held ? "held" : "queued"),
         el("span", { class: "queued-steer-text", title: text }, text),
-        queueHeld
-          ? action("Send", () => { queueHeld = false; renderQueued(); flushQueued(); })
+        held
+          ? action("Send", () => { item.held = false; renderQueued(); flushQueued(); })
           : null,
         action("Edit", () => { take(); returnToBox(text); }),
-        action(queueHeld ? "Discard" : "Cancel", take));
+        action(held ? "Discard" : "Cancel", take));
     }));
   };
   // The first queued message goes when the composer frees; the turn it
   // starts flushes the next one in its own finally. The box is not touched.
   const flushQueued = () => {
-    if (!queued.length || queueHeld || send.disabled || !assistantReady) return;
-    const content = queued.shift();
+    const at = queued.findIndex(item => !item.held);
+    if (at < 0 || send.disabled || !assistantReady) return;
+    const [{ text }] = queued.splice(at, 1);
     renderQueued();
-    deliver(content);
+    deliver(text);
   };
   // Phase 10 10.3: completion, /help and refusals read the registry's web slice.
   let deck = { commands: [], refusals: {} };
@@ -3515,7 +3516,7 @@ async function viewChat(main, chatId) {
     if (send.disabled && !beside) {
       // A second steer while one is already queued is its own chip —
       // losing the first would be the same bug wearing a queue.
-      queued.push(content);
+      queued.push({ text: content, held: false });
       if (fromBox) input.value = "";
       renderQueued();
       flash("ok", "queued — sends when this turn finishes");

@@ -533,3 +533,25 @@ test("R1 S15: /btw runs beside a pending card; /approve with no id stays in the 
   assert.equal(chat.input.value, "/approve");
   assert.equal(chat.streams.length, 1);
 });
+
+// S17: a held chip's Send sends that message only; the others stay held.
+test("R1 S17: Send on the second of two held chips sends only that one; the first stays held", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "go";
+  chat.press("Enter");
+  await settle();
+  for (const text of ["first held", "second held"]) { chat.input.value = text; chat.press("Enter"); }
+  await chat.log.querySelector(".chat-stop").click();
+  finish();
+  await settle();
+  const chips = () => chat.main.querySelectorAll(".queued-steer-item");
+  assert.equal(chips().length, 2);
+  chat.app.streamSse = async (path, body) => { chat.streams.push([path, body]); };
+  await chips()[1].querySelectorAll("button").find(b => b.textContent === "Send").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["go", "second held"]);
+  assert.deepEqual(chips().map(c => c.querySelector(".queued-steer-text").textContent), ["first held"]);
+  assert.match(chips()[0].textContent, /held/);
+});
