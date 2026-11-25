@@ -68,7 +68,9 @@ test("a card the web can confirm still locks the composer, beside a read-only on
   const { main, input } = await openChat([modelCard(), roleCard]);
   assert.equal(main.querySelectorAll(".command-card").length, 2);
   assert.equal(main.querySelectorAll(".elsewhere-card").length, 1);
-  assert.equal(input.disabled, true);
+  // v133-F21: "locks" withholds sending; the textarea still takes typing.
+  assert.equal(main.querySelectorAll(".composer-send")[0].disabled, true);
+  assert.equal(input.disabled, false);
 });
 
 test("the web's message says it is the web, so the server applies the same rule", async () => {

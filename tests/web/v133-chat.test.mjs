@@ -1,0 +1,333 @@
+// v133 B4 — the web chat (findings G1, G2, G3, G6, G7, G8 of the Alfin live
+// test). The chat page must not rebuild itself for a live event, the composer
+// must always take typing, and nothing the operator typed is lost or sent
+// without their action.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadApp } from "./harness.mjs";
+
+const settle = async (n = 8) => { for (let i = 0; i < n; i += 1) await new Promise(r => setTimeout(r, 0)); };
+
+const msg = (id, role, content, provenance = role === "user" ? "operator" : "queen") =>
+  ({ id, chat_id: "c1", role, content, provenance, created_at: "2026-11-25T10:00:00Z" });
+const card = (id, extra = {}) => ({
+  action_id: id, chat_id: "c1", tool: "run_shell", args: { command: "ls" },
+  status: "proposed", source: "assistant", card: { headline: `run_shell — ${id}` }, ...extra,
+});
+
+class FakeSource {
+  constructor(url) { this.url = url; this.listeners = {}; FakeSource.last = this; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  emit(type, data) { for (const fn of this.listeners[type] || []) fn({ data: JSON.stringify(data) }); }
+  close() { this.closed = true; }
+}
+
+// The chat view for chat c1 over a mutable server: `server.messages` and
+// `server.actions` are what the next GET returns. Every POST, every stream
+// and every route() (a rebuild of #main) is counted.
+async function openChat({ messages = [], actions = [] } = {}) {
+  const app = loadApp();
+  const server = { messages: [...messages], actions: [...actions] };
+  const posts = [];
+  const streams = [];
+  let routed = 0;
+  app.api = async (method, path, body) => {
+    if (method === "POST") { posts.push([path, body]); return { detail: "stopping", ok: true }; }
+    if (path === "/api/llm/config") return { configured: true, default_model: "m" };
+    if (path === "/api/chats") return { chats: [{ chat_id: "c1", title: "t" }] };
+    if (path === "/api/chats/c1") {
+      return { chat: { chat_id: "c1", title: "t" }, messages: [...server.messages], actions: server.actions.map(a => ({ ...a })) };
+    }
+    if (path === "/api/roles") return { roles: [], default: null };
+    if (path === "/api/llm/models") return { models: [] };
+    if (path === "/api/projects") return { projects: [] };
+    if (path === "/api/status") return { status: "ok", pending_approvals: 0, machine: "m" };
+    if (path === "/api/tasks") return { tasks: [] };
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  app.streamSse = async (path, body, handlers) => { streams.push([path, body]); };
+  app.renderThreads = () => {};
+  app.refreshSidebar = async () => {};
+  app.setInterval = () => 0;
+  app.clearInterval = () => {};
+  app.EventSource = FakeSource;
+  app.route = () => { routed += 1; };
+  const main = app.document.createElement("main");
+  await app.viewChat(main, "c1");
+  app.location.hash = "#/chat/c1";
+  app.document.visibilityState = "visible";
+  const input = main.querySelectorAll("textarea")[0];
+  const log = main.querySelector(".chat-log");
+  const firstChild = main.children[0];
+  const press = (key, extra = {}) => {
+    const event = { type: "keydown", key, shiftKey: false, prevented: false, preventDefault() { this.prevented = true; }, ...extra };
+    input.dispatchEvent(event);
+    return event;
+  };
+  const textCount = (text) => log.querySelectorAll(".chat-message").filter(n => n.textContent.includes(text)).length;
+  return { app, main, input, log, server, posts, streams, routed: () => routed, firstChild, press, textCount };
+}
+
+// ---------- F19 (G8): the poll reconciles by message id ----------
+
+test("F19: a reply stored by a background turn appears after one poll, without rebuilding #main, drawn once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello"), msg(2, "assistant", "hi there")] });
+  chat.server.messages.push(msg(9, "assistant", "the run finished, here is what it did"));
+  await chat.app.poll();
+  assert.equal(chat.textCount("the run finished"), 1, "the background reply is drawn");
+  assert.equal(chat.routed(), 0, "#main is not rebuilt");
+  assert.equal(chat.main.children[0], chat.firstChild);
+  await chat.app.poll();
+  assert.equal(chat.textCount("the run finished"), 1, "a message already drawn is not drawn twice");
+  assert.equal(chat.textCount("hi there"), 1);
+});
+
+test("F19: a message the live stream drew is not drawn again by the poll; a worker line stored mid-stream is", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    chat.server.messages.push(msg(6, "user", "run abc completed", "worker:abc"));
+    handlers.message({ content: "done, the thing is done" });
+    chat.server.messages.push(msg(7, "assistant", "done, the thing is done"));
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  await chat.app.poll();
+  assert.equal(chat.streams.length, 1);
+  assert.equal(chat.textCount("do the thing"), 1);
+  assert.equal(chat.textCount("done, the thing is done"), 1);
+  assert.equal(chat.textCount("run abc completed"), 1, "a line another author stored during the stream is drawn");
+  assert.equal(chat.routed(), 0);
+});
+
+// ---------- F20 (G1): live events update the node they concern ----------
+
+test("F20: a card arriving and a card resolved elsewhere do not rebuild #main; draft and scroll survive", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.input.value = "a draft in progress";
+  Object.assign(chat.log, { scrollTop: 100, scrollHeight: 1000, clientHeight: 300 });
+  chat.server.actions.push(card("a1"));
+  await chat.app.poll();
+  const drawn = chat.log.querySelectorAll(".confirm-card");
+  assert.equal(drawn.length, 1, "the card arriving is drawn");
+  chat.server.actions[0].status = "denied";
+  await chat.app.poll();
+  assert.ok(drawn[0].classList.contains("resolved"), "the verdict from elsewhere resolves the drawn card");
+  assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "a card is drawn once");
+  assert.equal(chat.routed(), 0);
+  assert.equal(chat.main.children[0], chat.firstChild);
+  assert.equal(chat.input.value, "a draft in progress");
+  assert.equal(chat.log.scrollTop, 100, "the operator's scroll position is kept");
+});
+
+test("F20: a run's terminal event draws its stored line in place, with no rebuild", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  const source = FakeSource.last;
+  assert.ok(source, "the status stream is open");
+  chat.server.messages.push(msg(4, "user", "run abcdef completed — land it?", "worker:abcdef"));
+  source.emit("terminal", { task_id: "abcdef0123456789", state: "completed" });
+  await settle();
+  assert.equal(chat.routed(), 0);
+  assert.equal(chat.main.children[0], chat.firstChild);
+  assert.equal(chat.textCount("run abcdef completed"), 1);
+});
+
+
+test("F20: a quiet poll touches nothing on screen, not even the context panel", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")], actions: [card("a1")] });
+  const panel = chat.main.querySelector(".chat-context");
+  const before = [...panel.children];
+  const logBefore = [...chat.log.children];
+  await chat.app.poll();
+  assert.deepEqual([...panel.children], before);
+  assert.deepEqual([...chat.log.children], logBefore);
+  chat.server.actions[0].status = "confirmed";
+  await chat.app.poll();
+  assert.notDeepEqual([...panel.children], before, "a card resolved elsewhere redraws the panel");
+});
+
+// ---------- F21 (G2): a pending card never disables the textarea ----------
+
+test("F21: with a card pending, typing works and Enter posts nothing until the card is answered", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")], actions: [card("a1")] });
+  assert.equal(chat.input.disabled, false, "the textarea takes typing under a pending card");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "sending to the model is withheld");
+  chat.input.value = "next, do this";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.streams.length, 0);
+  assert.deepEqual(chat.posts, []);
+  chat.input.value = "/runs 5";
+  const event = chat.press("Enter");
+  await settle();
+  assert.ok(event.prevented);
+  assert.equal(chat.input.value, "/runs 5", "a slash command under a pending card stays in the box");
+  assert.deepEqual(chat.posts, []);
+  assert.equal(chat.streams.length, 0);
+  // Answering the card sends the queued message, once.
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content]), [
+    ["/api/chats/c1/actions/a1/confirm", undefined],
+    ["/api/chats/c1/messages?surface=web", "next, do this"],
+  ]);
+});
+
+// ---------- F22 (G3): nothing typed is lost ----------
+
+test("F22: queue one message, type a new draft, answer the card: the queued one is sent once and the draft stays", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "queued first";
+  chat.press("Enter");
+  chat.input.value = "queued second";
+  chat.press("Enter");
+  await settle();
+  const chips = () => chat.main.querySelectorAll(".queued-steer-item");
+  assert.equal(chips().length, 2, "a second queued message does not overwrite the first");
+  assert.deepEqual(chips().map(c => c.querySelector(".queued-steer-text").textContent), ["queued first", "queued second"]);
+  // Cancel the second; edit nothing yet.
+  await chips()[1].querySelectorAll("button").find(b => b.textContent === "Cancel").click();
+  assert.equal(chips().length, 1);
+  chat.input.value = "a draft I am still writing";
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  await settle();
+  const sent = chat.streams.filter(([path]) => path.includes("/messages")).map(([, body]) => body.content);
+  assert.deepEqual(sent, ["queued first"], "the queued message is sent once; the cancelled one never");
+  assert.equal(chat.input.value, "a draft I am still writing", "the draft is still in the box");
+  assert.equal(chips().length, 0);
+});
+
+test("F22: Edit moves a queued message back into the box without losing the draft", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "fix the typo";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "and more";
+  await chat.main.querySelector(".queued-steer-item").querySelectorAll("button").find(b => b.textContent === "Edit").click();
+  assert.equal(chat.input.value, "fix the typo\nand more");
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+});
+
+test("F22: a message refused with 409 comes back to the box", async () => {
+  const chat = await openChat();
+  chat.app.streamSse = async () => {
+    throw Object.assign(new Error("a turn is already running in this chat"), { status: 409 });
+  };
+  chat.input.value = "please do X";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "please do X", "the refused message is back in the box");
+  assert.equal(chat.textCount("please do X"), 0, "and not shown as sent");
+  assert.ok(chat.app.flashes.some(([, text]) => /already running/.test(text)));
+});
+
+
+// ---------- F23 (G6): Stop holds the local queue ----------
+
+test("F23: Stop with a message queued sends nothing after; the chip is held with Send and Discard", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => {
+    chat.streams.push([path, body]);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  chat.input.value = "start working";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.streams.length, 1);
+  chat.input.value = "then this";
+  chat.press("Enter");
+  await settle();
+  await chat.log.querySelector(".chat-stop").click();
+  assert.deepEqual(chat.posts.map(([path]) => path), ["/api/chats/c1/stop"]);
+  finish();
+  await settle();
+  assert.equal(chat.streams.length, 1, "nothing queued is sent because Stop was pressed");
+  const chip = chat.main.querySelector(".queued-steer-item");
+  assert.ok(chip, "the queued message is kept");
+  assert.match(chip.textContent, /held/);
+  const labels = chip.querySelectorAll("button").map(b => b.textContent);
+  assert.ok(labels.includes("Send") && labels.includes("Discard"), labels.join(","));
+  chat.app.streamSse = async (path, body) => { chat.streams.push([path, body]); };
+  await chip.querySelectorAll("button").find(b => b.textContent === "Send").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["start working", "then this"]);
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+});
+
+test("F23: Discard drops a held message and nothing is sent", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "go";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "later";
+  chat.press("Enter");
+  await chat.log.querySelector(".chat-stop").click();
+  finish();
+  await settle();
+  await chat.main.querySelector(".queued-steer-item").querySelectorAll("button").find(b => b.textContent === "Discard").click();
+  await settle();
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+  assert.equal(chat.streams.length, 1);
+});
+
+
+// ---------- F24 (G7): ↑ recalls this chat's own messages ----------
+
+test("F24: ↑ in an empty composer walks this chat's own messages back, ↓ forward; a draft is left alone", async () => {
+  const chat = await openChat({ messages: [
+    msg(1, "user", "first ask"),
+    msg(2, "assistant", "a reply"),
+    msg(3, "user", "run x completed", "worker:x"),
+    msg(4, "user", "This is the run we were working on.", "queen"),
+    msg(5, "user", "second ask"),
+  ] });
+  const { input, press } = chat;
+  input.selectionStart = input.selectionEnd = 0;
+  assert.ok(press("ArrowUp").prevented);
+  assert.equal(input.value, "second ask");
+  press("ArrowUp");
+  assert.equal(input.value, "first ask", "walks back past rows other authors wrote");
+  press("ArrowUp");
+  assert.equal(input.value, "first ask", "stops at the oldest");
+  press("ArrowDown");
+  assert.equal(input.value, "second ask");
+  press("ArrowDown");
+  assert.equal(input.value, "", "past the newest is the empty box again");
+  // A draft — multi-line, caret at the start — is never replaced.
+  input.value = "line one\nline two";
+  input.selectionStart = input.selectionEnd = 0;
+  const event = press("ArrowUp");
+  assert.equal(event.prevented, false);
+  assert.equal(input.value, "line one\nline two");
+  // Caret not at the start of an empty-looking recall: nothing either.
+  input.value = "typed";
+  input.selectionStart = input.selectionEnd = 5;
+  assert.equal(press("ArrowUp").prevented, false);
+  assert.equal(input.value, "typed");
+});
+
+test("F24: a message sent in this session is the first ↑ recalls", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "old ask")] });
+  chat.input.value = "just sent";
+  chat.press("Enter");
+  await settle();
+  chat.input.selectionStart = chat.input.selectionEnd = 0;
+  chat.press("ArrowUp");
+  assert.equal(chat.input.value, "just sent");
+  chat.press("ArrowUp");
+  assert.equal(chat.input.value, "old ask");
+});

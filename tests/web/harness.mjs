@@ -46,6 +46,7 @@ class FakeNode {
   getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   focus() {}
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatchEvent(event) {
     for (const fn of this.listeners[event.type] || []) fn(event);
@@ -72,11 +73,14 @@ class FakeNode {
   async click() {
     await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {} })));
   }
-  // ".cls" or "tag" only — enough to find a card's parts.
+  // ".cls" or "tag", optionally with one [attr="value"] — enough to find a
+  // card's parts, and a drawn card by its data-action-id (v133).
   querySelectorAll(selector) {
-    const match = selector.startsWith(".")
-      ? n => n.classList?.contains(selector.slice(1))
-      : n => n.tagName === selector.toUpperCase();
+    const [, base, attr, value] = selector.match(/^([^[]*)(?:\[([\w-]+)="([^"]*)"\])?$/);
+    const matchBase = base.startsWith(".")
+      ? n => n.classList?.contains(base.slice(1))
+      : n => n.tagName === base.toUpperCase();
+    const match = attr ? n => matchBase(n) && n.getAttribute?.(attr) === value : matchBase;
     const found = [];
     const walk = n => { for (const c of n.children || []) { if (match(c)) found.push(c); walk(c); } };
     walk(this);

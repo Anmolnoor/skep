@@ -19,11 +19,14 @@ import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js
 
 // v130-F10: the working line's Stop. A direct POST — typed text queues behind
 // the turn (v103-F1), so a typed /stop would arrive only after it ended.
-function stopButton(chatId) {
+// v133-F23: `onStop` runs first, before the POST can fail — the chat holds
+// its local queue there.
+function stopButton(chatId, onStop = null) {
   return el("button", {
     type: "button",
     class: "chat-stop",
     onclick: async () => {
+      if (onStop) onStop();
       try { flash("ok", (await api("POST", `/api/chats/${chatId}/stop`)).detail); }
       catch (err) { flash("bad", err.message); }
     },
@@ -2427,27 +2430,52 @@ async function viewChat(main, chatId) {
   // v103-F1: the queued-steer receipt. A message taken mid-turn is SHOWN until
   // it is sent — "queued" that the operator cannot see is indistinguishable
   // from the drop this replaced (I8).
-  const queuedText = el("span", { class: "queued-steer-text" });
-  const queuedNote = el("div", { class: "queued-steer", hidden: true },
-    el("span", { class: "chip tone-info" }, "queued"), queuedText);
+  // v133-F22 (G3): one chip per queued message, each with Edit (back into
+  // the box, beside any draft) and Cancel — a second message never
+  // overwrites or merges into the first.
+  const queuedNote = el("div", { class: "queued-steer", hidden: true });
   // Declared HERE, above setComposerLocked, on purpose: that function calls
   // flushQueued and runs during the first render, before the composer handlers
   // further down have initialized. Declared beside them it would be a temporal
   // dead zone and the chat would fail to render at all. The empty-queue guard
   // is the first line for the same reason — the startup calls return before
   // they can reach `deliver`.
-  let queuedMessage = "";
-  const renderQueued = () => {
-    queuedNote.hidden = !queuedMessage;
-    queuedText.textContent = queuedMessage;
+  let queued = [];
+  // v133-F23 (G6): Stop holds the queue — nothing queued is sent because
+  // Stop was pressed; the chips say "held" with Send and Discard.
+  let queueHeld = false;
+  const holdQueue = () => { queueHeld = true; renderQueued(); };
+  // Text handed back to the box goes in front of whatever the operator is
+  // typing now — nothing in the box is overwritten.
+  const returnToBox = (text) => {
+    input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+    input.focus();
   };
+  const renderQueued = () => {
+    if (!queued.length) queueHeld = false; // an empty queue holds nothing
+    queuedNote.hidden = queued.length === 0;
+    const action = (label, onclick) =>
+      el("button", { type: "button", class: "ghost queued-steer-action", onclick }, label);
+    queuedNote.replaceChildren(...queued.map((text, index) => {
+      const take = () => { queued.splice(index, 1); renderQueued(); };
+      return el("div", { class: `queued-steer-item${queueHeld ? " held" : ""}` },
+        el("span", { class: `chip ${queueHeld ? "tone-warn" : "tone-info"}` },
+          queueHeld ? "held" : "queued"),
+        el("span", { class: "queued-steer-text", title: text }, text),
+        queueHeld
+          ? action("Send", () => { queueHeld = false; renderQueued(); flushQueued(); })
+          : null,
+        action("Edit", () => { take(); returnToBox(text); }),
+        action(queueHeld ? "Discard" : "Cancel", take));
+    }));
+  };
+  // The first queued message goes when the composer frees; the turn it
+  // starts flushes the next one in its own finally. The box is not touched.
   const flushQueued = () => {
-    if (!queuedMessage || send.disabled || !assistantReady) return;
-    const content = queuedMessage;
-    queuedMessage = "";
+    if (!queued.length || queueHeld || send.disabled || !assistantReady) return;
+    const content = queued.shift();
     renderQueued();
-    input.value = content;
-    deliver();
+    deliver(content);
   };
   // Phase 10 10.3: completion, /help and refusals read the registry's web slice.
   let deck = { commands: [], refusals: {} };
@@ -2580,9 +2608,10 @@ async function viewChat(main, chatId) {
       if (d.state === "completed") flash("ok", `run ${d.task_id.slice(0, 13)}… completed`);
       else flash("bad", `run ${d.task_id.slice(0, 13)}… ${d.state}${d.detail ? `: ${d.detail}` : ""}`);
       // The stored terminal line (v59-F2's call to action) is already in the
-      // transcript — redraw so it shows without a reload, v81-F13-style.
-      // Never mid-stream, never over a draft the operator is typing.
-      if (!chatStreamActive && !input.value.trim()) route();
+      // transcript — draw it without a reload. v133-F20: appended in place,
+      // never a rebuild, so a draft, focus and scroll survive; mid-stream the
+      // stream's finally draws it (a row from outside).
+      if (!chatStreamActive) reconcile().catch(() => {});
     });
     source.onerror = () => {
       source.close();
@@ -2628,6 +2657,7 @@ async function viewChat(main, chatId) {
     closeLiveWorkerSources();
     clearInterval(runRowsTick);
     if (window.__skepStatusES) { window.__skepStatusES.close(); window.__skepStatusES = null; }
+    chatReconcile = null;
   };
   const maybeMountWorkerActivity = (raw) => {
     const result = unwrapToolResult(raw);
@@ -2640,12 +2670,44 @@ async function viewChat(main, chatId) {
       if (chatStreamActive) trackRun(String(result.task_id));
     }
   };
+  // v133-F19 (G8): the highest stored message id this view has drawn. The
+  // poll and the stream's finally draw only rows above it — a row is drawn
+  // once, whichever of them sees it first.
+  let drawnMessageId = 0;
+  // v133-F24 (G7): what the operator sent in this chat, oldest first — the
+  // ↑ recall walks it. Filled by replay (their own rows only) and by deliver.
+  const sentHistory = [];
+  // v133-F19: a live event (the poll) updates what it concerns — new rows
+  // appended, cards drawn or resolved — and never rebuilds #main, so a reply
+  // a background turn stored shows within one poll. v133-F20: the terminal
+  // event and a card resolved elsewhere come here too; an operator scrolled
+  // up to read keeps their place.
+  const reconcile = async () => {
+    if (!activeChatId || chatStreamActive) return;
+    const fresh = await api("GET", `/api/chats/${activeChatId}`);
+    if (chatStreamActive) return; // a stream began meanwhile; its finally reconciles
+    const readingAt = log.scrollHeight - log.scrollTop - log.clientHeight > 40 ? log.scrollTop : null;
+    // The context panel redraws only when what it shows moved — a quiet poll
+    // touches nothing on screen.
+    const shown = (chat, acts) => JSON.stringify([chat?.title, chat?.role, chat?.model,
+      acts.map(a => [a.action_id, a.status])]);
+    const panelChanged = shown(activeChat, actions) !== shown(fresh.chat || activeChat, fresh.actions);
+    detail = fresh;
+    messages = fresh.messages;
+    actions = fresh.actions;
+    activeChat = fresh.chat || activeChat;
+    replayGroup = null;
+    drawMessages(messages.filter(m => m.id > drawnMessageId));
+    renderPendingCards();
+    if (panelChanged) drawContext(activeChat, actions);
+    if (readingAt !== null) log.scrollTop = readingAt;
+  };
+  chatReconcile = reconcile;
+  // v133-F21 (G2): a pending card withholds only SENDING; the textarea
+  // always takes typing — what is typed meanwhile queues (deliver).
   const setComposerLocked = (locked) => {
-    input.disabled = locked || !assistantReady;
+    input.disabled = !assistantReady;
     send.disabled = locked || !assistantReady;
-    // v56-F6: let the global poll watch this chat's pending cards so a
-    // resolution on another surface unlocks the composer here.
-    pendingCardChatId = locked ? activeChatId : null;
     // v103-F1: a card resolved elsewhere unlocks this composer — a steer that
     // was waiting on that verdict goes now.
     if (!locked) flushQueued();
@@ -3160,8 +3222,7 @@ async function viewChat(main, chatId) {
         const button = el("button", { class: "ghost" }, choice);
         button.addEventListener("click", () => {
           row.remove();
-          input.value = choice;
-          deliver();
+          deliver(choice); // v133-F22: the box (a draft) is left alone
         });
         return button;
       }));
@@ -3205,7 +3266,7 @@ async function viewChat(main, chatId) {
     // blank exactly while it is busiest. Shown after tool events, hidden the
     // moment real content streams, always the last element in the log.
     const working = el("div", { class: "chat-working", hidden: "" },
-      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId));
+      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId, holdQueue));
     log.append(working);
     // v87-F7: the working line carries a local elapsed counter — a 3-minute
     // provider prefill or an await_runs block reads as "Thinking… · 142s",
@@ -3279,6 +3340,13 @@ async function viewChat(main, chatId) {
         messages = detail.messages;
         actions = detail.actions;
         activeChat = detail.chat;
+        // v133-F19: this turn's own rows were drawn live, so they only move
+        // the watermark; a row from outside (a run's terminal line, a
+        // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
+        const unseen = messages.filter(m => m.id > drawnMessageId);
+        replayGroup = null;
+        drawMessages(unseen.filter(m => (m.provenance || "").includes(":")));
+        drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
         // v81-F13: an SSE drop loses the live `action` event — the refreshed
         // state re-draws any pending card the stream never delivered.
         renderPendingCards();
@@ -3302,7 +3370,8 @@ async function viewChat(main, chatId) {
   // v40-F1: replay batches consecutive tool records into one activity group,
   // so a refresh reconstructs exactly what the live stream drew.
   let replayGroup = null;
-  for (const message of messages) {
+  const drawMessages = (list) => { for (const message of list) {
+    drawnMessageId = Math.max(drawnMessageId, message.id || 0);
     if (message.role === "tool") {
       let result = null;
       try { result = JSON.parse(message.content || "null"); }
@@ -3320,6 +3389,7 @@ async function viewChat(main, chatId) {
       replayGroup = null;
       if (isInternalNudge(message)) { noteLine(`skep: ${message.content}`); continue; }
       const own = message.role === "user" && authorLabel(message, null) === null;
+      if (own) sentHistory.push(message.content);
       renderChatMessage(log, message.role, message.content, {
         label: authorLabel(message,
           message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
@@ -3331,7 +3401,8 @@ async function viewChat(main, chatId) {
         chatId: activeChatId,
       });
     }
-  }
+  } };
+  drawMessages(messages);
   renderPendingCards();
   scrollBottom();
   watchStatus();  // v43-F4: reopening a chat with a live run resumes the status line
@@ -3373,19 +3444,30 @@ async function viewChat(main, chatId) {
   // Queued, not blocked: mid-turn is exactly when an operator most wants to
   // say something, and the honest thing is to take the message and send it at
   // the first moment the composer is free. Nothing is ever silently dropped.
-  const deliver = async () => {
-    const content = input.value.trim();
+  // v133-F22: `text` is a queued message or a clicked choice — sent as is,
+  // with the box (the operator's draft) left alone; no argument reads the box.
+  const deliver = async (text = null) => {
+    const fromBox = text === null;
+    const content = fromBox ? input.value.trim() : text;
     if (!content || !assistantReady) return;
+    if (fromBox && content.startsWith("/") && anyCardPending()) {
+      // v133-F21: a /command typed under a pending card is never queued to
+      // run later on its own (a /deny meant for this card would hit the next
+      // one) — it stays in the box until the operator sends it again.
+      flash("bad", "a card is waiting — answer it first; your command stays in the box");
+      return;
+    }
     if (send.disabled) {
-      // A second steer while one is already queued appends rather than
-      // replaces — losing the first would be the same bug wearing a queue.
-      queuedMessage = queuedMessage ? `${queuedMessage}\n${content}` : content;
-      input.value = "";
+      // A second steer while one is already queued is its own chip —
+      // losing the first would be the same bug wearing a queue.
+      queued.push(content);
+      if (fromBox) input.value = "";
       renderQueued();
       flash("ok", "queued — sends when this turn finishes");
       return;
     }
-    input.value = "";
+    if (fromBox) input.value = "";
+    sentHistory.push(content);
     suggest.hidden = true;
     // v25-F1: a /command is intercepted BEFORE the LLM chat loop — parsed
     // here, executed against the HTTP API, never sent to the model.
@@ -3399,7 +3481,7 @@ async function viewChat(main, chatId) {
     }
     await ensureChat();
     const attachments = pendingImages.length ? await uploadPendingImages() : [];
-    renderChatMessage(log, "user", content, {
+    const bubble = renderChatMessage(log, "user", content, {
       label: "You",
       onResend: fillInput,
       scroll: scrollBottom,
@@ -3409,11 +3491,18 @@ async function viewChat(main, chatId) {
     const payload = attachments.length ? { content, attachments } : { content };
     // D1: the surface hint, so the server's 409 follows the web's lock rule.
     try { await runStream(`/api/chats/${activeChatId}/messages?surface=web`, payload); }
-    catch (e) { flash("bad", e.message); send.disabled = false; }
+    catch (e) {
+      // v133-F22: a refused message (409: a background turn is running) was
+      // never stored — it leaves the transcript and comes back to the box.
+      bubble.remove();
+      returnToBox(content);
+      flash("bad", e.message);
+      send.disabled = false;
+    }
     watchStatus();  // v43-F4: a dispatched run keeps reporting after the turn
     input.focus();
   };
-  send.addEventListener("click", deliver);
+  send.addEventListener("click", () => deliver());
   // v56-F3: the meter is server truth — typing does not move it; it refreshes
   // when the chat detail does (after each turn).
   input.addEventListener("input", updateSuggest);
@@ -3427,8 +3516,34 @@ async function viewChat(main, chatId) {
     updateAttachBadge();
     flash("ok", "image attached from clipboard");
   });
+  // v133-F24 (G7): ↑ in an empty box fills the last message sent in this
+  // chat; ↑ again walks back, ↓ forward and past the newest to the empty box.
+  // A draft is never replaced: ↑ acts only on an empty box or on a recalled
+  // message left as it was with the caret at its start; ↓ only on a recalled
+  // message with the caret on its last line.
+  let recallAt = null;
+  const recallStep = (back) => {
+    const recalling = recallAt !== null && input.value === sentHistory[recallAt];
+    if (back) {
+      const atStart = input.selectionStart === 0 && input.selectionEnd === 0;
+      if (input.value !== "" && !(recalling && atStart)) return false;
+      const at = recalling ? recallAt - 1 : sentHistory.length - 1;
+      if (at < 0) return recalling; // the oldest: stay on it
+      recallAt = at;
+    } else {
+      if (!recalling || input.value.slice(input.selectionEnd).includes("\n")) return false;
+      recallAt = recallAt + 1 < sentHistory.length ? recallAt + 1 : null;
+    }
+    input.value = recallAt === null ? "" : sentHistory[recallAt];
+    input.setSelectionRange(0, 0);
+    return true;
+  };
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { suggest.hidden = true; return; }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (recallStep(event.key === "ArrowUp")) event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); deliver(); }
   });
   input.focus();
@@ -4963,17 +5078,18 @@ const POLL_MAX_MS = 60000;
 let pollDelay = POLL_MIN_MS;
 let pollTimer = null;
 // v56-F6 (ADR 0038): what the badge counts, the views must show. The poll
-// tracks the pending count and the chat whose composer a card has locked.
+// tracks the pending count; the open chat reconciles itself (v133-F20).
 let lastPendingApprovals = null;
-let pendingCardChatId = null;
 // v60-F1: true while a chat stream (message or card verdict) is being
 // consumed. Confirming a card resolves it server-side BEFORE the model's
 // continuation streams, so for those seconds the store shows zero proposed
-// cards while pendingCardChatId is still set — without this guard the v56-F6
+// cards while the composer is still locked — without this guard the v56-F6
 // poll called route() mid-stream, re-rendering the view and orphaning the
 // live stream's DOM (field test 2026-07-18: screen flicker, the follow-up
 // card invisible until it auto-denied, the chat apparently dead).
 let chatStreamActive = false;
+// v133-F19: the open chat view's in-place refresh (null on any other page).
+let chatReconcile = null;
 
 async function poll() {
   // Skip the fetch entirely while the tab is hidden.
@@ -5011,28 +5127,15 @@ async function poll() {
       route(); // the approvals list / Home "waiting" panel re-render with the badge
     }
     lastPendingApprovals = status.pending_approvals;
-    if (pendingCardChatId && !chatStreamActive && hash.startsWith("#/chat")) {
-      // A card resolved elsewhere (second tab, deck, the auto-deny sweep)
-      // unlocks this composer within one poll cycle instead of on reload.
+    if (chatReconcile && !chatStreamActive && hash.startsWith("#/chat/")) {
+      // v81-F13: a card born while this view sat idle (background approval,
+      // another tab, the ticker) appears within one poll instead of on
+      // reload. v133-F19: and so does a reply a background turn stored.
+      // v56-F6 / v133-F20: a card resolved elsewhere (second tab, deck, the
+      // auto-deny sweep) resolves here and unlocks the composer — in place.
       // v60-F1: never while a stream is in flight — the stream reconciles
-      // the composer itself in its finally, and a route() here would tear
-      // down the DOM the stream is appending to.
-      const detail = await api("GET", `/api/chats/${pendingCardChatId}`);
-      if (!detail.actions.some(blocksComposer)) {
-        pendingCardChatId = null;
-        route();
-      }
-    }
-    const openChatMatch = !chatStreamActive && hash.match(/^#\/chat\/(.+)$/);
-    if (openChatMatch) {
-      // v81-F13: the inverse direction — a card born while this view sat idle
-      // (background approval, another tab, the ticker) appears within one
-      // poll instead of on reload. route() replays history, which draws it.
-      const detail = await api("GET", `/api/chats/${openChatMatch[1]}`);
-      const undrawn = detail.actions.some(action =>
-        action.status === "proposed"
-        && !document.querySelector(`.confirm-card[data-action-id="${action.action_id}"]`));
-      if (undrawn) route();
+      // the view itself in its finally.
+      await chatReconcile();
     }
     const taskBadge = document.getElementById("tasks-badge");
     const { tasks } = await api("GET", "/api/tasks");
