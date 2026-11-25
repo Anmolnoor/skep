@@ -3344,3 +3344,29 @@ you upgrade a home that is in use.
 - The Inbox approves inline only where the row is the whole evidence: a
   worker gate that is not a patch landing, or a memory proposal. A patch
   landing always opens the review page (#133).
+
+## v2.0.1 — a refused key during onboarding names steps that work (2026-11-24)
+
+One fix since 2.0.0 (#136):
+
+- When `skep onboard` checks a model endpoint and it answers 401 or 403, the
+  refusal now names a fix that fits the provider. 2.0.0 always said to run
+  `skep provider set-key <id>`, which is refused for a provider that is not
+  registered yet.
+  - An endpoint that uses the ChatGPT plan login: it says to sign in with
+    `codex login`. Bedrock: it says to set working AWS credentials. Neither
+    takes a stored key.
+  - Any other provider that is already registered keeps the 2.0.0 text.
+    Under a `--home` that is not the default one, its `set-key` command now
+    carries that home.
+  - A provider that is not registered yet, with a key variable named (by
+    `--api-key-env` or by the provider's preset): it says to set that
+    variable to a working key.
+  - A provider that is not registered yet, with no key variable named: the
+    refusal prints the `skep provider add` command for it (protocol,
+    endpoint and model), then `skep provider set-key`, then says to run the
+    same `skep onboard` command again, or to pass `--api-key-env NAME`.
+- The printed commands are shell-quoted and carry `--home` when the home is
+  not the default one. An endpoint URL that holds a login, a query or a
+  fragment, or anything the redactor masks, is not printed: the command
+  shows a placeholder for it instead.
