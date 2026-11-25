@@ -435,6 +435,126 @@ def test_open_pull_request_says_what_it_pushed_when_gh_then_fails(tmp_path: Path
     assert (result.opened, result.pushed, result.head) == (False, True, "c0ffee1234")
 
 
+# ---------- R1 (Sol S5): the commit checked and logged is the commit pushed ----
+
+
+def _github_repo_with_bare_origin(repo: Path, tmp_path: Path) -> Path:
+    """origin reads as GitHub (what open_pull_request requires) but pushes go
+    to a local bare repo, so the published commit can be read back."""
+    import subprocess
+
+    from .conftest import git
+
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    git(repo, "remote", "add", "origin", "git@github.com:me/repo.git")
+    git(repo, "config", "remote.origin.pushurl", str(bare))
+    return bare
+
+
+def _fake_github(
+    on_push: Any = None,
+) -> Any:
+    """Real git for everything but the GitHub reads and gh itself."""
+    import subprocess
+
+    def run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if "ls-remote" in args:
+            return subprocess.CompletedProcess(args, 0, "abc\trefs/heads/main\n", "")
+        if args[0] == "gh":
+            return subprocess.CompletedProcess(args, 0, "https://github.com/me/repo/pull/9\n", "")
+        if "push" in args and on_push is not None:
+            on_push()
+        return cast(subprocess.CompletedProcess[str], subprocess.run(args, **kw))
+
+    return run
+
+
+def test_r1_s5_a_branch_that_moves_before_the_push_publishes_the_checked_commit(
+    repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    bare = _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    checked = _commit(repo, "work", "w.txt")
+    git(repo, "switch", "-q", "main")
+
+    def move_branch() -> None:  # someone lands on the branch after the check
+        git(repo, "branch", "-f", "skep/work", _commit(repo, "late", "late.txt"))
+
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b",
+        runner=_fake_github(move_branch),
+    )  # fmt: skip
+    assert result.pushed and result.head == checked
+    published = git(bare, "rev-parse", "refs/heads/skep/work").stdout.strip()
+    assert published == checked  # the commit recorded is the commit published
+
+
+def test_r1_s5_an_expected_commit_that_is_not_the_tip_pushes_nothing(
+    repo: Path, tmp_path: Path
+) -> None:
+    import subprocess
+
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    bare = _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    shown = _commit(repo, "work", "w.txt")
+    tip = _commit(repo, "more", "w2.txt")
+    git(repo, "switch", "-q", "main")
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b",
+        runner=_fake_github(), expected_head=shown,
+    )  # fmt: skip
+    assert (result.opened, result.pushed, result.head) == (False, False, tip)
+    assert shown[:12] in result.detail and "nothing was pushed" in result.detail
+    probe = ["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", "refs/heads/skep/work"]
+    assert subprocess.run(probe, capture_output=True, check=False).returncode != 0
+
+
+def test_r1_s5_a_branch_pr_pushes_the_head_its_claimed_card_showed(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import recorded_card
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import git
+
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        calls.append(kw)
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head=kw["expected_head"])
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        git(repo, "switch", "-qc", "skep/work")
+        drawn = _commit(repo, "work", "w.txt")
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/work", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        action_id = store.add_chat_action(chat_id, tool="open_pr", args=args, card=card)
+        assert store.claim_chat_action(action_id)
+        holder = ConfigHolder(config, store)
+        actions.open_pr_for_branch(holder, store, str(repo), branch="skep/work", base="main")
+        # a caller holding the card passes its head explicitly
+        actions.open_pr_for_branch(
+            holder, store, str(repo), branch="skep/work", base="main", expected_head=drawn
+        )
+        assert [call["expected_head"] for call in calls] == [drawn, drawn]
+    finally:
+        store.close()
+
+
 # ---------- F15: a branch PR card names every run the push publishes (J5) ----------
 
 

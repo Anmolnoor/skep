@@ -3538,23 +3538,30 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
-def shown_head_moved(store: RunStore, repo: Path, branch: str) -> str | None:
-    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
-    not push it — the branch's head is not the commit the card showed — or
-    None. Found the way ``shown_g10_moved`` finds its card: the claimed one."""
-    now = resolve_commit(repo, f"refs/heads/{branch}")
+def shown_head(store: RunStore, branch: str) -> str | None:
+    """The head the claimed open_pr card for ``branch`` showed, or None."""
     for card in store.executing_chat_actions():
         shown = (card.card or {}).get("head")
-        if (
-            card.tool == "open_pr"
-            and card.args.get("branch") == branch
-            and shown not in (None, now)
-        ):
-            return (
-                f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
-                f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
-                "open_pr again: the new card lists the runs the branch carries now"
-            )
+        if card.tool == "open_pr" and card.args.get("branch") == branch and shown is not None:
+            return str(shown)
+    return None
+
+
+def shown_head_moved(
+    store: RunStore, repo: Path, branch: str, shown: str | None = None
+) -> str | None:
+    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
+    not push it — the branch's head is not the commit the card showed — or
+    None. Found the way ``shown_g10_moved`` finds its card: the claimed one
+    (``shown``: that card's head, given by a caller that holds it)."""
+    now = resolve_commit(repo, f"refs/heads/{branch}")
+    shown = shown or shown_head(store, branch)
+    if shown not in (None, now):
+        return (
+            f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
+            f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
+            "open_pr again: the new card lists the runs the branch carries now"
+        )
     return None
 
 
@@ -3567,6 +3574,7 @@ def open_pr_for_branch(
     base: str = "main",
     title: str | None = None,
     actor: str | None = None,
+    expected_head: str | None = None,
 ) -> dict[str, Any]:
     """v96-F4: open a PR for an existing local branch — the composer's button.
 
@@ -3594,12 +3602,15 @@ def open_pr_for_branch(
     )
     if exists.returncode != 0:
         raise HTTPException(status_code=404, detail=f"no local branch {branch!r}")
-    if store is not None and (moved := shown_head_moved(store, resolved, branch)) is not None:
+    # R1 (Sol S5): the push carries the commit the claimed card showed
+    expected_head = expected_head or (None if store is None else shown_head(store, branch))
+    if store is not None and (moved := shown_head_moved(store, resolved, branch, expected_head)):
         raise HTTPException(status_code=409, detail=moved)
     result = github.open_pull_request(
         repo=resolved,
         branch=branch,
         base=base,
+        expected_head=expected_head,
         title=title or f"skep: {branch}",
         body=f"Branch `{branch}` from the skep composer. Commits on it are "
         "operator-approved landings or the operator's own work; merging stays "
