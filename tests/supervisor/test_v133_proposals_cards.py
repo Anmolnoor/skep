@@ -447,3 +447,34 @@ def test_run_shell_points_read_only_probes_at_the_read_tools() -> None:
     text = tool_description("run_shell")
     assert "read-only probe" in text
     assert all(name in text for name in ("read_file", "search_files", "list_prs"))
+
+
+# ---------- F35: a re-setup keeps a stored "auto-dispatch off" (J9) ----------
+
+
+def test_a_same_phase_re_setup_keeps_a_stored_auto_dispatch_off(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    from skep.supervisor.serve.registry import repos_root, setup_project_record
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, {"auto_dispatch_allowed": False}, phase="build")
+
+        def setup(phase: str, overrides: dict[str, Any]) -> dict[str, Any]:
+            return setup_project_record(
+                run_store=store, root=repos_root(holder), project_id="proj", name="proj",
+                strategy="trusted_local_dev", phase=phase, repo_path=str(repo),
+                policy_overrides=overrides,
+            )  # fmt: skip
+
+        kept = setup("build", {"verify_command": "uv run pytest"})
+        assert kept["policy"]["auto_dispatch_allowed"] is False
+        assert "auto_dispatch_allowed" not in {c["key"] for c in kept["policy_changes"]}
+        asked = setup("build", {"auto_dispatch_allowed": True})
+        assert asked["policy"]["auto_dispatch_allowed"] is True
+        _bind(store, repo, {"auto_dispatch_allowed": False}, phase="build")
+        moved = setup("maintain", {})  # a phase move re-derives it, as before
+        assert moved["policy"]["auto_dispatch_allowed"] is True
+    finally:
+        store.close()
