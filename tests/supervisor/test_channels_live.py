@@ -1305,7 +1305,7 @@ def test_a_web_message_in_a_telegram_bound_chat_reaches_telegram(
 def test_a_web_confirm_and_deny_in_a_telegram_bound_chat_reach_telegram(
     config: SupervisorConfig, monkeypatch: object
 ) -> None:
-    """v129-F1, the Alfin incident: a Telegram turn raises a card, the operator
+    """v129-F1, the live-test incident: a Telegram turn raises a card, the operator
     confirms it at the desk, and the continuation reaches the phone once."""
     from .fake_ollama import FakeOllama
 

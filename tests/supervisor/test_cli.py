@@ -420,6 +420,8 @@ def test_review_approve_lands_on_named_branch(
         (approval,) = store.approvals_for(task_id)
         assert approval.landing_branch == "sci-cal"
         assert applied_branch_for(store, task_id) == "sci-cal"
+        # v133-F15: the CLI landing records its commit, like the chat's
+        assert store.landing_commits()[task_id] == git(repo, "rev-parse", "sci-cal").stdout.strip()
     finally:
         store.close()
 

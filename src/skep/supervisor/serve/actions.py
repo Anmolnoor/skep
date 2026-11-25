@@ -619,6 +619,111 @@ def reverification_warning(reverify: Any) -> str | None:
     )
 
 
+def g10_source(reverify: Any) -> str | None:
+    """v133-F16 (I2, I8): where the command G10 ran came from, in the words
+    reverify.py stamped into the record's detail; None when it says nothing."""
+    for source in ("the project's pinned verify_command", "the worker's own verify step"):
+        if source in str(getattr(reverify, "detail", "") or ""):
+            return source
+    return None
+
+
+def g10_facts(reverify: Any) -> dict[str, Any] | None:
+    """v133-F12 (J1, I8): what G10 did, from the store alone — the command,
+    its source, whether it ran, its exit codes, its outcome. None: no record."""
+    if reverify is None:
+        return None
+    return {
+        "command": list(reverify.commands),
+        "source": g10_source(reverify),
+        "ran": bool(reverify.exit_codes),
+        "exit_codes": list(reverify.exit_codes),
+        "outcome": reverify.outcome,
+    }
+
+
+def g10_fingerprint(reverify: Any) -> list[Any] | None:
+    """v133-F12 (J1, I7): the G10 record a landing card was drawn on. A
+    confirm whose record no longer matches is refused (``shown_g10_moved``)."""
+    if reverify is None:
+        return None
+    return [
+        reverify.outcome,
+        reverify.confirmed,
+        list(reverify.exit_codes),
+        reverify.detail,
+        reverify.created_at,
+    ]
+
+
+def g10_landing_label(reverify: Any) -> str | None:
+    """v133-F12 (J1): the action label of a landing G10 did not confirm,
+    worded per outcome; None for a confirmed (or not-applicable) record."""
+    if reverify is None or reverify.confirmed or reverify.outcome == "not_applicable":
+        return None
+    if reverify.outcome == "failed":
+        return "Land despite failed supervisor verification"
+    if reverify.outcome == "tampered":
+        return "Land despite test tampering found by supervisor verification"
+    if reverify.outcome == "unavailable":
+        return "Land although supervisor verification could not run"
+    return "Land without supervisor confirmation"
+
+
+def g10_line(reverify: Any) -> str:
+    """v133-F12/F16 (I2, I8): G10's result in one line, from the store."""
+    facts = g10_facts(reverify)
+    if facts is None:
+        return "G10: no re-verification recorded"
+    command = " && ".join(facts["command"]) or "no command"
+    ran = f"exit codes {facts['exit_codes']}" if facts["ran"] else "did not run"
+    source = f" ({facts['source']})" if facts["source"] else ""
+    return f"G10 {facts['outcome']}: `{command}`{source}, {ran}"
+
+
+def worker_result(store: RunStore, task_id: str) -> str | None:
+    """v133-F16 (F-I3): the worker's own verification outcome as the store
+    recorded it (its result, else what G10 recorded the worker claimed)."""
+    run = store.get_run(task_id)
+    reverify = store.reverification_for(task_id)
+    return (run.verification_outcome if run else None) or (
+        reverify.worker_outcome if reverify else None
+    )
+
+
+def g10_note_line(reverify: Any) -> str | None:
+    """v133-F12 (J1, I13): the line a landing approval's note starts with when
+    G10 did not confirm it — written from the store's record, never from the
+    caller's note, which follows it."""
+    if g10_landing_label(reverify) is None:
+        return None
+    return (
+        f"{g10_line(reverify)}; landed by a human verdict despite supervisor "
+        "verification not confirming it"
+    )
+
+
+def shown_g10_moved(
+    store: RunStore, task_id: str, reverify: Any = None, *, shown: list[Any] | None = None
+) -> str | None:
+    """v133-F12 (J1, I7): why the clicked card must not land ``task_id`` —
+    the G10 record changed after the card was drawn — or None. ``shown`` is
+    that card's own snapshot (R2: the only one; no other card is consulted);
+    a face with no card (None) acts on the live record. R1 (Sol S4):
+    ``reverify`` is the record the caller read once and lands on (read here
+    when None)."""
+    if shown is None:
+        return None
+    now = g10_fingerprint(store.reverification_for(task_id) if reverify is None else reverify)
+    if shown != now:
+        return (
+            f"the supervisor's re-verification (G10) record for run {task_id} changed "
+            "since this card was shown, so nothing landed. Propose the landing again: "
+            "the new card shows the current record"
+        )
+    return None
+
+
 def reverify_in_flight(store: RunStore, task_id: str) -> bool:
     """ES-F291: no G10 record yet, and the supervisor that runs G10 for this
     run is alive — a completed run in this state is still settling."""
@@ -1865,6 +1970,7 @@ def land_run(
     *,
     note: str | None = None,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Land a completed run's patch, creating the review if none exists (v23-F7).
 
@@ -1892,7 +1998,7 @@ def land_run(
     )
     if review_id is None:
         raise HTTPException(status_code=409, detail="nothing to land: this run produced no patch")
-    landed = apply_patch(store, run, review_id, actor, note, branch=branch)
+    landed = apply_patch(store, run, review_id, actor, note, branch=branch, g10_shown=g10_shown)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
     # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
     # result — say the terminal state in words a small model acts on (I9).
@@ -2189,6 +2295,16 @@ def _compiled_rule_source(rule: Any, resolved: ResolvedRunPolicy) -> str:
     return "compiled"
 
 
+def _shell_entry_source(argv: list[str], resolved: ResolvedRunPolicy) -> str:
+    """v133-F18: which knob or grant put one argv on the effective shell list."""
+    if argv in [list(a) for a in resolved.policy.get("allowed_shell_commands") or []]:
+        return (
+            f"allowed_shell_commands@{resolved.provenance.get('allowed_shell_commands', 'global')}"
+        )
+    grant = resolved.shell_grants.get(shlex.join(argv)) or resolved.shell_grants.get(" ".join(argv))
+    return f"learned@{grant}" if grant is not None else "compiled"
+
+
 def _operator_rule_sources(store: RunStore) -> dict[str, str]:
     base = (
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
@@ -2259,6 +2375,18 @@ def rsop_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any
             entry["source_name"] = None
             entry["note"] = "not configured at any layer — the resolver's fallback"
         keys.append(entry)
+    for entry in keys:
+        if entry["key"] == "allowed_shell_commands":
+            # v133-F18 (A7, I8): the effective list, grants included, under the
+            # key the Queen is asked about — each entry with where it came from
+            entry["effective"] = [
+                {"command": shlex.join(argv), "source": _shell_entry_source(list(argv), resolved)}
+                for argv in resolved.permissions.shell_allowlist
+            ]
+            entry["effective_note"] = (
+                "the shell list a run here gets, grants included: this key's value "
+                "plus every learned grant that holds here"
+            )
     view["keys"] = keys
     view["scopes"] = {
         scope: [
@@ -3306,6 +3434,34 @@ def _changed_files(audit_dir: Path, task_id: str) -> list[str]:
     return []
 
 
+def record_pr(
+    store: RunStore | None,
+    result: Any,
+    *,
+    actor: str | None,
+    repo: Path,
+    branch: str,
+    base: str,
+    task_ids: list[str],
+) -> dict[str, Any]:
+    """v133-F14 (J3, I13): the ledger row for one open_pr push, and the
+    result fields every open_pr face returns."""
+    if store is not None:
+        store.record_pr_push(
+            actor=actor, repo=str(repo), branch=branch, base=base, head_commit=result.head,
+            pushed=result.pushed, opened=result.opened, url=result.url,
+            detail=result.detail, task_ids=task_ids,
+        )  # fmt: skip
+    return {
+        "opened": result.opened,
+        "url": result.url,
+        "detail": result.detail,
+        "branch": branch,
+        "pushed": result.pushed,
+        "head_commit": result.head,
+    }
+
+
 def open_pr_from_branch(
     store: RunStore,
     audit_dir: Path,
@@ -3313,6 +3469,7 @@ def open_pr_from_branch(
     *,
     branch: str,
     base: str,
+    actor: str | None = None,
 ) -> dict[str, Any]:
     """Push an applied branch and open the PR, evidence in the body (U1 land)."""
     from .. import github
@@ -3328,17 +3485,16 @@ def open_pr_from_branch(
         body=github.default_pr_body(
             task_id=task_id,
             summary=str(run["summary"] or ""),
-            verification=run["verification_outcome"],
+            verification=worker_result(store, task_id),
             reverified=None if reverify is None else reverify.confirmed,
             changed_files=changed_files,
+            supervisor=g10_line(reverify),  # v133-F16: G10's words, not the model's
         ),
     )
-    return {
-        "opened": result.opened,
-        "url": result.url,
-        "detail": result.detail,
-        "branch": branch,
-    }
+    return record_pr(
+        store, result, actor=actor, repo=Path(str(run["repo"])), branch=branch, base=base,
+        task_ids=[task_id],
+    )  # fmt: skip
 
 
 def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) -> str:
@@ -3377,6 +3533,20 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
+def shown_head_moved(repo: Path, branch: str, shown: str | None) -> str | None:
+    """v133-F15 (J5, I7): why the clicked open_pr card must not push
+    ``branch`` — its head is not the commit the card showed (``shown``) — or
+    None. No card (None): the live head."""
+    now = resolve_commit(repo, f"refs/heads/{branch}")
+    if shown not in (None, now):
+        return (
+            f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
+            f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
+            "open_pr again: the new card lists the runs the branch carries now"
+        )
+    return None
+
+
 def open_pr_for_branch(
     holder: ConfigHolder,
     store: RunStore | None,
@@ -3385,8 +3555,14 @@ def open_pr_for_branch(
     branch: str,
     base: str = "main",
     title: str | None = None,
+    actor: str | None = None,
+    expected_head: str | None = None,
+    shown_runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """v96-F4: open a PR for an existing local branch — the composer's button.
+
+    R2 (Sol S5, S13): ``expected_head`` and ``shown_runs`` are the clicked
+    card's head and run evidence; a face with no card reads both live.
 
     No run required: the branch's commits are already operator-approved work
     (landings, or the operator's own hands). The PR is a proposal — the base
@@ -3412,16 +3588,51 @@ def open_pr_for_branch(
     )
     if exists.returncode != 0:
         raise HTTPException(status_code=404, detail=f"no local branch {branch!r}")
+    # R1 (Sol S5): the push carries the commit the clicked card showed
+    if (moved := shown_head_moved(resolved, branch, expected_head)) is not None:
+        raise HTTPException(status_code=409, detail=moved)
+    body = (
+        f"Branch `{branch}` from the skep composer. Commits on it are "
+        "operator-approved landings or the operator's own work; merging stays "
+        "a separate confirmed step."
+    )
+    # R1/R2 (Sol S13): the runs the clicked card named, each with the worker's
+    # result and G10's as that card showed them; with no card, read live
+    # (console.run_evidence, what a card would show now)
+    from .console import run_evidence
+
+    args = {"branch": branch, "repo": str(resolved), "base": base}
+    if shown_runs is None:
+        shown_runs = [] if store is None else run_evidence(store, "open_pr", args)
+    ids = [str(run["task_id"]) for run in shown_runs]
+    if store is not None and ids:
+        entries = [
+            github.GroupedRun(
+                task_id=str(run["task_id"]),
+                summary=(record.summary or "") if (record := store.get_run(run["task_id"])) else "",
+                verification=str(run.get("worker") or "").removeprefix(
+                    "worker's own verification: "
+                ) or None,
+                reverified=None,
+                supervisor=run.get("supervisor"),
+            )
+            for run in shown_runs
+        ]  # fmt: skip
+        changed = list(
+            dict.fromkeys(path for t in ids for path in _changed_files(holder.current.audit_dir, t))
+        )
+        body = f"{body}\n\n" + github.default_grouped_pr_body(runs=entries, changed_files=changed)
     result = github.open_pull_request(
         repo=resolved,
         branch=branch,
         base=base,
+        expected_head=expected_head,
         title=title or f"skep: {branch}",
-        body=f"Branch `{branch}` from the skep composer. Commits on it are "
-        "operator-approved landings or the operator's own work; merging stays "
-        "a separate confirmed step.",
+        body=body,
     )
-    return {"opened": result.opened, "url": result.url, "detail": result.detail, "branch": branch}
+    return record_pr(
+        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=ids
+    )
 
 
 def open_pr_for_run(
@@ -3432,6 +3643,7 @@ def open_pr_for_run(
     *,
     base: str = "main",
     note: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> dict[str, Any]:
     """v47-F3: land (if needed), then open the PR — keyed by the run.
 
@@ -3447,9 +3659,9 @@ def open_pr_for_run(
         )
     branch = applied_branch_for(store, task_id)
     if branch is None:
-        landed = land_run(store, run, actor, note=note or "approved via PR")
+        landed = land_run(store, run, actor, note=note or "approved via PR", g10_shown=g10_shown)
         branch = str(landed["branch"])
-    return open_pr_from_branch(store, audit_dir, run, branch=branch, base=base)
+    return open_pr_from_branch(store, audit_dir, run, branch=branch, base=base, actor=actor)
 
 
 def _grouped_branch(title: str | None, first_task_id: str) -> str:
@@ -3462,6 +3674,47 @@ def _grouped_branch(title: str | None, first_task_id: str) -> str:
     return f"skep/{first_task_id}"
 
 
+def grouped_landing(
+    store: RunStore, runs: list[dict[str, Any]], title: str | None
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    """A grouped PR's runs as its confirm resolves them — those that land,
+    those skipped, and the shared branch the first one that lands names.
+    The proposal asks the same (R2, Sol T1). v60-F3: only runs with a patch
+    can land — a script run (artifact only) must not fail the whole card
+    AFTER the operator approved it (field test 2026-07-18: one grouped card
+    burned its approval on "nothing to land", then the retry card timed out).
+    Already-landed runs stay: they need no patch to join their branch."""
+    landable: list[dict[str, Any]] = []
+    skipped_no_patch: list[str] = []
+    for run in runs:
+        task_id = str(run["task_id"])
+        if applied_branch_for(store, task_id) is not None or patch_path(store, task_id) is not None:
+            landable.append(run)
+        else:
+            skipped_no_patch.append(task_id)
+    if not landable:
+        raise HTTPException(
+            status_code=409,
+            detail="nothing to land: none of these runs produced a patch "
+            f"({', '.join(skipped_no_patch)})",
+        )
+    return landable, skipped_no_patch, _grouped_branch(title, str(landable[0]["task_id"]))
+
+
+def landed_elsewhere(store: RunStore, runs: list[dict[str, Any]], branch: str) -> str | None:
+    """Why a grouped PR cannot land on ``branch``: a run already landed on
+    another branch cannot also join it. None when every run can."""
+    for run in runs:
+        task_id = str(run["task_id"])
+        existing = applied_branch_for(store, task_id)
+        if existing is not None and existing != branch:
+            return (
+                f"run {task_id} already landed on {existing!r}; it cannot also join "
+                f"{branch!r} — open its PR from that branch instead (open_pr task_id={task_id})"
+            )
+    return None
+
+
 def open_pr_for_runs(
     store: RunStore,
     audit_dir: Path,
@@ -3471,6 +3724,7 @@ def open_pr_for_runs(
     base: str = "main",
     note: str | None = None,
     title: str | None = None,
+    g10_bound: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """v54-F4 (ADR 0034): land N related runs on ONE shared branch, open ONE PR.
 
@@ -3487,33 +3741,18 @@ def open_pr_for_runs(
         raise HTTPException(
             status_code=400, detail="runs must be from the same repo to group into one PR"
         )
-    # v60-F3: only runs with a patch can land — a script run (artifact only)
-    # must not fail the whole card AFTER the operator approved it (field test
-    # 2026-07-18: one grouped card burned its approval on "nothing to land",
-    # then the retry card timed out). Already-landed runs stay: they need no
-    # patch to join their branch.
-    landable: list[dict[str, Any]] = []
-    skipped_no_patch: list[str] = []
-    for run in runs:
-        task_id = str(run["task_id"])
-        if applied_branch_for(store, task_id) is not None or patch_path(store, task_id) is not None:
-            landable.append(run)
-        else:
-            skipped_no_patch.append(task_id)
-    if not landable:
-        raise HTTPException(
-            status_code=409,
-            detail="nothing to land: none of these runs produced a patch "
-            f"({', '.join(skipped_no_patch)})",
-        )
-    runs = landable
+    runs, skipped_no_patch, branch = grouped_landing(store, runs, title)
     # ES-F291 follow-up (I2 I8): refuse the group before any of it lands — a
     # never-re-verified run found mid-loop left the earlier runs landed on a
     # branch no PR was opened for.
     for run in runs:
         if applied_branch_for(store, str(run["task_id"])) is None:
             require_reverified(store, str(run["task_id"]))
-    branch = _grouped_branch(title, str(runs[0]["task_id"]))
+            shown = (g10_bound or {}).get(str(run["task_id"]))  # the clicked card's
+            if (moved := shown_g10_moved(store, str(run["task_id"]), shown=shown)) is not None:
+                raise HTTPException(status_code=409, detail=moved)  # v133-F12: before any lands
+    if (elsewhere := landed_elsewhere(store, runs, branch)) is not None:
+        raise HTTPException(status_code=409, detail=elsewhere)  # R2 (T1): before any lands
     for run in runs:
         task_id = str(run["task_id"])
         if run["state"] == "pending_approval":
@@ -3522,26 +3761,23 @@ def open_pr_for_runs(
                 detail=f"run {task_id} is waiting on a mid-run gate; resume past "
                 "the gate first (approve), then open the PR",
             )
-        existing = applied_branch_for(store, task_id)
-        if existing == branch:
+        if applied_branch_for(store, task_id) == branch:
             continue  # already on the shared branch — never re-apply a patch
-        if existing is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"run {task_id} already landed on {existing!r}; it cannot "
-                f"also join {branch!r} — open its PR from that branch instead",
-            )
-        land_run(store, run, actor, note=note or f"grouped PR on {branch}", branch=branch)
+        land_run(
+            store, run, actor, note=note or f"grouped PR on {branch}", branch=branch,
+            g10_shown=(g10_bound or {}).get(task_id),
+        )  # fmt: skip
     entries = [
         github.GroupedRun(
             task_id=str(run["task_id"]),
             summary=str(run["summary"] or ""),
-            verification=run["verification_outcome"],
+            verification=worker_result(store, str(run["task_id"])),
             reverified=(
                 None
                 if (reverify := store.reverification_for(str(run["task_id"]))) is None
                 else reverify.confirmed
             ),
+            supervisor=g10_line(reverify),  # v133-F16
         )
         for run in runs
     ]
@@ -3562,13 +3798,14 @@ def open_pr_for_runs(
         ),
         body=github.default_grouped_pr_body(runs=entries, changed_files=changed),
     )
+    ids = [entry.task_id for entry in entries]
     grouped: dict[str, Any] = {
-        "opened": result.opened,
-        "url": result.url,
-        "detail": result.detail,
-        "branch": branch,
-        "task_ids": [entry.task_id for entry in entries],
-    }
+        **record_pr(
+            store, result, actor=actor, repo=Path(str(first["repo"])), branch=branch,
+            base=base, task_ids=ids,
+        ),
+        "task_ids": ids,
+    }  # fmt: skip
     if skipped_no_patch:
         # v60-F3: the honest note — these runs produced no patch and are NOT
         # in the PR; the card still landed everything landable.
@@ -3640,6 +3877,7 @@ def apply_patch(
     note: str | None,
     *,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> str:
     """Q5: applying the patch IS the approval action. Returns the branch.
 
@@ -3652,6 +3890,12 @@ def apply_patch(
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
     require_reverified(store, task_id)
+    # R1 (Sol S4): ONE read of G10 — the bind check, the landing base and the
+    # note all use it, so a re-verify landing mid-way changes none of them
+    reverify = store.reverification_for(task_id)
+    moved = shown_g10_moved(store, task_id, reverify, shown=g10_shown)  # v133-F12
+    if moved is not None:
+        raise HTTPException(status_code=409, detail=moved)
     repo = Path(str(run["repo"]))
     if branch is not None and branch.strip():
         target = branch.strip()
@@ -3665,8 +3909,13 @@ def apply_patch(
     # review that had just landed, telling the operator to re-run it.
     if not store.claim_approval(review_id):
         raise landing_taken(store, review_id)
+    made: list[str] = []
     try:
-        failure = land_patch(store, repo, target, patch, task_id=task_id, actor=actor)
+        failure = land_patch(
+            store, repo, target, patch, task_id=task_id, actor=actor,
+            verified_base=reverify.base_commit if reverify and reverify.confirmed else None,
+            commit_out=made,
+        )  # fmt: skip
     except BaseException:
         store.unclaim_approval(review_id)
         raise
@@ -3688,9 +3937,15 @@ def apply_patch(
             review_id, approved=False, actor=actor, note=f"apply failed: {failure}", claimed=True
         )
         raise HTTPException(status_code=409, detail=failure)
+    # v133-F12 (J1, I13): a landing G10 did not confirm starts its note with
+    # G10's own line from the store; the caller's note follows, never replaces it.
+    line = g10_note_line(reverify)
+    if line is not None:
+        note = f"{line}; {note}" if note else line
     store.resolve_approval(
-        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True
-    )
+        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True,
+        landing_commit=next(iter(made), None),  # v133-F15 (J5); R2 (S12): the commit it made
+    )  # fmt: skip
     return target
 
 
@@ -3732,6 +3987,13 @@ def gate_taken(store: RunStore, review_id: str) -> HTTPException:
 # v107-F2: diagnose_run bounds — generous enough for one test file, capped
 # so a card can never grant an unbounded supervisor-side process.
 DIAGNOSE_DEFAULT_TIMEOUT_SECONDS = 120.0
+# v133-F29 (K, I12): the kept tree is the worker's output — with the sandbox
+# off the command would run on it unconfined, as the operator.
+DIAGNOSE_SANDBOX_OFF = (
+    "diagnose_run runs only inside the sandbox, and the sandbox is off on this "
+    "home — it never runs a command on a worker's tree unconfined; read the audit "
+    "trail via get_run instead"
+)
 DIAGNOSE_MAX_TIMEOUT_SECONDS = 600.0
 DIAGNOSE_OUTPUT_CAP = 10_000
 
@@ -3759,6 +4021,8 @@ def diagnose_run(
     record = store.get_run(task_id)
     if record is None:
         raise ValueError(f"no run {task_id!r} — list_runs shows recent task ids")
+    if not config.sandbox:
+        raise ValueError(DIAGNOSE_SANDBOX_OFF)  # v133-F29 (I12): every face, not only chat
     workspace = Path(record.workspace or "")
     if not record.workspace or not workspace.is_dir():
         raise ValueError(
@@ -4480,7 +4744,9 @@ def expire_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
     if not store.claim_chat_action(action_id):
         return False
     payload = {"ok": False, "denied": True, "note": note, "auto": True}
-    store.resolve_chat_action(action_id, status="denied", result=payload, claimed=True)
+    store.resolve_chat_action(
+        action_id, status="denied", result=payload, claimed=True, actor="auto:timeout"
+    )  # v133-F11: the deadline denied it, no human (I6)
     return True
 
 
@@ -4493,7 +4759,9 @@ def abandon_acp_permission(store: RunStore, action_id: str, note: str) -> bool:
     note = f"the engine already answered no: {note}"
     payload = {"ok": False, "superseded": True, "note": note, "auto": True}
     try:
-        store.resolve_chat_action(action_id, status="superseded", result=payload, claimed=True)
+        store.resolve_chat_action(
+            action_id, status="superseded", result=payload, claimed=True, actor="auto:engine"
+        )  # v133-F11: the engine's own answer settled it, no human
     except ValueError:
         return False
     return True

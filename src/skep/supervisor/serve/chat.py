@@ -30,7 +30,7 @@ import time
 import uuid
 import weakref
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from itertools import chain
@@ -535,8 +535,44 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     # E2: the winner's own words ("the engine already answered no: …"), when it left some
     return HTTPException(
         status_code=409,
-        detail=f"action {action_id!r} already {status}" + (f": {note}" if note else ""),
+        detail=f"action {action_id!r} already {_verdict_words(store, action, status)}"
+        + (f": {note}" if note else ""),
     )
+
+
+def _verdict_words(store: RunStore, action: ChatActionRecord | None, status: str) -> str:
+    """v133-F33 (B3, I13): what won, from the record — "approved at <time>
+    by <actor> (<surface>)". An actor the row does not hold is "unknown",
+    never a guessed person. R2 (Sol T6): a gate mirror superseded by its
+    gate's own answer says that answer, from the approval row."""
+    if action is not None and action.source == "gate" and status == "superseded":
+        gate = store.get_approval(str(action.args.get("review_id") or ""))
+        if gate is not None and gate.resolved_at is not None:
+            return f"{gate.status} at {gate.resolved_at} by {gate.resolved_by or 'unknown'}"
+    if action is None or action.resolved_at is None:
+        return status
+    word = {"confirmed": "approved", "failed": "approved (it then failed)"}.get(status, status)
+    where = f" ({action.resolved_surface})" if action.resolved_surface else ""
+    return f"{word} at {action.resolved_at} by {action.resolved_by or 'unknown'}{where}"
+
+
+def lost_deny(store: RunStore, chat_id: str, action_id: str) -> HTTPException:
+    """v133-F33 (B3): a deny that lost the race also says so in the chat,
+    once — a flash on one page is not the record. The line waits for no turn:
+    a turn in flight gets no row between its calls, the 409 still says it."""
+    taken = card_taken(store, action_id)
+    action = store.get_chat_action(action_id)
+    lock = chat_turn_lock(chat_id)
+    if action is not None and action.resolved_at is not None and lock.acquire(blocking=False):
+        try:
+            store.add_chat_message(
+                chat_id, role="assistant",
+                content=f"Too late to deny the {action.tool} card: it was already "
+                f"{_verdict_words(store, action, action.status)}.",
+            )  # fmt: skip
+        finally:
+            lock.release()
+    return taken
 
 
 def card_refusal(surface: str, card: ChatActionRecord) -> str | None:
@@ -654,7 +690,11 @@ def _queue_follow_up(
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
         with chat_turn_lock(chat_id):
             # claimed before the turn: a restart from here on never reruns it
-            if not engine.store.claim_follow_up(action_id) or blocking_cards(engine.store, chat_id):
+            if not engine.store.claim_follow_up(action_id):
+                return
+            holding = blocking_cards(engine.store, chat_id)
+            if holding:  # v133-F32 (G8): say which card holds the chat, not nothing
+                _say_held(engine.store, chat_id, holding[0])
                 return
             verdict = "denied" if action.status == "denied" else "confirmed"
             note = engine.store.add_chat_message(
@@ -694,6 +734,19 @@ def _queue_follow_up(
     threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
 
 
+def _say_held(store: RunStore, chat_id: str, card: ChatActionRecord) -> None:
+    """v133-F32: the line a held follow-up leaves — the card that holds the
+    chat and what to click. Once: a second follow-up held by the same card
+    finds the line already last and adds nothing. A note, never a verdict."""
+    line = (
+        f"Waiting on your open card before I continue: {card.tool} — "
+        f"{headline(card.tool, card.args)}. Approve or Deny it and I'll pick up from there."
+    )
+    last = store.chat_messages(chat_id)[-1:]
+    if not (last and last[0].role == "assistant" and last[0].content == line):
+        store.add_chat_message(chat_id, role="assistant", content=line)
+
+
 def resume_follow_ups(engine: ChatEngine) -> int:
     """D18: at serve start, the follow-ups a stopped serve never started —
     each runs once (its claim is the once). Returns how many."""
@@ -708,11 +761,17 @@ def resume_follow_ups(engine: ChatEngine) -> int:
         for task_id, _stage in owed:  # switched off since the stop: dropped, not run
             engine.store.clear_run_follow_up(task_id)
         owed = []
+    # v133-F31: a run still waiting at its gate is not owed a turn yet — the
+    # ticker's sweep gives it one when the gate settles
+    owed = [(task_id, stage) for task_id, stage in owed if stage != GATED]
     for task_id, stage in owed:
         threading.Thread(
             target=run_completion_turn,
             args=(engine.store, engine.holder, engine.runner, engine.home, task_id),
-            kwargs={"seeded": stage == "seeded"},
+            kwargs={
+                "seeded": stage.endswith("seeded"),
+                "gate": stage.startswith(_GATE_STAGE),  # R2 (T4): a pause stays one
+            },
             name=f"skep-continue-{task_id[:8]}",
             daemon=True,
         ).start()
@@ -2483,15 +2542,61 @@ class ChatEngine:
         marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS if channel else set()
         marks.add(chat_id)
         _STOP_REQUESTS.pop(chat_id, None)  # v130-F10: a stale stop is not for this turn
+        inner = self._turn_events(
+            chat_id, base_url=base_url, api_key=api_key, model=model,
+            protocol=protocol, read_only=read_only, unattended=unattended,
+            schedule=schedule,
+        )  # fmt: skip
+        refused: list[str] = []  # v133-F32 (B2): steps this unattended turn could not take
         try:
-            yield from self._turn_events(
-                chat_id, base_url=base_url, api_key=api_key, model=model,
-                protocol=protocol, read_only=read_only, unattended=unattended,
-                schedule=schedule,
-            )  # fmt: skip
+            for event, data in inner:
+                result = data.get("result") if event == "tool" else None
+                if isinstance(result, dict) and result.get("unattended") and not read_only:
+                    refused.append(str(data.get("tool")))
+                elif event == "done" and refused:
+                    yield self._go_ahead(chat_id, refused)
+                    refused = []
+                yield event, data
         finally:
+            inner.close()
             marks.discard(chat_id)
             _OPEN_CARDS.pop(chat_id, None)  # D18: this turn's round is closed
+
+    def _go_ahead(self, chat_id: str, refused: list[str]) -> ChatEvent:
+        """v133-F32 (B2): an unattended turn that refused a step ends with the
+        one thing to type. Typing it starts an attended turn, which may only
+        propose, as ever: the line grants nothing."""
+        names = ", ".join(dict.fromkeys(refused))
+        # R2 (Sol T5): from the turn's final state — an open card holds the
+        # chat's replies, so the line names that card instead of a reply
+        holding = blocking_cards(self.store, chat_id)
+        then = (
+            f"Your open card holds this chat: {holding[-1].tool} — "
+            f"{headline(holding[-1].tool, holding[-1].args)}. Approve or Deny it "
+            "and I'll pick up from there."
+            if holding
+            else "Reply “go ahead” and I'll continue in a turn you start."
+        )
+        line = (
+            f"{names} could not run in this turn: it started on its own (a run "
+            f"finished, or skep restarted) and nobody was there to approve it. {then}"
+        )
+        row = self.store.add_chat_message(chat_id, role="assistant", content=line)
+        return (None, {"content": f"\n\n{line}", "message_id": row})  # v133-F38
+
+    def _line(self, chat_id: str, line: str) -> ChatEvent:
+        """R2 (Sol T7): a row the server writes itself (Stop, a clarification,
+        a provider failure) — its text and its stored id in ONE event, so a
+        stream cut between them can never name a row the page did not draw."""
+        message_id = self.store.add_chat_message(chat_id, role="assistant", content=line)
+        return (None, {"content": line, "message_id": message_id})
+
+    def _said(self, chat_id: str, **row: Any) -> ChatEvent:
+        """v133-F38 (G8): store one assistant row of this turn, and the
+        message event that names its id — content empty, the deltas already
+        streamed — so a page knows which stored rows its stream drew."""
+        message_id = self.store.add_chat_message(chat_id, role="assistant", **row)
+        return (None, {"content": "", "message_id": message_id})
 
     def _turn_events(
         self,
@@ -2504,7 +2609,7 @@ class ChatEngine:
         read_only: bool = False,
         unattended: bool = False,
         schedule: str | None = None,
-    ) -> Iterator[ChatEvent]:
+    ) -> Generator[ChatEvent, None, None]:
         previous_read_tool: str | None = None
         hidden = off_menu(read_only=read_only, unattended=unattended)  # v121-F2
         # v59-F7: byte-identical read call returning a byte-identical result is
@@ -2601,9 +2706,8 @@ class ChatEngine:
                         continue
                     # Keep whatever arrived — the transcript should not lose a half-reply.
                     if parts:
-                        self.store.add_chat_message(
+                        yield self._said(
                             chat_id,
-                            role="assistant",
                             content="".join(parts),
                             thinking="".join(thinking_parts) or None,
                         )
@@ -2613,8 +2717,7 @@ class ChatEngine:
                         # toast — on reload the chat just ended mid-tools (field
                         # test 2026-07-19: three "hung" turns in a row).
                         line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
-                        yield (None, {"content": line})
-                        self.store.add_chat_message(chat_id, role="assistant", content=line)
+                        yield self._line(chat_id, line)
                     yield ("error", {"detail": str(exc)})
                     return
                 break
@@ -2646,9 +2749,8 @@ class ChatEngine:
             if content or thinking_text or tool_calls:
                 # v70-F1: an all-empty round persists nothing — an empty row
                 # is noise, and its old silent done/complete was the bug.
-                self.store.add_chat_message(
+                yield self._said(
                     chat_id,
-                    role="assistant",
                     content=content,
                     thinking=thinking_text or None,
                     tool_calls=tool_calls or None,
@@ -2718,14 +2820,15 @@ class ChatEngine:
                         ),
                     }
                     previous_read_tool = None
-                    self.store.add_chat_message(
+                    row_id = self.store.add_chat_message(
                         chat_id,
                         role="tool",
                         tool_name=name,
                         tool_call_id=call_id,
                         content=json.dumps(bad_args, ensure_ascii=True),
                     )
-                    yield ("tool", {"tool": name, "args": shown_args, "result": bad_args})
+                    yield ("tool", {"tool": name, "args": shown_args, "result": bad_args,
+                                    "message_id": row_id})  # fmt: skip
                     continue
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
@@ -2758,14 +2861,13 @@ class ChatEngine:
                             formatted += "\n" + "\n".join(
                                 f"{index}. {choice}" for index, choice in enumerate(choices, 1)
                             )
-                        self.store.add_chat_message(chat_id, role="assistant", content=formatted)
-                        yield (None, {"content": formatted})
+                        yield self._line(chat_id, formatted)
                         yield ("clarification", {"question": question, "choices": choices})
                         yield ("done", {"state": "complete"})
                         return
                     result = {"error": f"{CLARIFY_TOOL_NAME} needs a question"}
                     previous_read_tool = None
-                    self.store.add_chat_message(
+                    row_id = self.store.add_chat_message(
                         chat_id,
                         role="tool",
                         tool_name=name,
@@ -2775,8 +2877,9 @@ class ChatEngine:
                     # v115-F3: the terminal receipt names the lane (I8).
                     yield (
                         "tool",
-                        {"tool": name, "args": shown_args, "kind": "read", "result": result},
-                    )
+                        {"tool": name, "args": shown_args, "kind": "read", "result": result,
+                         "message_id": row_id},
+                    )  # fmt: skip
                     continue
                 # P4-1 (ADR 0059 D5): search_web is a read tool, and read tools
                 # never card — except a taint ask in a turn a human can answer.
@@ -2808,7 +2911,7 @@ class ChatEngine:
                             ),
                         }
                         previous_read_tool = None
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
@@ -2821,7 +2924,8 @@ class ChatEngine:
                             yield ("alarm", self._refused(
                                 chat_id, name, args, "unattended_mutation", schedule, alarm=True,
                             ))  # fmt: skip
-                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal,
+                                        "message_id": row_id})  # fmt: skip
                         continue
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
@@ -2897,7 +3001,8 @@ class ChatEngine:
                     if head is not None:
                         joined = self._join_fold(chat_id, head, name, args, call_id)
                         if joined is not None:
-                            yield ("tool", {"tool": name, "args": shown_args, "result": joined})
+                            yield ("tool", {"tool": name, "args": shown_args, "result": joined[0],
+                                            "message_id": joined[1]})  # fmt: skip
                         continue
                     if taint_ask and (unattended or name in taint_carded):
                         # P4-1: an unattended turn refuses a taint ask (nobody is
@@ -2915,8 +3020,10 @@ class ChatEngine:
                             ),
                             "decided_by": decision.decided_by,
                         }
+                        if unattended:
+                            waiting["unattended"] = True  # v133-F32: the turn ends with "go ahead"
                         previous_read_tool = None
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
@@ -2927,7 +3034,8 @@ class ChatEngine:
                             self._refused(
                                 chat_id, name, args, "unattended_mutation", schedule, alarm=False
                             )
-                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting,
+                                        "message_id": row_id})  # fmt: skip
                         continue
                     if taint_ask:
                         taint_carded.add(name)
@@ -2945,7 +3053,7 @@ class ChatEngine:
                             # reach the model so it can correct course.
                             payload["detail"] = decision.detail
                         previous_read_tool = None
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
@@ -2955,7 +3063,8 @@ class ChatEngine:
                         yield (  # L5: the deny names what was asked, masked
                             "tool",
                             {"tool": name, "args": shown_args,
-                             "decision": shown_strings(asdict(decision)), "result": payload},
+                             "decision": shown_strings(asdict(decision)), "result": payload,
+                             "message_id": row_id},
                         )  # fmt: skip
                         continue
                     # ES-F3 (B08): an unattended turn never executes — it
@@ -3029,6 +3138,7 @@ class ChatEngine:
                             "decision": shown_strings(asdict(decision)),
                             "result": payload,
                             "card": self._card(chat_id, name, args),
+                            "message_id": row_id,
                         }
                         # v106-F11 (v90-F3): the receipt names the covering
                         # grant's tier and when the operator gave it.
@@ -3049,24 +3159,26 @@ class ChatEngine:
                         )
                     except PolicyWriteRejected as exc:
                         payload = {"ok": False, "error": str(exc)}
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload,
+                                        "message_id": row_id})  # fmt: skip
                         continue
                     if checked.get("unchanged"):
                         # L7: a policy write that changes nothing is answered,
                         # never carded — its confirm would "succeed" at nothing
                         payload = {"ok": True, "unchanged": True, "detail": checked["unchanged"]}
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id, role="tool", tool_name=name, tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )  # fmt: skip
-                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload,
+                                        "message_id": row_id})  # fmt: skip
                         continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
@@ -3080,14 +3192,15 @@ class ChatEngine:
                         or duplicate[0].source != "assistant"
                     ):
                         payload = duplicate_proposal_result(duplicate[0].action_id)
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload,
+                                        "message_id": row_id})  # fmt: skip
                         continue
                     if duplicate is not None:
                         self.store.supersede_chat_action(
@@ -3176,11 +3289,19 @@ class ChatEngine:
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
                         turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
-                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}"}
+                        refusal_row: dict[str, Any] = {
+                            "error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}",
+                            "unattended": True,  # v133-F32: the turn ends with "go ahead"
+                        }
+                        result = refusal_row
                         previous_read_tool = name
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
-                        result = {"error": f"{name} {UNATTENDED_WRITE_REFUSAL}"}
+                        write_refusal: dict[str, Any] = {
+                            "error": f"{name} {UNATTENDED_WRITE_REFUSAL}",
+                            "unattended": True,  # R2 (T5): marked like every refusal
+                        }
+                        result = write_refusal
                         previous_read_tool = name
                     elif off_store:  # S8: a scheduled turn calls its allowlist only
                         result = {"error": f"{name} {SCHEDULED_STORE_ONLY_REFUSAL}"}
@@ -3289,7 +3410,8 @@ class ChatEngine:
                 # The live event carries the full result for EVERY tool — the
                 # old notes/tasks whitelist left get_run/list_runs/... rendering
                 # as empty expanders until a page reload (history always had it).
-                yield ("tool", {"tool": name, "args": shown_args, "result": result})
+                yield ("tool", {"tool": name, "args": shown_args, "result": result,
+                                "message_id": row_id})  # fmt: skip
             for action_event in round_cards:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
@@ -3314,8 +3436,7 @@ class ChatEngine:
     def _stopped(self, chat_id: str, face: str) -> Iterator[ChatEvent]:
         """v130-F10: the turn's honest last word (I8)."""
         line = f"stopped by {face}"
-        self.store.add_chat_message(chat_id, role="assistant", content=line)
-        yield (None, {"content": line})
+        yield self._line(chat_id, line)
         yield ("done", {"state": "stopped"})
 
     def _refused(
@@ -3404,17 +3525,15 @@ class ChatEngine:
                     )
                     continue
                 if parts:
-                    self.store.add_chat_message(
+                    yield self._said(
                         chat_id,
-                        role="assistant",
                         content="".join(parts),
                         thinking="".join(thinking_parts) or None,
                     )
                 else:
                     # v62-F1: same silent-death branch as the main loop.
                     line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
-                    yield (None, {"content": line})
-                    self.store.add_chat_message(chat_id, role="assistant", content=line)
+                    yield self._line(chat_id, line)
                 yield ("error", {"detail": str(exc)})
                 return
             break
@@ -3442,12 +3561,7 @@ class ChatEngine:
             # ends with a persisted, honest line.
             content = _NO_SUMMARY_LINE
             yield (None, {"content": content})
-        self.store.add_chat_message(
-            chat_id,
-            role="assistant",
-            content=content,
-            thinking=thinking_text or None,
-        )
+        yield self._said(chat_id, content=content, thinking=thinking_text or None)
         yield ("done", {"state": "complete"})
 
     def verdict_events(
@@ -3460,11 +3574,14 @@ class ChatEngine:
         actor: str = CHAT_ACTOR,
         keep: str | None = None,
         items: int | None = None,
+        surface: str | None = None,
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
         ``actor`` is who confirmed: ``chat-user`` from the web, a
         ``channel:<name>:<identity>`` actor from a messenger (v26).
+        ``surface`` (v133-F37) is the client's hint, recorded on the row —
+        never authorization; None stays unknown.
 
         NOT a generator: validation and the mutation itself run eagerly at
         call time (an HTTPException must become a status code, not a mid-
@@ -3627,6 +3744,8 @@ class ChatEngine:
             current = self.store.get_chat_action(action_id)
             if current is not None and current.status != "proposed":
                 # A Deny landing mid-confirm says what won, not just "busy".
+                if not confirm:
+                    raise lost_deny(self.store, chat_id, action_id) from None
                 raise card_taken(self.store, action_id) from None
             if action_id in _OPEN_CARDS.get(chat_id, ()) or not all(
                 item["tool_call_id"] for item in action.fold_items()
@@ -3637,28 +3756,30 @@ class ChatEngine:
             lock = None  # D18: record the click now; the model follows the turn
         if lock is None:
             with _verdict_lock(chat_id):
-                payload = self._record_verdict(
+                payload, rows = self._record_verdict(
                     chat_id, action, confirm=confirm, actor=actor, keep=keep,
-                    high=high is not None, shown_items=items,
+                    high=high is not None, shown_items=items, surface=surface,
                 )  # fmt: skip
             queued = not blocking_cards(self.store, chat_id)
             if queued:
                 self.store.queue_follow_up(action_id, actor)
                 _queue_follow_up(self, action_id, actor)
             return iter([
-                *(("tool", {"tool": action.tool, "result": item})
-                  for item in payload.get("items", [payload])),
+                *(("tool", {"tool": action.tool, "result": item, "message_id": row})
+                  for item, row in zip(payload.get("items", [payload]), rows, strict=False)),
                 ("done", {"state": "queued" if queued else "awaiting_confirmation"}),
             ])  # fmt: skip
         try:
             with _verdict_lock(chat_id):
-                payload = self._record_verdict(
+                payload, rows = self._record_verdict(
                     chat_id, action, confirm=confirm, actor=actor, keep=keep,
-                    high=high is not None, shown_items=items,
+                    high=high is not None, shown_items=items, surface=surface,
                 )  # fmt: skip
             more_pending = bool(blocking_cards(self.store, chat_id))
-        except BaseException:
+        except BaseException as exc:
             lock.release()
+            if not confirm and isinstance(exc, HTTPException) and exc.status_code == 409:
+                raise lost_deny(self.store, chat_id, action_id) from None  # v133-F33
             raise
         # v49-F3: the confirmer's stream carries what the mutation actually did
         # — the same 'tool' event shape free-executing tools emit. Before this,
@@ -3666,9 +3787,9 @@ class ChatEngine:
         # consumers watching the confirm stream saw a continuation with no
         # outcome (GAP-2, black-box field test).
         verdicts: list[ChatEvent] = [
-            ("tool", {"tool": action.tool, "result": item})
-            for item in payload.get("items", [payload])
-        ]  # P4-2: one per folded item
+            ("tool", {"tool": action.tool, "result": item, "message_id": row})
+            for item, row in zip(payload.get("items", [payload]), rows, strict=False)
+        ]  # P4-2: one per folded item; R3 (U1): each names its stored row
         if more_pending:
             # Other cards still open — the model resumes after the last verdict.
             lock.release()
@@ -3686,21 +3807,21 @@ class ChatEngine:
 
     def _join_fold(
         self, chat_id: str, head: str, name: str, args: dict[str, Any], call_id: str | None
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any], int] | None:
         """P4-2: this call joins card ``head`` as one more item — or, when the
         card already lists exactly it, the model gets the duplicate answer
-        (the row is written here; nothing runs twice)."""
+        and the id of the row written for it (nothing runs twice)."""
         record = self.store.get_chat_action(head)
         key = _canonical_args(args)
         if record is not None and any(
             _canonical_args(item["args"]) == key for item in record.fold_items()
         ):
             payload = duplicate_proposal_result(head)
-            self.store.add_chat_message(
+            row_id = self.store.add_chat_message(
                 chat_id, role="tool", tool_name=name, tool_call_id=call_id,
                 content=json.dumps(payload, ensure_ascii=True),
             )  # fmt: skip
-            return payload
+            return payload, row_id
         self.store.fold_into_chat_action(head, args=args, tool_call_id=call_id)
         return None
 
@@ -3785,8 +3906,10 @@ class ChatEngine:
         keep: str,
         high: bool = False,
         shown_items: int | None = None,
-    ) -> dict[str, Any]:
-        """Claim, execute (or deny) and record one card; the tool row's payload.
+        surface: str | None = None,
+    ) -> tuple[dict[str, Any], list[int]]:
+        """Claim, execute (or deny) and record one card; the tool row's payload
+        and the ids of the rows written (R3 U1: the stream names them).
 
         P4-2: a folded card is resolved whole by the one claim (PR #61) — every
         item it recorded runs once, in order, and gets its own tool row; a
@@ -3862,17 +3985,21 @@ class ChatEngine:
                 else {"ok": all(p["ok"] for p in payloads), "items": payloads}
             )
             self.store.resolve_chat_action(
-                action_id, status=executed_status(payload), result=payload, claimed=True
-            )
+                action_id, status=executed_status(payload), result=payload, claimed=True,
+                actor=actor, surface=surface,  # v133-F37: who decided (I13)
+            )  # fmt: skip
         else:
             payload = {"ok": False, "denied": True, "note": "the user denied this action"}
             try:
-                self.store.resolve_chat_action(action_id, status="denied", result=payload)
+                self.store.resolve_chat_action(
+                    action_id, status="denied", result=payload, actor=actor, surface=surface
+                )
             except ValueError:
                 raise card_taken(self.store, action_id) from None
             log_denied_dispatch_asks(self.store, self.holder, action)
             record_denied_landing(self.store, action, actor=actor)
             payloads = [payload] * len(items)
+        rows: list[int] = []
         for item, item_payload in zip(items, payloads, strict=True):
             row_id = self.store.add_chat_message(
                 chat_id,
@@ -3886,12 +4013,13 @@ class ChatEngine:
                 tool_call_id=item["tool_call_id"],
                 content=json.dumps(item_payload, ensure_ascii=True),
             )
+            rows.append(row_id)
             if confirm and item_payload["ok"]:  # P4-1: what the confirmed tool brought in
                 record_tool_taint(
                     self.store, self.holder, chat_id, action.tool, item["args"],
                     item_payload["result"], row_id,
                 )  # fmt: skip
-        return payload
+        return payload, rows
 
     def card_fields(self, chat_id: str, action: ChatActionRecord) -> dict[str, Any]:
         """W39: the card and its decision, from what the server recorded when
@@ -4061,6 +4189,61 @@ def run_scheduled_prompt(
 # run finishing needs the web.
 _CONTINUED: set[str] = set()
 _CONTINUE_LOCK = threading.Lock()
+# v133-F31 (G8): a run whose continuation ran while it waited at a gate is
+# owed one more when the gate settles — kept on the run row, so a restart
+# keeps the debt, and paid by ``continue_settled_gates`` on the ticker.
+GATED = "gated"
+# R2 (Sol T4): a pause turn in flight is stored apart from a final one
+# ("gate-queued", "gate-seeded"), so a restart resumes it as the pause.
+_GATE_STAGE = "gate-"
+# A settled gate whose run reaches one of these gets its continuation; a
+# superseded run handed the work to its resumed successor, which gets its own.
+_SETTLED = frozenset(s.value for s in TERMINAL_STATES) - {"pending_approval", "superseded"}
+
+
+def _bound_chat(store: RunStore, task_id: str) -> str | None:
+    """The chat that dispatched this run — or, for a run resumed past a
+    gate approved off the chat (REST, CLI), the chat of the run it resumes."""
+    seen: set[str] = set()
+    while task_id and task_id not in seen:
+        seen.add(task_id)
+        chat_id = store.chat_for_task(task_id)
+        if chat_id:
+            return chat_id
+        run = store.get_run(task_id)
+        task_id = (run.resume_of or "") if run is not None else ""
+    return None
+
+
+def continue_settled_gates(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, home: Path
+) -> list[str]:
+    """v133-F31: each run owed a turn after its gate whose gate has settled
+    gets it — once: the row moves off ``gated`` before its thread starts.
+    Returns the task ids started."""
+    from .run_status import CONTINUE_CHAT_SETTING
+
+    started: list[str] = []
+    for task_id, stage in store.queued_run_follow_ups():
+        run = store.get_run(task_id) if stage == GATED else None
+        if stage != GATED or (run is not None and run.state == "pending_approval"):
+            continue  # another kind of debt, or still waiting at its gate
+        if (
+            run is None
+            or run.state not in _SETTLED
+            or store.get_setting(CONTINUE_CHAT_SETTING) is False
+        ):
+            store.clear_run_follow_up(task_id)  # gone, handed to its successor, or switched off
+            continue
+        store.queue_run_follow_up(task_id, "queued")
+        threading.Thread(
+            target=run_completion_turn,
+            args=(store, holder, runner, home, task_id),
+            name=f"skep-continue-{task_id[:8]}",
+            daemon=True,
+        ).start()
+        started.append(task_id)
+    return started
 
 
 def run_completion_turn(
@@ -4071,28 +4254,35 @@ def run_completion_turn(
     task_id: str,
     *,
     seeded: bool = False,
+    gate: bool = False,
 ) -> tuple[str, bool]:
     """One Queen turn after a run reaches a terminal state. (reply, ok).
+    ``gate``: a resumed pause turn (R2, T4), whatever the run's state now.
 
     ES-F242 (D18): it is owed on the run row until its turn ends, so a serve
     stopped before then runs it at the next start (``resume_follow_ups``) —
     ``seeded`` when its rows were already written. Unlike a card's follow-up
     it is cleared AFTER its turn, not claimed before: the turn only reads and
     proposes (``unattended``), so rerunning a cut-off one doubles nothing."""
+    run = store.get_run(task_id)
+    # v133-F31 (G8): waiting at a gate is not the run's final state — that
+    # turn is its own, so the final state still gets one.
+    gated = gate or (run is not None and run.state == "pending_approval")
+    stage = _GATE_STAGE if gated else ""
     with _CONTINUE_LOCK:
         # notify_run_terminal is wired from two call sites and a done-callback
-        # can be re-entered on resume; one continuation per run, ever.
-        if task_id in _CONTINUED:
+        # can be re-entered on resume; one continuation per run and state.
+        key = f"{task_id}@gate" if gated else task_id
+        if key in _CONTINUED:
             return ("already continued", False)
-        _CONTINUED.add(task_id)
+        _CONTINUED.add(key)
 
-    chat_id = store.chat_for_task(task_id)
+    chat_id = _bound_chat(store, task_id)
     if not chat_id or store.get_chat(chat_id) is None:
         # A CLI or scheduled run with no bound chat has no conversation to
         # continue. The one-line notice already covered it.
         store.clear_run_follow_up(task_id)  # a resumed one whose chat is gone
         return ("run has no bound chat", False)
-    run = store.get_run(task_id)
     if run is None:
         return ("run vanished before the continuation", False)
 
@@ -4100,7 +4290,8 @@ def run_completion_turn(
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
     except HTTPException as exc:
-        store.clear_run_follow_up(task_id)
+        _turn_done(store, task_id, gated=gated)  # R2 (T4): a pause still owes the final turn
+        say_continuation_failed(store, task_id, str(exc.detail))  # v133-F32
         return (f"continuation could not run: {exc.detail}", False)
 
     # The facts go in the seed rather than making the model call get_run first:
@@ -4141,12 +4332,12 @@ def run_completion_turn(
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
     if not seeded:
-        store.queue_run_follow_up(task_id, "queued")
+        store.queue_run_follow_up(task_id, f"{stage}queued")
     with chat_turn_lock(chat_id):
         tail = store.chat_messages(chat_id)[-1:] if seeded else []
         if tail and tail[0].role == "assistant" and not tail[0].tool_calls:
             # the stop landed after its reply, before the clear: it is done
-            store.clear_run_follow_up(task_id)
+            _turn_done(store, task_id, gated=gated)
             return ("already continued", False)
         if summary and not seeded:
             # P4-1 (B37, D5): the worker's words are its own row — wrapped on
@@ -4157,7 +4348,7 @@ def run_completion_turn(
             )  # fmt: skip
         if not seeded:
             store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
-            store.queue_run_follow_up(task_id, "seeded")
+            store.queue_run_follow_up(task_id, f"{stage}seeded")
         try:
             for event, data in engine.turn_events(
                 chat_id,
@@ -4171,9 +4362,14 @@ def run_completion_turn(
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
-            store.clear_run_follow_up(task_id)
+            _turn_done(store, task_id, gated=gated)
+            # v133-F32 (G8): said in the chat, not only in the return value
+            store.add_chat_message(
+                chat_id, role="assistant",
+                content=continuation_failed_line(task_id, f"my follow-up turn failed ({exc})"),
+            )  # fmt: skip
             return (f"continuation failed mid-turn: {exc}", False)
-    store.clear_run_follow_up(task_id)
+    _turn_done(store, task_id, gated=gated)
     reply = "".join(parts).strip()
     from .channels.outbound import push_to_chat_channel
     from .run_status import run_terminal_text
@@ -4186,6 +4382,36 @@ def run_completion_turn(
     if reply and run_terminal_text(store, task_id, completion_opt_in=False) is None:
         push_to_chat_channel(store, home, chat_id, reply, kind="info")
     return (reply, bool(reply))
+
+
+def continuation_failed_line(task_id: str, why: str) -> str:
+    """v133-F32 (G8): the line a run-finish continuation leaves when it
+    cannot go on — silence is never the end state."""
+    return (
+        f"Run {task_id[:12]} finished, but I could not continue: {why}. "
+        "Send any message to continue."
+    )
+
+
+def say_continuation_failed(store: RunStore, task_id: str, why: str) -> None:
+    """v133-F32: post that line in the run's chat (none bound: nothing to
+    say), behind any turn in flight. Never call it holding the chat's lock."""
+    chat_id = _bound_chat(store, task_id)
+    if chat_id is None or store.get_chat(chat_id) is None:
+        return
+    with chat_turn_lock(chat_id):
+        store.add_chat_message(
+            chat_id, role="assistant", content=continuation_failed_line(task_id, why)
+        )
+
+
+def _turn_done(store: RunStore, task_id: str, *, gated: bool) -> None:
+    """The continuation's turn is over: nothing more owed — or, for a run
+    that waited at a gate, the turn its final state is owed (v133-F31)."""
+    if gated:
+        store.queue_run_follow_up(task_id, GATED)
+    else:
+        store.clear_run_follow_up(task_id)
 
 
 def run_analysis_tasks(
@@ -4533,13 +4759,27 @@ def add_chat_routes(
         # over instead of standing beside it as a twin (the B-pair: a typed
         # /approve while the gate-mirror card is pending). Identical args
         # return the pending card itself; changed args supersede it first.
+        # v133 R1 (S3; J1, I7) / R2 (T3): a typed /land, /approve, /pr or /setup
+        # records what it showed, like the Queen's card, so its confirm is bound
+        # to it (actions.shown_g10_moved, tools' setup check).
+        recorded = (
+            recorded_card(body.tool, body.args, None, run_store)
+            if body.tool in ("land_run", "approve_review", "open_pr", "setup_project")
+            else None
+        ) or {}
         duplicate = pending_duplicate_action(run_store, chat_id, body.tool, body.args)
         if duplicate is not None:
             pending, identical = duplicate
             # An assistant card cannot be resolved through the command
             # endpoints (409 below), so the typed command takes it over;
-            # operator/gate cards are handed back as the standing question.
-            if identical and pending.source in ("operator", "gate"):
+            # operator/gate cards are handed back as the standing question —
+            # unless what it showed has moved (R2, Sol S3): that card could
+            # only refuse, so a fresh one replaces it.
+            stale = any(
+                (pending.card or {}).get(key) != recorded.get(key)
+                for key in ("g10_bound", "head", "setup")
+            )
+            if identical and not stale and pending.source in ("operator", "gate"):
                 return {
                     "action_id": pending.action_id,
                     "tool": pending.tool,
@@ -4555,12 +4795,11 @@ def add_chat_routes(
                     "already_pending": True,
                 }
             run_store.supersede_chat_action(pending.action_id, note=_SUPERSEDED_BY_NEWER)
-        recorded = None
         if body.tool in _GATE_TOOLS:  # R2 (Neon): the label survives the gate's resolution
             label, remedy = boundary(body.tool, body.args, store=run_store)
-            recorded = {"boundary": label, **({"remediation": remedy} if remedy else {})}
+            recorded |= {"boundary": label, **({"remediation": remedy} if remedy else {})}
         action_id = run_store.add_chat_action(
-            chat_id, tool=body.tool, args=body.args, source="operator", card=recorded
+            chat_id, tool=body.tool, args=body.args, source="operator", card=recorded or None
         )
         return {
             "action_id": action_id,
@@ -4569,7 +4808,11 @@ def add_chat_routes(
             "description": tool_description(body.tool),
             # R1 G6: the store-backed card an assistant proposal gets (ChatEngine._card)
             "card": card_summary(
-                body.tool, body.args, tool_description(body.tool), store=run_store
+                body.tool,
+                body.args,
+                tool_description(body.tool),
+                store=run_store,
+                recorded=recorded,
             ),
         }
 
@@ -4613,6 +4856,8 @@ def add_chat_routes(
             # ES-F1 (B15): the same claim as verdict_events — a double /land
             # confirm ran land_run twice.
             if not run_store.claim_chat_action(action_id):
+                if not confirm:  # v133-F33: a gate's deny that lost says so in the chat
+                    raise lost_deny(run_store, chat_id, action_id)
                 raise card_taken(run_store, action_id)
             tool = action.tool if confirm else "deny_review"
             args = action.args if confirm else {"review_id": str(action.args.get("review_id", ""))}
@@ -4631,6 +4876,7 @@ def add_chat_routes(
                     runner=runner,
                     actor=COMMAND_ACTOR,
                     chat_id=chat_id,
+                    card=action.card if confirm else None,  # R2 (Sol S4): the clicked card
                 )
                 payload: dict[str, Any] = executed_payload(tool, result)
                 if not confirm:
@@ -4660,16 +4906,20 @@ def add_chat_routes(
                 status = executed_status(payload)
             try:
                 run_store.resolve_chat_action(
-                    action_id, status=status, result=payload, claimed=True
-                )
+                    action_id, status=status, result=payload, claimed=True,
+                    # v133-F37: who decided — a mirror superseded elsewhere names no one here
+                    actor=None if status == "superseded" else COMMAND_ACTOR, surface=surface,
+                )  # fmt: skip
             except ValueError:  # E2: the ACP engine settled it first — its answer stands
                 raise card_taken(run_store, action_id) from None
         else:
             payload = {"ok": False, "denied": True, "note": "the operator canceled this command"}
             try:
-                run_store.resolve_chat_action(action_id, status="denied", result=payload)
+                run_store.resolve_chat_action(
+                    action_id, status="denied", result=payload, actor=COMMAND_ACTOR, surface=surface
+                )
             except ValueError:
-                raise card_taken(run_store, action_id) from None
+                raise lost_deny(run_store, chat_id, action_id) from None  # v133-F33
             log_denied_dispatch_asks(run_store, holder, action)
             record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}
@@ -4690,7 +4940,10 @@ def add_chat_routes(
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/confirm")
     def confirm_action(
-        chat_id: str, action_id: str, body: ActionConfirm | None = None
+        chat_id: str,
+        action_id: str,
+        body: ActionConfirm | None = None,
+        surface: Literal["web", "cli"] | None = None,  # v133-F37: a hint, recorded
     ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         keep = body.keep if body is not None else None
@@ -4702,7 +4955,13 @@ def add_chat_routes(
                     home,
                     chat_id,
                     engine.verdict_events(
-                        chat_id, chat, action_id, confirm=True, keep=keep, items=shown
+                        chat_id,
+                        chat,
+                        action_id,
+                        confirm=True,
+                        keep=keep,
+                        items=shown,
+                        surface=surface,
                     ),
                 )
             ),
@@ -4710,7 +4969,9 @@ def add_chat_routes(
         )
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/deny")
-    def deny_action(chat_id: str, action_id: str) -> StreamingResponse:
+    def deny_action(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] | None = None
+    ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         return StreamingResponse(
             _as_sse(
@@ -4718,7 +4979,7 @@ def add_chat_routes(
                     run_store,
                     home,
                     chat_id,
-                    engine.verdict_events(chat_id, chat, action_id, confirm=False),
+                    engine.verdict_events(chat_id, chat, action_id, confirm=False, surface=surface),
                 )
             ),
             media_type="text/event-stream",

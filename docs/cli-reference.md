@@ -143,7 +143,12 @@ counts and detail), the decision log's chain head and `ledger verify` status,
 every `decisions.jsonl` row naming the run or its resume chain (all
 rotated generations) plus every refusal the worker's own capability layer
 recorded as an event (`BLOCKED ...`, e.g. the floor's `git push` deny), and
-the last 30 lines of `worker.log` with the `result.json` summary. Every string
+the last 30 lines of `worker.log` with the `result.json` summary. Each row is
+labelled with its kind: a policy decision, a worker capability decision, or an
+observation (an adapter launch, a built-in read) that authorized nothing. An
+external engine's own commands (`claude_code`, `codex`, ...) are confined by
+the sandbox and appear in no log, so the report lists none of them and says so
+(ADR 0047). Every string
 is redacted (credential fields in JSON or YAML included); nothing is written —
 the store opens strictly read-only, and one that needs a schema migration is
 refused rather than upgraded. Text by default, `--md`

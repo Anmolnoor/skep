@@ -206,6 +206,7 @@ def push_outcome(
                                 "task_id": run.task_id,
                                 "state": run.state,
                                 "summary": run.summary,
+                                "reverify": store.reverification_for(run.task_id),  # v133-F13
                             },
                             web_ui_url,
                         )

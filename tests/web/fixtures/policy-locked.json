@@ -167,7 +167,7 @@
    },
    {
     "action": "run",
-    "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+    "description": "Any other shell command asks first. A worker approval can be remembered as a command prefix, which also covers longer commands that start with it (a remembered Queen command covers only that exact line); a bare interpreter or its eval flag (node, node -e, python -c) is never remembered, and the floor's denies still apply.",
     "pattern": "*",
     "rule_id": "shell-learnable",
     "scope": "shell",
@@ -1243,7 +1243,7 @@
   "baseline": "baseline: builder approved 2026-11-18T09:00:00Z sha256 000000000000",
   "operator": {
    "decided_by": "template:builder/shell-learnable",
-   "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+   "description": "Any other shell command asks first. A worker approval can be remembered as a command prefix, which also covers longer commands that start with it (a remembered Queen command covers only that exact line); a bare interpreter or its eval flag (node, node -e, python -c) is never remembered, and the floor's denies still apply.",
    "rule_id": "shell-learnable",
    "verdict": "require_approval"
   },
@@ -1295,7 +1295,7 @@
   },
   "operator": {
    "decided_by": "template:builder/shell-learnable",
-   "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+   "description": "Any other shell command asks first. A worker approval can be remembered as a command prefix, which also covers longer commands that start with it (a remembered Queen command covers only that exact line); a bare interpreter or its eval flag (node, node -e, python -c) is never remembered, and the floor's denies still apply.",
    "rule_id": "shell-learnable",
    "verdict": "require_approval"
   },
@@ -1330,7 +1330,7 @@
   "baseline": "baseline: builder approved 2026-11-18T09:00:00Z sha256 000000000000",
   "operator": {
    "decided_by": "template:builder/shell-learnable",
-   "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+   "description": "Any other shell command asks first. A worker approval can be remembered as a command prefix, which also covers longer commands that start with it (a remembered Queen command covers only that exact line); a bare interpreter or its eval flag (node, node -e, python -c) is never remembered, and the floor's denies still apply.",
    "rule_id": "shell-learnable",
    "verdict": "require_approval"
   },
@@ -1449,6 +1449,57 @@
     "value": []
    },
    {
+    "effective": [
+     {
+      "command": "git status",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "git diff",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "git log",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pytest",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "uv run pytest",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "uv sync",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "npm test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "npm install",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pnpm test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "pnpm install",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "cargo test",
+      "source": "allowed_shell_commands@template:builder"
+     },
+     {
+      "command": "go test",
+      "source": "allowed_shell_commands@template:builder"
+     }
+    ],
+    "effective_note": "the shell list a run here gets, grants included: this key's value plus every learned grant that holds here",
     "key": "allowed_shell_commands",
     "overridden": [
      {

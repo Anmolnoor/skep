@@ -46,6 +46,7 @@ class FakeNode {
   getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   focus() {}
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatchEvent(event) {
     for (const fn of this.listeners[event.type] || []) fn(event);
@@ -65,18 +66,33 @@ class FakeNode {
     this.parentNode = null;
   }
   appendChild(node) { this.append(node); return node; }
+  // Insert before this node in its parent (a streaming reply's thinking block).
+  before(...nodes) {
+    const parent = this.parentNode;
+    for (const n of nodes) {
+      const node = typeof n === "object" ? n : new FakeText(n);
+      if (node.parentNode) node.remove?.();
+      node.parentNode = parent;
+      parent.children.splice(parent.children.indexOf(this), 0, node);
+    }
+  }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+  // The working line's label (a live tool event) is its first element child.
+  get firstElementChild() { return this.children.find(c => c.nodeType === 1) ?? null; }
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.
   async click() {
     await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {} })));
   }
-  // ".cls" or "tag" only — enough to find a card's parts.
+  // ".cls" or "tag", optionally with one [attr="value"] — enough to find a
+  // card's parts, and a drawn card by its data-action-id (v133).
   querySelectorAll(selector) {
-    const match = selector.startsWith(".")
-      ? n => n.classList?.contains(selector.slice(1))
-      : n => n.tagName === selector.toUpperCase();
+    const [, base, attr, value] = selector.match(/^([^[]*)(?:\[([\w-]+)="([^"]*)"\])?$/);
+    const matchBase = base.startsWith(".")
+      ? n => n.classList?.contains(base.slice(1))
+      : n => n.tagName === base.toUpperCase();
+    const match = attr ? n => matchBase(n) && n.getAttribute?.(attr) === value : matchBase;
     const found = [];
     const walk = n => { for (const c of n.children || []) { if (match(c)) found.push(c); walk(c); } };
     walk(this);

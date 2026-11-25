@@ -1009,6 +1009,8 @@
     "value": []
    },
    {
+    "effective": [],
+    "effective_note": "the shell list a run here gets, grants included: this key's value plus every learned grant that holds here",
     "key": "allowed_shell_commands",
     "note": "not configured at any layer \u2014 the resolver's fallback",
     "overridden": [],

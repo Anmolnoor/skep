@@ -17,6 +17,7 @@ which stays on this floor.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from collections.abc import Sequence
@@ -96,6 +97,13 @@ HOME_DIRS: tuple[str, ...] = (
 CODEX_RUN_LOGIN = "codex-login.json"
 SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret", CODEX_RUN_LOGIN)
 SERVE_ENV = "serve.env"
+# v133-F6 (C2): what a serve.env refusal tells the operator to do instead —
+# the chat never reads or writes it, so the step is theirs.
+SERVE_ENV_MANUAL_STEP = (
+    "only the operator edits serve.env: open it in an editor on this machine, add or "
+    "change the line, then restart skep serve so the daemon loads it (the chat cannot "
+    "do this step)"
+)
 
 
 def _fold(path: Path) -> Path:
@@ -214,9 +222,10 @@ def _reason(
     if folded in {alias_key(spelling) for spelling in path_spellings(codex_auth_file())}:
         return f"{path} is the Codex login ($CODEX_HOME/auth.json)"
     for home in skep_homes:
-        if folded == alias_key(home.parent / SERVE_ENV) or (
-            _under(folded, alias_key(home))
-            and any(fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES)
+        if folded == alias_key(home.parent / SERVE_ENV):
+            return f"{path} is skep's serve.env, which holds its keys; {SERVE_ENV_MANUAL_STEP}"
+        if _under(folded, alias_key(home)) and any(
+            fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES
         ):
             return f"{path} is one of skep's own secrets"
     return None
@@ -271,10 +280,13 @@ def shell_secret_floor_reason(
     (``cat $(printf ~/.s%s/id_rsa sh)``, a script that opens it). The real
     fix is sandboxing the Queen's shell (deny the floor paths like the
     worker sandbox will, B05) — out of scope here."""
-    for candidate in _command_paths(command, cwd):
-        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
-        if reason is not None:
-            return reason
+    try:
+        for candidate in _command_paths(command, cwd):
+            reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
+            if reason is not None:
+                return reason
+    except (OSError, ValueError, RuntimeError) as exc:  # v133 R1 (Sol S7): fail closed
+        return f"skep could not judge the paths this line names ({exc}), so it is refused"
     return None
 
 
@@ -318,16 +330,20 @@ def shell_read_target_unresolved(command: str, *, cwd: str | None) -> bool:
     from the home directory or above it). The floor resolves static tokens
     only (``shell_secret_floor_reason``); a line it cannot read is not
     denied — the operator may want it — but its card says so, HIGH."""
-    from .shell_prefixes import (
-        _FIND_EXEC_ACTIONS,
-        _WRAPPER_SHELLS,
-        command_line_segments,
-        program_name,
-    )
+    from .shell_prefixes import command_line_segments
 
     argvs = command_line_segments(command)
-    if argvs is None or _expands(command):
-        return True  # backticks / an unparseable line: nothing was read
+    if argvs is None or _expands(command) or "\0" in command:
+        return True  # backticks / an unparseable line / a NUL: nothing was read
+    try:
+        return _read_target_unresolved(argvs, cwd)
+    except (OSError, ValueError, RuntimeError):  # v133 R1 (Sol S7): a failed probe
+        return True
+
+
+def _read_target_unresolved(argvs: list[list[str]], cwd: str | None) -> bool:
+    from .shell_prefixes import _FIND_EXEC_ACTIONS, _WRAPPER_SHELLS, program_name
+
     homes = {alias_key(s) for s in path_spellings(Path.home())}
 
     def holds_home(path: Path) -> bool:
@@ -371,6 +387,20 @@ def _tilde(token: str) -> Path:
         return Path(token)
 
 
+def _may_exist(path: Path) -> bool:
+    """Might ``path`` name a file? v133-F1 (A1): a component too long to be a
+    file name (ENAMETOOLONG: a 300-byte prompt or heredoc word) names none;
+    any other failed probe counts as "may exist", so the word is still judged.
+    A policy probe never raises out of a chat turn."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG)
+    except ValueError:  # an embedded NUL names no file
+        return False
+    return True
+
+
 def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
     """The cwd and every path a host-shell line's tokens may name (also after
     ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
@@ -385,7 +415,7 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
     bases = [base]
     for argv in argvs:
         if len(argv) > 1 and program_name(argv[0]) in ("cd", "pushd"):
-            bases.append(bases[-1] / _tilde(os.path.expandvars(argv[1])))
+            bases.append(bases[-1] / _tilde(os.path.expandvars(argv[1].partition("\0")[0])))
     tokens = [token for argv in argvs for token in argv]
     tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
     tokens += _QUOTED_PATH.findall(command)
@@ -394,13 +424,15 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
         if "://" in token:
             continue  # a URL names no local file
         for part in {token, token.partition("=")[2]}:
-            part = part.removeprefix("@")
+            # v133 R1 (Sol S7): sh -c and execve read C strings, so a word
+            # ends at its first NUL — judge what is left, never raise on it
+            part = part.removeprefix("@").partition("\0")[0]
             if not part:
                 continue
             named = _tilde(os.path.expandvars(part))
             bare = len(named.parts) == 1 and not named.is_absolute()
             for path in dict.fromkeys(b / named for b in bases):
-                if named_only and bare and not path.exists():
+                if named_only and bare and not _may_exist(path):
                     continue  # a bare word (`df`, `-h`) names no file here
                 candidates.append(path)
                 if any(char in part for char in "*?["):
@@ -417,11 +449,16 @@ def names_path_under(command: str, root: Path, *, cwd: str | None, except_under:
     """D11: does the line (its cwd included) name a path under ``root`` — by
     either spelling, the requested path or its realpath — that is not under
     ``except_under``?"""
-    roots = {alias_key(spelling) for spelling in path_spellings(root)}
-    exempt = {alias_key(spelling) for spelling in path_spellings(except_under)}
-    for candidate in _command_paths(command, cwd, named_only=True):
-        for spelling in path_spellings(candidate):
-            folded = alias_key(spelling)
-            if any(_under(folded, r) for r in roots) and not any(_under(folded, e) for e in exempt):
-                return True
+    try:
+        roots = {alias_key(spelling) for spelling in path_spellings(root)}
+        exempt = {alias_key(spelling) for spelling in path_spellings(except_under)}
+        for candidate in _command_paths(command, cwd, named_only=True):
+            for spelling in path_spellings(candidate):
+                folded = alias_key(spelling)
+                if any(_under(folded, r) for r in roots) and not any(
+                    _under(folded, e) for e in exempt
+                ):
+                    return True
+    except (OSError, ValueError, RuntimeError):  # v133 R1 (Sol S7): fail closed
+        return True
     return False

@@ -12,7 +12,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .worktree import TREE_LOCK
 
@@ -234,8 +234,13 @@ def apply_patch_on_branch(
     task_id: str,
     actor: str,
     verified_base: str | None = None,
+    commit_out: list[str] | None = None,
 ) -> str | None:
     """Apply the patch on a fresh branch via a temp worktree; never touches main.
+
+    ``commit_out`` (R2, Sol S12): on success it receives the landing commit,
+    read in the apply worktree right after committing — the branch tip read
+    later may already be another landing's.
 
     Returns an error string on failure, None on success. The commit carries an
     ``Approved-by: <actor>`` trailer — ``<actor>`` is a username for a human or
@@ -287,6 +292,7 @@ def apply_patch_on_branch(
             )
             if committed.returncode != 0:
                 return f"commit on {branch} failed: {committed.stderr.strip()}"
+            commit = _git(apply_dir, "rev-parse", "HEAD").stdout.strip()
             if not branch_exists:
                 # The branch is born WITH the landing commit, never before it:
                 # `worktree add -b` made it first, so a failed add/apply left
@@ -303,6 +309,8 @@ def apply_patch_on_branch(
                 _git(repo, "worktree", "prune")
     if _git(repo, "rev-parse", "--verify", f"refs/heads/{branch}").returncode != 0:
         return f"branch {branch} missing after apply; aborting"
+    if commit_out is not None:
+        commit_out.append(commit)
     return None
 
 
@@ -314,10 +322,23 @@ def moved_past_verified_base(repo: Path, branch: str, verified_base: str | None)
     return tip if verified_base is not None and tip is not None and tip != verified_base else None
 
 
+_FROM_STORE: Any = object()
+
+
 def land_patch(
-    store: RunStore, repo: Path, branch: str, patch_path: Path, *, task_id: str, actor: str
+    store: RunStore,
+    repo: Path,
+    branch: str,
+    patch_path: Path,
+    *,
+    task_id: str,
+    actor: str,
+    verified_base: str | None = _FROM_STORE,
+    commit_out: list[str] | None = None,
 ) -> str | None:
     """``apply_patch_on_branch`` on the commit G10 verified (ES-F3, B131).
+    ``verified_base``: the one the caller already read (v133 R1, Sol S4).
+    ``commit_out``: receives the landing commit (R2, Sol S12).
 
     An append past that commit still lands (a human asked for the stack), but
     the record stops calling the run confirmed — every landing surface then
@@ -334,11 +355,13 @@ def land_patch(
     )
     if landed is not None:
         return f"this task already landed on {landed}; a task lands once — dispatch a follow-up"
-    verified_base = store.verified_base(task_id)
+    if verified_base is _FROM_STORE:
+        verified_base = store.verified_base(task_id)
     moved = moved_past_verified_base(repo, branch, verified_base)
     failure = apply_patch_on_branch(
-        repo, branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base
-    )
+        repo, branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base,
+        commit_out=commit_out,
+    )  # fmt: skip
     if failure is None and moved is not None and verified_base is not None:
         store.unconfirm_reverification(
             task_id,

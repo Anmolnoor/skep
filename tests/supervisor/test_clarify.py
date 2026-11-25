@@ -123,5 +123,7 @@ def test_web_ui_renders_choices_as_buttons() -> None:
     assert "clarification: (d)" in source
     assert "const clarificationChoices" in source
     assert 'class: "clarify-choices"' in source
-    assert "input.value = choice;" in source  # answers ride the real composer
+    # answers ride the real composer; v133-F22: as deliver's argument, so a
+    # draft in the box is left alone
+    assert "deliver(choice);" in source
     assert ".clarify-choices" in styles

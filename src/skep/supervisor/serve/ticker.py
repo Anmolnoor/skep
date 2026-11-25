@@ -35,6 +35,9 @@ from .settings import (
 )
 
 logger = logging.getLogger("skep.serve")
+# v133-F37: the actor a timed-out card records — the deadline, never a person
+# (the same string ACP's own card deadline records, actions.expire_acp_permission).
+TIMEOUT_ACTOR = "auto:timeout"
 
 # v59-F6: how often the ticker re-probes provider health. Before this wiring
 # run_provider_health_checks had no production caller at all — provider_health
@@ -110,6 +113,19 @@ class Ticker(threading.Thread):
 
         push_to_chat_channel(self._store, self._holder.current.home, chat_id, text, kind=kind)
 
+    def _continue_settled_gates(self) -> None:
+        """v133-F31 (G8): a run that waited at a gate gets its continuation
+        once the gate settles — a gate denied anywhere (web, CLI, a phone)
+        fires no done-callback, so the tick notices instead. Engine-free
+        tickers (tests, CLI-shaped callers) skip it."""
+        if self._runner is None:
+            return
+        from .chat import continue_settled_gates
+        from .jobs import Dispatcher
+
+        assert isinstance(self._runner, Dispatcher)
+        continue_settled_gates(self._store, self._holder, self._runner, self._holder.current.home)
+
     def _expire_cards(self) -> None:
         """v54-F1 (ADR 0032): auto-DENY proposed cards older than the timeout.
 
@@ -155,7 +171,9 @@ class Ticker(threading.Thread):
                 )
                 continue
             try:
-                self._store.resolve_chat_action(card.action_id, status="denied", result=payload)
+                self._store.resolve_chat_action(
+                    card.action_id, status="denied", result=payload, actor=TIMEOUT_ACTOR
+                )  # v133-F37: the deadline decided, no human (I6)
             except (KeyError, ValueError):
                 continue  # resolved concurrently — that verdict stands
             log_denied_dispatch_asks(self._store, self._holder, card)  # I6: a timeout denies
@@ -345,6 +363,10 @@ class Ticker(threading.Thread):
                 self._supersede_orphan_acp_cards()
             except Exception:
                 logger.exception("orphaned ACP card sweep failed")
+            try:
+                self._continue_settled_gates()  # starts threads; never waits on a turn
+            except Exception:
+                logger.exception("settled-gate continuation sweep failed")
             # ES B27: at most one schedule pass in flight; a slow one makes the
             # next tick skip it, never queue behind it. Each job inside has its
             # own ceiling: scripts SCRIPT_TIMEOUT_SECONDS, prompt turns

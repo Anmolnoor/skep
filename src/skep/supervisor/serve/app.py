@@ -28,7 +28,7 @@ from skep.worker_contract import Event
 
 from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
-from ..forensics import _commands_source, build_run_forensics, filtered_decisions
+from ..forensics import _commands_source, build_run_forensics, filtered_decisions, syntax_only
 from ..store import RunStore
 from .actions import (
     allow_network_host_and_resume,
@@ -103,6 +103,7 @@ from .chat import (
     ChatEngine,
     add_chat_routes,
     run_completion_turn,
+    say_continuation_failed,
 )
 from .console import add_console_routes
 from .jobs import Dispatcher
@@ -1254,8 +1255,9 @@ def create_app(
 
         # v47-F3: the PR assembly is shared with the chat's open_pr tool.
         return open_pr_from_branch(
-            run_store, holder.current.audit_dir, run, branch=branch, base=body.base
-        )
+            run_store, holder.current.audit_dir, run, branch=branch, base=body.base,
+            actor=principal(request),  # v133-F37: the ledger names who pushed (I13)
+        )  # fmt: skip
 
     @app.post("/api/runs/{task_id}/land")
     def land(task_id: str, body: ResolveRequest, request: Request) -> dict[str, Any]:
@@ -1385,7 +1387,11 @@ def create_app(
             # Phase 10 R2 I10: whose command G10 re-ran, as forensics reads it
             "reverification": None
             if reverify is None
-            else {**asdict(reverify), "commands_source": _commands_source(reverify.detail)},
+            else {
+                **asdict(reverify),
+                "commands_source": _commands_source(reverify.detail),
+                "syntax_only": syntax_only(reverify.commands),  # v133 (F-I1)
+            },
             # ES-F291 follow-up (I8): a landable patch with no G10 record says
             # so (still running, or never ran) instead of showing nothing.
             "reverification_missing": (
@@ -1520,15 +1526,27 @@ def create_app(
                 return
         except Exception:
             logging.getLogger("skep.serve").exception("unlocked auto-answer failed")
-        notify_run_terminal(run_store, config.home, task_id, web_ui_url=web_ui_url)
+        try:
+            notify_run_terminal(run_store, config.home, task_id, web_ui_url=web_ui_url)
+        except Exception:  # v133-F32: a broken notice must not cost the conversation
+            logging.getLogger("skep.serve").exception("run-finish notice failed")
         if run_store.get_setting(CONTINUE_CHAT_SETTING) is False:
             return  # opt-out; default is on
         threading.Thread(
-            target=run_completion_turn,
-            args=(run_store, holder, runner, config.home, task_id),
+            target=_continue_after_run,
+            args=(task_id,),
             name=f"skep-continue-{task_id[:8]}",
             daemon=True,
         ).start()
+
+    def _continue_after_run(task_id: str) -> None:
+        """v133-F32 (G8): a continuation that raises says so in its chat — a
+        daemon thread's exception reaches no one."""
+        try:
+            run_completion_turn(run_store, holder, runner, config.home, task_id)
+        except Exception as exc:
+            logging.getLogger("skep.serve").exception("run-finish continuation failed")
+            say_continuation_failed(run_store, task_id, f"{type(exc).__name__}: {exc}")
 
     runner.on_run_finished = _on_run_finished
 

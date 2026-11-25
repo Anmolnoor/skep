@@ -10,7 +10,7 @@ import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
 import { viewInbox } from "./js/pages/inbox.js";
-import { forensicsSection, g10Provenance, routeLive, viewReview } from "./js/pages/run-detail.js";
+import { forensicsSection, g10Notes, g10Provenance, routeLive, viewReview } from "./js/pages/run-detail.js";
 import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
 import { viewSchedules } from "./js/pages/schedules.js";
 import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js";
@@ -19,11 +19,14 @@ import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js
 
 // v130-F10: the working line's Stop. A direct POST — typed text queues behind
 // the turn (v103-F1), so a typed /stop would arrive only after it ended.
-function stopButton(chatId) {
+// v133-F23: `onStop` runs first, before the POST can fail — the chat holds
+// its local queue there.
+function stopButton(chatId, onStop = null) {
   return el("button", {
     type: "button",
     class: "chat-stop",
     onclick: async () => {
+      if (onStop) onStop();
       try { flash("ok", (await api("POST", `/api/chats/${chatId}/stop`)).detail); }
       catch (err) { flash("bad", err.message); }
     },
@@ -282,7 +285,13 @@ function cardRuns(card) {
       el("span", { class: "mono" }, `run ${shortTaskId(run.task_id)}`),
       run.tamper ? el("p", { class: "banner bad", role: "alert" }, `⚠ V1 · ${run.tamper}`) : null,
       run.warning && run.warning !== run.tamper ? ` · ⚠ ${run.warning}` : null,
-      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null))));
+      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null,
+      // v133-F34 (F-I3, J1): the worker's result and G10's apart, each in the
+      // store's words; a landing from before v133 says what it lacks.
+      run.worker ? el("p", { class: "note card-run-worker" }, run.worker) : null,
+      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" ? "" : " bad"}` },
+        run.supervisor) : null,
+      run.landing ? el("p", { class: "note card-run-landing" }, run.landing) : null))));
 }
 
 // R4 K8: the commands a review grants, as text — the stored argv the server
@@ -452,8 +461,10 @@ function receiptNode(d) {
     ? `denied by ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`
     : "denied by policy";
   return el("div", { class: "confirm-card receipt-card" },
+    // v133-F34 (J2): the store records this row "allowed by policy" — a rule
+    // decided it, not a click — so the receipt says so.
     el("p", { class: "card-kicker" },
-      allowed ? "Ran without asking — you approved this already" : "Denied — this did not run"),
+      allowed ? "Allowed by policy — ran without asking" : "Denied — this did not run"),
     el("p", { class: "card-headline mono" }, card.headline || d.tool),
     card.risk ? el("p", { class: "card-risk" },
       el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
@@ -1994,7 +2005,8 @@ function projectIdForRepo(repo) {
 function cardVerdict(action) {
   const note = (action.result && (action.result.error || action.result.note)) || "";
   switch (action.status) {
-    case "confirmed": return ["✓ Approved", "confirm"];
+    // v133-F34 (J2): the store's verdict for a row a rule decided, no human
+    case "confirmed": return [action.verdict === "allowed by policy" ? "✓ Allowed by policy" : "✓ Approved", "confirm"];
     case "executing": return ["… Running — confirmed elsewhere", "confirm"];
     case "failed": return [`✗ Failed — ${note || "the action did not complete"}`, "deny"];
     case "interrupted": return [`⚠ Interrupted — ${note || "serve stopped mid-run"}`, "deny"];
@@ -2427,27 +2439,53 @@ async function viewChat(main, chatId) {
   // v103-F1: the queued-steer receipt. A message taken mid-turn is SHOWN until
   // it is sent — "queued" that the operator cannot see is indistinguishable
   // from the drop this replaced (I8).
-  const queuedText = el("span", { class: "queued-steer-text" });
-  const queuedNote = el("div", { class: "queued-steer", hidden: true },
-    el("span", { class: "chip tone-info" }, "queued"), queuedText);
+  // v133-F22 (G3): one chip per queued message, each with Edit (back into
+  // the box, beside any draft) and Cancel — a second message never
+  // overwrites or merges into the first.
+  const queuedNote = el("div", { class: "queued-steer", hidden: true });
   // Declared HERE, above setComposerLocked, on purpose: that function calls
   // flushQueued and runs during the first render, before the composer handlers
   // further down have initialized. Declared beside them it would be a temporal
   // dead zone and the chat would fail to render at all. The empty-queue guard
   // is the first line for the same reason — the startup calls return before
   // they can reach `deliver`.
-  let queuedMessage = "";
-  const renderQueued = () => {
-    queuedNote.hidden = !queuedMessage;
-    queuedText.textContent = queuedMessage;
+  let queued = []; // { text, held }
+  // v133-F23 (G6): Stop holds the queue — nothing queued is sent because
+  // Stop was pressed; the chips say "held" with Send and Discard. v133 R1
+  // (S17): held per message — a chip's Send releases that message only.
+  const holdQueue = () => { for (const item of queued) item.held = true; renderQueued(); };
+  // Text handed back to the box goes in front of whatever the operator is
+  // typing now — nothing in the box is overwritten.
+  const returnToBox = (text) => {
+    input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+    input.focus();
   };
+  const renderQueued = () => {
+    queuedNote.hidden = queued.length === 0;
+    const action = (label, onclick) =>
+      el("button", { type: "button", class: "ghost queued-steer-action", onclick }, label);
+    queuedNote.replaceChildren(...queued.map((item) => {
+      const { text, held } = item;
+      const take = () => { queued.splice(queued.indexOf(item), 1); renderQueued(); };
+      return el("div", { class: `queued-steer-item${held ? " held" : ""}` },
+        el("span", { class: `chip ${held ? "tone-warn" : "tone-info"}` },
+          held ? "held" : "queued"),
+        el("span", { class: "queued-steer-text", title: text }, text),
+        held
+          ? action("Send", () => { item.held = false; renderQueued(); flushQueued(); })
+          : null,
+        action("Edit", () => { take(); returnToBox(text); }),
+        action(held ? "Discard" : "Cancel", take));
+    }));
+  };
+  // The first queued message goes when the composer frees; the turn it
+  // starts flushes the next one in its own finally. The box is not touched.
   const flushQueued = () => {
-    if (!queuedMessage || send.disabled || !assistantReady) return;
-    const content = queuedMessage;
-    queuedMessage = "";
+    const at = queued.findIndex(item => !item.held);
+    if (at < 0 || send.disabled || !assistantReady) return;
+    const [{ text }] = queued.splice(at, 1);
     renderQueued();
-    input.value = content;
-    deliver();
+    deliver(text);
   };
   // Phase 10 10.3: completion, /help and refusals read the registry's web slice.
   let deck = { commands: [], refusals: {} };
@@ -2580,9 +2618,10 @@ async function viewChat(main, chatId) {
       if (d.state === "completed") flash("ok", `run ${d.task_id.slice(0, 13)}… completed`);
       else flash("bad", `run ${d.task_id.slice(0, 13)}… ${d.state}${d.detail ? `: ${d.detail}` : ""}`);
       // The stored terminal line (v59-F2's call to action) is already in the
-      // transcript — redraw so it shows without a reload, v81-F13-style.
-      // Never mid-stream, never over a draft the operator is typing.
-      if (!chatStreamActive && !input.value.trim()) route();
+      // transcript — draw it without a reload. v133-F20: appended in place,
+      // never a rebuild, so a draft, focus and scroll survive; mid-stream the
+      // stream's finally draws it (a row from outside).
+      if (!chatStreamActive) reconcile().catch(() => {});
     });
     source.onerror = () => {
       source.close();
@@ -2628,6 +2667,7 @@ async function viewChat(main, chatId) {
     closeLiveWorkerSources();
     clearInterval(runRowsTick);
     if (window.__skepStatusES) { window.__skepStatusES.close(); window.__skepStatusES = null; }
+    chatReconcile = null;
   };
   const maybeMountWorkerActivity = (raw) => {
     const result = unwrapToolResult(raw);
@@ -2640,12 +2680,64 @@ async function viewChat(main, chatId) {
       if (chatStreamActive) trackRun(String(result.task_id));
     }
   };
+  // v133-F19 (G8): the highest stored message id this view has drawn. The
+  // poll and the stream's finally draw only rows above it — a row is drawn
+  // once, whichever of them sees it first.
+  let drawnMessageId = 0;
+  // v133 R1 (S6): the rows the last stream drew live, as a test the next
+  // reconcile applies once to the rows above the watermark — whichever
+  // reconcile runs first after the stream (its own finally or a poll).
+  // `streamEpoch` counts streams: a read that began before one did predates
+  // that stream's rows and must not spend its rule.
+  let streamRule = null;
+  let streamEpoch = 0;
+  // v133 R2 (S16): reads are numbered as they start; a response older than
+  // the last one applied is stale and is dropped, never drawn over a newer
+  // snapshot (nor allowed to free the queue).
+  let readsStarted = 0;
+  let readApplied = 0;
+  // v133-F24 (G7): what the operator sent in this chat, oldest first — the
+  // ↑ recall walks it. Filled by replay (their own rows only) and by deliver.
+  const sentHistory = [];
+  // v133-F19: a live event (the poll) updates what it concerns — new rows
+  // appended, cards drawn or resolved — and never rebuilds #main, so a reply
+  // a background turn stored shows within one poll. v133-F20: the terminal
+  // event and a card resolved elsewhere come here too; an operator scrolled
+  // up to read keeps their place.
+  const reconcile = async () => {
+    if (!activeChatId || chatStreamActive) return;
+    const epoch = streamEpoch;
+    const read = ++readsStarted;
+    const fresh = await api("GET", `/api/chats/${activeChatId}`);
+    // a stream began meanwhile (or ran start to finish): its finally reconciles
+    if (chatStreamActive || epoch !== streamEpoch || read < readApplied) return;
+    readApplied = read;
+    const readingAt = log.scrollHeight - log.scrollTop - log.clientHeight > 40 ? log.scrollTop : null;
+    // The context panel redraws only when what it shows moved — a quiet poll
+    // touches nothing on screen.
+    const shown = (chat, acts) => JSON.stringify([chat?.title, chat?.role, chat?.model,
+      acts.map(a => [a.action_id, a.status])]);
+    const panelChanged = shown(activeChat, actions) !== shown(fresh.chat || activeChat, fresh.actions);
+    detail = fresh;
+    messages = fresh.messages;
+    actions = fresh.actions;
+    activeChat = fresh.chat || activeChat;
+    replayGroup = null;
+    const drewLive = streamRule || (() => false);
+    streamRule = null;
+    const unseen = messages.filter(m => m.id > drawnMessageId);
+    drawMessages(unseen.filter(m => !drewLive(m)));
+    drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
+    renderPendingCards();
+    if (panelChanged) drawContext(activeChat, actions);
+    if (readingAt !== null) log.scrollTop = readingAt;
+  };
+  chatReconcile = reconcile;
+  // v133-F21 (G2): a pending card withholds only SENDING; the textarea
+  // always takes typing — what is typed meanwhile queues (deliver).
   const setComposerLocked = (locked) => {
-    input.disabled = locked || !assistantReady;
+    input.disabled = !assistantReady;
     send.disabled = locked || !assistantReady;
-    // v56-F6: let the global poll watch this chat's pending cards so a
-    // resolution on another surface unlocks the composer here.
-    pendingCardChatId = locked ? activeChatId : null;
     // v103-F1: a card resolved elsewhere unlocks this composer — a steer that
     // was waiting on that verdict goes now.
     if (!locked) flushQueued();
@@ -2674,6 +2766,9 @@ async function viewChat(main, chatId) {
     const args = renderArgs(d.args);
     if (args) details.push(args);
     return [
+      // v133-F34 (J1): a landing G10 did not confirm says so first, in the
+      // server's words; the confirm button carries the same label.
+      card.action_label ? el("p", { class: "banner bad card-action-label", role: "alert" }, card.action_label) : null,
       tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       foldItems(card),
@@ -2715,7 +2810,7 @@ async function viewChat(main, chatId) {
 
   // A proposed mutation: the model never holds the trigger — you do.
   const actionCard = (d) => {
-    const approve = el("button", { class: "primary" }, "Approve");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
     const keep = keepSelect(d.card);
@@ -2732,7 +2827,8 @@ async function viewChat(main, chatId) {
         // R5-2 (K2): a confirm names how many items this card rendered — the
         // server refuses (409, nothing ran) a card that now holds another set.
         const items = (d.card?.items || []).length || 1;
-        await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`,
+        // v133-F37: the surface hint, so the store records who answered (not authorization)
+        await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}?surface=web`,
           verb === "confirm" ? { ...(keep ? { keep: keep.value } : {}), items } : {});
       }
       catch (e) {
@@ -2762,8 +2858,10 @@ async function viewChat(main, chatId) {
   // the verdict instead — done, not just dimmed.
   const resolveCardUI = (card, label, verb) => {
     card.classList.add("resolved");
-    card.append(el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label));
+    const verdictNode = el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label);
+    card.append(verdictNode);
     refreshContext();
+    return verdictNode;
   };
 
   // ---------- the command deck executor (v25-F1) ----------
@@ -2803,7 +2901,7 @@ async function viewChat(main, chatId) {
   // A deck mutation: the same confirm-card, resolved on the commands endpoints
   // (actor operator-command) — the model is never in this loop.
   const commandCard = (d, notes = []) => {
-    const approve = el("button", { class: "primary" }, "Confirm");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Confirm");
     const refuse = el("button", { class: "danger" }, "Cancel");
     const card = el("div", { class: "confirm-card command-card", "data-action-id": d.action_id },
       ...cardBody(d),
@@ -2864,7 +2962,7 @@ async function viewChat(main, chatId) {
   // superseded automatically when the Approvals view answers first. Never
   // locks the composer: a gate can wait; the conversation must not.
   const gateCard = (d) => {
-    const approve = el("button", { class: "primary" }, "Approve");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
@@ -2905,10 +3003,22 @@ async function viewChat(main, chatId) {
         // a newer proposal, or answered from another surface — must drop its
         // buttons: a live Approve on a dead action can only 409, which reads
         // as "approval is broken" (the Aug 9 five-close_pr field test).
-        if (drawn && !drawn.classList.contains("resolved")) {
-          resolveCardUI(drawn, ...cardVerdict(action));
+        // v133 R1 (S14): "executing" is passing — the next status replaces it.
+        const running = drawn?.querySelector(".verdict-running");
+        if (drawn && (!drawn.classList.contains("resolved") || (running && action.status !== "executing"))) {
+          running?.remove();
+          const verdictNode = resolveCardUI(drawn, ...cardVerdict(action));
+          if (action.status === "executing") verdictNode.classList.add("verdict-running");
         }
         continue;
+      }
+      // v133 R2 (S14): back at proposed after "executing" (a confirm refused
+      // and unclaimed): the passing verdict goes and the buttons come back.
+      const running = drawn?.querySelector(".verdict-running");
+      if (running) {
+        running.remove();
+        drawn.classList.remove("resolved");
+        for (const button of drawn.querySelector(".actions")?.querySelectorAll("button") || []) button.disabled = false;
       }
       if (drawn) continue;
       // v25-F1: operator /commands resolve on the commands endpoints; only
@@ -2943,9 +3053,9 @@ async function viewChat(main, chatId) {
       await followProject(card.tool, result);
       refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {
-      await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);
+      await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}?surface=web`); // v133-F37
     }
-    setComposerLocked(anyCardPending());
+    await reconcile(); // v133 R1 (S15): the card shows its verdict; the lock follows the server
     return true;
   };
 
@@ -3160,8 +3270,7 @@ async function viewChat(main, chatId) {
         const button = el("button", { class: "ghost" }, choice);
         button.addEventListener("click", () => {
           row.remove();
-          input.value = choice;
-          deliver();
+          deliver(choice); // v133-F22: the box (a draft) is left alone
         });
         return button;
       }));
@@ -3172,6 +3281,7 @@ async function viewChat(main, chatId) {
   const runStream = async (path, body = {}) => {
     send.disabled = true;
     chatStreamActive = true;  // v60-F1: the poll must not route() mid-stream
+    streamEpoch += 1;
     const replyOptions = {
       label: activeChat?.model || llm.default_model || "skep",
       scroll: scrollBottom,
@@ -3188,6 +3298,15 @@ async function viewChat(main, chatId) {
       reply = null;
     };
     let cardOpen = false;
+    // v133-F39 (G8): the stored ids this stream's message events named (F38's
+    // message_id) — the rows it drew, known instead of guessed.
+    const streamedIds = new Set();
+    // v133 R2 (S6/T7): the tool events this stream showed, as "name result"
+    // keys — a stored tool row counts as drawn only against one of these.
+    // v133 R3 (U1): an event that names its stored row (message_id) is
+    // matched by that id alone; the keys are for a server that names none.
+    const shownTools = [];
+    const streamedToolIds = new Set();
     let spokenText = "";  // v53-F6: what the voice toggle reads aloud
     // v40-F1: consecutive tool events accumulate into one activity group; the
     // first content/thinking delta or action card closes it (the same
@@ -3205,7 +3324,7 @@ async function viewChat(main, chatId) {
     // blank exactly while it is busiest. Shown after tool events, hidden the
     // moment real content streams, always the last element in the log.
     const working = el("div", { class: "chat-working", hidden: "" },
-      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId));
+      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId, holdQueue));
     log.append(working);
     // v87-F7: the working line carries a local elapsed counter — a 3-minute
     // provider prefill or an await_runs block reads as "Thinking… · 142s",
@@ -3233,6 +3352,7 @@ async function viewChat(main, chatId) {
     try {
       await streamSse(path, body, {
         message: (d) => {
+          if (d.message_id != null) streamedIds.add(Number(d.message_id));
           if (d.content) { hideWorking(); group = null; currentReply().append(d.content); spokenText += d.content; }
         },
         thinking: (d) => {
@@ -3240,6 +3360,8 @@ async function viewChat(main, chatId) {
         },
         tool: (d) => {
           finishReply();
+          if (d.message_id != null) streamedToolIds.add(Number(d.message_id));
+          else shownTools.push([d.tool, JSON.stringify(d.result ?? null)]);
           // v90-F3: `decision` rides only an auto-allowed mutation — one that
           // ran because a grant already covered it. Those get a receipt card
           // instead of a bare transcript line; everything else is unchanged.
@@ -3270,27 +3392,68 @@ async function viewChat(main, chatId) {
       working.remove();
       finishReply();
       speakReply(spokenText);
-      setComposerLocked(cardOpen);  // locked while a verdict is pending
-      const latest = await api("GET", "/api/chats");
-      chats = latest.chats;
-      activeChat = chats.find(chat => chat.chat_id === activeChatId) || activeChat;
-      if (activeChatId) {
-        detail = await api("GET", `/api/chats/${activeChatId}`);
-        messages = detail.messages;
-        actions = detail.actions;
-        activeChat = detail.chat;
-        // v81-F13: an SSE drop loses the live `action` event — the refreshed
-        // state re-draws any pending card the stream never delivered.
-        renderPendingCards();
+      // v133 R1 (S6): which stored rows this stream drew live — those its
+      // message events named by id (F38); an assistant row it did not name
+      // is a background turn's reply, unless it is blank (a tool-call round
+      // whose thinking streamed). From a server that names none, an
+      // assistant row whose text this stream showed. The operator's own row
+      // by the text sent; tool rows by their live tool events. Anything else
+      // — a run's terminal line, a schedule, a nudge — was not drawn.
+      // v133 R2 (S6/T7): an id is proof only once its text arrived (an id
+      // can come first, then the stream drop), and a tool row is drawn only
+      // if this stream showed its tool event — same result first, then same
+      // name — so a background turn's tool row is not swallowed.
+      // v133 R3 (U1): a tool row is drawn by the stored id its event named;
+      // an event with no id (an older server) by same name and result only —
+      // a name alone picked a background row of the same tool.
+      let ownText = typeof body.content === "string" ? body.content : null;
+      const shownText = [spokenText, spokenText.replace(/<think>[\s\S]*?<\/think>/g, "")];
+      const shown = (text) => shownText.some(all => all.includes(text));
+      const toolKey = (m) => {
+        try { return JSON.stringify(JSON.parse(m.content || "null")); } catch { return m.content; }
+      };
+      const claimTool = (match) => {
+        const at = shownTools.findIndex(match);
+        if (at >= 0) shownTools.splice(at, 1);
+        return at >= 0;
+      };
+      streamRule = (m) => {
+        const text = (m.content || "").trim();
+        if (m.role === "tool") {
+          return streamedToolIds.has(m.id)
+            || claimTool(([name, result]) => name === m.tool_name && result === toolKey(m));
+        }
+        if (streamedIds.has(m.id)) return !text || shown(text);
+        if (m.role === "assistant") {
+          return !text || (!streamedIds.size && shown(text));
+        }
+        if (m.role === "user" && ownText !== null && m.content === ownText && authorLabel(m, null) === null) {
+          ownText = null;
+          return true;
+        }
+        return false;
+      };
+      // No await above: the rule is set before any poll can reconcile.
+      // v133 R1 (S16): the lock — and with it the queue — waits for the
+      // server's card state: reconcile draws the rows above (by the rule),
+      // then any card whose `action` event the stream lost, and only then
+      // frees the composer and drains the queue.
+      try {
+        chats = (await api("GET", "/api/chats")).chats;
+        await reconcile();
+      } catch (e) {
+        // No card state read: Send follows what this stream saw, and the
+        // queue and the rule wait for the next reconcile (the poll).
+        send.disabled = cardOpen || !assistantReady;
+        flash("bad", `could not refresh the chat: ${e.message}`);
       }
       updateContextMeter();
       renderThreads(chats); // titles may have changed
       drawContext(activeChat, actions);
-      // v103-F1: the turn is over — send whatever the operator typed during it.
-      // After the refresh above, so a card raised by this turn has already
-      // locked the composer and the steer waits for the verdict instead of
-      // racing it.
-      flushQueued();
+      // v103-F1: the turn is over — whatever the operator typed during it is
+      // sent by the reconcile above (renderPendingCards), after a card raised
+      // by this turn has locked the composer, so a steer waits for the
+      // verdict instead of racing it.
     }
   };
 
@@ -3302,7 +3465,8 @@ async function viewChat(main, chatId) {
   // v40-F1: replay batches consecutive tool records into one activity group,
   // so a refresh reconstructs exactly what the live stream drew.
   let replayGroup = null;
-  for (const message of messages) {
+  const drawMessages = (list) => { for (const message of list) {
+    drawnMessageId = Math.max(drawnMessageId, message.id || 0);
     if (message.role === "tool") {
       let result = null;
       try { result = JSON.parse(message.content || "null"); }
@@ -3320,6 +3484,7 @@ async function viewChat(main, chatId) {
       replayGroup = null;
       if (isInternalNudge(message)) { noteLine(`skep: ${message.content}`); continue; }
       const own = message.role === "user" && authorLabel(message, null) === null;
+      if (own) sentHistory.push(message.content);
       renderChatMessage(log, message.role, message.content, {
         label: authorLabel(message,
           message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
@@ -3331,7 +3496,8 @@ async function viewChat(main, chatId) {
         chatId: activeChatId,
       });
     }
-  }
+  } };
+  drawMessages(messages);
   renderPendingCards();
   scrollBottom();
   watchStatus();  // v43-F4: reopening a chat with a live run resumes the status line
@@ -3373,19 +3539,35 @@ async function viewChat(main, chatId) {
   // Queued, not blocked: mid-turn is exactly when an operator most wants to
   // say something, and the honest thing is to take the message and send it at
   // the first moment the composer is free. Nothing is ever silently dropped.
-  const deliver = async () => {
-    const content = input.value.trim();
+  // v133-F22: `text` is a queued message or a clicked choice — sent as is,
+  // with the box (the operator's draft) left alone; no argument reads the box.
+  const deliver = async (text = null) => {
+    const fromBox = text === null;
+    const content = fromBox ? input.value.trim() : text;
     if (!content || !assistantReady) return;
-    if (send.disabled) {
-      // A second steer while one is already queued appends rather than
-      // replaces — losing the first would be the same bug wearing a queue.
-      queuedMessage = queuedMessage ? `${queuedMessage}\n${content}` : content;
-      input.value = "";
+    // v133 R1 (S15): a verdict addressed by id (/approve <id>, /deny <id>) is
+    // the decision itself, asked once — it goes to the resolver now; so does
+    // /btw, a read-only turn the server runs beside a pending card. Neither
+    // waits on the card's lock, only on a turn still streaming.
+    const beside = fromBox && !chatStreamActive && /^\/(?:approve|deny|btw)\s+\S/.test(content);
+    if (fromBox && content.startsWith("/") && anyCardPending() && !beside) {
+      // v133-F21: a /command typed under a pending card is never queued to
+      // run later on its own (a /deny meant for this card would hit the next
+      // one) — it stays in the box until the operator sends it again.
+      flash("bad", "a card is waiting — answer it first; your command stays in the box");
+      return;
+    }
+    if (send.disabled && !beside) {
+      // A second steer while one is already queued is its own chip —
+      // losing the first would be the same bug wearing a queue.
+      queued.push({ text: content, held: false });
+      if (fromBox) input.value = "";
       renderQueued();
       flash("ok", "queued — sends when this turn finishes");
       return;
     }
-    input.value = "";
+    if (fromBox) input.value = "";
+    sentHistory.push(content);
     suggest.hidden = true;
     // v25-F1: a /command is intercepted BEFORE the LLM chat loop — parsed
     // here, executed against the HTTP API, never sent to the model.
@@ -3399,7 +3581,7 @@ async function viewChat(main, chatId) {
     }
     await ensureChat();
     const attachments = pendingImages.length ? await uploadPendingImages() : [];
-    renderChatMessage(log, "user", content, {
+    const bubble = renderChatMessage(log, "user", content, {
       label: "You",
       onResend: fillInput,
       scroll: scrollBottom,
@@ -3409,11 +3591,17 @@ async function viewChat(main, chatId) {
     const payload = attachments.length ? { content, attachments } : { content };
     // D1: the surface hint, so the server's 409 follows the web's lock rule.
     try { await runStream(`/api/chats/${activeChatId}/messages?surface=web`, payload); }
-    catch (e) { flash("bad", e.message); send.disabled = false; }
+    catch (e) {
+      // v133-F22: a refused message (409: a background turn is running) was
+      // never stored — it leaves the transcript and comes back to the box.
+      bubble.remove();
+      returnToBox(content);
+      flash("bad", e.message);
+    }
     watchStatus();  // v43-F4: a dispatched run keeps reporting after the turn
     input.focus();
   };
-  send.addEventListener("click", deliver);
+  send.addEventListener("click", () => deliver());
   // v56-F3: the meter is server truth — typing does not move it; it refreshes
   // when the chat detail does (after each turn).
   input.addEventListener("input", updateSuggest);
@@ -3427,8 +3615,34 @@ async function viewChat(main, chatId) {
     updateAttachBadge();
     flash("ok", "image attached from clipboard");
   });
+  // v133-F24 (G7): ↑ in an empty box fills the last message sent in this
+  // chat; ↑ again walks back, ↓ forward and past the newest to the empty box.
+  // A draft is never replaced: ↑ acts only on an empty box or on a recalled
+  // message left as it was with the caret at its start; ↓ only on a recalled
+  // message with the caret on its last line.
+  let recallAt = null;
+  const recallStep = (back) => {
+    const recalling = recallAt !== null && input.value === sentHistory[recallAt];
+    if (back) {
+      const atStart = input.selectionStart === 0 && input.selectionEnd === 0;
+      if (input.value !== "" && !(recalling && atStart)) return false;
+      const at = recalling ? recallAt - 1 : sentHistory.length - 1;
+      if (at < 0) return recalling; // the oldest: stay on it
+      recallAt = at;
+    } else {
+      if (!recalling || input.value.slice(input.selectionEnd).includes("\n")) return false;
+      recallAt = recallAt + 1 < sentHistory.length ? recallAt + 1 : null;
+    }
+    input.value = recallAt === null ? "" : sentHistory[recallAt];
+    input.setSelectionRange(0, 0);
+    return true;
+  };
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { suggest.hidden = true; return; }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (recallStep(event.key === "ArrowUp")) event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); deliver(); }
   });
   input.focus();
@@ -3845,7 +4059,7 @@ async function viewRunDetail(main, taskId) {
     }
     // Phase 10 R2 I10 (I2, I8): whose command it was and the counts, as the
     // review page says them.
-    if (rv.outcome !== "not_applicable") for (const [k, v] of g10Provenance(rv)) kv(k, v);
+    if (rv.outcome !== "not_applicable") for (const [k, v] of [...g10Provenance(rv), ...g10Notes(rv)]) kv(k, v);
   } else if (detail.reverification_missing) {
     // ES-F291 follow-up (I8): a patch with no G10 record is "not re-verified",
     // never a blank row — landing refuses it until the record exists.
@@ -4963,17 +5177,18 @@ const POLL_MAX_MS = 60000;
 let pollDelay = POLL_MIN_MS;
 let pollTimer = null;
 // v56-F6 (ADR 0038): what the badge counts, the views must show. The poll
-// tracks the pending count and the chat whose composer a card has locked.
+// tracks the pending count; the open chat reconciles itself (v133-F20).
 let lastPendingApprovals = null;
-let pendingCardChatId = null;
 // v60-F1: true while a chat stream (message or card verdict) is being
 // consumed. Confirming a card resolves it server-side BEFORE the model's
 // continuation streams, so for those seconds the store shows zero proposed
-// cards while pendingCardChatId is still set — without this guard the v56-F6
+// cards while the composer is still locked — without this guard the v56-F6
 // poll called route() mid-stream, re-rendering the view and orphaning the
 // live stream's DOM (field test 2026-07-18: screen flicker, the follow-up
 // card invisible until it auto-denied, the chat apparently dead).
 let chatStreamActive = false;
+// v133-F19: the open chat view's in-place refresh (null on any other page).
+let chatReconcile = null;
 
 async function poll() {
   // Skip the fetch entirely while the tab is hidden.
@@ -5011,28 +5226,15 @@ async function poll() {
       route(); // the approvals list / Home "waiting" panel re-render with the badge
     }
     lastPendingApprovals = status.pending_approvals;
-    if (pendingCardChatId && !chatStreamActive && hash.startsWith("#/chat")) {
-      // A card resolved elsewhere (second tab, deck, the auto-deny sweep)
-      // unlocks this composer within one poll cycle instead of on reload.
+    if (chatReconcile && !chatStreamActive && hash.startsWith("#/chat/")) {
+      // v81-F13: a card born while this view sat idle (background approval,
+      // another tab, the ticker) appears within one poll instead of on
+      // reload. v133-F19: and so does a reply a background turn stored.
+      // v56-F6 / v133-F20: a card resolved elsewhere (second tab, deck, the
+      // auto-deny sweep) resolves here and unlocks the composer — in place.
       // v60-F1: never while a stream is in flight — the stream reconciles
-      // the composer itself in its finally, and a route() here would tear
-      // down the DOM the stream is appending to.
-      const detail = await api("GET", `/api/chats/${pendingCardChatId}`);
-      if (!detail.actions.some(blocksComposer)) {
-        pendingCardChatId = null;
-        route();
-      }
-    }
-    const openChatMatch = !chatStreamActive && hash.match(/^#\/chat\/(.+)$/);
-    if (openChatMatch) {
-      // v81-F13: the inverse direction — a card born while this view sat idle
-      // (background approval, another tab, the ticker) appears within one
-      // poll instead of on reload. route() replays history, which draws it.
-      const detail = await api("GET", `/api/chats/${openChatMatch[1]}`);
-      const undrawn = detail.actions.some(action =>
-        action.status === "proposed"
-        && !document.querySelector(`.confirm-card[data-action-id="${action.action_id}"]`));
-      if (undrawn) route();
+      // the view itself in its finally.
+      await chatReconcile();
     }
     const taskBadge = document.getElementById("tasks-badge");
     const { tasks } = await api("GET", "/api/tasks");

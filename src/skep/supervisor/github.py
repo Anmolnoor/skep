@@ -31,6 +31,10 @@ class PullRequestResult:
     opened: bool
     url: str | None
     detail: str
+    # v133-F14 (J3, I13): whether the branch reached origin, and the commit
+    # it pushed — a push that succeeds before gh fails is still a push.
+    pushed: bool = False
+    head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -368,8 +372,14 @@ def open_pull_request(
     title: str,
     body: str,
     runner: Runner = subprocess.run,
+    expected_head: str | None = None,
 ) -> PullRequestResult:
     """Push ``branch`` and open a PR against ``base``. Honest failure, never raises.
+
+    v133 R1 (Sol S5): the commit read here is the one pushed, by its id, to
+    ``refs/heads/<branch>`` — a branch that moves afterwards is not what
+    gets published. ``expected_head`` (the claimed card's): a tip that is not
+    it pushes nothing.
 
     Phase 09 R3 (S16): gh is told the repo — origin's, as HOST/OWNER/REPO,
     so GH_HOST never redirects it — and a non-GitHub origin is refused
@@ -395,22 +405,40 @@ def open_pull_request(
             f"then retry (or push once yourself: git -C {repo} push -u origin "
             f"{base}); skep never updates an existing default branch",
         )
-    push = _run(runner, ["git", "-C", str(repo), "push", "-u", "origin", branch])
+    tip = _run(runner, ["git", "-C", str(repo), "rev-parse", "--verify", f"refs/heads/{branch}"])
+    head = tip.stdout.strip() or None if tip.returncode == 0 else None
+    if expected_head is not None and head != expected_head:
+        return PullRequestResult(
+            False,
+            None,
+            f"{branch} is at {(head or 'nothing')[:12]}, not the {expected_head[:12]} the card "
+            "showed, so nothing was pushed",
+            head=head,
+        )
+    source = f"{head}:refs/heads/{branch}" if head else branch
+    push = _run(runner, ["git", "-C", str(repo), "push", "origin", source])
     if push.returncode != 0:
         why = (push.stderr or push.stdout).strip()
-        return PullRequestResult(False, None, f"git push failed: {why}")
-    created = _run(
-        runner,
-        ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
-         "--head", branch, "--title", title, "--body", body],
-        cwd=repo,
-    )  # fmt: skip
+        return PullRequestResult(False, None, f"git push failed: {why}", head=head)
+    try:
+        created = _run(
+            runner,
+            ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
+             "--head", branch, "--title", title, "--body", body],
+            cwd=repo,
+        )  # fmt: skip
+    except OSError as exc:  # v133 R1 (Sol S11): the push happened; keep its record
+        return PullRequestResult(
+            False, None, f"gh could not start ({exc}) after the push", pushed=True, head=head
+        )
     if created.returncode != 0:
         why = (created.stderr or created.stdout).strip()
-        return PullRequestResult(False, None, f"gh pr create failed: {why}")
+        return PullRequestResult(False, None, f"gh pr create failed: {why}", pushed=True, head=head)
     lines = [line for line in created.stdout.splitlines() if line.strip()]
     url = lines[-1].strip() if lines else None
-    return PullRequestResult(True, url, f"opened PR: {url}" if url else "opened PR")
+    return PullRequestResult(
+        True, url, f"opened PR: {url}" if url else "opened PR", pushed=True, head=head
+    )
 
 
 _MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
@@ -621,6 +649,10 @@ def _reverify_label(reverified: bool | None) -> str:
     )
 
 
+def _supervisor_words(supervisor: str | None, reverified: bool | None) -> str:
+    return supervisor or f"{_reverify_label(reverified)} (G10)"
+
+
 def default_pr_body(
     *,
     task_id: str,
@@ -628,12 +660,17 @@ def default_pr_body(
     verification: str | None,
     reverified: bool | None,
     changed_files: list[str],
+    supervisor: str | None = None,
 ) -> str:
+    """v133-F16 (F-I3, I2, I8): the worker's result and the supervisor's are
+    two lines, each from the store — ``supervisor`` is G10's own line
+    (``actions.g10_line``: command, source, exit codes); no model text."""
     files = "\n".join(f"- `{path}`" for path in changed_files) or "- (none)"
     return (
         f"Opened by **skep** from task `{task_id}`.\n\n"
         f"**Summary:** {summary or '-'}\n\n"
-        f"**Verification:** {verification or '-'} — {_reverify_label(reverified)} (G10).\n\n"
+        f"**Worker's result:** {verification or 'not reported'} (the worker's own report)\n\n"
+        f"**Supervisor's result:** {_supervisor_words(supervisor, reverified)}\n\n"
         f"**Changed files:**\n{files}\n\n"
         "_This branch is the worker's patch artifact applied verbatim; "
         "review the diff before merging._"
@@ -648,13 +685,15 @@ class GroupedRun:
     summary: str
     verification: str | None
     reverified: bool | None
+    supervisor: str | None = None  # v133-F16: G10's own line
 
 
 def default_grouped_pr_body(*, runs: list[GroupedRun], changed_files: list[str]) -> str:
     """The multi-run PR body: every run's evidence travels, same as single."""
     lines = "\n".join(
-        f"- `{run.task_id}`: {run.summary or '-'} — {run.verification or '-'} — "
-        f"{_reverify_label(run.reverified)} (G10)"
+        f"- `{run.task_id}`: {run.summary or '-'} — worker's result: "
+        f"{run.verification or 'not reported'} — supervisor's result: "
+        f"{_supervisor_words(run.supervisor, run.reverified)}"
         for run in runs
     )
     files = "\n".join(f"- `{path}`" for path in changed_files) or "- (none)"

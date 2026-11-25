@@ -657,7 +657,7 @@ class ChatRepl:
         # standing rule behind every `--yes` in the field test.
         body = {"keep": "once"} if verb == "confirm" else None
         with self.client.stream(
-            "POST", f"/api/chats/{chat_id}/actions/{action_id}/{verb}", body
+            "POST", f"/api/chats/{chat_id}/actions/{action_id}/{verb}?surface=cli", body
         ) as response:
             _state, more = render_turn(
                 iter_sse(response), show_thinking=self.show_thinking, url=self.url

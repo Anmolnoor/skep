@@ -38,11 +38,28 @@ export function g10Provenance(g10) {
   if ((g10.commands || []).length) {
     rows.push(["command from", COMMANDS_SOURCE[g10.commands_source] || COMMANDS_SOURCE.unknown]);
   }
+  // v133 R1: a pinned check that only proves the code parses, in the record's words.
+  if (g10.syntax_only) rows.push(["syntax-only check", g10.syntax_only]);
   const counts = g10.test_counts;
   if (counts?.baseline || counts?.patched) {
     rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
   }
   return rows;
+}
+
+// v133-F34 (F-I5, I8): a G10 that could not install the dependencies ran no
+// check, and its record's lead line says so (reverify.INSTALL_FAILED); a check
+// that failed on a network lookup carries reverify.OFFLINE_NOTE. Each is
+// quoted from the record's detail, on its own row.
+export function g10Notes(g10) {
+  const detail = String(g10.detail || "");
+  const lead = detail.split("\n")[0];
+  const offline = detail.match(/the replay runs offline[^;\n]*/);
+  return [
+    g10.outcome === "unavailable" && lead.includes("could not install dependencies")
+      ? ["re-verify did not run", lead] : null,
+    offline ? ["offline replay", offline[0]] : null,
+  ].filter(Boolean);
 }
 
 function g10Box(g10) {
@@ -57,7 +74,7 @@ function g10Box(g10) {
   if (ran) rows.push(["ran", commands || "-"], ["exit codes", g10.exit_codes.join(", ")]);
   else if (commands) rows.push(["recorded verify (not run)", commands]);
   rows.push(...g10Provenance(g10));
-  if (!nothing) rows.push(["V1 (test tamper)", g10.v1]);
+  if (!nothing) rows.push(...g10Notes(g10), ["V1 (test tamper)", g10.v1]);
   if (g10.detail && !nothing) rows.push(["detail", g10.detail]);
   return el("div", {},
     tampered ? el("p", { class: "banner bad", role: "alert" },

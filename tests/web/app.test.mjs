@@ -107,7 +107,7 @@ test("a grant-covered receipt says it ran, names the grant, and has no buttons",
     why: "allowed: a session grant",
     grant: { tier: "session", granted_at: "2026-11-09T10:00:00Z" },
   });
-  assert.equal(texts(node, "card-kicker")[0], "Ran without asking — you approved this already");
+  assert.equal(texts(node, "card-kicker")[0], "Allowed by policy — ran without asking");
   assert.equal(texts(node, "card-headline")[0], "uv run pytest");
   assert.equal(texts(node, "card-purpose")[0], "covered by session grant: uv run pytest");
   assert.equal(texts(node, "card-why")[0], "why: allowed: a session grant");
@@ -146,7 +146,7 @@ test("allow_with_constraints ran too — the receipt follows allows_execution()"
   const node = app.receiptNode({
     tool: "run_shell", decision: { verdict: "allow_with_constraints", reason: "ops.allow.dry_run" },
   });
-  assert.equal(texts(node, "card-kicker")[0], "Ran without asking — you approved this already");
+  assert.equal(texts(node, "card-kicker")[0], "Allowed by policy — ran without asking");
 });
 
 // ---------- ES-F1: a card's verdict follows its real status ----------

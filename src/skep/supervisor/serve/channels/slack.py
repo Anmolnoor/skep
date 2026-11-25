@@ -139,17 +139,19 @@ def run_summary_blocks(
     """v78-F6: a terminal run's rich summary — pure, pinned-shape. The one
     actions element is a URL button ("Open in web UI"): a link is navigation,
     not authority — NO Approve/Deny controls here, ever (landing is web-only,
-    I5/I6). Summary text is the supervisor's recorded summary (store truth)."""
-    from . import state_emoji
+    I5/I6). Summary text is the supervisor's recorded summary (store truth).
+    v133-F37 (J2): the view's ``reverify`` record, when given, picks the mark."""
+    from . import run_mark
 
     task_id = str(run_view.get("task_id") or "")
     state = str(run_view.get("state") or "")
+    mark = run_mark(state, run_view.get("reverify"))
     blocks: list[dict[str, object]] = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"{state_emoji(state)} *run {task_id[:12]}: {state}*",
+                "text": f"{mark} *run {task_id[:12]}: {state}*",
             },
         }
     ]

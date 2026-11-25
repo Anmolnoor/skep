@@ -250,7 +250,8 @@ def test_terminal_text_carries_the_state_prefix(store: RunStore, tmp_path: Path)
     )
     notice = run_terminal_text(store, task_id)
     assert notice is not None
-    assert notice[0].startswith("🟢 run ")  # completed, even when disagreed
+    # v133-F13 (J2): the mark is G10's verdict — a disagreement is never green
+    assert notice[0].startswith("🔴 run ")
 
     failed = mint_task(workspace=tmp_path / "ws-f", instructions="x", budget=DEFAULT_BUDGET)
     store.create_run(failed, repo=tmp_path, ref=None, execution_mode="sandbox")

@@ -379,6 +379,17 @@ def high_tier(
         if existing is None or existing.worker_kind == "script":  # unknown: fail closed
             return f"a script schedule {SCRIPT_SENTENCE}"
     overrides = safe.get("policy_overrides")
+    if tool == "setup_project" and store is not None:
+        # v133-F28 (J9, I1, I6): the lane that lands with no human, turned on
+        # by this write — asked for or derived from a phase default
+        from .tools import setup_card_facts
+
+        landing = (setup_card_facts(store, safe) or {}).get("auto_landing") or {}
+        if landing.get("new") is True and landing.get("old") is not True:
+            return (
+                f"it turns auto-landing on: G10-confirmed patches land on {landing['branch']} "
+                "with no human approval"
+            )
     if tool == "setup_project" and (
         safe.get("unlocked") is True
         or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
@@ -414,6 +425,13 @@ def high_tier(
                 return f"it picks the coding agent itself (engine {task['engine']!r})"
     if tool == "start_research" and _wildcard_network(safe):
         return "the run may reach any host on the internet (network '*')"
+    if store is not None and (label := landing_label(store, tool, safe)) is not None:
+        # v133-F12 (J1, I1, I2): a landing G10 did not confirm stays the
+        # human's to make — one card, HIGH, saying what G10 found
+        from .actions import g10_line
+
+        failed = [store.reverification_for(task_id) for task_id in _landed_runs(store, tool, safe)]
+        return f"{label}: " + "; ".join(g10_line(r) for r in failed if r and not r.confirmed)
     if tool in ("run_shell", "start_process"):
         from ..secret_floor import UNRESOLVED_READ, shell_read_target_unresolved
 
@@ -421,6 +439,24 @@ def high_tier(
         command = str(safe.get("command") or "")
         if command and shell_read_target_unresolved(command, cwd=None if cwd is None else str(cwd)):
             return UNRESOLVED_READ  # L3 (D44): the floor could not read it
+    return None
+
+
+def _landed_runs(store: RunStore, tool: str, args: dict[str, Any]) -> list[str]:
+    from .console import card_runs
+
+    return card_runs(store, tool, args) if tool in _LANDING_TOOLS else []
+
+
+def landing_label(store: RunStore, tool: str, args: dict[str, Any]) -> str | None:
+    """v133-F12 (J1): a land_run / approve_review (landing) card's action
+    label when G10 did not confirm a run it lands — None otherwise."""
+    from .actions import g10_landing_label
+
+    for task_id in _landed_runs(store, tool, args):
+        label = g10_landing_label(store.reverification_for(task_id))
+        if label is not None:
+            return label
     return None
 
 
@@ -529,35 +565,94 @@ def _host_of(args: dict[str, Any]) -> str | None:
     return urllib.parse.urlparse(value).hostname or value
 
 
+def _shell_risk(args: dict[str, Any]) -> str:
+    argv = _argv_of(args)
+    if not argv:
+        return "runs a command on this machine"
+    if is_outbound_content_prefix(argv):
+        return (
+            "sends content outward — public and permanent, and never grantable, "
+            "so this cards every time (ADR 0044)"
+        )
+    if escalates(argv):
+        return "privilege escalation — it would launder every command guard beneath it"
+    if is_ops_mutating_command(argv):
+        return "changes machine state (service, files, or backups) — approve-once only"
+    command_line = args.get("command") or args.get("shell_command")
+    refusal = (
+        queen_command_line_refusal(command_line)
+        if isinstance(command_line, str) and command_line.strip()
+        else queen_shell_refusal(argv)
+    )
+    if refusal is not None:
+        # Should never reach a card (the verb refuses it outright), but if a
+        # path ever proposes one, say the engine's own reason, not a guess.
+        return refusal
+    return "runs a command on this machine"
+
+
+# v133-F29 (F-I6): the Queen's own host shell — no sandbox, the operator's login
+_HOST_SHELL_TOOLS = frozenset({"run_shell", "start_process"})
+HOST_SHELL = "on this machine as your account, outside the sandbox"
+
+
+def _credential_dirs() -> tuple[str, ...]:
+    """The home-relative paths where the secret floor's credentials live
+    (``HOME_SECRETS``): each listed path, and the folder of a listed file
+    (``.claude/.credentials.json`` → ``.claude``). Longest first."""
+    from ..secret_floor import HOME_SECRETS
+
+    found = set(HOME_SECRETS)
+    for entry in HOME_SECRETS:
+        folder, _, leaf = entry.rpartition("/")
+        if folder and "." in leaf[1:]:
+            found.add(folder)
+    return tuple(sorted(found, key=len, reverse=True))
+
+
+def _credential_dir_named(command: str) -> str | None:
+    homes = r"(?:~|\$HOME|\$\{HOME\}|/(?:home|Users)/[^/\s'\"]+)"
+    names = "|".join(re.escape(name) for name in _credential_dirs())
+    found = re.search(rf"{homes}/({names})(?=[/\s'\"]|$)", command)
+    return None if found is None else f"~/{found[1]}"
+
+
+def host_shell_risk(args: dict[str, Any], line: str) -> str:
+    """v133-F29 (F-I6, I8, I12): a run_shell / start_process card says it runs on
+    this machine as your account, outside the sandbox; one that starts an
+    agent CLI or names a credential directory says that too, in plain words."""
+    from ..engines import CODING_ENGINES
+    from ..shell_prefixes import command_line_segments, program_name
+
+    generic = line == "runs a command on this machine"
+    parts = [f"runs {HOST_SHELL}" if generic else f"{line} — it runs {HOST_SHELL}"]
+    command = str(args.get("command") or "")
+    agents = {engine.binary for engine in CODING_ENGINES.values() if engine.binary}
+    started = [
+        program_name(segment[0])
+        for segment in command_line_segments(command) or []
+        if segment and program_name(segment[0]) in agents
+    ]
+    if started:
+        parts.append(
+            f"it starts the agent CLI `{started[0]}` with your own login, not a sandboxed run"
+        )
+    folder = _credential_dir_named(command)
+    if folder is not None:
+        parts.append(f"it names {folder}, a credential directory")
+    return "; ".join(parts)
+
+
 def risk(tool: str, args: dict[str, Any]) -> str | None:
     """The specific reason this needs a human, or None when there is none.
 
     Never invents a line: a benign read renders no risk at all.
     """
+    if tool in _HOST_SHELL_TOOLS:
+        # v133-F29 (F-I6, I12): a host shell says where it runs and as whom
+        return host_shell_risk(args, _shell_risk(args))
     if tool in _SHELL_TOOLS:
-        argv = _argv_of(args)
-        if not argv:
-            return "runs a command on this machine"
-        if is_outbound_content_prefix(argv):
-            return (
-                "sends content outward — public and permanent, and never grantable, "
-                "so this cards every time (ADR 0044)"
-            )
-        if escalates(argv):
-            return "privilege escalation — it would launder every command guard beneath it"
-        if is_ops_mutating_command(argv):
-            return "changes machine state (service, files, or backups) — approve-once only"
-        command_line = args.get("command") or args.get("shell_command")
-        refusal = (
-            queen_command_line_refusal(command_line)
-            if isinstance(command_line, str) and command_line.strip()
-            else queen_shell_refusal(argv)
-        )
-        if refusal is not None:
-            # Should never reach a card (the verb refuses it outright), but if a
-            # path ever proposes one, say the engine's own reason, not a guess.
-            return refusal
-        return "runs a command on this machine"
+        return _shell_risk(args)
     if tool == "propose_schedule" and args.get("caste") == "script":
         # ES (lane F3): one click grants recurring host shell as the operator;
         # the card has to say so, with the exact command and interval.
@@ -695,6 +790,54 @@ def _role_words(role: str | None) -> str:
     return "no role" if role is None else f"role {role}"
 
 
+def pr_review_pin_line(args: dict[str, Any], manifest: dict[str, Any] | None) -> str | None:
+    """v133-F27 (A5, I2, I9): a dispatch that reviews a PR head on a project
+    that pins no verify_command — G10 re-verifies a PR head only with the pin
+    (reverify.py, v88-F4), so the card says so before the run, with the line
+    that pins one. The review is still allowed. None otherwise."""
+    from ..github import PR_HEAD_REF
+
+    found = PR_HEAD_REF.fullmatch(str(args.get("ref") or ""))
+    if found is None or manifest is None or "error" in manifest or manifest.get("verify_command"):
+        return None
+    repo = shlex.quote(str(manifest.get("repo") or args.get("repo") or "<repo>"))
+    return (
+        f"PR #{found[1]}: G10 cannot re-verify this review — the project pins no "
+        f'verify_command; pin one first: `skep project setup {repo} --verify-command "<command>"` '
+        "(the review can still run, unverified)"
+    )
+
+
+def setup_line(setup: dict[str, Any]) -> str | None:
+    """v133-F28 (J9, F-I1): the setup card's line — the pin before and after
+    (syntax-only marked) and any auto-landing change with its branch."""
+    if setup.get("error"):
+        return f"its effect could not be previewed: {setup['error']}"
+    parts: list[str] = []
+    pin = setup.get("verify_command") or {}
+    if pin.get("old") != pin.get("new"):
+        old, new = (f"`{pin[key]}`" if pin.get(key) else "none" for key in ("old", "new"))
+        parts.append(f"verify_command: {old} → {new}")
+    if pin.get("syntax_only"):
+        parts.append(f"{pin['syntax_only']} — it cannot qualify a patch for auto-landing")
+    landing = setup.get("auto_landing")
+    if landing and landing.get("old") != landing.get("new"):
+        asked = landing.get("asked")
+        if landing.get("new"):  # unasked, only a phase default turns it on
+            how = "asked for" if asked else "from the phase default"
+            parts.append(f"auto-landing: off → ON ({how}), lands on {landing['branch']}")
+        else:
+            parts.append(f"auto-landing: on → off ({'asked for' if asked else 'derived'})")
+    elif landing and landing.get("old_branch") != landing.get("branch"):
+        # R3 (U3): a destination-only change, in plain words
+        how = "asked for" if landing.get("asked") else "derived"
+        parts.append(
+            f"auto-landing stays on: lands on {landing['branch']} instead of "
+            f"{landing['old_branch']} ({how})"
+        )
+    return "; ".join(parts) or None
+
+
 def recorded_card(
     tool: str,
     args: dict[str, Any],
@@ -713,6 +856,14 @@ def recorded_card(
     record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
     if manifest is not None:
         record["manifest"] = manifest
+    if tool == "dispatch_run" and (pin_line := pr_review_pin_line(args, manifest)) is not None:
+        record["pin_warning"] = pin_line
+    if tool == "setup_project":  # v133-F28: the pin and auto-landing, as previewed
+        from .tools import setup_card_facts
+
+        setup = setup_card_facts(store, args)
+        if setup is not None:
+            record["setup"] = setup
     if schedule_role is not None:
         record["schedule_role"] = schedule_role
     if tool == "propose_schedule":
@@ -726,6 +877,33 @@ def recorded_card(
         record["capture"] = capture_card(store, args)
     if tool == "merge_pr":  # R3 (S6): the pin the proposal already validated
         record["merge"] = merge_pin(store, args) if merge is None else merge
+    if tool in ("land_run", "approve_review", "open_pr"):
+        # v133-F11/F12 (J1, J3, I7): the runs it lands or publishes, each
+        # with its G10 facts, kept on the row; the confirm is bound to the
+        # G10 record each was drawn on (actions.shown_g10_moved)
+        from .actions import g10_fingerprint
+        from .console import run_evidence
+
+        runs = run_evidence(store, tool, args)
+        # R3 (U2): kept even when empty — the card shows what it recorded
+        record["evidence"] = {"runs": runs}
+        if runs:
+            record["g10_bound"] = {
+                run["task_id"]: g10_fingerprint(store.reverification_for(run["task_id"]))
+                for run in runs
+            }
+        label = landing_label(store, tool, args)
+        if label is not None:
+            record["action_label"] = label
+    if tool == "open_pr" and args.get("branch"):
+        # v133-F15 (J5, I7): the push is bound to the head this card shows
+        from ..apply import resolve_commit
+        from .console import _branch_repo
+
+        repo = _branch_repo(store, args)
+        head = None if repo is None else resolve_commit(repo, f"refs/heads/{args['branch']}")
+        if head is not None:
+            record["head"] = head
     return record or None
 
 
@@ -960,6 +1138,15 @@ def card_summary(
     push = (recorded or {}).get("push")
     if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
         danger = f"{push} — {danger}"
+    setup = (recorded or {}).get("setup")
+    if tool == "setup_project" and isinstance(setup, dict):
+        summary["setup"] = setup
+        line = setup_line(setup)
+        if line is not None:  # v133-F28: before the generic line, never instead
+            danger = line if danger is None else f"{line} — {danger}"
+    pin_warning = (recorded or {}).get("pin_warning")
+    if pin_warning:  # v133-F27 (A5): before the review runs, not after G10
+        danger = pin_warning if danger is None else f"{pin_warning} — {danger}"
     if tool == "approve_memory_proposal" and store is not None:
         # v126-F6: the approver sees what the filing chat (or note) had read
         from ..memory import taint_phrase, taint_words
@@ -1075,6 +1262,12 @@ def card_summary(
         )
         if facts is not None:
             summary["schedule"] = facts
+    if manifest is not None and manifest.get("base_ref"):
+        # v133-F30 (F-I2): what the worker will start from, on the line read first
+        commit = str(manifest.get("base_commit") or "")[:7]
+        if commit and manifest.get("base_before_refresh"):  # R2 (Sol T8)
+            commit += ", before the clone refreshes"
+        summary["headline"] += f" @ {manifest['base_ref']}" + (f" ({commit})" if commit else "")
     if len(folded) > 1:
         summary["items"] = [headline(tool, item, limit=None) for item in folded]
         summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"
@@ -1083,9 +1276,24 @@ def card_summary(
     if high is not None:
         summary["tier"] = "high"
         summary["high"] = high
-    if store is not None and live_tier:
+    label = (
+        landing_label(store, tool, safe_args)
+        if recorded is None and store is not None and live_tier
+        else (recorded or {}).get("action_label")
+    )
+    if label is not None:  # v133-F12 (J1): the button says what approving does
+        summary["action_label"] = label
+    evidence = (recorded or {}).get("evidence")
+    if evidence is not None:
+        # v133-F11/F16, R3 (U2): a card shows the runs it recorded when
+        # proposed, pending or resolved — the confirm acts on those; a
+        # recorded empty list stays empty
+        if evidence.get("runs"):
+            summary["runs"] = evidence["runs"]
+    elif store is not None and live_tier:
         # R4 K1: the thread's card is where a landing or PR is approved — it
         # names every run it lands or publishes, each with its G10 and V1.
+        # A card from before v133 R3 recorded none: it reads them live.
         from .console import run_evidence
 
         runs = run_evidence(store, tool, safe_args)

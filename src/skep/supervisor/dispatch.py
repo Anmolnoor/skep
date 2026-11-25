@@ -410,6 +410,59 @@ def _resolve_provider_routing(
     return decision, profile
 
 
+def starts_on_landing_branch(
+    config: SupervisorConfig,
+    repo: Path,
+    auto_apply_branch: str | None,
+    auto_apply_verified_patch: bool | None,
+) -> bool:
+    """ES-F6 (B132, I1): does a dispatch that names no ref start on its
+    project's auto-landing branch? Yes when the branch exists and the run
+    will land there. v133-F30 (F-I2): the dispatch card asks the same."""
+    return bool(
+        auto_apply_branch
+        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
+        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
+        == "allow"
+    )
+
+
+# v133-F26 (C1): how the operator mints an engine's token, where a CLI does it.
+_AUTH_MINT = {"claude_code": ("run `claude setup-token` and copy the token it prints", "token")}
+
+
+def refreshes_before_dispatch(config: SupervisorConfig, repo: Path) -> bool:
+    """v55-F2: a managed clone fetches when its run starts, so the commit it
+    starts from may be newer than the one a card read (R2, Sol T8)."""
+    return repo.parent == (config.home.parent / "repos").resolve()
+
+
+def launches_external_engine(worker_kind: str, engine: Any) -> bool:
+    """Whether a run of this caste starts ``engine``'s external agent — only
+    a coding run does. The proposal-time auth check asks the same (R2, T2)."""
+    return worker_kind == "coding" and bool(engine.external)
+
+
+def no_auth_env_refusal(engine: CodingEngine, *, serve_env: Path | None = None) -> str | None:
+    """v116-F1: the NO AUTH ENV refusal for an engine with none of its auth
+    env set in this process, else None. v133-F25: the chat asks it when a
+    dispatch card would be proposed, and run_task again before any record.
+    v133-F26 (C1, I9): it names the operator's three manual steps — the chat
+    can neither mint the token nor write ``serve_env`` (the secret floor)."""
+    if not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env):
+        return None
+    mint, value = _AUTH_MINT.get(engine.name, (f"get a {engine.auth_env[0]} value", "key"))
+    where = str(serve_env) if serve_env is not None else "<home>/serve.env"
+    return (
+        f"coding_engine {engine.name!r}: NO AUTH ENV — none of "
+        f"{'/'.join(engine.auth_env)} is set in the environment the worker inherits. "
+        f"Three steps on this machine, and the chat cannot do these steps: (1) {mint}; "
+        f"(2) add the line `{engine.auth_env[0]}=<{value}>` to {where}; (3) restart skep "
+        "serve so the daemon loads it (`skep run` uses your shell's environment "
+        "instead). `skep doctor` then shows the engine ready"
+    )
+
+
 def run_task(
     repo: Path,
     instructions: str,
@@ -477,7 +530,7 @@ def run_task(
     # v55-F2 (ADR 0035): a managed clone fetches before the baseline resolves —
     # the "is it on the latest code?" step. Managed clones only; workon dirs
     # are the operator's own. Offline dispatch keeps working from the clone.
-    if repo.parent == (config.home.parent / "repos").resolve():
+    if refreshes_before_dispatch(config, repo):
         try:
             refreshed = refresh_clone(repo)
             logger.info("refreshed %s before dispatch: %s", repo.name, refreshed["detail"])
@@ -544,7 +597,7 @@ def run_task(
     # (a hand-edited task, a stray caller) loses it here.
     if dispatch_decision is None or dispatch_decision.delegation is None:
         permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
-    if worker_kind == "coding" and engine.external:
+    if launches_external_engine(worker_kind, engine):
         # v132-F16 (v94-F3, ADR 0047 §3): what an engine cannot work without
         # is merged on every creation path, like its API host — `skep run
         # --minimal --engine …` resolves no policy and ran it with none.
@@ -556,7 +609,7 @@ def run_task(
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
-    worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    worker_argv = engine.argv if launches_external_engine(worker_kind, engine) else None
     # ADR 0058: an ACP engine's adapter runs in the sandbox; its governor here.
     adapter = acp_adapter(engine) if worker_argv is not None else None
     if wrapped == ACP_UNREGISTERED:
@@ -629,13 +682,8 @@ def run_task(
                 "`skep doctor` lists each engine; install it, or switch the project "
                 "to another engine (`skep project setup --engine builtin`)"
             )
-        if engine.auth_env and not any(os.environ.get(var) for var in engine.auth_env):
-            refusal = (
-                f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
-                f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
-                "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
-                "shell) — the line `skep doctor` prints for this engine"
-            )
+        refusal = no_auth_env_refusal(engine, serve_env=config.home.parent / "serve.env")
+        if refusal is not None:
             # ES-F122 (D20): a codex run on a project that opted in may use the
             # operator's ChatGPT plan login instead — checked HERE, before any
             # run record, against the run's whole budget (codex_login.py).
@@ -730,13 +778,10 @@ def run_task(
     # (v30), so a run that will land there must START there — based on main it
     # never sees the branch's earlier landings, and the second nearby task
     # conflicts. Only when the caller named no ref and the branch exists.
-    if (
-        not caller_chose_ref
-        and auto_apply_branch
-        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
-        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
-        == "allow"
+    if not caller_chose_ref and starts_on_landing_branch(
+        config, repo, auto_apply_branch, auto_apply_verified_patch
     ):
+        assert auto_apply_branch is not None
         ref = auto_apply_branch
     try:
         landing_decision = auto_apply_decision(

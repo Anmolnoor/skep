@@ -45,7 +45,7 @@ from .engines import (
 )
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
-from .policy import known_vacuous_verify
+from .policy import known_vacuous_verify, syntax_only_verify
 from .policy_resolver import (
     PolicyResolutionError,
     managed_repos_root,
@@ -1111,7 +1111,8 @@ def _external_engine_pause(
             ("strict_reads", "strict_read_confinement is off, so the agent could read your "
              f"whole home — `{setup} --strict-reads`")
         )  # fmt: skip
-    vacuous = known_vacuous_verify(str(policy.get("verify_command") or ""))
+    pin = str(policy.get("verify_command") or "")
+    vacuous = known_vacuous_verify(pin) or syntax_only_verify(pin)  # v133-F4
     if vacuous is not None:
         closed.append(
             ("verify_pin", f"{vacuous}, so G10 and its V1 test-tamper guard would confirm "

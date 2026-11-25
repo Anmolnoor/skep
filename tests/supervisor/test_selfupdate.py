@@ -35,7 +35,7 @@ from skep.supervisor.serve.selfupdate import (
 
 _MAJOR, _MINOR, _PATCH = (int(part) for part in __version__.split("."))
 NEWER = f"{_MAJOR}.{_MINOR}.{_PATCH + 1}"
-PIPX = Path("/home/alfin/.local/share/pipx/venvs/skep")
+PIPX = Path("/home/operator/.local/share/pipx/venvs/skep")
 PYTHON = str(Path(sys.executable).resolve())
 PIPX_INSTALL = ["pipx", "install", "--force", "--python", PYTHON]
 

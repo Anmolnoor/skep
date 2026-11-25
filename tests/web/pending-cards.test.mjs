@@ -68,7 +68,9 @@ test("a card the web can confirm still locks the composer, beside a read-only on
   const { main, input } = await openChat([modelCard(), roleCard]);
   assert.equal(main.querySelectorAll(".command-card").length, 2);
   assert.equal(main.querySelectorAll(".elsewhere-card").length, 1);
-  assert.equal(input.disabled, true);
+  // v133-F21: "locks" withholds sending; the textarea still takes typing.
+  assert.equal(main.querySelectorAll(".composer-send")[0].disabled, true);
+  assert.equal(input.disabled, false);
 });
 
 test("the web's message says it is the web, so the server applies the same rule", async () => {
@@ -123,7 +125,7 @@ test("R5-2: the chat confirm posts the rendered item count; a changed card reloa
   const card = main.querySelector(".confirm-card");
   await card.querySelectorAll("button").find(b => b.textContent === "Approve").click();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0][0], "/api/chats/c1/actions/a-url/confirm");
+  assert.equal(sent[0][0], "/api/chats/c1/actions/a-url/confirm?surface=web");
   assert.equal(sent[0][1].items, 1);
   assert.equal(routed, 1, "the thread reloads with the card as it is now");
   assert.deepEqual(app.flashes.at(-1), ["bad", "this card changed — review it again; nothing ran"]);

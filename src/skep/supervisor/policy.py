@@ -23,11 +23,13 @@ import shlex
 import subprocess
 import tempfile
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
 from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths
+from .shell_prefixes import launched_command
 from .store import RunStore
 
 
@@ -99,7 +101,9 @@ VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_ver
 # (round 3): the exit status is the LAST list's after `;`/newline; in an
 # and-or list `&&` needs every side vacuous and `||` any side; a pipe, a
 # background `&` or a command substitution can hide the code anywhere.
-_VACUOUS_ARGV0 = frozenset({"true", ":", "test", "[", "echo", "printf", "ls", "cat"})
+_VACUOUS_ARGV0 = frozenset(
+    {"true", ":", "test", "[", "echo", "printf", "ls", "cat", "cd", "pushd", "popd"}
+)
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _MASKING_TOKENS = frozenset({"|", "&", "|&", ";;", ";&"})
@@ -145,16 +149,19 @@ def _segment_vacuous(argv: list[str]) -> bool:
     return name in _VACUOUS_ARGV0
 
 
-def _and_or_vacuous(tokens: list[str]) -> bool:
+def _and_or_vacuous(
+    tokens: list[str], weak: Callable[[list[str]], bool] = _segment_vacuous
+) -> bool:
     """sh's and-or list, left to right at equal precedence: ``a && b`` always
-    passes iff both do, ``a || b`` iff either does (an empty side counts)."""
+    passes iff both do, ``a || b`` iff either does (an empty side counts).
+    ``weak`` judges one segment (v133-F4: also syntax-only)."""
     vacuous: bool | None = None
     joiner, segment = "&&", []
     for token in [*tokens, "&&"]:
         if token not in ("&&", "||"):
             segment.append(token)
             continue
-        this = _segment_vacuous(segment)
+        this = weak(segment)
         if vacuous is None:
             vacuous = this
         else:
@@ -211,6 +218,79 @@ def known_vacuous_verify(command: str) -> str | None:
     if "no test specified" in " ".join(last) or _and_or_vacuous(last):
         return f"`{shown}` passes whether or not the patch works"
     return None
+
+
+# v133-F4 (F-I1): checks that pass on any patch that parses, or that only ask
+# a tool to start — a chat-set `node --check index.js` pin "confirmed" patches
+# that touched no file it read. Narrow on purpose: a type check (`tsc
+# --noEmit`), a linter or a test runner is a real check. Options before the
+# first operand only: `node test.js -c` hands `-c` to the script.
+_SYNTAX_FLAGS: dict[str, frozenset[str]] = {
+    "node": frozenset({"--check", "-c"}),
+    "nodejs": frozenset({"--check", "-c"}),
+    **{shell: frozenset({"-n"}) for shell in _SHELLS},
+    "ruby": frozenset({"-c"}),
+    "perl": frozenset({"-c"}),
+    "php": frozenset({"-l"}),
+}
+_COMPILE_MODULES = frozenset({"py_compile", "compileall"})
+_PYTHON = re.compile(r"python[0-9.]*")
+_RUNNER_PREFIXES = (("uv", "run"), ("poetry", "run"), ("npx",))
+
+
+def _segment_syntax_only(argv: list[str]) -> bool:
+    while argv and (os.path.basename(argv[0]) == "env" or _ASSIGNMENT.match(argv[0])):
+        argv = argv[1:]
+    for prefix in _RUNNER_PREFIXES:
+        if tuple(argv[: len(prefix)]) == prefix:
+            argv = argv[len(prefix) :]
+            break
+    if not argv:
+        return False
+    name = os.path.basename(argv[0])
+    if name in _SHELLS and len(argv) >= 3 and argv[1] in ("-c", "-lc"):
+        return known_vacuous_verify(argv[2]) is not None or syntax_only_verify(argv[2]) is not None
+    if argv[1:] in (["--version"], ["--help"]):
+        return True
+    if _PYTHON.fullmatch(name):
+        return argv[1:2] == ["-m"] and argv[2:3] != [] and argv[2] in _COMPILE_MODULES
+    options = []
+    for token in argv[1:]:
+        if not token.startswith("-"):
+            break
+        options.append(token)
+    return bool(_SYNTAX_FLAGS.get(name, frozenset()) & set(options))
+
+
+def _segment_weak(argv: list[str]) -> bool:
+    # v133 R1 (Sol S1): a subshell, assignments and a launcher's own options
+    # (`env -C web`, `timeout 60`) only set the check up.
+    argv = [token for token in argv if token not in ("(", ")")]
+    while argv and _ASSIGNMENT.match(argv[0]):
+        argv = argv[1:]
+    argv = launched_command(argv)
+    return _segment_vacuous(argv) or _segment_syntax_only(argv)
+
+
+def syntax_only_verify(command: str) -> str | None:
+    """v133-F4 (F-I1): why ``command`` is a syntax-only (or version-only)
+    check, in plain words, or None. Read like ``known_vacuous_verify`` (the
+    last list's and-or); a known-vacuous pin is not also called syntax-only,
+    so a gate asks both. Such a pin never qualifies a patch for auto-landing."""
+    shown = command.strip()
+    if known_vacuous_verify(shown) is not None:
+        return None
+    tokens = _tokens(shown) or []
+    while tokens and tokens[-1] in (";", "\n"):
+        tokens.pop()
+    cut = max((i + 1 for i, t in enumerate(tokens) if t in (";", "\n")), default=0)
+    last = tokens[cut:]
+    if not last or not _and_or_vacuous(last, _segment_weak):
+        return None
+    return (
+        f"`{shown}` is syntax-only: it checks that the code parses (or that a tool "
+        "starts), not that the patch works"
+    )
 
 
 # v127-F5 round 2 (I2): files that decide what the pinned check runs. G10
@@ -276,6 +356,30 @@ _TEST_CONFIG_GLOBS = (
 )
 # Compared section by section (``_test_config(..., runner_only=True)``).
 _TEST_CONFIG_PARSED = ("pyproject.toml", "package.json", "setup.cfg", "tox.ini")
+# v133-F3 (A3): directories that hold installed dependencies. A manifest in
+# one is a dependency's own, not the project's test config (a repo without a
+# .gitignore put ~200 node_modules package.json files in one patch, each
+# labelled tampering). The files still block auto-landing
+# (``vendored_files``): a vendored runner is code the check may load (I2).
+_VENDORED_DIRS = frozenset({"node_modules", "vendor", ".venv", "site-packages"})
+
+
+# v133 R1 (Sol S9): the vendored directories no test runner reads — jest and
+# vitest exclude node_modules by default, pytest never recurses into it or a
+# virtualenv. Not `vendor/`: pytest collects from it.
+_RUNNER_UNREAD_DIRS = _VENDORED_DIRS - {"vendor"}
+
+
+def vendored_files(
+    changed_files: tuple[str, ...], dirs: frozenset[str] = _VENDORED_DIRS
+) -> tuple[str, ...]:
+    """The changed files under a vendored dependency directory (``dirs``)."""
+    return tuple(p for p in changed_files if dirs & set(p.split("/")[:-1]))
+
+
+def runner_unread(path: str) -> bool:
+    """Is ``path`` under a vendored directory no test runner reads?"""
+    return bool(vendored_files((path,), _RUNNER_UNREAD_DIRS))
 
 
 def _dig(node: object, *keys: str) -> object:
@@ -455,10 +559,16 @@ def test_config_changes(
     hits = [
         path
         for path in changed_files
-        if any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+        if (
+            any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+            and not runner_unread(path)
+        )
         or path.startswith(".github/workflows/")
     ]
-    parsed = [p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED]
+    vendored = vendored_files(changed_files)
+    parsed = [
+        p for p in changed_files if os.path.basename(p) in _TEST_CONFIG_PARSED and p not in vendored
+    ]
     hits += _config_changes(
         repo, patch_path, base, parsed, runner_only=True, head=head, modes=modes
     )
@@ -595,6 +705,19 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
                 "The patch is still landable by hand"
             )
         return f"{cannot_land_on(why)}. The patch is still landable by hand"
+    # v133-F4 (F-I1): every re-run that is not vacuous is syntax-only
+    if all(known_vacuous_verify(c) or syntax_only_verify(c) for c in ctx.reverify_commands):
+        why = "; ".join(filter(None, (syntax_only_verify(c) for c in ctx.reverify_commands)))
+        return f"{cannot_land_on(why)}. The patch is still landable by hand"
+    vendored = vendored_files(ctx.changed_files)
+    if vendored:
+        # v133-F3 (A3): not tampering, but code the check may load (I2)
+        return (
+            f"this patch vendors {len(vendored)} dependency file"
+            f"{'' if len(vendored) == 1 else 's'} ({vendored[0]}"
+            f"{', ...' if len(vendored) > 1 else ''}), which the check may load, so skep "
+            "can't land it by itself; the patch is still landable by hand"
+        )
     if ctx.pin_control_files:
         return (
             "the patch changes files that decide what the pinned check runs "
@@ -735,9 +858,11 @@ def maybe_auto_approve(
             ),
         )
         return None
+    made: list[str] = []
     failure = apply_patch_on_branch(
-        repo, target_branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base
-    )
+        repo, target_branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base,
+        commit_out=made,
+    )  # fmt: skip
     review_id = store.enqueue_approval(
         task_id, action="apply_patch", reason=note, decided_by=decided_by
     )
@@ -750,6 +875,7 @@ def maybe_auto_approve(
         )
         return None
     store.resolve_approval(
-        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch
-    )
+        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch,
+        landing_commit=next(iter(made), None),  # R2 (Sol S12): the commit it made
+    )  # fmt: skip
     return AutoApproval(rule_name=rule.name, review_id=review_id, note=note, branch=target_branch)

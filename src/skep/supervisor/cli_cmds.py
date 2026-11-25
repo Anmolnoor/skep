@@ -1267,8 +1267,9 @@ def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str
         verdict = "unavailable — re-verify (G10) could not run, NOT CONFIRMED"
     else:
         verdict = "NOT CONFIRMED by re-verify (G10)"
-    # Round 7 (I8): only a passed/failed outcome means the pin itself ran; a
-    # failed install stores the INSTALLER's exit code beside it.
+    # Round 7 (I8): only a passed/failed outcome means the pin itself ran. A
+    # failed install stores no exit code (v133-F8: reverify.INSTALL_FAILED
+    # leads its detail), so the detail line is what is shown for it.
     if rv.exit_codes and rv.outcome in ("passed", "failed"):
         how = f"re-ran {'; '.join(rv.commands)} → exit {', '.join(map(str, rv.exit_codes))}"
     else:
@@ -1846,9 +1847,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
             )
         try:
+            made: list[str] = []
             failure = land_patch(
-                store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
-            )
+                store, Path(record.repo), branch, patch_path, task_id=record.task_id,
+                actor=actor, commit_out=made,
+            )  # fmt: skip
         except BaseException:
             store.unclaim_approval(review_id)
             raise
@@ -1878,6 +1881,7 @@ def cmd_review(args: argparse.Namespace) -> int:
             actor=actor,
             note=args.note,
             landing_branch=branch,
+            landing_commit=next(iter(made), None),  # v133-F15; R2 (S12): the commit it made
             claimed=True,
         )
         print(f"approved: task {record.task_id} (by {actor})")
@@ -1889,7 +1893,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         if warning is not None:
             print(f"  warning: {warning}")
         if getattr(args, "pr", False):
-            open_pr_for_branch(store, record, branch, base=args.pr_base, audit_dir=audit_dir)
+            open_pr_for_branch(
+                store, record, branch, base=args.pr_base, audit_dir=audit_dir, actor=actor
+            )
         else:
             print(f"  next: git -C {record.repo} switch {branch}")
         return 0
@@ -1898,9 +1904,17 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def open_pr_for_branch(
-    store: RunStore, record: RunRecord, branch: str, *, base: str, audit_dir: Path
+    store: RunStore,
+    record: RunRecord,
+    branch: str,
+    *,
+    base: str,
+    audit_dir: Path,
+    actor: str | None = None,
 ) -> None:
     """Open a GitHub PR from an applied branch — the U1 'land', never a push to main."""
+    from .serve.actions import g10_line, record_pr
+
     if shutil.which("gh") is None:
         print("  note: gh CLI not found — push the branch and open the PR manually")
         return
@@ -1920,8 +1934,14 @@ def open_pr_for_branch(
             verification=record.verification_outcome,
             reverified=None if reverify is None else reverify.confirmed,
             changed_files=changed_files,
+            supervisor=g10_line(reverify),  # v133-F36 (F16): G10's words, from the store
         ),
     )
+    # v133-F36 (F14, I13): the push is a ledger row, as on every other face
+    record_pr(
+        store, result, actor=actor, repo=Path(record.repo), branch=branch, base=base,
+        task_ids=[record.task_id],
+    )  # fmt: skip
     if result.opened:
         print(f"  PR: {result.url}")
     else:
@@ -3602,6 +3622,7 @@ def cmd_pr_open(args: argparse.Namespace) -> int:
             branch=args.branch,
             base=args.base,
             title=args.title,
+            actor=getpass.getuser(),  # v133-F36 (F14): who pushed, on the ledger row
         )
     except HTTPException as exc:
         return _err(_http_error_detail(exc))
@@ -3673,6 +3694,8 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
             status=executed_status(record),  # R3 (S8): the chat card's own mapping
             result=record,
             claimed=True,
+            actor=actor,  # v133-F36 (F11, I13): who resolved it, from which surface
+            surface="cli",
         )
     finally:
         store.close()

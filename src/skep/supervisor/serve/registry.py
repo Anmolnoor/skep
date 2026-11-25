@@ -31,7 +31,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
-from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify
+from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify, syntax_only_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
     PROJECT_STRATEGIES,
@@ -613,7 +613,8 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
             "unlocked=true needs a pinned verify_command: a patch lands without a "
             f"human only after skep re-runs the project's own check. {PIN_HINT}."
         )
-    vacuous = known_vacuous_verify(str(policy.get("verify_command")))
+    pin = str(policy.get("verify_command"))
+    vacuous = known_vacuous_verify(pin) or syntax_only_verify(pin)  # v133-F4
     if vacuous is not None:
         return f"unlocked=true needs a real check: {cannot_land_on(vacuous)}."
     probe = sandbox_availability()
@@ -642,7 +643,7 @@ def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str
     if policy.get("auto_apply_verified_patch") is not True:
         return
     pin = str(policy.get("verify_command") or "").strip()
-    vacuous = known_vacuous_verify(pin) if pin else None
+    vacuous = (known_vacuous_verify(pin) or syntax_only_verify(pin)) if pin else None  # v133-F4
     if pin and vacuous is None:
         return
     why = (
@@ -1120,6 +1121,7 @@ def _carry_forward_existing(
     run_store: RunStore,
     *,
     project_id: str,
+    phase: str,
     base_policy: dict[str, Any],
     bindings: list[ProjectBinding],
     overrides: dict[str, Any],
@@ -1154,6 +1156,24 @@ def _carry_forward_existing(
         if record.binding_kind not in kinds
     ]
     merged = {**stored.policy, **base_policy}
+    # v133-F5 (J9, I1, I6): a stored "auto-landing off" is the operator's. A
+    # re-run in the same phase rebuilt it from the phase default (maintain:
+    # on) and silently turned the lane back on; only an explicit ask or a
+    # move into a phase that turns it on may.
+    # v133-F35 (J9, I6): the same for a stored "auto-dispatch off" — the
+    # strategy default (on) must not quietly reopen the lane on a re-setup.
+    # v133 R3 (U3): and for where auto-landing commits — a stored branch
+    # survives a re-setup that does not name it. One rule: a same-phase
+    # re-setup keeps the stored value of a key it does not name, except an
+    # "on", which the defaults still decide (keeping one never opens a lane).
+    # R4 (Sol V1): a stored `auto_apply_branch: null` is a choice too (land on
+    # per-task branches), so for that key a stored null is kept.
+    for key in ("auto_apply_verified_patch", "auto_dispatch_allowed", "auto_apply_branch"):
+        if key not in stored.policy or key in overrides or stored.phase != phase:
+            continue
+        value = stored.policy[key]
+        if value is not True and (value is not None or key == "auto_apply_branch"):
+            merged[key] = value
     # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
     # A binding the project did not have (a same-named folder elsewhere: the
     # id is the basename) is a new target, so the unlock stays behind unless
@@ -1207,6 +1227,20 @@ def _under_setup_lock[F: Callable[..., Any]](fn: F) -> F:
     return cast(F, locked)
 
 
+def policy_changes(
+    old: dict[str, Any], new: dict[str, Any], overrides: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """v133-F5 (J9): every policy key a setup changes, as ``{key, old, new,
+    asked}`` — ``asked`` when this call's ``policy_overrides`` named it, else
+    derived (a phase or strategy default, a seed, a coercion). ``old`` is None
+    for a key the stored policy did not hold (every key of a new project)."""
+    return [
+        {"key": key, "old": old.get(key), "new": new.get(key), "asked": key in overrides}
+        for key in sorted({*old, *new})
+        if old.get(key) != new.get(key)
+    ]
+
+
 @_under_setup_lock
 def setup_project_record(
     *,
@@ -1256,9 +1290,11 @@ def setup_project_record(
         policy=base_policy,
         backend=new_project_sandbox_probe().backend,
     )
+    stored = run_store.get_project_policy(project_id)
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
+        phase=phase,
         base_policy=base_policy,
         bindings=bindings,
         overrides=policy_overrides or {},
@@ -1283,6 +1319,10 @@ def setup_project_record(
         requested="auto_apply_verified_patch" in (policy_overrides or {}),
         notes=notes,
     )
+    syntax_only = syntax_only_verify(str(base_policy.get("verify_command") or ""))
+    if syntax_only and not any("syntax-only" in note for note in notes):
+        # v133-F4 (F-I1): the pin is named for what it checks
+        notes.append(f"{syntax_only}; patches land by approval until a real check is pinned.")
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1395,6 +1435,9 @@ def setup_project_record(
     result["seeded_shell_commands"] = seeded_shell_commands
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
+    result["policy_changes"] = policy_changes(
+        {} if stored is None else stored.policy, project.policy, policy_overrides or {}
+    )
     result["notes"] = [_strategy_note(strategy, strategy_source, project.policy), *notes]
     if (
         "coding_engine" not in (policy_overrides or {})
@@ -1538,9 +1581,11 @@ def preview_project_setup(
         policy=base_policy,
         backend=new_project_sandbox_probe().backend,
     )
+    stored = run_store.get_project_policy(project_id)
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
+        phase=phase,
         base_policy=base_policy,
         bindings=bindings,
         overrides=policy_overrides,
@@ -1590,6 +1635,9 @@ def preview_project_setup(
         "pack": None if pack is None else _pack_summary(pack),
         "phase_defaults": {} if pack is None else dict(pack.phase_defaults[phase]),
         "effective_policy": dict(project.policy),
+        "policy_changes": policy_changes(
+            {} if stored is None else stored.policy, project.policy, policy_overrides
+        ),
         "dangerous_grant_warnings": _dangerous_grant_warnings(project.policy),
         "bindings_to_save": [
             {"kind": binding.kind, "value": binding.value} for binding in project.bindings
