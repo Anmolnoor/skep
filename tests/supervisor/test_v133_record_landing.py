@@ -585,6 +585,39 @@ def test_r1_s11_gh_that_cannot_start_after_the_push_is_a_pushed_result(
     assert "gh" in result.detail and "could not start" in result.detail
 
 
+# ---------- R1 (Sol S12): an automatic landing records the commit it made ----
+
+
+def test_r1_s12_an_automatic_landing_records_its_commit(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.policy import VERIFIED_PATCH_RULE, maybe_auto_approve
+    from skep.supervisor.serve.console import landing_line
+
+    from .conftest import git
+
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        store.record_reverification(
+            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["uv run pytest"], exit_codes=[0], detail="re-ran clean",
+            base_commit=git(repo, "rev-parse", "HEAD").stdout.strip(),
+        )  # fmt: skip
+        approved = maybe_auto_approve(
+            store=store, rules=(VERIFIED_PATCH_RULE,), repo=repo, task_id=task_id,
+            verification_outcome="passed", risk_flags=(), verify_pinned=True,
+        )  # fmt: skip
+        assert approved is not None
+        made = git(repo, "rev-parse", f"refs/heads/{approved.branch}").stdout.strip()
+        assert store.landing_commits()[task_id] == made
+        assert landing_line(store, task_id) is None  # not "landed before v133"
+    finally:
+        store.close()
+
+
 # ---------- F15: a branch PR card names every run the push publishes (J5) ----------
 
 

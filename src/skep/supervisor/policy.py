@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths
+from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths, resolve_commit
 from .shell_prefixes import launched_command
 from .store import RunStore
 
@@ -873,6 +873,7 @@ def maybe_auto_approve(
         )
         return None
     store.resolve_approval(
-        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch
-    )
+        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch,
+        landing_commit=resolve_commit(repo, f"refs/heads/{target_branch}"),  # R1 (Sol S12)
+    )  # fmt: skip
     return AutoApproval(rule_name=rule.name, review_id=review_id, note=note, branch=target_branch)
