@@ -1121,6 +1121,7 @@ def _carry_forward_existing(
     run_store: RunStore,
     *,
     project_id: str,
+    phase: str,
     base_policy: dict[str, Any],
     bindings: list[ProjectBinding],
     overrides: dict[str, Any],
@@ -1155,6 +1156,16 @@ def _carry_forward_existing(
         if record.binding_kind not in kinds
     ]
     merged = {**stored.policy, **base_policy}
+    # v133-F5 (J9, I1, I6): a stored "auto-landing off" is the operator's. A
+    # re-run in the same phase rebuilt it from the phase default (maintain:
+    # on) and silently turned the lane back on; only an explicit ask or a
+    # move into a phase that turns it on may.
+    if (
+        stored.policy.get("auto_apply_verified_patch") is False
+        and "auto_apply_verified_patch" not in overrides
+        and stored.phase == phase
+    ):
+        merged["auto_apply_verified_patch"] = False
     # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
     # A binding the project did not have (a same-named folder elsewhere: the
     # id is the basename) is a new target, so the unlock stays behind unless
@@ -1208,6 +1219,20 @@ def _under_setup_lock[F: Callable[..., Any]](fn: F) -> F:
     return cast(F, locked)
 
 
+def policy_changes(
+    old: dict[str, Any], new: dict[str, Any], overrides: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """v133-F5 (J9): every policy key a setup changes, as ``{key, old, new,
+    asked}`` — ``asked`` when this call's ``policy_overrides`` named it, else
+    derived (a phase or strategy default, a seed, a coercion). ``old`` is None
+    for a key the stored policy did not hold (every key of a new project)."""
+    return [
+        {"key": key, "old": old.get(key), "new": new.get(key), "asked": key in overrides}
+        for key in sorted({*old, *new})
+        if old.get(key) != new.get(key)
+    ]
+
+
 @_under_setup_lock
 def setup_project_record(
     *,
@@ -1257,9 +1282,11 @@ def setup_project_record(
         policy=base_policy,
         backend=new_project_sandbox_probe().backend,
     )
+    stored = run_store.get_project_policy(project_id)
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
+        phase=phase,
         base_policy=base_policy,
         bindings=bindings,
         overrides=policy_overrides or {},
@@ -1400,6 +1427,9 @@ def setup_project_record(
     result["seeded_shell_commands"] = seeded_shell_commands
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
+    result["policy_changes"] = policy_changes(
+        {} if stored is None else stored.policy, project.policy, policy_overrides or {}
+    )
     result["notes"] = [_strategy_note(strategy, strategy_source, project.policy), *notes]
     if (
         "coding_engine" not in (policy_overrides or {})
@@ -1543,9 +1573,11 @@ def preview_project_setup(
         policy=base_policy,
         backend=new_project_sandbox_probe().backend,
     )
+    stored = run_store.get_project_policy(project_id)
     base_policy, bindings = _carry_forward_existing(
         run_store,
         project_id=project_id,
+        phase=phase,
         base_policy=base_policy,
         bindings=bindings,
         overrides=policy_overrides,
@@ -1595,6 +1627,9 @@ def preview_project_setup(
         "pack": None if pack is None else _pack_summary(pack),
         "phase_defaults": {} if pack is None else dict(pack.phase_defaults[phase]),
         "effective_policy": dict(project.policy),
+        "policy_changes": policy_changes(
+            {} if stored is None else stored.policy, project.policy, policy_overrides
+        ),
         "dangerous_grant_warnings": _dangerous_grant_warnings(project.policy),
         "bindings_to_save": [
             {"kind": binding.kind, "value": binding.value} for binding in project.bindings

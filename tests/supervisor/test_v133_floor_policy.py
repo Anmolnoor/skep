@@ -6,6 +6,7 @@ from __future__ import annotations
 import errno
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -402,3 +403,132 @@ def test_f4_setup_names_a_syntax_only_pin(repo: Path, config: SupervisorConfig) 
     )  # fmt: skip
     assert response.status_code == 201, response.text
     assert any("syntax-only" in note for note in response.json()["notes"]), response.json()
+
+
+# --- F5 (J9): re-running setup keeps a stored "auto-landing off" -----------
+
+
+def _stored_project(
+    config: SupervisorConfig, repo: Path, *, phase: str, policy: dict[str, object]
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="j9",
+            name="j9",
+            strategy="trusted_local_dev",
+            phase=phase,
+            policy={"default_execution_mode": "workspace", "auto_dispatch_allowed": True, **policy},
+        )
+        store.add_project_binding(
+            project_id="j9", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+
+def _setup(config: SupervisorConfig, repo: Path, route: str = "setup", **body: object) -> Any:
+    from .conftest import serve_client
+
+    payload = {"project_id": "j9", "name": "j9", "strategy": "trusted_local_dev",
+               "repo_path": str(repo), **body}  # fmt: skip
+    response = serve_client(config).post(f"/api/projects/{route}", json=payload)
+    assert response.status_code in (200, 201), response.text
+    return response.json()
+
+
+def _policy(body: dict[str, Any]) -> dict[str, Any]:
+    return (body.get("project") or body)["policy"]
+
+
+def _changes(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {change["key"]: change for change in body["policy_changes"]}
+
+
+@pytest.mark.parametrize("route", ["setup", "preview"])
+def test_f5_resetup_keeps_a_stored_auto_landing_off(
+    repo: Path, config: SupervisorConfig, route: str
+) -> None:
+    _stored_project(
+        config,
+        repo,
+        phase="maintain",
+        policy={"auto_apply_verified_patch": False, "verify_command": "npm test"},
+    )
+    body = _setup(
+        config, repo, route, phase="maintain", policy_overrides={"verify_command": "uv run pytest"}
+    )
+    assert _policy(body)["auto_apply_verified_patch"] is False
+    changes = _changes(body)
+    assert changes["verify_command"] == {
+        "key": "verify_command", "old": "npm test", "new": "uv run pytest", "asked": True,
+    }  # fmt: skip
+    assert "auto_apply_verified_patch" not in changes
+
+
+def test_f5_an_explicit_ask_still_turns_it_on(repo: Path, config: SupervisorConfig) -> None:
+    _stored_project(
+        config,
+        repo,
+        phase="maintain",
+        policy={"auto_apply_verified_patch": False, "verify_command": "npm test"},
+    )
+    body = _setup(
+        config, repo, phase="maintain", policy_overrides={"auto_apply_verified_patch": True}
+    )
+    assert _policy(body)["auto_apply_verified_patch"] is True
+    assert _changes(body)["auto_apply_verified_patch"]["asked"] is True
+
+
+def test_f5_a_phase_move_into_maintain_still_turns_it_on(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    _stored_project(
+        config,
+        repo,
+        phase="build",
+        policy={"auto_apply_verified_patch": False, "verify_command": "npm test"},
+    )
+    body = _setup(config, repo, phase="maintain")
+    assert _policy(body)["auto_apply_verified_patch"] is True
+    change = _changes(body)["auto_apply_verified_patch"]
+    assert (change["old"], change["new"], change["asked"]) == (False, True, False)
+    assert _changes(body)["auto_apply_branch"]["new"] == "skep/maintain"
+
+
+def test_f5_a_fresh_maintain_setup_is_unchanged(repo: Path, config: SupervisorConfig) -> None:
+    body = _setup(config, repo, phase="maintain", policy_overrides={"verify_command": "npm test"})
+    assert _policy(body)["auto_apply_verified_patch"] is True
+    change = _changes(body)["auto_apply_verified_patch"]
+    assert (change["old"], change["new"], change["asked"]) == (None, True, False)
+
+
+def test_f5_the_unlocked_carry_forward_is_unchanged(config: SupervisorConfig, repo: Path) -> None:
+    """ES-F141's carry-forward of ``unlocked`` (kept for a known binding,
+    dropped for a new one) is not touched by the F5 rule."""
+    from skep.supervisor.projects import ProjectBinding
+    from skep.supervisor.serve.registry import _carry_forward_existing
+
+    stored = {"unlocked": True, "auto_apply_verified_patch": False, "verify_command": "npm test"}
+    _stored_project(config, repo, phase="maintain", policy=stored)
+    store = RunStore(config.db_path)
+    try:
+        same, _ = _carry_forward_existing(
+            store,
+            project_id="j9",
+            phase="maintain",
+            base_policy={"auto_apply_verified_patch": True},
+            bindings=[ProjectBinding(kind="repo_path", value=str(repo))],
+            overrides={},
+        )
+        moved, _ = _carry_forward_existing(
+            store,
+            project_id="j9",
+            phase="maintain",
+            base_policy={"auto_apply_verified_patch": True},
+            bindings=[ProjectBinding(kind="repo_path", value=str(repo.parent / "other"))],
+            overrides={},
+        )
+    finally:
+        store.close()
+    assert same["unlocked"] is True and moved["unlocked"] is False
