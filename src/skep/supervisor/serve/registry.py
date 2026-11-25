@@ -1160,12 +1160,11 @@ def _carry_forward_existing(
     # re-run in the same phase rebuilt it from the phase default (maintain:
     # on) and silently turned the lane back on; only an explicit ask or a
     # move into a phase that turns it on may.
-    if (
-        stored.policy.get("auto_apply_verified_patch") is False
-        and "auto_apply_verified_patch" not in overrides
-        and stored.phase == phase
-    ):
-        merged["auto_apply_verified_patch"] = False
+    # v133-F35 (J9, I6): the same for a stored "auto-dispatch off" — the
+    # strategy default (on) must not quietly reopen the lane on a re-setup.
+    for key in ("auto_apply_verified_patch", "auto_dispatch_allowed"):
+        if stored.policy.get(key) is False and key not in overrides and stored.phase == phase:
+            merged[key] = False
     # v132-F4 (ADR 0061, I6): an unlock holds for what the operator unlocked.
     # A binding the project did not have (a same-named folder elsewhere: the
     # id is the basename) is a new target, so the unlock stays behind unless

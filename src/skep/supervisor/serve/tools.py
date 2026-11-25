@@ -49,7 +49,7 @@ from .settings import (
     DEFAULT_TICKER_INTERVAL,
     TICKER_INTERVAL_SECONDS,
     ConfigHolder,
-    policy_view,
+    global_policy_view,
 )
 
 CHAT_TOOL_ACTOR = "chat-user"
@@ -379,7 +379,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_approvals",
-        "The pending approval queue, with each run's summary — PLUS the last "
+        "The pending approval queue (chat cards are not in it; chat_cards_pending "
+        "counts this chat's), with each run's summary — PLUS the last "
         "10 resolved verdicts (recently_resolved: who approved/denied, when, "
         "landing branch). If the queue is empty, check recently_resolved "
         "before concluding nothing happened: a gate approved from the web UI "
@@ -474,8 +475,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_skills",
         "Skill drafts and packs, not runnable skills. Returns learned drafts "
-        "awaiting the human gate and script skill packs with their ladder "
-        "state; runnable skills are in list_templates.",
+        "awaiting the human gate, script skill packs with their ladder "
+        "state, and how many seed recipes there are; runnable skills and the "
+        "seed recipes are in list_templates.",
         {},
     ),
     _tool(
@@ -871,7 +873,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "too; one extra argument or a trailing & cards again. A policy deny "
         "refuses, no card. "
         "For one-off diagnostics: 'what's on port 8765?', "
-        "'df -h', 'systemd status'. NOT for repo work — a cwd inside a "
+        "'df -h', 'systemd status'. A read-only probe of files or PRs needs no "
+        "card: read_file, search_files, list_prs. NOT for repo work — a cwd inside a "
         "registered repo REFUSES (a shell there edits files with no patch "
         "card; use quick_edit or dispatch_run) — and git "
         "push/pull/fetch/commit/checkout and sudo never run from chat and "
@@ -1942,7 +1945,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         # caste param itself. v127-F12: `document` is advanced and left the
         # enum, so its brief-writing example left too — teaching the small
         # model a caste it cannot pick is a stale description (CLAUDE.md).
-        "For anything that must FETCH sources, use start_research instead.",
+        "For anything that must FETCH sources, use start_research instead. "
+        # v133-F30 (F-I4, A10): no option exists, and engine runs need a patch
+        "No model or effort option. A read-only ask: run_code or read tools (an "
+        "external engine run that changes no file ends failed).",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "instructions": {"type": "string"},
@@ -3227,7 +3233,7 @@ def dispatch_manifest_for(
             "network": args["source_allowlist"],
         }
     try:
-        return actions.dispatch_manifest(
+        manifest = actions.dispatch_manifest(
             holder,
             store,
             repo=str(args.get("repo") or ""),
@@ -3252,6 +3258,28 @@ def dispatch_manifest_for(
         )
     except (ValueError, TypeError) as exc:  # malformed args: the confirm says so too
         return {"error": f"bad arguments: {exc}"}
+    if "error" not in manifest:
+        manifest.update(_dispatch_base(holder, manifest, args.get("ref")))
+    return manifest
+
+
+def _dispatch_base(holder: ConfigHolder, manifest: dict[str, Any], ref: Any) -> dict[str, Any]:
+    """v133-F30 (F-I2, I8): the ref a dispatch baselines from and its commit,
+    resolved as run_task resolves them (a named ref; else the auto-landing
+    branch it will land on, ES-F6; else the repo's default branch), so the
+    card shows what the worker will see."""
+    from ..apply import repo_default_branch, resolve_commit
+    from ..dispatch import starts_on_landing_branch
+
+    repo = Path(str(manifest["repo"]))
+    base = str(ref or "") or None
+    if base is None and starts_on_landing_branch(
+        holder.current, repo, manifest.get("auto_apply_branch"),
+        manifest.get("auto_apply_verified_patch"),
+    ):  # fmt: skip
+        base = str(manifest["auto_apply_branch"])
+    base = base or repo_default_branch(repo)
+    return {"base_ref": base, "base_commit": resolve_commit(repo, base)}
 
 
 def fetch_grant_decision(
@@ -4137,9 +4165,17 @@ def execute_read_tool(
             }
             for a in store.resolved_approvals()
         ]
-        return {"approvals": approvals, "recently_resolved": recently_resolved}
+        # v133-F30 (B4): a chat card is not an approval row — say how many
+        # wait in this chat, so an empty queue is not read as "nothing waits"
+        pending = len(store.pending_chat_actions(chat_id)) if chat_id else 0
+        return {
+            "approvals": approvals,
+            "recently_resolved": recently_resolved,
+            "chat_cards_pending": pending,
+        }
     if name == "get_policy":
-        return policy_view(store, holder.current)
+        # v133-F36 (F18, A7): the view says it is the global layer only
+        return global_policy_view(store, holder.current)
     if name == "list_templates":
         return {
             "templates": [
@@ -4156,8 +4192,10 @@ def execute_read_tool(
     if name == "list_skills":
         # v85-F5: candidates (learned drafts) + packs (script-shipping
         # SKILL.md packages on the v17 ladder) in one honest listing.
+        from ..seed_skills import SEED_PROVENANCE
         from ..skill_packs import load_packs
 
+        seeds = [t for t in store.list_templates() if t.provenance == SEED_PROVENANCE]
         return {
             "skills": [
                 {
@@ -4181,6 +4219,11 @@ def execute_read_tool(
                 }
                 for record in load_packs(store).values()
             ],
+            # v133-F30 (G4): the seeds are templates, so "no skills" above
+            # never means none — the count, and where they are listed
+            "seed_recipes": len(seeds),
+            "seed_note": f"{len(seeds)} seed recipes (provenance seed) are listed by "
+            "list_templates; view_skill one and follow it yourself",
         }
     if name == "view_skill":
         # v51-F4: the full recipe INCLUDING the grant surface — the same
@@ -4535,6 +4578,19 @@ def landing_card_error(
         if name == "open_pr" and not args.get("branch"):
             # ES-F292 follow-up: open_pr lands each run first (land_run).
             ids = args.get("task_ids") or [args.get("task_id")]
+            if args.get("task_ids") and isinstance(ids, list) and ids:
+                # v133-F25 (F-I7): the 08:30 "already landed" — a run landed on
+                # its own branch cannot join the grouped PR's shared branch
+                title = None if args.get("title") is None else str(args["title"])
+                shared = actions._grouped_branch(title, str(ids[0]))
+                for task_id in ids:
+                    landed = actions.applied_branch_for(store, str(task_id))
+                    if landed is not None and landed != shared:
+                        return (
+                            f"run {task_id} already landed on {landed!r}; it cannot also "
+                            f"join {shared!r} — open its PR from that branch instead "
+                            f"(open_pr task_id={task_id})"
+                        )
             for task_id in ids if isinstance(ids, list) else []:
                 if (
                     task_id
@@ -4687,6 +4743,95 @@ def policy_write_preview(
     if found.get("warnings"):
         fields["policy_warnings"] = found["warnings"]
     return fields
+
+
+def setup_overrides(args: dict[str, Any]) -> dict[str, Any]:
+    """The policy overrides a setup_project call writes: ``policy_overrides``
+    plus its sugar args (engine, codex_chatgpt_login, groups, unlocked). The
+    confirm and the card's preview (v133-F28) read the same overrides."""
+    overrides = _object_arg(args, "policy_overrides")
+    if args.get("engine") is not None:
+        # v95-F4: the CLI's --engine sugar (v94-F5) for the chat tool —
+        # validated at setup so a typo refuses naming the choices (I9);
+        # an explicit policy_overrides.coding_engine wins over the sugar.
+        from ..engines import resolve_engine
+
+        resolve_engine(str(args["engine"]))
+        overrides.setdefault("coding_engine", str(args["engine"]))
+    if args.get("codex_chatgpt_login") is not None:
+        # ES-F121 (D20): same sugar shape; validated as a bool at setup.
+        overrides.setdefault("codex_chatgpt_login", args["codex_chatgpt_login"])
+    if args.get("groups"):
+        # v97-F4: same sugar shape as engine= — known-name vetting happens
+        # in setup_project_record (one point for chat/CLI/HTTP, I5).
+        if not isinstance(args["groups"], list):
+            raise ValueError("groups must be a list of policy group names")
+        overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
+    if args.get("unlocked") is not None:
+        # ES-F141: sugar like engine=; the preconditions are vetted where
+        # every face's write lands (registry.unlocked_block_reason, I5).
+        # Uncoerced: bool("false") is True, and the HIGH tier reads `is True`.
+        overrides.setdefault("unlocked", args["unlocked"])
+    return overrides
+
+
+def _auto_landing(policy: dict[str, Any]) -> bool:
+    # an unlocked project lands G10-confirmed patches too (ADR 0061)
+    return policy.get("auto_apply_verified_patch") is True or policy.get("unlocked") is True
+
+
+def setup_card_facts(store: RunStore, args: dict[str, Any]) -> dict[str, Any] | None:
+    """v133-F28 (J9, F-I1, I6, I8): what a setup_project card would change,
+    from the side-effect-free preview of the very write its confirm makes —
+    the pin before and after (and whether the new one is syntax-only, F4),
+    and any change to auto-landing, asked for or derived (a phase default,
+    F5), with the branch it lands on. ``{"error"}`` when the preview fails
+    (the confirm reports it); None for a call that names no project."""
+    from ..policy import syntax_only_verify
+    from .registry import preview_project_setup
+
+    if not args.get("project_id") or not args.get("name"):
+        return None
+    stored = store.get_project_policy(str(args["project_id"]))
+    old = {} if stored is None else dict(stored.policy)
+    try:
+        template_names = args.get("template_names")
+        preview = preview_project_setup(
+            root=Path(store.db_path).parent.parent / "repos",  # registry.repos_root
+            run_store=store,
+            project_id=str(args["project_id"]),
+            name=str(args["name"]),
+            strategy=None if args.get("strategy") is None else str(args["strategy"]),
+            phase=str(args.get("phase") or "build"),
+            pack_name=None if args.get("pack") is None else str(args["pack"]),
+            repo_path=None if args.get("repo_path") is None else str(args["repo_path"]),
+            repo_slug=None if args.get("repo_slug") is None else str(args["repo_slug"]),
+            template_names=[] if template_names is None else [str(t) for t in template_names],
+            policy_overrides=setup_overrides(args),
+        )
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+    new = dict(preview["effective_policy"])
+    old_pin, new_pin = str(old.get("verify_command") or ""), str(new.get("verify_command") or "")
+    facts: dict[str, Any] = {
+        "verify_command": {
+            "old": old_pin,
+            "new": new_pin,
+            "syntax_only": syntax_only_verify(new_pin) if new_pin else None,
+        }
+    }
+    if _auto_landing(old) != _auto_landing(new):
+        asked = {"auto_apply_verified_patch", "unlocked"} & set(setup_overrides(args))
+        branch = new.get("auto_apply_branch") if _auto_landing(new) else None
+        facts["auto_landing"] = {
+            "old": _auto_landing(old),
+            "new": _auto_landing(new),
+            "asked": bool(asked),
+            "branch": str(branch or "skep/<task_id>") if _auto_landing(new) else None,
+        }
+    return facts
 
 
 def execute_mutation(
@@ -5023,6 +5168,10 @@ def _execute_mutation(
     if name == "diagnose_run":
         # v107-F2: one bounded command in the kept evidence — sandboxed like
         # re-verification (I5), always carded (I6), reads the tree it names.
+        # v133-F29: the confirm asks the proposal's checks again (sandbox off)
+        refused = _diagnose_refusal(store, holder.current, str(args["task_id"]))
+        if refused is not None:
+            raise ValueError(refused)
         return actions.diagnose_run(
             store,
             holder.current,
@@ -5855,6 +6004,7 @@ def _execute_mutation(
                 branch=str(args["branch"]),
                 base=str(args.get("base") or "main"),
                 title=None if args.get("title") is None else str(args["title"]),
+                actor=actor,  # v133-F36 (F14, I13): the ledger row names who pushed
             )
         if grouped_ids:
             # v54-F4: several related runs → one shared branch, one PR.
@@ -6024,29 +6174,7 @@ def _execute_mutation(
         )
     if name == "setup_project":
         template_names = args.get("template_names")
-        overrides = _object_arg(args, "policy_overrides")
-        if args.get("engine") is not None:
-            # v95-F4: the CLI's --engine sugar (v94-F5) for the chat tool —
-            # validated at setup so a typo refuses naming the choices (I9);
-            # an explicit policy_overrides.coding_engine wins over the sugar.
-            from ..engines import resolve_engine
-
-            resolve_engine(str(args["engine"]))
-            overrides.setdefault("coding_engine", str(args["engine"]))
-        if args.get("codex_chatgpt_login") is not None:
-            # ES-F121 (D20): same sugar shape; validated as a bool at setup.
-            overrides.setdefault("codex_chatgpt_login", args["codex_chatgpt_login"])
-        if args.get("groups"):
-            # v97-F4: same sugar shape as engine= — known-name vetting happens
-            # in setup_project_record (one point for chat/CLI/HTTP, I5).
-            if not isinstance(args["groups"], list):
-                raise ValueError("groups must be a list of policy group names")
-            overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
-        if args.get("unlocked") is not None:
-            # ES-F141: sugar like engine=; the preconditions are vetted where
-            # every face's write lands (registry.unlocked_block_reason, I5).
-            # Uncoerced: bool("false") is True, and the HIGH tier reads `is True`.
-            overrides.setdefault("unlocked", args["unlocked"])
+        overrides = setup_overrides(args)
         return setup_project_record(
             run_store=store,
             root=repos_root(holder),
@@ -6581,6 +6709,102 @@ def _schedule_role_refusal(
     return None
 
 
+def _shell_parse_refusal(command: str) -> str | None:
+    """v133-F25 (A9): the run_shell confirm's own parse check, asked at
+    proposal — a line the shell cannot even split gets no card."""
+    import shlex
+
+    try:
+        if not shlex.split(command):
+            return "command could not be parsed: command must be a non-empty shell command"
+    except ValueError as exc:
+        return f"command could not be parsed: {exc} — fix the quoting and propose it again"
+    return None
+
+
+def _diagnose_refusal(store: RunStore, config: Any, task_id: str) -> str | None:
+    """v133-F25/F29 (A9, F-I7, F-I6): why diagnose_run cannot run in ``task_id``'s
+    kept tree, or None. An unknown id is left for the confirm ("no run")."""
+    record = store.get_run(task_id)
+    if record is None:
+        return None
+    if not config.sandbox:
+        # v133-F29 (K, I12): the kept tree is the worker's output — with the
+        # sandbox off the command would run on it unconfined, as the operator
+        return (
+            "diagnose_run runs only inside the sandbox, and the sandbox is off on this "
+            "home — it never runs a command on a worker's tree unconfined; read the audit "
+            "trail via get_run instead"
+        )
+    workspace = Path(record.workspace or "")
+    if not record.workspace or not workspace.is_dir():
+        return (
+            f"run {task_id[:13]}…'s worktree is gone — preserved trees (failed/"
+            "unconfirmed runs) live 24h before the sweep; dispatch a fresh run, "
+            "or read the audit trail via get_run instead"
+        )
+    return None
+
+
+def _setup_refusal(args: dict[str, Any]) -> str | None:
+    """v133-F25 (F-I7): a setup_project field its confirm rejects — an unknown
+    policy key or engine — refused at proposal, naming the allowed ones."""
+    from ..engines import resolve_engine
+    from ..projects import PROJECT_POLICY_KEYS
+
+    overrides = args.get("policy_overrides")
+    unknown = sorted(set(overrides) - PROJECT_POLICY_KEYS) if isinstance(overrides, dict) else []
+    if unknown:
+        return (
+            f"unknown project policy fields: {unknown!r}; allowed keys are "
+            f"{sorted(PROJECT_POLICY_KEYS)!r}"
+        )
+    if args.get("engine") is not None:
+        try:
+            resolve_engine(str(args["engine"]))
+        except ValueError as exc:
+            return str(exc)
+    return None
+
+
+def _no_auth_refusal(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v133-F25 (A9, C1): a dispatch whose external engine has no way to log
+    in, from the manifest its card would show (engine and login, compiled as
+    the confirm compiles them). run_task refuses the same dispatch."""
+    from ..dispatch import no_auth_env_refusal
+    from ..engines import resolve_engine
+
+    manifest = dispatch_manifest_for(store, holder, args, chat_id)
+    if "error" in manifest or manifest.get("engine_auth") is not None:
+        return None
+    engine = resolve_engine(str(manifest.get("engine") or "builtin"))
+    if not engine.external:
+        return None
+    return no_auth_env_refusal(engine, serve_env=holder.current.home.parent / "serve.env")
+
+
+def _proposal_refusal(
+    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any], chat_id: str | None
+) -> AutonomyDecision | None:
+    """v133-F25 (A9, F-I7, I5, I9): the checks that need no side effect, asked
+    when the card would be proposed. Each confirm path checks again: state can
+    change between the card and the click."""
+    why: str | None = None
+    if name == "run_shell":
+        why = _shell_parse_refusal(str(args.get("command") or "x"))
+    elif name == "diagnose_run":
+        why = _diagnose_refusal(store, holder.current, str(args.get("task_id") or ""))
+    elif name == "setup_project":
+        why = _setup_refusal(args)
+    elif name == "dispatch_run" and str(args.get("repo") or "").strip():
+        why = _no_auth_refusal(store, holder, args, chat_id)
+    if why is None:
+        return None
+    return AutonomyDecision(verdict="deny", reason=f"{name}.deny.cannot_run", detail=why)
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -6604,6 +6828,9 @@ def mutation_execution_decision(
         # words; one that would card (a run policy that cannot resolve: a
         # tampered baseline, a gated repo) or allow is overruled (W2).
         decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id) or decision
+    if decision is None or decision.verdict != "deny":
+        # v133-F25: a card whose confirm can only fail is not offered (B22)
+        decision = _proposal_refusal(store, holder, name, args, chat_id) or decision
     if (
         chat_id is None
         or name in _DECIDED_LANES
