@@ -1,5 +1,5 @@
 // v133 B7 — run detail and card rendering (findings F-I1, F-I3, F-I5, J1, J2,
-// G8 of the Alfin live test). The web pages show what wave 1's store now
+// G8 of the live test). The web pages show what wave 1's store now
 // says, in the store's words: a landing G10 did not confirm says so on the
 // card the operator clicks, each run's worker and supervisor results apart,
 // a failed install apart from a check that ran and failed, a rule's verdict

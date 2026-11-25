@@ -1,4 +1,4 @@
-"""v133 B2: the worker and re-verify fixes from the Alfin live test.
+"""v133 B2: the worker and re-verify fixes from the live test.
 
 F7 (A2): re-verify primes Node deps in the directory the pin runs in.
 F8 (F-I5): a failed install is not a verify that ran; offline failures say so.
@@ -61,7 +61,7 @@ def _commit(repo: Path, message: str) -> None:
 def _web_project(
     repo: Path, lockfile: str = "package-lock.json", *, host: str = "registry.npmjs.org"
 ) -> None:
-    """The Alfin shape: the app lives in web/, the repo root has no package.json."""
+    """The live-test shape: the app lives in web/, the repo root has no package.json."""
     web = repo / "web"
     web.mkdir()
     (web / "package.json").write_text(
@@ -351,7 +351,7 @@ def test_f8_a_failed_uv_sync_is_reported_as_the_install(
 def test_f8_a_verify_that_needs_the_network_says_the_replay_is_offline(
     repo: Path, config: SupervisorConfig, tmp_path: Path, lookup_error: str
 ) -> None:
-    """Alfin 01a211e5: the worker's script installed its own deps; G10's
+    """Live-test run 01a211e5: the worker's script installed its own deps; G10's
     replay has no network by design and failed EAI_AGAIN with no word why."""
     bin_dir, log = _pwd_stubs(tmp_path)
     _failing_tool(bin_dir, "node", f"echo '{lookup_error}' >&2; exit 1")
@@ -416,7 +416,7 @@ def _worker_run(
 def test_f9_react_survives_bad_replies_between_good_steps(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Alfin 01a211bf-c6ed: the fourth bad reply of a whole run killed it,
+    """Live-test run 01a211bf-c6ed: the fourth bad reply of a whole run killed it,
     however many good steps came between."""
     replies = [_BAD_REPLY, _BAD_REPLY, _react_write_action()]
     replies += [_BAD_REPLY, _BAD_REPLY, _react_verify_action()]

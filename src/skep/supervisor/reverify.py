@@ -782,7 +782,7 @@ _OUTPUT_TAIL_CHARS = 2000
 # installer's code is in the text), so no surface reads it as "ran and failed".
 INSTALL_FAILED = "could not install dependencies"
 # ... and a pin that failed on a name lookup failed because the replay is
-# offline by design, which the record says (Alfin run 01a211e5: EAI_AGAIN).
+# offline by design, which the record says (live-test run 01a211e5: EAI_AGAIN).
 OFFLINE_NOTE = (
     "the replay runs offline (no network, by design) and this output shows a failed "
     "network lookup: a check that installs or downloads for itself fails here — pin "

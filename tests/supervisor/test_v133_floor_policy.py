@@ -20,7 +20,7 @@ _LONG = "word" * 75  # 300 bytes: one component over NAME_MAX (255)
 
 @pytest.fixture
 def py312_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``Path.exists`` as Python 3.12/3.13 (CI, Alfin) has it: an errno it
+    """``Path.exists`` as Python 3.12/3.13 (CI, the live-test VM) has it: an errno it
     does not ignore (ENAMETOOLONG) raises. 3.14 swallows every OSError, so
     without this the crash only shows on the older interpreters."""
 

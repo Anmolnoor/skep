@@ -686,7 +686,7 @@ def test_a_guard_that_cannot_read_the_patch_fails_closed(
 
 def test_vendored_files_are_not_test_tampering(repo: Path) -> None:
     """v133-F3 (A3): a vendored dependency's own tests and skip markers are not
-    the project's tests (Alfin run 01a211bd: 224 flags, all under node_modules).
+    the project's tests (live-test run 01a211bd: 224 flags, all under node_modules).
     The patch still cannot land by itself: policy.rule_block_reason."""
     _seed(repo)
 

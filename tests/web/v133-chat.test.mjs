@@ -1,4 +1,4 @@
-// v133 B4 — the web chat (findings G1, G2, G3, G6, G7, G8 of the Alfin live
+// v133 B4 — the web chat (findings G1, G2, G3, G6, G7, G8 of the live
 // test). The chat page must not rebuild itself for a live event, the composer
 // must always take typing, and nothing the operator typed is lost or sent
 // without their action.

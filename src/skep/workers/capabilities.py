@@ -450,7 +450,7 @@ def _workspace_fingerprint(root: Path) -> dict[str, str]:
 
 
 # v133-F10 (A8): the keys shell.run reads. Any other key was silently dropped —
-# a plan step's `cwd` ran its command at the worktree root (Alfin run 01a211cc:
+# a plan step's `cwd` ran its command at the worktree root (live-test run 01a211cc:
 # `npm ci` found no lockfile there). Honouring `cwd` needs it in policy, grants,
 # receipts and replay (a command matched in one directory must not run in
 # another), so an unknown key is refused with what to do instead.
