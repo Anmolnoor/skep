@@ -60,6 +60,11 @@ def test_f1_long_token_is_not_a_path(tmp_path: Path, command: str) -> None:
     assert shell_secret_floor_reason(command, cwd=str(tmp_path)) is None
 
 
+def test_f1_a_nul_byte_names_no_file(tmp_path: Path) -> None:
+    home = _skep_home(tmp_path)
+    assert queen_skep_refusal("cat 'a\x00b'", home=home, cwd=str(tmp_path)) is None
+
+
 @pytest.mark.usefixtures("py312_exists")
 def test_f1_protected_path_beside_long_token_still_refused(tmp_path: Path) -> None:
     home = _skep_home(tmp_path)
@@ -298,6 +303,7 @@ SYNTAX_ONLY = [
     "npm test; node --check f.js",  # the exit status is the last list's
     "sh -c 'node --check f.js'",
     "env CI=1 node --check f.js",
+    "node --check f.js;",
 ]
 REAL_CHECKS = [
     "uv run pytest",
@@ -334,6 +340,7 @@ def test_f4_a_vacuous_pin_is_not_called_syntax_only() -> None:
     """Each pin gets one name: ``true`` stays known-vacuous."""
     assert syntax_only_verify("true") is None
     assert syntax_only_verify("git diff --check") is None
+    assert syntax_only_verify("uv run") is None  # a runner with no command
 
 
 def test_f4_gate_refuses_auto_landing_on_a_syntax_only_pin() -> None:
