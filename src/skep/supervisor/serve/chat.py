@@ -739,6 +739,9 @@ def resume_follow_ups(engine: ChatEngine) -> int:
         for task_id, _stage in owed:  # switched off since the stop: dropped, not run
             engine.store.clear_run_follow_up(task_id)
         owed = []
+    # v133-F31: a run still waiting at its gate is not owed a turn yet — the
+    # ticker's sweep gives it one when the gate settles
+    owed = [(task_id, stage) for task_id, stage in owed if stage != GATED]
     for task_id, stage in owed:
         threading.Thread(
             target=run_completion_turn,
@@ -4103,6 +4106,54 @@ def run_scheduled_prompt(
 # run finishing needs the web.
 _CONTINUED: set[str] = set()
 _CONTINUE_LOCK = threading.Lock()
+# v133-F31 (G8): a run whose continuation ran while it waited at a gate is
+# owed one more when the gate settles — kept on the run row, so a restart
+# keeps the debt, and paid by ``continue_settled_gates`` on the ticker.
+GATED = "gated"
+# A settled gate whose run reaches one of these gets its continuation; a
+# superseded run handed the work to its resumed successor, which gets its own.
+_SETTLED = frozenset(s.value for s in TERMINAL_STATES) - {"pending_approval", "superseded"}
+
+
+def _bound_chat(store: RunStore, task_id: str) -> str | None:
+    """The chat that dispatched this run — or, for a run resumed past a
+    gate approved off the chat (REST, CLI), the chat of the run it resumes."""
+    seen: set[str] = set()
+    while task_id and task_id not in seen:
+        seen.add(task_id)
+        chat_id = store.chat_for_task(task_id)
+        if chat_id:
+            return chat_id
+        run = store.get_run(task_id)
+        task_id = (run.resume_of or "") if run is not None else ""
+    return None
+
+
+def continue_settled_gates(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, home: Path
+) -> list[str]:
+    """v133-F31: each run owed a turn after its gate whose gate has settled
+    gets it — once: the row moves off ``gated`` before its thread starts.
+    Returns the task ids started."""
+    from .run_status import CONTINUE_CHAT_SETTING
+
+    started: list[str] = []
+    for task_id, stage in store.queued_run_follow_ups():
+        run = store.get_run(task_id) if stage == GATED else None
+        if run is None or run.state == "pending_approval":
+            continue
+        if run.state not in _SETTLED or store.get_setting(CONTINUE_CHAT_SETTING) is False:
+            store.clear_run_follow_up(task_id)  # handed to its successor, or switched off
+            continue
+        store.queue_run_follow_up(task_id, "queued")
+        threading.Thread(
+            target=run_completion_turn,
+            args=(store, holder, runner, home, task_id),
+            name=f"skep-continue-{task_id[:8]}",
+            daemon=True,
+        ).start()
+        started.append(task_id)
+    return started
 
 
 def run_completion_turn(
@@ -4121,20 +4172,24 @@ def run_completion_turn(
     ``seeded`` when its rows were already written. Unlike a card's follow-up
     it is cleared AFTER its turn, not claimed before: the turn only reads and
     proposes (``unattended``), so rerunning a cut-off one doubles nothing."""
+    run = store.get_run(task_id)
+    # v133-F31 (G8): waiting at a gate is not the run's final state — that
+    # turn is its own, so the final state still gets one.
+    gated = run is not None and run.state == "pending_approval"
     with _CONTINUE_LOCK:
         # notify_run_terminal is wired from two call sites and a done-callback
-        # can be re-entered on resume; one continuation per run, ever.
-        if task_id in _CONTINUED:
+        # can be re-entered on resume; one continuation per run and state.
+        key = f"{task_id}@gate" if gated else task_id
+        if key in _CONTINUED:
             return ("already continued", False)
-        _CONTINUED.add(task_id)
+        _CONTINUED.add(key)
 
-    chat_id = store.chat_for_task(task_id)
+    chat_id = _bound_chat(store, task_id)
     if not chat_id or store.get_chat(chat_id) is None:
         # A CLI or scheduled run with no bound chat has no conversation to
         # continue. The one-line notice already covered it.
         store.clear_run_follow_up(task_id)  # a resumed one whose chat is gone
         return ("run has no bound chat", False)
-    run = store.get_run(task_id)
     if run is None:
         return ("run vanished before the continuation", False)
 
@@ -4188,7 +4243,7 @@ def run_completion_turn(
         tail = store.chat_messages(chat_id)[-1:] if seeded else []
         if tail and tail[0].role == "assistant" and not tail[0].tool_calls:
             # the stop landed after its reply, before the clear: it is done
-            store.clear_run_follow_up(task_id)
+            _turn_done(store, task_id, gated=gated)
             return ("already continued", False)
         if summary and not seeded:
             # P4-1 (B37, D5): the worker's words are its own row — wrapped on
@@ -4213,9 +4268,9 @@ def run_completion_turn(
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
-            store.clear_run_follow_up(task_id)
+            _turn_done(store, task_id, gated=gated)
             return (f"continuation failed mid-turn: {exc}", False)
-    store.clear_run_follow_up(task_id)
+    _turn_done(store, task_id, gated=gated)
     reply = "".join(parts).strip()
     from .channels.outbound import push_to_chat_channel
     from .run_status import run_terminal_text
@@ -4228,6 +4283,15 @@ def run_completion_turn(
     if reply and run_terminal_text(store, task_id, completion_opt_in=False) is None:
         push_to_chat_channel(store, home, chat_id, reply, kind="info")
     return (reply, bool(reply))
+
+
+def _turn_done(store: RunStore, task_id: str, *, gated: bool) -> None:
+    """The continuation's turn is over: nothing more owed — or, for a run
+    that waited at a gate, the turn its final state is owed (v133-F31)."""
+    if gated:
+        store.queue_run_follow_up(task_id, GATED)
+    else:
+        store.clear_run_follow_up(task_id)
 
 
 def run_analysis_tasks(

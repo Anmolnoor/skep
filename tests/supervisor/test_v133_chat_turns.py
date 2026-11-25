@@ -250,3 +250,106 @@ def test_a_deny_racing_a_confirm_in_flight_adds_no_row(rig: Rig) -> None:
 
     assert late.status_code == 409 and "already being confirmed" in late.json()["detail"]
     assert _assistant_lines(rig, chat_id) == []  # its result lands; nothing to correct
+
+
+# ---------- F31: a gate does not spend the run's continuation (G8) ----------
+
+_SEED = "This is the run we were working on"
+
+
+def _gated_run(rig: Rig, repo: Path) -> tuple[str, str, str]:
+    """A chat-dispatched run paused at a worker gate: (chat, task, review)."""
+    chat_id = rig.store.create_chat(title="gate", model=None).chat_id
+    task = mint_task(workspace=repo, instructions="do the thing")
+    rig.store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+    action_id = rig.store.add_chat_action(chat_id, tool="dispatch_run", args={"repo": str(repo)})
+    rig.store.resolve_chat_action(action_id, status="confirmed", result={"task_id": task.task_id})
+    rig.store.transition(task.task_id, "pending_approval")
+    review_id = rig.store.enqueue_approval(
+        task.task_id, action="shell.run", reason="npm test", commands=[["npm", "test"]]
+    )
+    return chat_id, str(task.task_id), review_id
+
+
+def _continue(rig: Rig, task_id: str) -> tuple[str, bool]:
+    return chat_module.run_completion_turn(
+        rig.store, rig.holder, rig.engine.runner, rig.config.home, task_id
+    )
+
+
+def _seeds(rig: Rig, chat_id: str) -> list[str]:
+    return [
+        m.content
+        for m in rig.store.chat_messages(chat_id)
+        if m.role == "user" and _SEED in m.content
+    ]
+
+
+def _sweep(rig: Rig) -> None:
+    """The ticker's sweep, then every continuation it started, to its end."""
+    import threading
+
+    before = set(threading.enumerate())
+    Ticker(rig.holder, rig.store, runner=rig.engine.runner)._continue_settled_gates()
+    for thread in set(threading.enumerate()) - before:
+        thread.join(10)
+
+
+def test_a_denied_gate_gets_one_continuation_for_its_final_state(rig: Rig, repo: Path) -> None:
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    rig.ollama.script_reply("Paused at a gate: npm test needs your OK.")
+    assert _continue(rig, task_id)[1]  # the pause is said...
+    assert _continue(rig, task_id) == ("already continued", False)  # ...once
+
+    _sweep(rig)
+    assert len(_seeds(rig, chat_id)) == 1  # still waiting at the gate: nothing new
+
+    rig.store.resolve_approval(review_id, approved=False, actor="chat-user")
+    rig.ollama.script_reply("You denied npm test, so the run stopped.")
+    _sweep(rig)
+    _sweep(rig)  # a second pass finds nothing owed
+
+    seeds = _seeds(rig, chat_id)
+    assert len(seeds) == 2 and "state=rejected" in seeds[-1]
+    assert "the run stopped" in [m for m in rig.store.chat_messages(chat_id)][-1].content
+    assert _continue(rig, task_id) == ("already continued", False)  # the done-callback again
+    assert rig.store.queued_run_follow_ups() == []
+
+
+def test_an_approved_gate_continues_once_through_the_resumed_run(rig: Rig, repo: Path) -> None:
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    rig.ollama.script_reply("Paused at a gate.")
+    assert _continue(rig, task_id)[1]
+    # approved past the gate the way resume_past_gate does: a successor run
+    # (not bound to the chat by any card — approved from the REST face)
+    resumed = mint_task(workspace=repo, instructions="do the thing", resume_of=task_id)
+    rig.store.create_run(resumed, repo=repo, ref=None, execution_mode="workspace")
+    rig.store.resolve_approval(review_id, approved=True, actor="operator")
+    rig.store.transition(task_id, "superseded", f"resumed as {resumed.task_id}")
+    _sweep(rig)
+    assert len(_seeds(rig, chat_id)) == 1  # the old run hands over, it does not continue
+
+    rig.store.transition(resumed.task_id, "completed")
+    rig.ollama.script_reply("The resumed run finished.")
+    reply, ok = _continue(rig, str(resumed.task_id))
+    _sweep(rig)
+
+    assert ok, reply
+    seeds = _seeds(rig, chat_id)
+    assert len(seeds) == 2 and "state=completed" in seeds[-1]
+    assert rig.store.queued_run_follow_ups() == []
+
+
+def test_a_gate_settled_across_a_restart_still_gets_its_turn(rig: Rig, repo: Path) -> None:
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    rig.ollama.script_reply("Paused at a gate.")
+    assert _continue(rig, task_id)[1]
+    chat_module._CONTINUED.clear()  # serve stopped and started again
+    # the startup resume leaves a run that still waits at its gate alone
+    assert chat_module.resume_follow_ups(rig.engine) == 0
+
+    rig.store.resolve_approval(review_id, approved=False, actor="cli-user")
+    rig.ollama.script_reply("Denied while I was away.")
+    _sweep(rig)
+
+    assert len(_seeds(rig, chat_id)) == 2
