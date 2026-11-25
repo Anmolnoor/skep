@@ -633,3 +633,49 @@ def test_r1_s1_setup_before_a_real_check_stays_real(command: str) -> None:
     assert syntax_only_verify(command) is None, command
     assert known_vacuous_verify(command) is None, command
     assert rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(command)) is None
+
+
+# --- R1 (Sol S7): a NUL in a path-shaped word, and a probe that fails ------
+
+
+def test_r1_s7_nul_in_a_path_word_never_raises(tmp_path: Path) -> None:
+    from skep.supervisor.secret_floor import shell_read_target_unresolved
+
+    home = _skep_home(tmp_path)
+    for line in ("cat a/b\x00c", "cat /a/b\x00c*", "cat ~/x\x00y"):
+        assert queen_skep_refusal(line, home=home, cwd=str(tmp_path)) is None, line
+        assert shell_secret_floor_reason(line, cwd=str(tmp_path), skep_home=home) is None
+        # skep cannot say what a C program makes of the line: HIGH card
+        assert shell_read_target_unresolved(line, cwd=str(tmp_path)) is True
+
+
+def test_r1_s7_a_protected_path_before_the_nul_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sh -c`` and execve read a C string: the word ends at the NUL, so the
+    floor judges what is left before it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = _skep_home(tmp_path)
+    reason = shell_secret_floor_reason(f"cat {tmp_path}/.ssh/id_rsa\x00x", cwd=str(tmp_path))
+    assert reason is not None and ".ssh" in reason, reason
+    serve_env = tmp_path / "skep" / "serve.env"
+    refusal = queen_skep_refusal(f"cat {serve_env}\x00x", home=home, cwd=str(tmp_path))
+    assert refusal is not None and "serve.env" in refusal, refusal
+
+
+def test_r1_s7_an_unexpected_probe_failure_is_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.secret_floor import shell_read_target_unresolved
+
+    home = _skep_home(tmp_path)
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        raise ValueError("probe broke")
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    line = "cat notes.txt"
+    reason = shell_secret_floor_reason(line, cwd=str(tmp_path), skep_home=home)
+    assert reason is not None and "could not" in reason, reason
+    assert queen_skep_refusal(line, home=home, cwd=str(tmp_path)) is not None
+    assert shell_read_target_unresolved(line, cwd=str(tmp_path)) is True
