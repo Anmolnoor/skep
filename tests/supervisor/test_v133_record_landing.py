@@ -488,3 +488,35 @@ def test_card_and_pr_body_state_worker_and_supervisor_results_apart(
         assert f"**Supervisor's result:** {g10_words}" in body
     finally:
         store.close()
+
+
+# ---------- F17: forensics says what each row is and where it comes from (J4) ----------
+
+
+def test_forensics_labels_decisions_observations_and_what_is_not_listed(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    from skep.supervisor.forensics import build_run_forensics, render_forensics
+    from skep.supervisor.policy_v3 import log_decision
+
+    store = _store(config)
+    try:
+        task = mint_task(workspace=tmp_path, instructions="x")
+        store.create_run(
+            task, repo=tmp_path, ref=None, execution_mode="sandbox", coding_engine="claude_code"
+        )
+        base = {"at": "2026-11-25T10:00:00Z", "task_id": task.task_id, "actor": "queen",
+                "repo": str(tmp_path), "scope": "shell", "action": "run"}  # fmt: skip
+        log_decision(config.audit_dir, {**base, "value": "ls", "source": "run", "verdict": "allow"})
+        log_decision(config.audit_dir, {**base, "value": "claude -p", "source": "observed"})
+        report = build_run_forensics(store, config.audit_dir, task.task_id)
+    finally:
+        store.close()
+    decided, observed = report["policy_trail"]
+    assert (decided["kind"], decided["origin"]) == ("policy decision", "decisions.jsonl")
+    assert (observed["kind"], observed["origin"]) == ("observation", "decisions.jsonl")
+    assert "claude_code" in report["coverage"]
+    assert "confined by the sandbox and not listed" in report["coverage"]
+    text = render_forensics(report, markdown=False)
+    assert "[observation]" in text and "[policy decision]" in text
+    assert "confined by the sandbox and not listed" in text
