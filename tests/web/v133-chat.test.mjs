@@ -148,3 +148,34 @@ test("F20: a quiet poll touches nothing on screen, not even the context panel", 
   await chat.app.poll();
   assert.notDeepEqual([...panel.children], before, "a card resolved elsewhere redraws the panel");
 });
+
+// ---------- F21 (G2): a pending card never disables the textarea ----------
+
+test("F21: with a card pending, typing works and Enter posts nothing until the card is answered", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")], actions: [card("a1")] });
+  assert.equal(chat.input.disabled, false, "the textarea takes typing under a pending card");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "sending to the model is withheld");
+  chat.input.value = "next, do this";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.streams.length, 0);
+  assert.deepEqual(chat.posts, []);
+  chat.input.value = "/runs 5";
+  const event = chat.press("Enter");
+  await settle();
+  assert.ok(event.prevented);
+  assert.equal(chat.input.value, "/runs 5", "a slash command under a pending card stays in the box");
+  assert.deepEqual(chat.posts, []);
+  assert.equal(chat.streams.length, 0);
+  // Answering the card sends the queued message, once.
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content]), [
+    ["/api/chats/c1/actions/a1/confirm", undefined],
+    ["/api/chats/c1/messages?surface=web", "next, do this"],
+  ]);
+});

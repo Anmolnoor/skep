@@ -2672,8 +2672,10 @@ async function viewChat(main, chatId) {
     if (readingAt !== null) log.scrollTop = readingAt;
   };
   chatReconcile = reconcile;
+  // v133-F21 (G2): a pending card withholds only SENDING; the textarea
+  // always takes typing — what is typed meanwhile queues (deliver).
   const setComposerLocked = (locked) => {
-    input.disabled = locked || !assistantReady;
+    input.disabled = !assistantReady;
     send.disabled = locked || !assistantReady;
     // v103-F1: a card resolved elsewhere unlocks this composer — a steer that
     // was waiting on that verdict goes now.
@@ -3414,6 +3416,13 @@ async function viewChat(main, chatId) {
   const deliver = async () => {
     const content = input.value.trim();
     if (!content || !assistantReady) return;
+    if (content.startsWith("/") && anyCardPending()) {
+      // v133-F21: a /command typed under a pending card is never queued to
+      // run later on its own (a /deny meant for this card would hit the next
+      // one) — it stays in the box until the operator sends it again.
+      flash("bad", "a card is waiting — answer it first; your command stays in the box");
+      return;
+    }
     if (send.disabled) {
       // A second steer while one is already queued appends rather than
       // replaces — losing the first would be the same bug wearing a queue.
