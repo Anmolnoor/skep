@@ -10,7 +10,7 @@ import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
 import { viewInbox } from "./js/pages/inbox.js";
-import { forensicsSection, g10Provenance, routeLive, viewReview } from "./js/pages/run-detail.js";
+import { forensicsSection, g10Notes, g10Provenance, routeLive, viewReview } from "./js/pages/run-detail.js";
 import { viewMemory, viewNotesTasks, viewTemplates } from "./js/pages/library.js";
 import { viewSchedules } from "./js/pages/schedules.js";
 import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js";
@@ -285,7 +285,13 @@ function cardRuns(card) {
       el("span", { class: "mono" }, `run ${shortTaskId(run.task_id)}`),
       run.tamper ? el("p", { class: "banner bad", role: "alert" }, `⚠ V1 · ${run.tamper}`) : null,
       run.warning && run.warning !== run.tamper ? ` · ⚠ ${run.warning}` : null,
-      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null))));
+      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null,
+      // v133-F34 (F-I3, J1): the worker's result and G10's apart, each in the
+      // store's words; a landing from before v133 says what it lacks.
+      run.worker ? el("p", { class: "note card-run-worker" }, run.worker) : null,
+      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" ? "" : " bad"}` },
+        run.supervisor) : null,
+      run.landing ? el("p", { class: "note card-run-landing" }, run.landing) : null))));
 }
 
 // R4 K8: the commands a review grants, as text — the stored argv the server
@@ -455,8 +461,10 @@ function receiptNode(d) {
     ? `denied by ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`
     : "denied by policy";
   return el("div", { class: "confirm-card receipt-card" },
+    // v133-F34 (J2): the store records this row "allowed by policy" — a rule
+    // decided it, not a click — so the receipt says so.
     el("p", { class: "card-kicker" },
-      allowed ? "Ran without asking — you approved this already" : "Denied — this did not run"),
+      allowed ? "Allowed by policy — ran without asking" : "Denied — this did not run"),
     el("p", { class: "card-headline mono" }, card.headline || d.tool),
     card.risk ? el("p", { class: "card-risk" },
       el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
@@ -1997,7 +2005,8 @@ function projectIdForRepo(repo) {
 function cardVerdict(action) {
   const note = (action.result && (action.result.error || action.result.note)) || "";
   switch (action.status) {
-    case "confirmed": return ["✓ Approved", "confirm"];
+    // v133-F34 (J2): the store's verdict for a row a rule decided, no human
+    case "confirmed": return [action.verdict === "allowed by policy" ? "✓ Allowed by policy" : "✓ Approved", "confirm"];
     case "executing": return ["… Running — confirmed elsewhere", "confirm"];
     case "failed": return [`✗ Failed — ${note || "the action did not complete"}`, "deny"];
     case "interrupted": return [`⚠ Interrupted — ${note || "serve stopped mid-run"}`, "deny"];
@@ -2736,6 +2745,9 @@ async function viewChat(main, chatId) {
     const args = renderArgs(d.args);
     if (args) details.push(args);
     return [
+      // v133-F34 (J1): a landing G10 did not confirm says so first, in the
+      // server's words; the confirm button carries the same label.
+      card.action_label ? el("p", { class: "banner bad card-action-label", role: "alert" }, card.action_label) : null,
       tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       foldItems(card),
@@ -2777,7 +2789,7 @@ async function viewChat(main, chatId) {
 
   // A proposed mutation: the model never holds the trigger — you do.
   const actionCard = (d) => {
-    const approve = el("button", { class: "primary" }, "Approve");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
     const keep = keepSelect(d.card);
@@ -2865,7 +2877,7 @@ async function viewChat(main, chatId) {
   // A deck mutation: the same confirm-card, resolved on the commands endpoints
   // (actor operator-command) — the model is never in this loop.
   const commandCard = (d, notes = []) => {
-    const approve = el("button", { class: "primary" }, "Confirm");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Confirm");
     const refuse = el("button", { class: "danger" }, "Cancel");
     const card = el("div", { class: "confirm-card command-card", "data-action-id": d.action_id },
       ...cardBody(d),
@@ -2926,7 +2938,7 @@ async function viewChat(main, chatId) {
   // superseded automatically when the Approvals view answers first. Never
   // locks the composer: a gate can wait; the conversation must not.
   const gateCard = (d) => {
-    const approve = el("button", { class: "primary" }, "Approve");
+    const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
@@ -3249,6 +3261,9 @@ async function viewChat(main, chatId) {
       reply = null;
     };
     let cardOpen = false;
+    // v133-F39 (G8): the stored ids this stream's message events named (F38's
+    // message_id) — the rows it drew, known instead of guessed.
+    const streamedIds = new Set();
     let spokenText = "";  // v53-F6: what the voice toggle reads aloud
     // v40-F1: consecutive tool events accumulate into one activity group; the
     // first content/thinking delta or action card closes it (the same
@@ -3294,6 +3309,7 @@ async function viewChat(main, chatId) {
     try {
       await streamSse(path, body, {
         message: (d) => {
+          if (d.message_id != null) streamedIds.add(Number(d.message_id));
           if (d.content) { hideWorking(); group = null; currentReply().append(d.content); spokenText += d.content; }
         },
         thinking: (d) => {
@@ -3345,7 +3361,12 @@ async function viewChat(main, chatId) {
         // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
         const unseen = messages.filter(m => m.id > drawnMessageId);
         replayGroup = null;
-        drawMessages(unseen.filter(m => (m.provenance || "").includes(":")));
+        // v133-F39: once the stream named its rows, an assistant row it did
+        // not name (a background turn's reply) is drawn; the rest, and every
+        // row of a stream that named none, keep the provenance rule.
+        const fromOutside = m => (streamedIds.size && m.role === "assistant"
+          ? !streamedIds.has(m.id) : (m.provenance || "").includes(":"));
+        drawMessages(unseen.filter(fromOutside));
         drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
         // v81-F13: an SSE drop loses the live `action` event — the refreshed
         // state re-draws any pending card the stream never delivered.
@@ -3960,7 +3981,7 @@ async function viewRunDetail(main, taskId) {
     }
     // Phase 10 R2 I10 (I2, I8): whose command it was and the counts, as the
     // review page says them.
-    if (rv.outcome !== "not_applicable") for (const [k, v] of g10Provenance(rv)) kv(k, v);
+    if (rv.outcome !== "not_applicable") for (const [k, v] of [...g10Provenance(rv), ...g10Notes(rv)]) kv(k, v);
   } else if (detail.reverification_missing) {
     // ES-F291 follow-up (I8): a patch with no G10 record is "not re-verified",
     // never a blank row — landing refuses it until the record exists.
