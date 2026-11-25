@@ -636,3 +636,29 @@ def test_a_settled_gate_with_continuations_switched_off_is_dropped_not_run(
     _sweep(rig)
 
     assert len(_seeds(rig, chat_id)) == 1 and rig.store.queued_run_follow_ups() == []
+
+
+def _server_row_events(events: list[tuple[Any, dict[str, Any]]], text: str) -> list[Any]:
+    """Every message event that carries ``text``: one, holding the stored id."""
+    return [d for e, d in events if e is None and text in str(d.get("content") or "")]
+
+
+@pytest.mark.parametrize("case", ["clarification", "provider_failure", "stop"])
+def test_r2_t7_a_row_the_server_writes_sends_its_text_and_id_in_one_event(
+    rig: Rig, case: str
+) -> None:
+    from .test_serve_chat import sse_events
+
+    chat_id = rig.client.post("/api/chats", json={}).json()["chat_id"]
+    if case == "stop":
+        events: list[Any] = list(rig.engine._stopped(chat_id, "web"))
+    else:
+        if case == "clarification":
+            rig.ollama.script_tool_call("ask_clarifying_question", {"question": "Which repo?"})
+        else:
+            rig.ollama.script_refusal(500, "upstream exploded")
+        response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "go"})
+        events = sse_events(response.text)
+    row = [m for m in rig.store.chat_messages(chat_id) if m.role == "assistant"][-1]
+    [event] = _server_row_events(events, row.content)
+    assert event.get("message_id") == row.id, events

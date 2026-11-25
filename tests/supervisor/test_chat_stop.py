@@ -55,7 +55,9 @@ def test_stop_ends_the_turn_before_its_next_tool_call(
     )
     assert ran == ["list_runs"]  # the second call never ran
     assert events[-1] == ("done", {"state": "stopped"})
-    assert (None, {"content": "stopped by the web UI"}) in events
+    # v133 R2 (T7): a row the server writes sends its text and id in one event
+    assert any(e is None and d.get("content") == "stopped by the web UI" and d.get("message_id")
+               for e, d in events)  # fmt: skip
     assert len(ollama.chat_bodies()) == 1  # and no model call followed
     messages = client.get(f"/api/chats/{chat_id}").json()["messages"]
     assert (messages[-1]["role"], messages[-1]["content"]) == ("assistant", "stopped by the web UI")

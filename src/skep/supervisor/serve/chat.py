@@ -2584,6 +2584,13 @@ class ChatEngine:
         row = self.store.add_chat_message(chat_id, role="assistant", content=line)
         return (None, {"content": f"\n\n{line}", "message_id": row})  # v133-F38
 
+    def _line(self, chat_id: str, line: str) -> ChatEvent:
+        """R2 (Sol T7): a row the server writes itself (Stop, a clarification,
+        a provider failure) — its text and its stored id in ONE event, so a
+        stream cut between them can never name a row the page did not draw."""
+        message_id = self.store.add_chat_message(chat_id, role="assistant", content=line)
+        return (None, {"content": line, "message_id": message_id})
+
     def _said(self, chat_id: str, **row: Any) -> ChatEvent:
         """v133-F38 (G8): store one assistant row of this turn, and the
         message event that names its id — content empty, the deltas already
@@ -2710,8 +2717,7 @@ class ChatEngine:
                         # toast — on reload the chat just ended mid-tools (field
                         # test 2026-07-19: three "hung" turns in a row).
                         line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
-                        yield (None, {"content": line})
-                        yield self._said(chat_id, content=line)
+                        yield self._line(chat_id, line)
                     yield ("error", {"detail": str(exc)})
                     return
                 break
@@ -2854,8 +2860,7 @@ class ChatEngine:
                             formatted += "\n" + "\n".join(
                                 f"{index}. {choice}" for index, choice in enumerate(choices, 1)
                             )
-                        yield self._said(chat_id, content=formatted)
-                        yield (None, {"content": formatted})
+                        yield self._line(chat_id, formatted)
                         yield ("clarification", {"question": question, "choices": choices})
                         yield ("done", {"state": "complete"})
                         return
@@ -3420,8 +3425,7 @@ class ChatEngine:
     def _stopped(self, chat_id: str, face: str) -> Iterator[ChatEvent]:
         """v130-F10: the turn's honest last word (I8)."""
         line = f"stopped by {face}"
-        yield self._said(chat_id, content=line)
-        yield (None, {"content": line})
+        yield self._line(chat_id, line)
         yield ("done", {"state": "stopped"})
 
     def _refused(
@@ -3518,8 +3522,7 @@ class ChatEngine:
                 else:
                     # v62-F1: same silent-death branch as the main loop.
                     line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
-                    yield (None, {"content": line})
-                    yield self._said(chat_id, content=line)
+                    yield self._line(chat_id, line)
                 yield ("error", {"detail": str(exc)})
                 return
             break
