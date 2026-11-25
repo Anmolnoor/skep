@@ -622,6 +622,37 @@ def test_r1_s2_a_patched_installer_on_the_path_is_never_installed_with(
     assert [line.split()[:2] for line in _log(log)] == [["npm", "ci"]]  # baseline only
 
 
+# ---------- R2 (Sol S2): a yarnPath with `..` is compared normalised ----
+
+
+@pytest.mark.parametrize(
+    ("yarnrc", "detail"),
+    [
+        ("yarnPath: ../tools/yarn.cjs\n", "package manager's config (apps/tools/yarn.cjs)"),
+        ("yarnPath: ../../../outside.cjs\n", "outside the worktree"),
+    ],
+    ids=["dot-dot-inside", "escapes"],
+)
+def test_r2_s2_a_yarnpath_with_dot_dot_still_protects_its_target(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, yarnrc: str, detail: str
+) -> None:
+    _apps_web_project(repo)
+    (repo / "apps" / ".yarnrc.yml").write_text("", encoding="utf-8")  # only the climb names it
+    (repo / "apps" / "web" / ".yarnrc.yml").write_text(yarnrc, encoding="utf-8")
+    _commit(repo, "a yarnPath that climbs")
+    bin_dir, log = _pwd_stubs(tmp_path)
+    installer = (
+        "diff --git a/apps/tools/yarn.cjs b/apps/tools/yarn.cjs\n"
+        "--- a/apps/tools/yarn.cjs\n+++ b/apps/tools/yarn.cjs\n"
+        "@@ -1 +1 @@\n-// release\n+// patched installer\n"
+    )
+    patch = _marker_patch(tmp_path, _apps_web_lock_bump() + installer)
+    outcome = _run(repo, config, patch, bin_dir, log, "cd apps/web && npm test")
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert detail in outcome.detail, outcome.detail
+    assert [line.split()[:2] for line in _log(log)] == [["npm", "ci"]]  # baseline only
+
+
 # ---------- R1 (Sol S10): only the package manager's own directory flags ----
 
 

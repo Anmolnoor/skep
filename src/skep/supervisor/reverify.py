@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -630,6 +631,8 @@ def _node_install_refusal(
     )
     if config:
         return f"it changes the package manager's config ({', '.join(config)})"
+    if escaping := sorted(p for p in protected if p == ".." or p.startswith(("../", "/"))):
+        return f"its yarnPath points outside the worktree ({', '.join(escaping)})"
     if (changed := _package_manager(worktree, node_dir)) != package_manager:
         return f"it changes packageManager to {changed!r} (corepack would fetch and run it)"
     return ""
@@ -988,7 +991,8 @@ def reverify(
             with contextlib.suppress(OSError):
                 text = (worktree / rc).read_text(encoding="utf-8")
                 base = PurePosixPath(rc).parent
-                protected |= {str(base / p) for p in _YARN_PATH.findall(text)}
+                # R2 (Sol S2): compared normalised, as the patch names it
+                protected |= {posixpath.normpath(base / p) for p in _YARN_PATH.findall(text)}
         wall = _PrimeWall(
             stack,
             tuple(sorted(hosts)),
