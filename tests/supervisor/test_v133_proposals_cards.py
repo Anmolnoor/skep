@@ -218,3 +218,39 @@ def test_the_no_auth_env_refusal_names_the_three_manual_steps(
         assert str(config.home.parent / "serve.env") in str(refused.detail)
     finally:
         store.close()
+
+
+# ---------- F27: a PR review on an unpinned project says so first (A5) ----------
+
+
+def test_a_pr_review_dispatch_on_an_unpinned_project_says_so_on_its_card(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+    from skep.supervisor.serve.tools import dispatch_manifest_for
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, {})
+        args = {"repo": str(repo), "instructions": "review", "ref": "refs/skep/pr/8/head"}
+
+        def card(call: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            manifest = dispatch_manifest_for(store, holder, call, None)
+            recorded = recorded_card("dispatch_run", call, None, store, manifest) or {}
+            return recorded, card_summary("dispatch_run", call, store=store, recorded=recorded)
+
+        recorded, summary = card(args)
+        line = recorded["pin_warning"]
+        assert "PR #8" in line and "no verify_command" in line
+        assert f'skep project setup {repo} --verify-command "<command>"' in line
+        assert "the review can still run" in line
+        assert str(summary["risk"]).startswith(line)
+        # still a card, not a refusal
+        decision = mutation_execution_decision("dispatch_run", args, store=store, holder=holder)
+        assert decision is None or decision.verdict != "deny"
+        # a pinned project, or a dispatch that reviews no PR: no line
+        assert "pin_warning" not in card({**args, "ref": None})[0]
+        _bind(store, repo, {"verify_command": "uv run pytest"})
+        assert "pin_warning" not in card(args)[0]
+    finally:
+        store.close()

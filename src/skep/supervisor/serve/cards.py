@@ -720,6 +720,24 @@ def _role_words(role: str | None) -> str:
     return "no role" if role is None else f"role {role}"
 
 
+def pr_review_pin_line(args: dict[str, Any], manifest: dict[str, Any] | None) -> str | None:
+    """v133-F27 (A5, I2, I9): a dispatch that reviews a PR head on a project
+    that pins no verify_command — G10 re-verifies a PR head only with the pin
+    (reverify.py, v88-F4), so the card says so before the run, with the line
+    that pins one. The review is still allowed. None otherwise."""
+    from ..github import PR_HEAD_REF
+
+    found = PR_HEAD_REF.fullmatch(str(args.get("ref") or ""))
+    if found is None or manifest is None or "error" in manifest or manifest.get("verify_command"):
+        return None
+    repo = shlex.quote(str(manifest.get("repo") or args.get("repo") or "<repo>"))
+    return (
+        f"PR #{found[1]}: G10 cannot re-verify this review — the project pins no "
+        f'verify_command; pin one first: `skep project setup {repo} --verify-command "<command>"` '
+        "(the review can still run, unverified)"
+    )
+
+
 def recorded_card(
     tool: str,
     args: dict[str, Any],
@@ -738,6 +756,8 @@ def recorded_card(
     record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
     if manifest is not None:
         record["manifest"] = manifest
+    if tool == "dispatch_run" and (pin_line := pr_review_pin_line(args, manifest)) is not None:
+        record["pin_warning"] = pin_line
     if schedule_role is not None:
         record["schedule_role"] = schedule_role
     if tool == "propose_schedule":
@@ -1011,6 +1031,9 @@ def card_summary(
     push = (recorded or {}).get("push")
     if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
         danger = f"{push} — {danger}"
+    pin_warning = (recorded or {}).get("pin_warning")
+    if pin_warning:  # v133-F27 (A5): before the review runs, not after G10
+        danger = pin_warning if danger is None else f"{pin_warning} — {danger}"
     if tool == "approve_memory_proposal" and store is not None:
         # v126-F6: the approver sees what the filing chat (or note) had read
         from ..memory import taint_phrase, taint_words
