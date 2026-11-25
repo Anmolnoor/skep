@@ -5,7 +5,7 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares functions: by the time any of them
    runs, app.js has finished evaluating. */
-import { api, el, liveRunStatus, openRunLink, relativeTime, shortTaskId, stateChip } from "./app.js";
+import { LIVE_RUN_STATES, api, el, liveRunStatus, openRunLink, relativeTime, shortTaskId, stateChip } from "./app.js";
 
 const section = (label, ...body) =>
   el("section", { class: "context-section" }, el("div", { class: "context-label" }, label), ...body);
@@ -13,9 +13,6 @@ const none = text => el("p", { class: "note" }, text);
 // v134-F7 (N5): who raised a card — "assistant" read like the chat's role.
 const PROPOSERS = { assistant: "proposed by skep", operator: "your command", gate: "a worker's gate" };
 const proposer = source => PROPOSERS[source] || source;
-// TaskState minus TERMINAL_STATES: a gated run (pending_approval) has stopped;
-// its approval resumes it as a new run, and its card is under Waiting on you.
-const RUNNING = new Set(["created", "dispatched", "running"]);
 
 // The panel's sync half draws at once from what the chat view already holds;
 // runs and spend follow from two reads, and a failed read says so (I8).
@@ -53,8 +50,8 @@ export function renderContextPanel(panel, { chat, defaultModel, actions }) {
       // v134-F6 (W2, the operator's ask): the runs working now come first,
       // each with its live status (the chat view's status stream writes the
       // span) and Open ↗ to its page in a new tab; the history follows.
-      const running = list.filter(run => RUNNING.has(run.state));
-      const rest = list.filter(run => !RUNNING.has(run.state));
+      const running = list.filter(run => LIVE_RUN_STATES.has(run.state));
+      const rest = list.filter(run => !LIVE_RUN_STATES.has(run.state));
       runs.replaceChildren(
         ...(running.length ? [el("div", { class: "context-running" },
           el("small", { class: "context-sublabel" }, "Running now"),

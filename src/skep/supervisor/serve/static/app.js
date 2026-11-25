@@ -1563,6 +1563,9 @@ function renderActivityGroup(log, options = {}) {
 // The status span carries data-task-id: the chat view's status stream
 // writes every span of a run, the transcript's and the side panel's (W2).
 const DISPATCHED_RESULT_STATES = new Set(["dispatched", "research_dispatched"]);
+// TaskState minus TERMINAL_STATES (a gated run has stopped; its approval
+// resumes it as a new run).
+const LIVE_RUN_STATES = new Set(["created", "dispatched", "running"]);
 // v92-F1: terminal announcements dedupe here — the status stream replays
 // terminals for 30s after a reconnect (v56-F7), and the post-redraw
 // resubscribe must not re-flash (or re-redraw) the same ending.
@@ -1602,7 +1605,10 @@ function renderWorkerActivity(log, taskId, options = {}) {
       status.className = `live-run-status state ${run.state || ""}`;
       status.textContent = runStateWords(run.state);
     }
-  }).catch(() => { status.textContent = "run not found"; });
+    // review R1 (S2): a row drawn after the status stream drained (a
+    // continuation's dispatch) asks for the stream again
+    if (LIVE_RUN_STATES.has(run.state) && options.onActive) options.onActive();
+  }).catch(() => { status.textContent = "status unavailable"; });
   return row;
 }
 
@@ -2445,8 +2451,32 @@ async function viewChat(main, chatId) {
     }
   };
   const runRowsTick = setInterval(drawRunRows, 1000);
+  // review R1 (S1): a live run whose terminal event never comes — the stream
+  // closed (its cap, a drop, a restart) or the run ended before the stream
+  // opened and is past the server's replay window — settles from the store.
+  const settleLiveRuns = () => {
+    for (const taskId of [...liveRunRows.keys()]) {
+      api("GET", `/api/runs/${taskId}`).then(({ run }) => {
+        if (!LIVE_RUN_STATES.has(run.state)) untrackRun(taskId, run.state);
+        // review R2 (S1): still live and no stream (the server's 30-minute
+        // cap, a drop) — reopen it, or its end would never arrive. One
+        // pending reopen, 5 s out: a stream that fails at once (a deleted
+        // chat) must not spin close → settle → reopen at network speed.
+        else if (!window.__skepStatusES && !reopenTimer) {
+          reopenTimer = setTimeout(() => {
+            reopenTimer = null;
+            if (!window.__skepStatusES) watchStatus();
+          }, 5000);
+        }
+      }).catch(() => {});
+    }
+  };
+  const panelAskedFor = new Set();
+  let viewGone = false; // review R2 (N1): set by cleanup — a late read reopens nothing
+  let reopenTimer = null;
   const watchStatus = () => {
-    if (!activeChatId) return;
+    if (!activeChatId || viewGone) return;
+    settleLiveRuns();
     if (window.__skepStatusES) window.__skepStatusES.close();
     let source;
     try { source = new EventSource(`/api/chats/${activeChatId}/status`); }
@@ -2460,6 +2490,12 @@ async function viewChat(main, chatId) {
         phase: d.phase,
         startedAt: Date.now() - (d.elapsed_seconds || 0) * 1000,
       });
+      // review R1 (S2): a run started elsewhere (a resume, an approval, a
+      // continuation, a messenger) has no row here yet — the panel shows it
+      if (!runSpans(d.task_id).length && !panelAskedFor.has(d.task_id)) {
+        panelAskedFor.add(d.task_id);
+        refreshContext();
+      }
     });
     source.addEventListener("terminal", (event) => {
       const d = JSON.parse(event.data);
@@ -2478,6 +2514,7 @@ async function viewChat(main, chatId) {
     source.onerror = () => {
       source.close();
       if (window.__skepStatusES === source) window.__skepStatusES = null;
+      settleLiveRuns(); // review R1 (S1)
     };
   };
   const pane = el("div", { class: "chat-main" }, log, composer);
@@ -2496,6 +2533,7 @@ async function viewChat(main, chatId) {
   // card just resolved may be the one that changed its role or model.
   const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
     .then(fresh => drawContext(fresh.chat, fresh.actions))
+    .then(drawRunRows) // review R1 (N8): the redrawn panel's live spans, at once
     .catch(() => {});
   const applyContextState = () => {
     layout.classList.toggle("context-hidden", contextHidden);
@@ -2516,6 +2554,7 @@ async function viewChat(main, chatId) {
   // v40-F3: a route change must close any live worker event streams.
   // v92-F1: … and the status stream + loader ticker with them.
   cleanup = () => {
+    viewGone = true;
     clearInterval(runRowsTick);
     if (window.__skepStatusES) { window.__skepStatusES.close(); window.__skepStatusES = null; }
     chatReconcile = null;
@@ -2528,7 +2567,10 @@ async function viewChat(main, chatId) {
     const result = unwrapToolResult(raw);
     if (result && typeof result === "object" && result.task_id
         && DISPATCHED_RESULT_STATES.has(result.state)) {
-      renderWorkerActivity(log, String(result.task_id), { scroll: scrollBottom });
+      renderWorkerActivity(log, String(result.task_id), {
+        scroll: scrollBottom,
+        onActive: () => { if (!window.__skepStatusES) watchStatus(); },
+      });
       if (live) {
         trackRun(String(result.task_id));
         refreshContext(); // W2: the new run shows in the panel at once
@@ -5139,4 +5181,4 @@ schedulePoll(POLL_MIN_MS);
 // only declare at top level). After the boot marker, so tests/web never sees it.
 // Phase 10 10.1: api/el/iconButton now come from js/; re-exported so the
 // modules that import them from here keep working unchanged.
-export { api, buildFilterBar, buildTabBar, casteSelect, chatTitle, confirmTemplateSuggestion, copyText, el, flash, fmtTs, header, iconButton, liveRunStatus, offersRemember, openRunLink, previewTemplateSuggestion, relativeTime, renderAssistantTab, renderChannelsTab, renderMarkdown, renderProjectList, renderReposTab, renderSuggestionGrant, renderWebhooksTab, renderWorkerModel, renderWorkersTab, repoOptions, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };
+export { LIVE_RUN_STATES, api, buildFilterBar, buildTabBar, casteSelect, chatTitle, confirmTemplateSuggestion, copyText, el, flash, fmtTs, header, iconButton, liveRunStatus, offersRemember, openRunLink, previewTemplateSuggestion, relativeTime, renderAssistantTab, renderChannelsTab, renderMarkdown, renderProjectList, renderReposTab, renderSuggestionGrant, renderWebhooksTab, renderWorkerModel, renderWorkersTab, repoOptions, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };

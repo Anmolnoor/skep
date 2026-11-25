@@ -862,6 +862,7 @@ main.chat-view { padding: 0; max-width: none; }
 /* v134-F6 (W2): the side panel's "Running now" group above the history. */
 .context-running { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
 .context-sublabel { color: var(--muted-2); font-size: 11px; }
+.context-running .context-run { cursor: default; } /* the Open link is the action */
 .worker-command-output {
   margin: 2px 0 6px; padding: 8px 10px; max-height: 200px; overflow: auto;
   background: var(--panel-2); border: 1px solid var(--border-soft);

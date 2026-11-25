@@ -97,10 +97,11 @@ const dispatched = (id, taskId) => ({
   content: JSON.stringify({ task_id: taskId, state: "dispatched" }), created_at: "2026-11-25T10:00:00Z",
 });
 
-async function openWorkers({ runs, before = () => {} }) {
+async function openWorkers({ runs, extra = {}, before = () => {} }) {
   const app = loadApp();
   before(app);
   const sources = [];
+  let listed = 0;
   app.api = async (method, path) => {
     if (path === "/api/llm/config") return { configured: true, default_model: "m" };
     if (path === "/api/chats") return { chats: [{ chat_id: "c1", title: "t" }] };
@@ -108,8 +109,11 @@ async function openWorkers({ runs, before = () => {} }) {
       return { chat: { chat_id: "c1", title: "t" }, actions: [],
         messages: [msg(1, "user", "go"), ...Object.keys(runs).map((t, i) => dispatched(2 + i, t))] };
     }
-    if (path.startsWith("/api/runs?chat_id=")) return { runs: Object.entries(runs).map(([task_id, r]) => ({ task_id, ...r })) };
-    if (path.startsWith("/api/runs/")) return { run: runs[path.slice("/api/runs/".length)] };
+    if (path.startsWith("/api/runs?chat_id=")) {
+      listed += 1; // ``extra`` runs started after the first panel read
+      return { runs: Object.entries(listed > 1 ? { ...runs, ...extra } : runs).map(([task_id, r]) => ({ task_id, ...r })) };
+    }
+    if (path.startsWith("/api/runs/")) return { run: { ...runs, ...extra }[path.slice("/api/runs/".length)] };
     if (path.startsWith("/api/llm/usage")) return { chat: { last_5h: { total_tokens: 1 }, last_7d: { total_tokens: 1 } } };
     if (path === "/api/roles") return { roles: [], default: null };
     if (path === "/api/llm/models") return { models: [] };
@@ -130,7 +134,7 @@ async function openWorkers({ runs, before = () => {} }) {
   await app.viewChat(main, "c1");
   await settle();
   const emit = (type, data) => sources.at(-1).on[type]({ data: JSON.stringify(data) });
-  return { app, main, log: main.querySelector(".chat-log"), emit };
+  return { app, main, log: main.querySelector(".chat-log"), emit, sources, listed: () => listed };
 }
 
 const RUNS = {
@@ -192,4 +196,57 @@ test("F7: Waiting on you names the proposer: skep for the Queen's cards, you for
   const [queen, mine] = panel.querySelectorAll(".context-card").map(n => n.querySelector("small").textContent);
   assert.match(queen, /^proposed by skep · /);
   assert.match(mine, /^your command · /);
+});
+
+// ---------- review R1 (S1, S2): live rows settle; runs from elsewhere show ----------
+
+test("R1 S1: a live row whose terminal never arrives settles from the store when the stream closes", async () => {
+  const runs = { [RUN_B]: { ...RUNS[RUN_B] } };
+  const { main, emit, sources } = await openWorkers({ runs });
+  emit("status", { task_id: RUN_B, phase: "build", elapsed_seconds: 3 });
+  runs[RUN_B].state = "completed"; // it ended; the stream closed before saying so
+  sources.at(-1).onerror();
+  await settle();
+  const spans = main.querySelectorAll(`.live-run-status[data-task-id="${RUN_B}"]`);
+  assert.ok(spans.length >= 1);
+  for (const span of spans) assert.equal(span.textContent, "completed");
+});
+
+test("R2 S1: a stream that closes on runs still live is reopened once, after a pause", async () => {
+  const RUN_C = "01a21483-d097-7d7b-b075-a778042b82f1";
+  const runs = { [RUN_B]: { ...RUNS[RUN_B] }, [RUN_C]: { ...RUNS[RUN_B] } };
+  const { app, emit, sources } = await openWorkers({ runs });
+  const timers = [];
+  app.setTimeout = (fn, ms) => { timers.push([fn, ms]); return timers.length; };
+  emit("status", { task_id: RUN_B, phase: "build", elapsed_seconds: 3 });
+  emit("status", { task_id: RUN_C, phase: "build", elapsed_seconds: 3 });
+  const opened = sources.length;
+  sources.at(-1).onerror(); // the server's 30-minute cap; both runs still running
+  await settle();
+  assert.deepEqual(timers.map(([, ms]) => ms), [5000], "one pending reopen, 5 s out, for both runs");
+  timers[0][0]();
+  assert.equal(sources.length, opened + 1, "a new status stream was opened");
+});
+
+test("R2 N1: after leaving the chat, a late settle never reopens its stream", async () => {
+  const { app, emit, sources } = await openWorkers({ runs: { [RUN_B]: { ...RUNS[RUN_B] } } });
+  emit("status", { task_id: RUN_B, phase: "build", elapsed_seconds: 3 });
+  const opened = sources.length;
+  app.setTimeout = (fn) => { fn(); return 0; }; // the pending reopen fires inside the test
+  vm.runInContext("cleanup()", app); // the route changed
+  sources.at(-1).onerror();
+  await settle();
+  assert.equal(sources.length, opened);
+});
+
+test("R1 S2: a status event for a run this page never drew refreshes the panel, which then shows it live", async () => {
+  const RUN_C = "01a21483-d097-7d7b-b075-a778042b82f1";
+  const extra = { [RUN_C]: { state: "running", repo: "/r", instructions: "resumed", updated_at: "2026-11-25T10:00:00Z" } };
+  const { main, emit, listed } = await openWorkers({ runs: { [RUN_A]: RUNS[RUN_A] }, extra });
+  const before = listed();
+  emit("status", { task_id: RUN_C, phase: "test", elapsed_seconds: 5 });
+  await settle();
+  assert.equal(listed(), before + 1, "the panel was re-read");
+  const [span] = main.querySelectorAll(`.live-run-status[data-task-id="${RUN_C}"]`);
+  assert.equal(span.textContent, "test · 5s");
 });
