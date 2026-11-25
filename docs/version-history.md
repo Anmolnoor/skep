@@ -3359,14 +3359,17 @@ One fix since 2.0.0 (#136):
   - Any other provider that is already registered keeps the 2.0.0 text.
     Under a `--home` that is not the default one, its `set-key` command now
     carries that home.
-  - A provider that is not registered yet, with a key variable named (by
-    `--api-key-env` or by the provider's preset): it says to set that
+  - Any other provider that is not registered yet, with a key variable named
+    (by `--api-key-env` or by the provider's preset): it says to set that
     variable to a working key.
-  - A provider that is not registered yet, with no key variable named: the
-    refusal prints the `skep provider add` command for it (protocol,
-    endpoint and model), then `skep provider set-key`, then says to run the
-    same `skep onboard` command again, or to pass `--api-key-env NAME`.
-- The printed commands are shell-quoted and carry `--home` when the home is
-  not the default one. An endpoint URL that holds a login, a query or a
-  fragment, or anything the redactor masks, is not printed: the command
-  shows a placeholder for it instead.
+  - Any other provider that is not registered yet, with no key variable
+    named: the refusal prints the `skep provider add` command for it
+    (protocol, endpoint and model), then `skep provider set-key`, then says
+    to run the same `skep onboard` command again, or to pass
+    `--api-key-env NAME`.
+- Those `skep provider` commands carry `--home` when the home is not the
+  default one, and their values are shell-quoted where they need it. When the
+  endpoint URL holds a login, a query or a fragment, or anything the redactor
+  masks, the `provider add` command shows a placeholder where the URL goes:
+  put your URL there, quoted for the shell, before you run it. The provider's
+  own error text earlier in the same refusal is unchanged.
