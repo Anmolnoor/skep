@@ -4535,6 +4535,19 @@ def landing_card_error(
         if name == "open_pr" and not args.get("branch"):
             # ES-F292 follow-up: open_pr lands each run first (land_run).
             ids = args.get("task_ids") or [args.get("task_id")]
+            if args.get("task_ids") and isinstance(ids, list) and ids:
+                # v133-F25 (F-I7): the 08:30 "already landed" — a run landed on
+                # its own branch cannot join the grouped PR's shared branch
+                title = None if args.get("title") is None else str(args["title"])
+                shared = actions._grouped_branch(title, str(ids[0]))
+                for task_id in ids:
+                    landed = actions.applied_branch_for(store, str(task_id))
+                    if landed is not None and landed != shared:
+                        return (
+                            f"run {task_id} already landed on {landed!r}; it cannot also "
+                            f"join {shared!r} — open its PR from that branch instead "
+                            f"(open_pr task_id={task_id})"
+                        )
             for task_id in ids if isinstance(ids, list) else []:
                 if (
                     task_id
@@ -6581,6 +6594,92 @@ def _schedule_role_refusal(
     return None
 
 
+def _shell_parse_refusal(command: str) -> str | None:
+    """v133-F25 (A9): the run_shell confirm's own parse check, asked at
+    proposal — a line the shell cannot even split gets no card."""
+    import shlex
+
+    try:
+        if not shlex.split(command):
+            return "command could not be parsed: command must be a non-empty shell command"
+    except ValueError as exc:
+        return f"command could not be parsed: {exc} — fix the quoting and propose it again"
+    return None
+
+
+def _diagnose_refusal(store: RunStore, config: Any, task_id: str) -> str | None:
+    """v133-F25 (A9, F-I7): why diagnose_run cannot run in ``task_id``'s
+    kept tree, or None. An unknown id is left for the confirm ("no run")."""
+    record = store.get_run(task_id)
+    if record is None:
+        return None
+    workspace = Path(record.workspace or "")
+    if not record.workspace or not workspace.is_dir():
+        return (
+            f"run {task_id[:13]}…'s worktree is gone — preserved trees (failed/"
+            "unconfirmed runs) live 24h before the sweep; dispatch a fresh run, "
+            "or read the audit trail via get_run instead"
+        )
+    return None
+
+
+def _setup_refusal(args: dict[str, Any]) -> str | None:
+    """v133-F25 (F-I7): a setup_project field its confirm rejects — an unknown
+    policy key or engine — refused at proposal, naming the allowed ones."""
+    from ..engines import resolve_engine
+    from ..projects import PROJECT_POLICY_KEYS
+
+    overrides = args.get("policy_overrides")
+    unknown = sorted(set(overrides) - PROJECT_POLICY_KEYS) if isinstance(overrides, dict) else []
+    if unknown:
+        return (
+            f"unknown project policy fields: {unknown!r}; allowed keys are "
+            f"{sorted(PROJECT_POLICY_KEYS)!r}"
+        )
+    if args.get("engine") is not None:
+        try:
+            resolve_engine(str(args["engine"]))
+        except ValueError as exc:
+            return str(exc)
+    return None
+
+
+def _no_auth_refusal(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v133-F25 (A9, C1): a dispatch whose external engine has no way to log
+    in, from the manifest its card would show (engine and login, compiled as
+    the confirm compiles them). run_task refuses the same dispatch."""
+    from ..dispatch import no_auth_env_refusal
+    from ..engines import resolve_engine
+
+    manifest = dispatch_manifest_for(store, holder, args, chat_id)
+    if "error" in manifest or manifest.get("engine_auth") is not None:
+        return None
+    engine = resolve_engine(str(manifest.get("engine") or "builtin"))
+    return no_auth_env_refusal(engine) if engine.external else None
+
+
+def _proposal_refusal(
+    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any], chat_id: str | None
+) -> AutonomyDecision | None:
+    """v133-F25 (A9, F-I7, I5, I9): the checks that need no side effect, asked
+    when the card would be proposed. Each confirm path checks again: state can
+    change between the card and the click."""
+    why: str | None = None
+    if name == "run_shell":
+        why = _shell_parse_refusal(str(args.get("command") or "x"))
+    elif name == "diagnose_run":
+        why = _diagnose_refusal(store, holder.current, str(args.get("task_id") or ""))
+    elif name == "setup_project":
+        why = _setup_refusal(args)
+    elif name == "dispatch_run" and str(args.get("repo") or "").strip():
+        why = _no_auth_refusal(store, holder, args, chat_id)
+    if why is None:
+        return None
+    return AutonomyDecision(verdict="deny", reason=f"{name}.deny.cannot_run", detail=why)
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -6604,6 +6703,9 @@ def mutation_execution_decision(
         # words; one that would card (a run policy that cannot resolve: a
         # tampered baseline, a gated repo) or allow is overruled (W2).
         decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id) or decision
+    if decision is None or decision.verdict != "deny":
+        # v133-F25: a card whose confirm can only fail is not offered (B22)
+        decision = _proposal_refusal(store, holder, name, args, chat_id) or decision
     if (
         chat_id is None
         or name in _DECIDED_LANES

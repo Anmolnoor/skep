@@ -410,6 +410,20 @@ def _resolve_provider_routing(
     return decision, profile
 
 
+def no_auth_env_refusal(engine: CodingEngine) -> str | None:
+    """v116-F1: the NO AUTH ENV refusal for an engine with none of its auth
+    env set in this process, else None. v133-F25: the chat asks it when a
+    dispatch card would be proposed, and run_task again before any record."""
+    if not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env):
+        return None
+    return (
+        f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
+        f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
+        "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
+        "shell) — the line `skep doctor` prints for this engine"
+    )
+
+
 def run_task(
     repo: Path,
     instructions: str,
@@ -629,13 +643,8 @@ def run_task(
                 "`skep doctor` lists each engine; install it, or switch the project "
                 "to another engine (`skep project setup --engine builtin`)"
             )
-        if engine.auth_env and not any(os.environ.get(var) for var in engine.auth_env):
-            refusal = (
-                f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
-                f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
-                "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
-                "shell) — the line `skep doctor` prints for this engine"
-            )
+        refusal = no_auth_env_refusal(engine)
+        if refusal is not None:
             # ES-F122 (D20): a codex run on a project that opted in may use the
             # operator's ChatGPT plan login instead — checked HERE, before any
             # run record, against the run's whole budget (codex_login.py).
