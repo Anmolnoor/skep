@@ -54,8 +54,10 @@ re-runs only with what the host already has.
 
 A Node pin is primed in the directory its first Node command runs in: the
 `cd X` steps before that command (`cd web && npm test`,
-`cd apps && cd web && node --test`), then the command's own `--prefix X`,
-`--prefix=X` or `-C X` (`npm --prefix web test`, `pnpm -C web test`). The
+`cd apps && cd web && node --test`), then that tool's own directory flag
+before its script arguments: `--prefix X`, `--prefix=X` or `-C X` for npm and
+npx, `-C X` for pnpm (`npm --prefix web test`, `pnpm -C web test`). `node` and
+`yarn` have no such flag here, and a flag after `--` belongs to the script. The
 `package.json`, the lockfile, the hosts that lockfile names, the install, the
 kept `node_modules` and the re-install after a patched lockfile all come from
 that directory. Each part must be a literal path (letters, digits, `.`, `_`,
