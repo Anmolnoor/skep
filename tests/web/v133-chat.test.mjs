@@ -659,3 +659,21 @@ test("R2 S6: a tool row a background turn wrote is drawn; the stream's own tool 
   assert.equal(toolRows(chat, "get_run"), 1, "the streamed tool row is drawn once");
   assert.equal(chat.textCount("the answer"), 1);
 });
+
+// S14: a card that went executing → proposed (a refused, unclaimed confirm)
+// is pending again: the Running verdict goes and the buttons come back.
+test("R2 S14: a card back at proposed after Running drops the verdict and gets its buttons back", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  const [drawn] = chat.log.querySelectorAll(".confirm-card");
+  chat.server.actions[0].status = "executing";
+  await chat.app.poll();
+  assert.match(drawn.textContent, /Running/);
+  chat.server.actions[0].status = "proposed";
+  await chat.app.poll();
+  assert.doesNotMatch(drawn.textContent, /Running/);
+  assert.equal(drawn.classList.contains("resolved"), false, "its buttons show again");
+  assert.equal(drawn.querySelectorAll(".verdict").length, 0);
+  assert.ok(drawn.querySelectorAll("button").filter(b => /Approve|Deny/.test(b.textContent)).every(b => !b.disabled));
+  assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "drawn once");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "it holds the composer again");
+});

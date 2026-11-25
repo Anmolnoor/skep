@@ -3005,6 +3005,14 @@ async function viewChat(main, chatId) {
         }
         continue;
       }
+      // v133 R2 (S14): back at proposed after "executing" (a confirm refused
+      // and unclaimed): the passing verdict goes and the buttons come back.
+      const running = drawn?.querySelector(".verdict-running");
+      if (running) {
+        running.remove();
+        drawn.classList.remove("resolved");
+        for (const button of drawn.querySelector(".actions")?.querySelectorAll("button") || []) button.disabled = false;
+      }
       if (drawn) continue;
       // v25-F1: operator /commands resolve on the commands endpoints; only
       // model proposals resume the model after the verdict. v87-F2: gate
