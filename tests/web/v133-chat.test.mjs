@@ -461,3 +461,23 @@ test("R1 S6: with ids, an unnamed reply is drawn even in the streamed words; a b
   assert.equal(chat.textCount("let me look"), 1, "the streamed thinking is not drawn again");
   assert.equal(chat.textCount("do the thing"), 1);
 });
+
+// S14: "executing" is a passing state — the next status replaces it.
+for (const [status, final] of [["confirmed", /Approved/], ["failed", /Failed — boom/]]) {
+  test(`R1 S14: a card seen running elsewhere ends on its real result (${status})`, async () => {
+    const chat = await openChat({ actions: [card("a1")] });
+    const [drawn] = chat.log.querySelectorAll(".confirm-card");
+    chat.server.actions[0].status = "executing";
+    await chat.app.poll();
+    assert.match(drawn.textContent, /Running — confirmed elsewhere/);
+    assert.ok(drawn.classList.contains("resolved"), "its buttons are gone while it runs");
+    await chat.app.poll();
+    assert.equal(drawn.querySelectorAll(".verdict").length, 1, "a quiet poll adds nothing");
+    Object.assign(chat.server.actions[0], { status, result: { error: "boom" } });
+    await chat.app.poll();
+    assert.doesNotMatch(drawn.textContent, /Running/);
+    assert.match(drawn.textContent, final);
+    assert.equal(drawn.querySelectorAll(".verdict").length, 1, "one verdict on the card");
+    assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1);
+  });
+}

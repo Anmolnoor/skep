@@ -2849,8 +2849,10 @@ async function viewChat(main, chatId) {
   // the verdict instead — done, not just dimmed.
   const resolveCardUI = (card, label, verb) => {
     card.classList.add("resolved");
-    card.append(el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label));
+    const verdictNode = el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label);
+    card.append(verdictNode);
     refreshContext();
+    return verdictNode;
   };
 
   // ---------- the command deck executor (v25-F1) ----------
@@ -2992,8 +2994,12 @@ async function viewChat(main, chatId) {
         // a newer proposal, or answered from another surface — must drop its
         // buttons: a live Approve on a dead action can only 409, which reads
         // as "approval is broken" (the Aug 9 five-close_pr field test).
-        if (drawn && !drawn.classList.contains("resolved")) {
-          resolveCardUI(drawn, ...cardVerdict(action));
+        // v133 R1 (S14): "executing" is passing — the next status replaces it.
+        const running = drawn?.querySelector(".verdict-running");
+        if (drawn && (!drawn.classList.contains("resolved") || (running && action.status !== "executing"))) {
+          running?.remove();
+          const verdictNode = resolveCardUI(drawn, ...cardVerdict(action));
+          if (action.status === "executing") verdictNode.classList.add("verdict-running");
         }
         continue;
       }
