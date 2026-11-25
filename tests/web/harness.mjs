@@ -66,6 +66,16 @@ class FakeNode {
     this.parentNode = null;
   }
   appendChild(node) { this.append(node); return node; }
+  // Insert before this node in its parent (a streaming reply's thinking block).
+  before(...nodes) {
+    const parent = this.parentNode;
+    for (const n of nodes) {
+      const node = typeof n === "object" ? n : new FakeText(n);
+      if (node.parentNode) node.remove?.();
+      node.parentNode = parent;
+      parent.children.splice(parent.children.indexOf(this), 0, node);
+    }
+  }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }

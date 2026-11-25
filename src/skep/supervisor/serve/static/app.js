@@ -2683,6 +2683,13 @@ async function viewChat(main, chatId) {
   // poll and the stream's finally draw only rows above it — a row is drawn
   // once, whichever of them sees it first.
   let drawnMessageId = 0;
+  // v133 R1 (S6): the rows the last stream drew live, as a test the next
+  // reconcile applies once to the rows above the watermark — whichever
+  // reconcile runs first after the stream (its own finally or a poll).
+  // `streamEpoch` counts streams: a read that began before one did predates
+  // that stream's rows and must not spend its rule.
+  let streamRule = null;
+  let streamEpoch = 0;
   // v133-F24 (G7): what the operator sent in this chat, oldest first — the
   // ↑ recall walks it. Filled by replay (their own rows only) and by deliver.
   const sentHistory = [];
@@ -2693,8 +2700,10 @@ async function viewChat(main, chatId) {
   // up to read keeps their place.
   const reconcile = async () => {
     if (!activeChatId || chatStreamActive) return;
+    const epoch = streamEpoch;
     const fresh = await api("GET", `/api/chats/${activeChatId}`);
-    if (chatStreamActive) return; // a stream began meanwhile; its finally reconciles
+    // a stream began meanwhile (or ran start to finish): its finally reconciles
+    if (chatStreamActive || epoch !== streamEpoch) return;
     const readingAt = log.scrollHeight - log.scrollTop - log.clientHeight > 40 ? log.scrollTop : null;
     // The context panel redraws only when what it shows moved — a quiet poll
     // touches nothing on screen.
@@ -2706,7 +2715,11 @@ async function viewChat(main, chatId) {
     actions = fresh.actions;
     activeChat = fresh.chat || activeChat;
     replayGroup = null;
-    drawMessages(messages.filter(m => m.id > drawnMessageId));
+    const drewLive = streamRule || (() => false);
+    streamRule = null;
+    const unseen = messages.filter(m => m.id > drawnMessageId);
+    drawMessages(unseen.filter(m => !drewLive(m)));
+    drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
     renderPendingCards();
     if (panelChanged) drawContext(activeChat, actions);
     if (readingAt !== null) log.scrollTop = readingAt;
@@ -3245,6 +3258,7 @@ async function viewChat(main, chatId) {
   const runStream = async (path, body = {}) => {
     send.disabled = true;
     chatStreamActive = true;  // v60-F1: the poll must not route() mid-stream
+    streamEpoch += 1;
     const replyOptions = {
       label: activeChat?.model || llm.default_model || "skep",
       scroll: scrollBottom,
@@ -3347,48 +3361,48 @@ async function viewChat(main, chatId) {
       working.remove();
       finishReply();
       speakReply(spokenText);
-      // v133 R1 (S16): the lock — and with it the queue — waits for the
-      // server's card state below: a card whose `action` event the stream
-      // lost must hold a queued message, not receive it.
-      try {
-        const latest = await api("GET", "/api/chats");
-        chats = latest.chats;
-        activeChat = chats.find(chat => chat.chat_id === activeChatId) || activeChat;
-        if (activeChatId) {
-          detail = await api("GET", `/api/chats/${activeChatId}`);
-          messages = detail.messages;
-          actions = detail.actions;
-          activeChat = detail.chat;
-          // v133-F19: this turn's own rows were drawn live, so they only move
-          // the watermark; a row from outside (a run's terminal line, a
-          // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
-          const unseen = messages.filter(m => m.id > drawnMessageId);
-          replayGroup = null;
-          // v133-F39: once the stream named its rows, an assistant row it did
-          // not name (a background turn's reply) is drawn; the rest, and every
-          // row of a stream that named none, keep the provenance rule.
-          const fromOutside = m => (streamedIds.size && m.role === "assistant"
-            ? !streamedIds.has(m.id) : (m.provenance || "").includes(":"));
-          drawMessages(unseen.filter(fromOutside));
-          drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
-          // v81-F13: an SSE drop loses the live `action` event — the refreshed
-          // state re-draws any pending card the stream never delivered.
-          renderPendingCards();
+      // v133 R1 (S6): which stored rows this stream drew live — those its
+      // message events named by id (F38); an assistant row it did not name
+      // is a background turn's reply, unless it is blank (a tool-call round
+      // whose thinking streamed). From a server that names none, an
+      // assistant row whose text this stream showed. The operator's own row
+      // by the text sent; tool rows by their live tool events. Anything else
+      // — a run's terminal line, a schedule, a nudge — was not drawn.
+      let ownText = typeof body.content === "string" ? body.content : null;
+      const shownText = [spokenText, spokenText.replace(/<think>[\s\S]*?<\/think>/g, "")];
+      streamRule = (m) => {
+        const text = (m.content || "").trim();
+        if (streamedIds.has(m.id) || m.role === "tool") return true;
+        if (m.role === "assistant") {
+          return !text || (!streamedIds.size && shownText.some(shown => shown.includes(text)));
         }
+        if (m.role === "user" && ownText !== null && m.content === ownText && authorLabel(m, null) === null) {
+          ownText = null;
+          return true;
+        }
+        return false;
+      };
+      chatStreamActive = false;
+      // v133 R1 (S16): the lock — and with it the queue — waits for the
+      // server's card state: reconcile draws the rows above (by the rule),
+      // then any card whose `action` event the stream lost, and only then
+      // frees the composer and drains the queue.
+      try {
+        chats = (await api("GET", "/api/chats")).chats;
+        await reconcile();
       } catch (e) {
         // No card state read: Send follows what this stream saw, and the
-        // queue waits for the next reconcile rather than guessing.
+        // queue and the rule wait for the next reconcile (the poll).
         send.disabled = cardOpen || !assistantReady;
         flash("bad", `could not refresh the chat: ${e.message}`);
       }
       updateContextMeter();
       renderThreads(chats); // titles may have changed
       drawContext(activeChat, actions);
-      // v103-F1: the turn is over — send whatever the operator typed during it.
-      // After the refresh above, so a card raised by this turn has already
-      // locked the composer and the steer waits for the verdict instead of
-      // racing it.
-      flushQueued();
+      // v103-F1: the turn is over — whatever the operator typed during it is
+      // sent by the reconcile above (renderPendingCards), after a card raised
+      // by this turn has locked the composer, so a steer waits for the
+      // verdict instead of racing it.
     }
   };
 

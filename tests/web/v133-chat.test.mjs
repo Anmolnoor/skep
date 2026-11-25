@@ -367,3 +367,97 @@ test("R1 S16: a POST refused while a card waits leaves Send locked", async () =>
   assert.equal(chat.input.value, "please do X");
   assert.equal(chat.main.querySelector(".composer-send").disabled, true, "the card's lock survives the refusal");
 });
+
+// S6: a row is drawn exactly once, whichever of the stream and the poll
+// carries it — the stream's own rows matched by the ids it named (or, from
+// an older server that names none, by what it showed), never by provenance.
+async function turn(chat, { ids = false, background = null } = {}) {
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    if (ids) handlers.message({ message_id: 7 });
+  };
+  if (background) chat.server.messages.push(background);
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+}
+
+test("R1 S6: with no message ids, a Queen reply stored since the last poll is drawn after the turn, once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  await turn(chat, { background: msg(3, "assistant", "a background turn's reply") });
+  assert.equal(chat.textCount("a background turn's reply"), 1, "a plain-provenance row the stream never showed is drawn");
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("do the thing"), 1);
+  await chat.app.poll();
+  assert.equal(chat.textCount("a background turn's reply"), 1);
+  assert.equal(chat.textCount("the answer"), 1);
+});
+
+for (const ids of [true, false]) {
+  test(`R1 S6: a poll while the stream is finishing draws none of its rows again (ids: ${ids})`, async () => {
+    const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+    const api = chat.app.api;
+    let release;
+    let gated = false;
+    chat.app.api = async (method, path, body) => {
+      if (!gated && chat.streams.length && method === "GET" && path === "/api/chats") {
+        gated = true;
+        await new Promise(r => { release = r; });
+      }
+      return api(method, path, body);
+    };
+    await turn(chat, { ids });
+    assert.ok(gated, "the stream's finish is waiting on its refresh");
+    await chat.app.poll();
+    release();
+    await settle();
+    await chat.app.poll();
+    assert.equal(chat.textCount("do the thing"), 1);
+    assert.equal(chat.textCount("the answer"), 1);
+  });
+
+  test(`R1 S6: a refresh that fails after the stream leaves the message sent, and the next poll draws none of its rows again (ids: ${ids})`, async () => {
+    const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+    const api = chat.app.api;
+    let failed = false;
+    chat.app.api = async (method, path, body) => {
+      if (!failed && chat.streams.length && method === "GET" && path === "/api/chats") {
+        failed = true;
+        throw new Error("network down");
+      }
+      return api(method, path, body);
+    };
+    await turn(chat, { ids, background: msg(3, "assistant", "a background turn's reply") });
+    assert.ok(failed);
+    assert.equal(chat.input.value, "", "a message the server took is not handed back to the box");
+    await chat.app.poll();
+    assert.equal(chat.textCount("do the thing"), 1);
+    assert.equal(chat.textCount("the answer"), 1);
+    assert.equal(chat.textCount("a background turn's reply"), 1);
+    assert.equal(chat.main.querySelector(".composer-send").disabled, false);
+  });
+}
+
+test("R1 S6: with ids, an unnamed reply is drawn even in the streamed words; a blank tool-call round is not redrawn", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.thinking({ thinking: "let me look" });
+    chat.server.messages.push({ ...msg(6, "assistant", ""), thinking: "let me look", tool_calls: [{ id: "c" }] });
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message({ message_id: 7 });
+  };
+  chat.server.messages.push(msg(3, "assistant", "the answer")); // a background reply, same words
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("the answer"), 2, "the streamed reply and the unnamed background one");
+  assert.equal(chat.textCount("let me look"), 1, "the streamed thinking is not drawn again");
+  assert.equal(chat.textCount("do the thing"), 1);
+});

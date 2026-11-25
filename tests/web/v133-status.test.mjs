@@ -258,9 +258,9 @@ test("F39: with message_id on the stream's message events, a background reply st
   assert.equal(chat.routed(), 0);
 });
 
-test("F39: without the field, today's provenance rule stands exactly", async () => {
+test("F39 (R1 S6): without the field, a reply the stream never showed is drawn; the ones it showed are not", async () => {
   const chat = await turnWithBackgroundReply(d => d);
   assert.equal(chat.textCount("the answer"), 1);
-  assert.equal(chat.textCount("a background turn's reply"), 0, "today: an unmarked row stored mid-stream counts as drawn");
+  assert.equal(chat.textCount("a background turn's reply"), 1, "an unmarked row the stream did not show is drawn");
   assert.equal(chat.textCount("go"), 1);
 });
