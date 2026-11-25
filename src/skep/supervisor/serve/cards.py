@@ -768,6 +768,15 @@ def recorded_card(
         label = landing_label(store, tool, args)
         if label is not None:
             record["action_label"] = label
+    if tool == "open_pr" and args.get("branch"):
+        # v133-F15 (J5, I7): the push is bound to the head this card shows
+        from ..apply import resolve_commit
+        from .console import _branch_repo
+
+        repo = _branch_repo(store, args)
+        head = None if repo is None else resolve_commit(repo, f"refs/heads/{args['branch']}")
+        if head is not None:
+            record["head"] = head
     return record or None
 
 

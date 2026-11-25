@@ -1389,6 +1389,10 @@ class RunStore:
         if "claim_owner" not in approval_columns:
             # W27: the claimer's pid and start time (NULL: claimed before W27).
             self._conn.execute("ALTER TABLE approvals ADD COLUMN claim_owner TEXT")
+        if "landing_commit" not in approval_columns:
+            # v133-F15 (J5): the commit a landing made. NULL: landed before
+            # v133 (or not a landing) — said as "not recorded", never guessed.
+            self._conn.execute("ALTER TABLE approvals ADD COLUMN landing_commit TEXT")
         action_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chat_actions)")}
         if "source" not in action_columns:
             # v25-F1: operator-typed /commands audit beside model proposals.
@@ -2267,6 +2271,7 @@ class RunStore:
         remembered: bool = False,
         landing_branch: str | None = None,
         claimed: bool = False,
+        landing_commit: str | None = None,
     ) -> None:
         """Record the verdict with actor + timestamp; resolution is final.
 
@@ -2288,13 +2293,14 @@ class RunStore:
         resolved_at = _now()
         self._conn.execute(
             "UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?,"
-            " resolution_note = ?, landing_branch = ? WHERE review_id = ?",
+            " resolution_note = ?, landing_branch = ?, landing_commit = ? WHERE review_id = ?",
             (
                 "approved" if approved else "denied",
                 resolved_at,
                 actor,
                 note,
                 landing_branch,
+                landing_commit,
                 review_id,
             ),
         )
@@ -2399,6 +2405,16 @@ class RunStore:
             (review_id,),
         ).fetchone()
         return None if row is None else ApprovalRecord(*row)
+
+    @_locked
+    def landing_commits(self) -> dict[str, str | None]:
+        """v133-F15 (J5): task id → the commit its approved landing made (None:
+        landed before v133 recorded it)."""
+        rows = self._conn.execute(
+            "SELECT task_id, landing_commit FROM approvals"
+            " WHERE action = 'apply_patch' AND status = 'approved' ORDER BY resolved_at"
+        ).fetchall()
+        return {str(row[0]): None if row[1] is None else str(row[1]) for row in rows}
 
     @_locked
     def runs_landed_on(self, branch: str) -> list[str]:

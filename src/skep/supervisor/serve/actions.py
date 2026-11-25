@@ -3495,6 +3495,26 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
+def shown_head_moved(store: RunStore, repo: Path, branch: str) -> str | None:
+    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
+    not push it — the branch's head is not the commit the card showed — or
+    None. Found the way ``shown_g10_moved`` finds its card: the claimed one."""
+    now = resolve_commit(repo, f"refs/heads/{branch}")
+    for card in store.executing_chat_actions():
+        shown = (card.card or {}).get("head")
+        if (
+            card.tool == "open_pr"
+            and card.args.get("branch") == branch
+            and shown not in (None, now)
+        ):
+            return (
+                f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
+                f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
+                "open_pr again: the new card lists the runs the branch carries now"
+            )
+    return None
+
+
 def open_pr_for_branch(
     holder: ConfigHolder,
     store: RunStore | None,
@@ -3531,6 +3551,8 @@ def open_pr_for_branch(
     )
     if exists.returncode != 0:
         raise HTTPException(status_code=404, detail=f"no local branch {branch!r}")
+    if store is not None and (moved := shown_head_moved(store, resolved, branch)) is not None:
+        raise HTTPException(status_code=409, detail=moved)
     result = github.open_pull_request(
         repo=resolved,
         branch=branch,
@@ -3821,8 +3843,9 @@ def apply_patch(
     if line is not None:
         note = f"{line}; {note}" if note else line
     store.resolve_approval(
-        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True
-    )
+        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True,
+        landing_commit=resolve_commit(repo, f"refs/heads/{target}"),  # v133-F15 (J5)
+    )  # fmt: skip
     return target
 
 

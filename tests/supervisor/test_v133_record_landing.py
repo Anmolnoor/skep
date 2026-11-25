@@ -357,3 +357,90 @@ def test_open_pull_request_says_what_it_pushed_when_gh_then_fails(tmp_path: Path
         repo=tmp_path, branch="skep/x", base="main", title="t", body="b", runner=run
     )
     assert (result.opened, result.pushed, result.head) == (False, True, "c0ffee1234")
+
+
+# ---------- F15: a branch PR card names every run the push publishes (J5) ----------
+
+
+def _commit(repo: Path, message: str, name: str) -> str:
+    from .conftest import git
+
+    (repo / name).write_text(message + "\n", encoding="utf-8")
+    git(repo, "add", name)
+    git(repo, "commit", "-qm", message)
+    return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _approve(store: RunStore, task_id: str, branch: str, commit: str | None) -> None:
+    review_id = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+    store.resolve_approval(
+        review_id, approved=True, actor="chat-user", landing_branch=branch, landing_commit=commit
+    )
+
+
+def test_a_branch_pr_card_lists_every_run_on_the_branch_and_none_on_the_base(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.serve.console import card_runs, run_evidence
+
+    from .conftest import git
+
+    store = _store(config)
+    try:
+        ids = [
+            _run_with_g10(store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0])
+            for _ in range(4)
+        ]
+        merged, legacy, first, last = ids
+        _approve(store, merged, "skep/old", _commit(repo, f"Apply skep task {merged}", "m.txt"))
+        git(repo, "switch", "-qc", "skep/stack")
+        # a landing from before v133: no recorded commit, found by its subject
+        _commit(repo, f"Apply skep task {legacy}", "l.txt")
+        _approve(store, legacy, "skep/legacy", None)
+        _approve(store, first, "skep/stack", _commit(repo, f"Apply skep task {first}", "a.txt"))
+        _approve(store, last, "skep/stack", _commit(repo, f"Apply skep task {last}", "b.txt"))
+        git(repo, "switch", "-q", "main")
+
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        assert card_runs(store, "open_pr", args) == [legacy, first, last]  # base's run is not
+        shown = {run["task_id"]: run for run in run_evidence(store, "open_pr", args)}
+        assert shown[legacy]["landing"] == "landing commit not recorded (landed before v133)"
+        assert shown[first]["landing"] is None and shown[first]["g10"]["outcome"] == "passed"
+    finally:
+        store.close()
+
+
+def test_a_branch_pr_whose_head_moved_after_the_card_was_drawn_is_refused(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi import HTTPException
+
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import recorded_card
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import git
+
+    pushed: list[dict[str, Any]] = []
+    monkeypatch.setattr(github, "open_pull_request", lambda **kw: pushed.append(kw))
+    store = _store(config)
+    try:
+        git(repo, "switch", "-qc", "skep/work")
+        drawn = _commit(repo, "work", "w.txt")
+        args = {"branch": "skep/work", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        assert card["head"] == drawn
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        action_id = store.add_chat_action(chat_id, tool="open_pr", args=args, card=card)
+        _commit(repo, "more work", "w2.txt")  # the branch moves on before the click
+        git(repo, "switch", "-q", "main")
+        assert store.claim_chat_action(action_id)
+        with pytest.raises(HTTPException) as refused:
+            actions.open_pr_for_branch(
+                ConfigHolder(config, store), store, str(repo), branch="skep/work", base="main"
+            )
+        assert refused.value.status_code == 409
+        assert drawn[:12] in str(refused.value.detail)
+        assert pushed == []
+    finally:
+        store.close()
