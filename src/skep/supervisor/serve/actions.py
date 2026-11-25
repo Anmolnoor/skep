@@ -619,6 +619,97 @@ def reverification_warning(reverify: Any) -> str | None:
     )
 
 
+def g10_source(reverify: Any) -> str | None:
+    """v133-F16 (I2, I8): where the command G10 ran came from, in the words
+    reverify.py stamped into the record's detail; None when it says nothing."""
+    for source in ("the project's pinned verify_command", "the worker's own verify step"):
+        if source in str(getattr(reverify, "detail", "") or ""):
+            return source
+    return None
+
+
+def g10_facts(reverify: Any) -> dict[str, Any] | None:
+    """v133-F12 (J1, I8): what G10 did, from the store alone — the command,
+    its source, whether it ran, its exit codes, its outcome. None: no record."""
+    if reverify is None:
+        return None
+    return {
+        "command": list(reverify.commands),
+        "source": g10_source(reverify),
+        "ran": bool(reverify.exit_codes),
+        "exit_codes": list(reverify.exit_codes),
+        "outcome": reverify.outcome,
+    }
+
+
+def g10_fingerprint(reverify: Any) -> list[Any] | None:
+    """v133-F12 (J1, I7): the G10 record a landing card was drawn on. A
+    confirm whose record no longer matches is refused (``shown_g10_moved``)."""
+    if reverify is None:
+        return None
+    return [
+        reverify.outcome,
+        reverify.confirmed,
+        list(reverify.exit_codes),
+        reverify.detail,
+        reverify.created_at,
+    ]
+
+
+def g10_landing_label(reverify: Any) -> str | None:
+    """v133-F12 (J1): the action label of a landing G10 did not confirm,
+    worded per outcome; None for a confirmed (or not-applicable) record."""
+    if reverify is None or reverify.confirmed or reverify.outcome == "not_applicable":
+        return None
+    if reverify.outcome == "failed":
+        return "Land despite failed supervisor verification"
+    if reverify.outcome == "tampered":
+        return "Land despite test tampering found by supervisor verification"
+    if reverify.outcome == "unavailable":
+        return "Land although supervisor verification could not run"
+    return "Land without supervisor confirmation"
+
+
+def g10_line(reverify: Any) -> str:
+    """v133-F12/F16 (I2, I8): G10's result in one line, from the store."""
+    facts = g10_facts(reverify)
+    if facts is None:
+        return "G10: no re-verification recorded"
+    command = " && ".join(facts["command"]) or "no command"
+    ran = f"exit codes {facts['exit_codes']}" if facts["ran"] else "did not run"
+    source = f" ({facts['source']})" if facts["source"] else ""
+    return f"G10 {facts['outcome']}: `{command}`{source}, {ran}"
+
+
+def g10_note_line(reverify: Any) -> str | None:
+    """v133-F12 (J1, I13): the line a landing approval's note starts with when
+    G10 did not confirm it — written from the store's record, never from the
+    caller's note, which follows it."""
+    if g10_landing_label(reverify) is None:
+        return None
+    return (
+        f"{g10_line(reverify)}; landed by a human verdict despite supervisor "
+        "verification not confirming it"
+    )
+
+
+def shown_g10_moved(store: RunStore, task_id: str) -> str | None:
+    """v133-F12 (J1, I7): why the card now executing for ``task_id`` must
+    not land it — the G10 record changed after the card was drawn — or None.
+    The confirm paths claim a card ('executing') before they execute it, so
+    the card being confirmed is the executing one that bound this run."""
+    now = g10_fingerprint(store.reverification_for(task_id))
+    for card in store.executing_chat_actions():
+        bound = (card.card or {}).get("g10_bound")
+        if isinstance(bound, dict) and task_id in bound and bound[task_id] != now:
+            return (
+                f"the supervisor's re-verification (G10) record for run {task_id} changed "
+                "since this card was shown, so nothing landed. Propose the landing again: "
+                "the new card shows the current record"
+            )
+    return None
+
+
 def reverify_in_flight(store: RunStore, task_id: str) -> bool:
     """ES-F291: no G10 record yet, and the supervisor that runs G10 for this
     run is alive — a completed run in this state is still settling."""
@@ -3513,6 +3604,8 @@ def open_pr_for_runs(
     for run in runs:
         if applied_branch_for(store, str(run["task_id"])) is None:
             require_reverified(store, str(run["task_id"]))
+            if (moved := shown_g10_moved(store, str(run["task_id"]))) is not None:
+                raise HTTPException(status_code=409, detail=moved)  # v133-F12: before any lands
     branch = _grouped_branch(title, str(runs[0]["task_id"]))
     for run in runs:
         task_id = str(run["task_id"])
@@ -3652,6 +3745,9 @@ def apply_patch(
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
     require_reverified(store, task_id)
+    moved = shown_g10_moved(store, task_id)  # v133-F12: the card's record, or none
+    if moved is not None:
+        raise HTTPException(status_code=409, detail=moved)
     repo = Path(str(run["repo"]))
     if branch is not None and branch.strip():
         target = branch.strip()
@@ -3688,6 +3784,11 @@ def apply_patch(
             review_id, approved=False, actor=actor, note=f"apply failed: {failure}", claimed=True
         )
         raise HTTPException(status_code=409, detail=failure)
+    # v133-F12 (J1, I13): a landing G10 did not confirm starts its note with
+    # G10's own line from the store; the caller's note follows, never replaces it.
+    line = g10_note_line(store.reverification_for(task_id))
+    if line is not None:
+        note = f"{line}; {note}" if note else line
     store.resolve_approval(
         review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True
     )

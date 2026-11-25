@@ -5080,6 +5080,14 @@ class RunStore:
         return [self._row_to_action(row) for row in rows]
 
     @_locked
+    def executing_chat_actions(self) -> list[ChatActionRecord]:
+        """v133-F12: every card a confirm has claimed and is executing now."""
+        rows = self._conn.execute(
+            f"SELECT {self._ACTION_COLS} FROM chat_actions WHERE status = 'executing'"
+        ).fetchall()
+        return [self._row_to_action(row) for row in rows]
+
+    @_locked
     def proposed_chat_actions(self) -> list[ChatActionRecord]:
         """H1 (hive-rooms C9): every card still waiting on the operator, across
         all chats, oldest first — the sidebar's dots and the Inbox."""

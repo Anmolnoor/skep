@@ -23,6 +23,7 @@ from ..skills import DRAFT, TESTED
 from ..store import RunStore
 from .actions import (
     approval_views,
+    g10_facts,
     never_reverified_error,
     patch_digest,
     patch_path,
@@ -154,6 +155,8 @@ def run_evidence(store: RunStore, tool: str, args: dict[str, Any]) -> list[dict[
             "task_id": task_id,
             "warning": landing_warning(store, task_id),
             "tamper": tamper_note(store.reverification_for(task_id)),
+            # v133-F12 (J1, I8): G10's command, source, run, exit codes, outcome
+            "g10": g10_facts(store.reverification_for(task_id)),
         }
         for task_id in card_runs(store, tool, args)
     ]
