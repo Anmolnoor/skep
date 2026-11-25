@@ -361,3 +361,89 @@ def test_diagnose_run_refuses_when_the_sandbox_is_off(
         assert not (kept / "escaped").exists()
     finally:
         store.close()
+
+
+# ---------- F30: descriptions and results tell the truth (F-I2, F-I4, A10, B4, G4, B1) ----------
+
+
+def test_the_dispatch_card_shows_the_base_ref_and_commit(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+    from skep.supervisor.serve.tools import dispatch_manifest_for
+
+    from .conftest import git
+
+    store, holder = _parts(config)
+    try:
+        _bind(store, repo, {})
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "branch", "skep/harness")
+        args = {"repo": str(repo), "instructions": "x"}
+        manifest = dispatch_manifest_for(store, holder, args, None)
+        assert (manifest["base_ref"], manifest["base_commit"]) == ("main", head)
+        recorded = recorded_card("dispatch_run", args, None, store, manifest) or {}
+        summary = card_summary("dispatch_run", args, store=store, recorded=recorded)
+        assert summary["headline"].endswith(f"@ main ({head[:7]})")
+        named = dispatch_manifest_for(store, holder, {**args, "ref": "skep/harness"}, None)
+        assert named["base_ref"] == "skep/harness"
+    finally:
+        store.close()
+
+
+def test_dispatch_run_says_what_it_cannot_do() -> None:
+    from skep.supervisor.serve.tools import tool_description
+
+    text = tool_description("dispatch_run")
+    assert "No model or effort option" in text
+    assert "read-only ask" in text and "run_code" in text and "read tools" in text
+    assert "changes no file ends failed" in text
+
+
+def test_list_approvals_says_it_excludes_chat_cards_and_counts_this_chats(
+    config: SupervisorConfig,
+) -> None:
+    from skep.supervisor.serve.tools import execute_read_tool, tool_description
+
+    assert "chat cards are not in it" in tool_description("list_approvals")
+    store, holder = _parts(config)
+    try:
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        other = store.create_chat(title="o", model=None).chat_id
+        store.add_chat_action(chat_id, tool="run_shell", args={"command": "ls"})
+        store.add_chat_action(chat_id, tool="run_shell", args={"command": "pwd"})
+        store.add_chat_action(other, tool="run_shell", args={"command": "df"})
+        result = execute_read_tool(
+            "list_approvals", {}, store=store, holder=holder, chat_id=chat_id
+        )
+        assert result["approvals"] == [] and result["chat_cards_pending"] == 2
+    finally:
+        store.close()
+
+
+def test_list_skills_reports_the_seed_recipes_beside_drafts_and_packs(
+    config: SupervisorConfig,
+) -> None:
+    from skep.supervisor.serve.tools import execute_read_tool, tool_description
+
+    assert "seed recipes" in tool_description("list_skills")
+    from skep.supervisor.seed_skills import load_seed_skills
+
+    store, holder = _parts(config)
+    try:
+        load_seed_skills(store)  # serve seeds at startup
+        seeds = [t for t in store.list_templates() if t.provenance == "seed"]
+        result = execute_read_tool("list_skills", {}, store=store, holder=holder)
+        assert result["skills"] == [] and len(seeds) > 0
+        assert result["seed_recipes"] == len(seeds)
+        assert "list_templates" in result["seed_note"]
+    finally:
+        store.close()
+
+
+def test_run_shell_points_read_only_probes_at_the_read_tools() -> None:
+    from skep.supervisor.serve.tools import tool_description
+
+    text = tool_description("run_shell")
+    assert "read-only probe" in text
+    assert all(name in text for name in ("read_file", "search_files", "list_prs"))

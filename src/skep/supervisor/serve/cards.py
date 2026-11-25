@@ -1254,6 +1254,10 @@ def card_summary(
         )
         if facts is not None:
             summary["schedule"] = facts
+    if manifest is not None and manifest.get("base_ref"):
+        # v133-F30 (F-I2): what the worker will start from, on the line read first
+        commit = str(manifest.get("base_commit") or "")[:7]
+        summary["headline"] += f" @ {manifest['base_ref']}" + (f" ({commit})" if commit else "")
     if len(folded) > 1:
         summary["items"] = [headline(tool, item, limit=None) for item in folded]
         summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"

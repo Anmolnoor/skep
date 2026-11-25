@@ -379,7 +379,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_approvals",
-        "The pending approval queue, with each run's summary — PLUS the last "
+        "The pending approval queue (chat cards are not in it; chat_cards_pending "
+        "counts this chat's), with each run's summary — PLUS the last "
         "10 resolved verdicts (recently_resolved: who approved/denied, when, "
         "landing branch). If the queue is empty, check recently_resolved "
         "before concluding nothing happened: a gate approved from the web UI "
@@ -474,8 +475,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_skills",
         "Skill drafts and packs, not runnable skills. Returns learned drafts "
-        "awaiting the human gate and script skill packs with their ladder "
-        "state; runnable skills are in list_templates.",
+        "awaiting the human gate, script skill packs with their ladder "
+        "state, and how many seed recipes there are; runnable skills and the "
+        "seed recipes are in list_templates.",
         {},
     ),
     _tool(
@@ -871,7 +873,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "too; one extra argument or a trailing & cards again. A policy deny "
         "refuses, no card. "
         "For one-off diagnostics: 'what's on port 8765?', "
-        "'df -h', 'systemd status'. NOT for repo work — a cwd inside a "
+        "'df -h', 'systemd status'. A read-only probe of files or PRs needs no "
+        "card: read_file, search_files, list_prs. NOT for repo work — a cwd inside a "
         "registered repo REFUSES (a shell there edits files with no patch "
         "card; use quick_edit or dispatch_run) — and git "
         "push/pull/fetch/commit/checkout and sudo never run from chat and "
@@ -1942,7 +1945,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         # caste param itself. v127-F12: `document` is advanced and left the
         # enum, so its brief-writing example left too — teaching the small
         # model a caste it cannot pick is a stale description (CLAUDE.md).
-        "For anything that must FETCH sources, use start_research instead.",
+        "For anything that must FETCH sources, use start_research instead. "
+        # v133-F30 (F-I4, A10): no option exists, and engine runs need a patch
+        "No model or effort option. A read-only ask: run_code or read tools (an "
+        "external engine run that changes no file ends failed).",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "instructions": {"type": "string"},
@@ -3227,7 +3233,7 @@ def dispatch_manifest_for(
             "network": args["source_allowlist"],
         }
     try:
-        return actions.dispatch_manifest(
+        manifest = actions.dispatch_manifest(
             holder,
             store,
             repo=str(args.get("repo") or ""),
@@ -3252,6 +3258,28 @@ def dispatch_manifest_for(
         )
     except (ValueError, TypeError) as exc:  # malformed args: the confirm says so too
         return {"error": f"bad arguments: {exc}"}
+    if "error" not in manifest:
+        manifest.update(_dispatch_base(holder, manifest, args.get("ref")))
+    return manifest
+
+
+def _dispatch_base(holder: ConfigHolder, manifest: dict[str, Any], ref: Any) -> dict[str, Any]:
+    """v133-F30 (F-I2, I8): the ref a dispatch baselines from and its commit,
+    resolved as run_task resolves them (a named ref; else the auto-landing
+    branch it will land on, ES-F6; else the repo's default branch), so the
+    card shows what the worker will see."""
+    from ..apply import repo_default_branch, resolve_commit
+    from ..dispatch import starts_on_landing_branch
+
+    repo = Path(str(manifest["repo"]))
+    base = str(ref or "") or None
+    if base is None and starts_on_landing_branch(
+        holder.current, repo, manifest.get("auto_apply_branch"),
+        manifest.get("auto_apply_verified_patch"),
+    ):  # fmt: skip
+        base = str(manifest["auto_apply_branch"])
+    base = base or repo_default_branch(repo)
+    return {"base_ref": base, "base_commit": resolve_commit(repo, base)}
 
 
 def fetch_grant_decision(
@@ -4137,7 +4165,14 @@ def execute_read_tool(
             }
             for a in store.resolved_approvals()
         ]
-        return {"approvals": approvals, "recently_resolved": recently_resolved}
+        # v133-F30 (B4): a chat card is not an approval row — say how many
+        # wait in this chat, so an empty queue is not read as "nothing waits"
+        pending = len(store.pending_chat_actions(chat_id)) if chat_id else 0
+        return {
+            "approvals": approvals,
+            "recently_resolved": recently_resolved,
+            "chat_cards_pending": pending,
+        }
     if name == "get_policy":
         return policy_view(store, holder.current)
     if name == "list_templates":
@@ -4156,8 +4191,10 @@ def execute_read_tool(
     if name == "list_skills":
         # v85-F5: candidates (learned drafts) + packs (script-shipping
         # SKILL.md packages on the v17 ladder) in one honest listing.
+        from ..seed_skills import SEED_PROVENANCE
         from ..skill_packs import load_packs
 
+        seeds = [t for t in store.list_templates() if t.provenance == SEED_PROVENANCE]
         return {
             "skills": [
                 {
@@ -4181,6 +4218,11 @@ def execute_read_tool(
                 }
                 for record in load_packs(store).values()
             ],
+            # v133-F30 (G4): the seeds are templates, so "no skills" above
+            # never means none — the count, and where they are listed
+            "seed_recipes": len(seeds),
+            "seed_note": f"{len(seeds)} seed recipes (provenance seed) are listed by "
+            "list_templates; view_skill one and follow it yourself",
         }
     if name == "view_skill":
         # v51-F4: the full recipe INCLUDING the grant surface — the same

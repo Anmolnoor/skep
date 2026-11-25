@@ -410,6 +410,23 @@ def _resolve_provider_routing(
     return decision, profile
 
 
+def starts_on_landing_branch(
+    config: SupervisorConfig,
+    repo: Path,
+    auto_apply_branch: str | None,
+    auto_apply_verified_patch: bool | None,
+) -> bool:
+    """ES-F6 (B132, I1): does a dispatch that names no ref start on its
+    project's auto-landing branch? Yes when the branch exists and the run
+    will land there. v133-F30 (F-I2): the dispatch card asks the same."""
+    return bool(
+        auto_apply_branch
+        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
+        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
+        == "allow"
+    )
+
+
 # v133-F26 (C1): how the operator mints an engine's token, where a CLI does it.
 _AUTH_MINT = {"claude_code": ("run `claude setup-token` and copy the token it prints", "token")}
 
@@ -749,13 +766,10 @@ def run_task(
     # (v30), so a run that will land there must START there — based on main it
     # never sees the branch's earlier landings, and the second nearby task
     # conflicts. Only when the caller named no ref and the branch exists.
-    if (
-        not caller_chose_ref
-        and auto_apply_branch
-        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
-        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
-        == "allow"
+    if not caller_chose_ref and starts_on_landing_branch(
+        config, repo, auto_apply_branch, auto_apply_verified_patch
     ):
+        assert auto_apply_branch is not None
         ref = auto_apply_branch
     try:
         landing_decision = auto_apply_decision(
