@@ -17,6 +17,7 @@ which stays on this floor.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from collections.abc import Sequence
@@ -371,6 +372,20 @@ def _tilde(token: str) -> Path:
         return Path(token)
 
 
+def _may_exist(path: Path) -> bool:
+    """Might ``path`` name a file? v133-F1 (A1): a component too long to be a
+    file name (ENAMETOOLONG: a 300-byte prompt or heredoc word) names none;
+    any other failed probe counts as "may exist", so the word is still judged.
+    A policy probe never raises out of a chat turn."""
+    try:
+        os.stat(path)
+    except OSError as exc:
+        return exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG)
+    except ValueError:  # an embedded NUL names no file
+        return False
+    return True
+
+
 def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
     """The cwd and every path a host-shell line's tokens may name (also after
     ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
@@ -400,7 +415,7 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
             named = _tilde(os.path.expandvars(part))
             bare = len(named.parts) == 1 and not named.is_absolute()
             for path in dict.fromkeys(b / named for b in bases):
-                if named_only and bare and not path.exists():
+                if named_only and bare and not _may_exist(path):
                     continue  # a bare word (`df`, `-h`) names no file here
                 candidates.append(path)
                 if any(char in part for char in "*?["):

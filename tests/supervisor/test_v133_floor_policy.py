@@ -1,0 +1,89 @@
+"""v133 B1: the floor and policy rules (plans/v133, findings A1, A3, A6, C2,
+F-I1, J9)."""
+
+from __future__ import annotations
+
+import errno
+import os
+from pathlib import Path
+
+import pytest
+
+from skep.supervisor.secret_floor import shell_secret_floor_reason
+from skep.supervisor.shell_prefixes import SKEP_SELF_REFUSAL, queen_skep_refusal
+
+# --- F1 (A1): a word too long to be a file name is not a path ---------------
+
+_LONG = "word" * 75  # 300 bytes: one component over NAME_MAX (255)
+
+
+@pytest.fixture
+def py312_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``Path.exists`` as Python 3.12/3.13 (CI, Alfin) has it: an errno it
+    does not ignore (ENAMETOOLONG) raises. 3.14 swallows every OSError, so
+    without this the crash only shows on the older interpreters."""
+
+    def exists(self: Path, *, follow_symlinks: bool = True) -> bool:
+        try:
+            os.stat(self, follow_symlinks=follow_symlinks)
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                return False
+            raise
+        except ValueError:
+            return False
+        return True
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+
+def _skep_home(tmp_path: Path) -> Path:
+    home = tmp_path / "skep" / "supervisor"
+    home.mkdir(parents=True)
+    return home
+
+
+@pytest.mark.usefixtures("py312_exists")
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'claude -p "{_LONG}"',
+        f"cat >> pr73.md <<'BODYEOF'\nsome prose {_LONG}\nBODYEOF",
+        f'claude -p "{_LONG}*"',  # a glob too: iglob over the long word
+    ],
+    ids=["prompt", "heredoc", "glob"],
+)
+def test_f1_long_token_is_not_a_path(tmp_path: Path, command: str) -> None:
+    home = _skep_home(tmp_path)
+    assert queen_skep_refusal(command, home=home, cwd=str(tmp_path)) is None
+    assert shell_secret_floor_reason(command, cwd=str(tmp_path)) is None
+
+
+@pytest.mark.usefixtures("py312_exists")
+def test_f1_protected_path_beside_long_token_still_refused(tmp_path: Path) -> None:
+    home = _skep_home(tmp_path)
+    serve_env = tmp_path / "skep" / "serve.env"
+    command = f'echo "{_LONG}" {serve_env}'
+    assert queen_skep_refusal(command, home=home, cwd=str(tmp_path)) == SKEP_SELF_REFUSAL
+    reason = shell_secret_floor_reason(command, cwd=str(tmp_path), skep_home=home)
+    assert reason is not None and "skep's own secrets" in reason
+
+
+def test_f1_other_probe_error_keeps_the_word_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that fails for any other reason never raises and never lets
+    the word go unjudged: it is judged as if it exists."""
+    home = _skep_home(tmp_path)
+    real_stat = os.stat
+
+    def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if str(path).endswith("serve.env"):
+            raise PermissionError(errno.EACCES, "denied", str(path))
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", stat)
+    # a bare relative word, run from the skep home's parent
+    assert queen_skep_refusal("cat serve.env", home=home, cwd=str(home.parent)) == (
+        SKEP_SELF_REFUSAL
+    )
