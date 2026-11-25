@@ -662,3 +662,28 @@ def test_r2_t7_a_row_the_server_writes_sends_its_text_and_id_in_one_event(
     row = [m for m in rig.store.chat_messages(chat_id) if m.role == "assistant"][-1]
     [event] = _server_row_events(events, row.content)
     assert event.get("message_id") == row.id, events
+
+
+# ---------- v133 R3 (U1): a tool event names the row it stored ----------
+
+
+def test_r3_u1_every_tool_event_carries_its_stored_rows_id(rig: Rig) -> None:
+    from .test_serve_chat import sse_events
+
+    chat_id = rig.client.post("/api/chats", json={}).json()["chat_id"]
+    rig.ollama.script_tool_calls(("list_runs", {}), ("no_such_tool", {}))
+    rig.ollama.script_reply("No runs yet.")
+    response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "any runs?"})
+    tool_events = [d for e, d in sse_events(response.text) if e == "tool"]
+
+    rows = [m.id for m in rig.store.chat_messages(chat_id) if m.role == "tool"]
+    assert len(rows) == 2 and [d.get("message_id") for d in tool_events] == rows
+
+    # a confirm stream's verdict event names the row the verdict stored
+    rig.ollama.script_reply("done")
+    _, action_id = _card(rig, chat_id=chat_id)
+    url = f"/api/chats/{chat_id}/actions/{action_id}/confirm"
+    response = rig.client.post(url, json={"keep": "once"})
+    [verdict] = [d for e, d in sse_events(response.text) if e == "tool"]
+    newest = [m.id for m in rig.store.chat_messages(chat_id) if m.role == "tool"][-1]
+    assert verdict.get("message_id") == newest

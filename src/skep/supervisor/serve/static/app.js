@@ -3303,7 +3303,10 @@ async function viewChat(main, chatId) {
     const streamedIds = new Set();
     // v133 R2 (S6/T7): the tool events this stream showed, as "name result"
     // keys — a stored tool row counts as drawn only against one of these.
+    // v133 R3 (U1): an event that names its stored row (message_id) is
+    // matched by that id alone; the keys are for a server that names none.
     const shownTools = [];
+    const streamedToolIds = new Set();
     let spokenText = "";  // v53-F6: what the voice toggle reads aloud
     // v40-F1: consecutive tool events accumulate into one activity group; the
     // first content/thinking delta or action card closes it (the same
@@ -3357,7 +3360,8 @@ async function viewChat(main, chatId) {
         },
         tool: (d) => {
           finishReply();
-          shownTools.push([d.tool, JSON.stringify(d.result ?? null)]);
+          if (d.message_id != null) streamedToolIds.add(Number(d.message_id));
+          else shownTools.push([d.tool, JSON.stringify(d.result ?? null)]);
           // v90-F3: `decision` rides only an auto-allowed mutation — one that
           // ran because a grant already covered it. Those get a receipt card
           // instead of a bare transcript line; everything else is unchanged.
@@ -3399,6 +3403,9 @@ async function viewChat(main, chatId) {
       // can come first, then the stream drop), and a tool row is drawn only
       // if this stream showed its tool event — same result first, then same
       // name — so a background turn's tool row is not swallowed.
+      // v133 R3 (U1): a tool row is drawn by the stored id its event named;
+      // an event with no id (an older server) by same name and result only —
+      // a name alone picked a background row of the same tool.
       let ownText = typeof body.content === "string" ? body.content : null;
       const shownText = [spokenText, spokenText.replace(/<think>[\s\S]*?<\/think>/g, "")];
       const shown = (text) => shownText.some(all => all.includes(text));
@@ -3413,8 +3420,8 @@ async function viewChat(main, chatId) {
       streamRule = (m) => {
         const text = (m.content || "").trim();
         if (m.role === "tool") {
-          return claimTool(([name, result]) => name === m.tool_name && result === toolKey(m))
-            || claimTool(([name]) => name === m.tool_name);
+          return streamedToolIds.has(m.id)
+            || claimTool(([name, result]) => name === m.tool_name && result === toolKey(m));
         }
         if (streamedIds.has(m.id)) return !text || shown(text);
         if (m.role === "assistant") {

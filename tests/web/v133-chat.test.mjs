@@ -723,3 +723,34 @@ test("R2 S16: an older read resolving after a newer one is discarded; the queued
   assert.equal(chat.main.querySelector(".composer-send").disabled, true);
   assert.equal(chat.log.querySelector(".confirm-card").classList.contains("resolved"), false);
 });
+
+// ---------- v133 R3 (Sol's third review) ----------
+
+// U1: a tool row is matched by the stored id its tool event names — a
+// background get_run row before the stream's own get_run (a different
+// result) is drawn, and the streamed one is not drawn twice.
+test("R3 U1: a background get_run row before a streamed get_run is drawn, and the streamed one once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  const toolRow = (id, name, result) =>
+    ({ ...msg(id, "tool", JSON.stringify(result)), tool_name: name, provenance: null });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    chat.server.messages.push(toolRow(6, "get_run", { ok: true, state: "running" })); // a background turn's
+    chat.server.messages.push(toolRow(7, "get_run", { ok: true, state: "done" }));
+    handlers.tool({ tool: "get_run", args: {}, result: { ok: true, state: "done" }, message_id: 7 });
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(8, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 8 });
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  const results = chat.log.querySelectorAll(".agent-thread-tool")
+    .filter(n => n.textContent === "get_run").length;
+  assert.equal(results, 2, "the background row and the streamed row, each once");
+  const states = chat.log.querySelectorAll(".agent-thread-content")
+    .map(n => n.textContent.includes("running") ? "running" : "done").sort();
+  assert.deepEqual(states, ["done", "running"], "the background result and the streamed result, each once");
+});
