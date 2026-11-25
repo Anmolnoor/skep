@@ -17,13 +17,13 @@ add the optional sections for the features you want.
 | `pipx` or `uv` (or `pip` inside a virtual environment) | installing skep | yes |
 | A model provider you can reach, with the model you pick | live chat and skep's own coding worker | yes |
 | A git repository with at least one commit | any coding run | yes |
-| bubblewrap (Linux only) | the native sandbox: sandboxed runs, sandboxed re-verification, strict reads | yes, for sandboxed work |
+| bubblewrap (Linux only) | the native sandbox, which strict reads, a list of allowed network hosts and re-verification (by default) all use | yes, for the full sandboxed workflow |
 | Your project's test runner (`uv`, `pytest`, `npm` or `make`) | the verify command that skep re-runs | yes, for a run skep confirms |
 | ripgrep (`rg`) | the assistant's `search_files` tool | recommended |
 | `gh`, signed in | opening, reviewing and merging pull requests | optional |
 | `claude` or `codex`, with its login or key | running Claude Code or Codex as the worker | optional |
 | Node.js with `npm` | the Codex CLI, `npm test` projects, a browser MCP server | optional |
-| podman | a container backend for some worker runs | optional |
+| podman | a container sandbox for worker runs that need neither strict reads nor a list of allowed hosts | optional |
 
 Nothing in the optional rows is needed for a first run. skep ships its own
 coding worker, which uses the model you connect during `skep onboard`.
@@ -62,8 +62,9 @@ dry run, not a working assistant.) The endpoint can be:
   downloaded (`ollama pull <model>`). It normally needs no key. On a fresh
   home, with no provider named, onboarding looks for it at
   `http://localhost:11434`.
-- **A hosted provider, or any OpenAI-compatible endpoint.** A hosted one
-  needs its credential. For an API key, export it in the shell that runs
+- **A hosted provider, or an OpenAI-compatible endpoint** that answers both
+  a model-list request and a test completion for the model you pick. Supply
+  its credential if it needs one. For an API key, export it in the shell that runs
   `skep onboard` and give onboarding the variable's **name** (it never asks
   for the key itself). The other way is to register the provider first
   (`skep provider add`) and then store the key with `skep provider set-key`.
@@ -175,10 +176,10 @@ rows in order, and a row counts only when its tool is on the `PATH`:
 
 | The repository has | And the host has | Pinned command |
 |---|---|---|
-| a `Makefile` with a `test` target | `make` | `make test` |
+| a `Makefile` with a line that begins `test:` | `make` | `make test` |
 | `pyproject.toml`, a `tests/` directory or a top-level `test_*.py` file, and `uv.lock` | `uv` | `uv run pytest` |
 | `pyproject.toml` and a `tests/` directory or a top-level `test_*.py` file | `pytest` | `pytest` |
-| a `package.json` whose `test` script is a real one, not `npm init`'s "no test specified" placeholder | `npm` | `npm test` |
+| a `package.json` with a non-empty `scripts.test` that does not contain `no test specified` (the `npm init` placeholder) | `npm` | `npm test` |
 
 If no row matches, the project is pinned to nothing. Re-verification then
 re-runs the command the worker named, so a run can still be confirmed, but
@@ -208,10 +209,11 @@ uses Yarn Classic's flags, so Yarn 2 and newer fails there. If `pnpm` or
 `yarn` is a corepack launcher, cache the version first:
 `corepack prepare <tool>@<version> --activate`.
 
-**Where the runner is installed matters.** A project with strict reads sees
-the system directories and the toolchain locations skep detects
-(`~/.local/bin`, uv's Pythons and tools, `~/.cargo`, `~/.nvm`, `~/.pyenv`).
-A runner installed somewhere else has to be added to the project's
+**Where the runner is installed matters.** A project with strict reads can
+read the run's own files, the system directories and the toolchains skep
+detects (among them `~/.local/bin`, uv's Pythons and tools, `~/.cargo`,
+`~/.nvm`, `~/.pyenv`, and the `uv` program found on skep's `PATH`). For a
+tool or dependency outside those, add its absolute path to the project's
 `extra_read_paths`. [`sandboxing.md`](sandboxing.md) has the full list.
 
 `uv` has a second use. Installing the pinned dependencies of a forged tool
@@ -239,10 +241,10 @@ problem.
 | `aider`, `pi` | `aider`, `pi` | their own provider's key; advanced, never recommended |
 
 **Where the program is installed matters.** A project with strict reads (the
-default for a new sandboxed project) reads only the system directories and
-the toolchain locations listed in section 3. An agent installed anywhere
-else passes `--version` and `skep doctor` on the host, and the worker still
-cannot start it.
+default for a new sandboxed project) reads only what section 3 lists. An
+agent installed outside that passes `--version` and `skep doctor` on the
+host, and the worker still cannot start it until its directory is in the
+project's `extra_read_paths`.
 
 - **Claude Code.** Install it by Anthropic's own instructions. Their
   installer's default places, `~/.local/bin` and `~/.local/share/claude`, are
@@ -251,14 +253,15 @@ cannot start it.
   `~/.nvm`:
 
   ```sh
-  sudo npm install -g @openai/codex
+  sudo npm install -g @openai/codex   # system npm, root-owned prefix
+  npm install -g @openai/codex        # Node from nvm: as the skep user, no sudo
   codex --version
   ```
 
-  A user npm prefix such as `~/.npm-global` is outside the strict-read set.
-  If you use one, add that directory to the project's `extra_read_paths`.
-  There is no CLI flag for it: chat and REST set it through
-  `policy_overrides`.
+  A user npm prefix such as `~/.npm-global` is outside the default
+  strict-read set. If you use one, add that directory to the project's
+  `extra_read_paths`. There is no CLI flag for it: chat and REST set it
+  through `policy_overrides`.
 
 Then, from the same shell or service that runs skep, check that the program
 answers `--version` and that `skep doctor` no longer says `MISSING`
@@ -306,11 +309,14 @@ gh auth status
 In every case the repository's `origin` remote must be a `github.com`
 repository. Then, by task:
 
-- **Opening a pull request** (`skep review --approve --pr`, `skep pr open`).
-  Your git credentials must be able to push a branch to `origin`: skep pushes
-  the landed branch with `git push`, then calls `gh pr create`. The base
-  branch must exist on GitHub. For a repository that was created empty, skep
-  offers a `push_baseline` card, which only creates the missing base branch.
+- **Opening a pull request.** `skep review <task_id> --approve --pr` lands a
+  run and opens its PR; `skep pr open <repo> --branch <branch>` opens one for
+  a local branch that already exists. Your git credentials must be able to
+  push a branch to `origin`: skep pushes it with `git push`, then calls
+  `gh pr create`. The base branch must exist on GitHub. If the repository
+  was created empty, create it first with `skep repo push-baseline <repo>`
+  (or the `push_baseline` card in chat), then retry. That command only
+  creates a missing base branch.
 - **Reviewing a pull request at its exact head.** skep reads the PR through
   `gh` and fetches its head and base from `origin` with git, so both need
   read access. The project also needs a pinned verify command (section 3):
@@ -318,7 +324,8 @@ repository. Then, by task:
 - **Merging through skep.** This needs a clean, confirmed review of the PR's
   current head and base, your approval, and permission to merge on GitHub.
 
-Without `gh`, `skep review --approve --pr` still lands the branch and prints
+Without `gh`, `skep review <task_id> --approve --pr` still lands the run
+locally and prints
 `note: gh CLI not found — push the branch and open the PR manually`.
 
 ## 6. Optional: everything else
@@ -326,24 +333,19 @@ Without `gh`, `skep review --approve --pr` still lands the branch and prints
 | Feature | What it needs |
 |---|---|
 | The assistant's `search_files` tool | ripgrep: `sudo apt install ripgrep` (Fedora: `sudo dnf install ripgrep`; macOS: `brew install ripgrep`). Without it the tool answers `ripgrep (rg) is not installed on the host`. |
-| Browser automation | `npx` (it ships with npm), to run the Playwright MCP server. See [`browser.md`](browser.md). |
+| Browser automation | `npx` on the daemon's `PATH`, and a Node.js version the Playwright MCP server accepts. Ubuntu 24.04's packaged Node 18 may be too old for the current one; check that server's own requirements. See [`browser.md`](browser.md). |
 | Office and PDF documents | the `documents` extra: `pipx install --force "skep[documents]"` |
 | OCR | the `ocr` extra, and the `tesseract` system program (`sudo apt install tesseract-ocr`, `brew install tesseract`) |
-| Spoken replies in a messenger | a text-to-speech provider turned on for the channel, and its packages. The Piper and Edge ones are in the `voice` extra. (The web chat speaks through the browser and needs nothing.) |
-| Schedules that fire on time | a machine that stays on, with `skep serve` running as a service. See [`guide-ubuntu-server.md`](guide-ubuntu-server.md). |
+| Schedules that fire on time | `skep serve` kept running on a machine that stays on. A service manager keeps it running across logouts and restarts. See [`guide-ubuntu-server.md`](guide-ubuntu-server.md). |
 | Approving from your phone | a messenger channel (Telegram, Discord or Slack) with confirming turned on; it is off by default. See [`mobile.md`](mobile.md) and [`daily-driver-setup.md`](daily-driver-setup.md). |
-
-For a `pipx` or `uv tool` install, skep's own `/update` installs plain
-`skep==<version>`, with no extras: install the extra again after it. A
-`pip` install in a virtual environment is not updated by `/update`; upgrade
-it with `pip`.
 
 ## 7. The service's `PATH` is not your shell's `PATH`
 
-skep looks for every program above on the `PATH` of the process that runs it.
-In a terminal that is your shell's `PATH`. Under systemd it is whatever the
-unit sets, and a tool you installed into `~/.local/bin` is invisible unless
-the unit names that directory:
+skep finds the programs it calls by name, such as `git`, `gh`, `bwrap` and an
+agent's CLI, on the `PATH` of the process that runs it. In a terminal that
+is your shell's `PATH`. Under systemd it is whatever the unit sets, and a
+tool you installed into `~/.local/bin` is invisible unless the unit names
+that directory:
 
 ```ini
 [Service]
@@ -354,11 +356,14 @@ If a program works in your shell and a run says it is missing, check this
 line first. After you change it, run `systemctl --user daemon-reload` and
 restart the service.
 
+Install the tools a worker needs outside skep's own virtual environment:
+skep removes that environment from the worker's `PATH`.
+
 ## Install everything on Ubuntu 24.04
 
-This is the full set for a machine that will run sandboxed coding runs, open
-pull requests, and can use Codex. Leave out the lines for features you do not
-want.
+This is the set of host packages for a machine that will run sandboxed coding
+runs and open pull requests. Leave out the lines for features you do not
+want. To use Claude Code or Codex, also follow section 4.
 
 ```sh
 # as a user with sudo
@@ -375,8 +380,9 @@ gh auth login && gh auth setup-git
 
 On Fedora the same packages install with `dnf`
 (`sudo dnf install git pipx bubblewrap ripgrep make gh nodejs npm`). On macOS,
-`brew install pipx git ripgrep gh node uv` covers the same list, and there is
-no sandbox package to install.
+run `brew install pipx git ripgrep gh node uv`; there is no sandbox package
+to install. For a Makefile project, check that `make --version` answers, and
+install Apple's Command Line Tools (`xcode-select --install`) if it does not.
 
 ## Check it
 
@@ -391,7 +397,7 @@ skep doctor
 | any other sandbox line that is not `ready` | the probe did not pass; the line gives the reason | read the reason; on Ubuntu 24.04 it is usually the AppArmor step in section 2 |
 | `engine <name>: MISSING` | that agent's program is not on the `PATH` | section 4, or ignore it for an engine you do not use |
 | `engine <name>: NO AUTH ENV` | the program is there, its credential is not | section 4 |
-| a project under **Projects needing upgrade** | it runs unsandboxed, pins no verify command, or reads the whole disk | run the `skep project setup …` line doctor prints. If it ends in `'<your test command>'`, install the runner (section 3) and put your command there. If doctor cannot find the checkout, it says what to run once you have one. |
+| a project under **Projects needing upgrade** | it runs unsandboxed, pins no verify command, or reads the whole disk | run the `skep project setup …` line doctor prints, with the checkout's current path. If it ends in `'<your test command>'`, install the runner (section 3) and put your command there. If doctor has no checkout path to print, it shows the flags to use once you have one. |
 | `provider: ready` | a live provider answered a real completion (or the `mock` provider is configured) | nothing |
 
 `skep onboard --check` prints the same report plus the onboarding checks. It
