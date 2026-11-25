@@ -3460,11 +3460,14 @@ class ChatEngine:
         actor: str = CHAT_ACTOR,
         keep: str | None = None,
         items: int | None = None,
+        surface: str | None = None,
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
         ``actor`` is who confirmed: ``chat-user`` from the web, a
         ``channel:<name>:<identity>`` actor from a messenger (v26).
+        ``surface`` (v133-F37) is the client's hint, recorded on the row —
+        never authorization; None stays unknown.
 
         NOT a generator: validation and the mutation itself run eagerly at
         call time (an HTTPException must become a status code, not a mid-
@@ -3639,7 +3642,7 @@ class ChatEngine:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
                     chat_id, action, confirm=confirm, actor=actor, keep=keep,
-                    high=high is not None, shown_items=items,
+                    high=high is not None, shown_items=items, surface=surface,
                 )  # fmt: skip
             queued = not blocking_cards(self.store, chat_id)
             if queued:
@@ -3654,7 +3657,7 @@ class ChatEngine:
             with _verdict_lock(chat_id):
                 payload = self._record_verdict(
                     chat_id, action, confirm=confirm, actor=actor, keep=keep,
-                    high=high is not None, shown_items=items,
+                    high=high is not None, shown_items=items, surface=surface,
                 )  # fmt: skip
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
@@ -3785,6 +3788,7 @@ class ChatEngine:
         keep: str,
         high: bool = False,
         shown_items: int | None = None,
+        surface: str | None = None,
     ) -> dict[str, Any]:
         """Claim, execute (or deny) and record one card; the tool row's payload.
 
@@ -3862,12 +3866,15 @@ class ChatEngine:
                 else {"ok": all(p["ok"] for p in payloads), "items": payloads}
             )
             self.store.resolve_chat_action(
-                action_id, status=executed_status(payload), result=payload, claimed=True
-            )
+                action_id, status=executed_status(payload), result=payload, claimed=True,
+                actor=actor, surface=surface,  # v133-F37: who decided (I13)
+            )  # fmt: skip
         else:
             payload = {"ok": False, "denied": True, "note": "the user denied this action"}
             try:
-                self.store.resolve_chat_action(action_id, status="denied", result=payload)
+                self.store.resolve_chat_action(
+                    action_id, status="denied", result=payload, actor=actor, surface=surface
+                )
             except ValueError:
                 raise card_taken(self.store, action_id) from None
             log_denied_dispatch_asks(self.store, self.holder, action)
@@ -4660,14 +4667,18 @@ def add_chat_routes(
                 status = executed_status(payload)
             try:
                 run_store.resolve_chat_action(
-                    action_id, status=status, result=payload, claimed=True
-                )
+                    action_id, status=status, result=payload, claimed=True,
+                    # v133-F37: who decided — a mirror superseded elsewhere names no one here
+                    actor=None if status == "superseded" else COMMAND_ACTOR, surface=surface,
+                )  # fmt: skip
             except ValueError:  # E2: the ACP engine settled it first — its answer stands
                 raise card_taken(run_store, action_id) from None
         else:
             payload = {"ok": False, "denied": True, "note": "the operator canceled this command"}
             try:
-                run_store.resolve_chat_action(action_id, status="denied", result=payload)
+                run_store.resolve_chat_action(
+                    action_id, status="denied", result=payload, actor=COMMAND_ACTOR, surface=surface
+                )
             except ValueError:
                 raise card_taken(run_store, action_id) from None
             log_denied_dispatch_asks(run_store, holder, action)
@@ -4690,7 +4701,10 @@ def add_chat_routes(
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/confirm")
     def confirm_action(
-        chat_id: str, action_id: str, body: ActionConfirm | None = None
+        chat_id: str,
+        action_id: str,
+        body: ActionConfirm | None = None,
+        surface: Literal["web", "cli"] | None = None,  # v133-F37: a hint, recorded
     ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         keep = body.keep if body is not None else None
@@ -4702,7 +4716,13 @@ def add_chat_routes(
                     home,
                     chat_id,
                     engine.verdict_events(
-                        chat_id, chat, action_id, confirm=True, keep=keep, items=shown
+                        chat_id,
+                        chat,
+                        action_id,
+                        confirm=True,
+                        keep=keep,
+                        items=shown,
+                        surface=surface,
                     ),
                 )
             ),
@@ -4710,7 +4730,9 @@ def add_chat_routes(
         )
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/deny")
-    def deny_action(chat_id: str, action_id: str) -> StreamingResponse:
+    def deny_action(
+        chat_id: str, action_id: str, surface: Literal["web", "cli"] | None = None
+    ) -> StreamingResponse:
         chat = _require_chat(chat_id)
         return StreamingResponse(
             _as_sse(
@@ -4718,7 +4740,7 @@ def add_chat_routes(
                     run_store,
                     home,
                     chat_id,
-                    engine.verdict_events(chat_id, chat, action_id, confirm=False),
+                    engine.verdict_events(chat_id, chat, action_id, confirm=False, surface=surface),
                 )
             ),
             media_type="text/event-stream",

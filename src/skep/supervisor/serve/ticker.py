@@ -35,6 +35,9 @@ from .settings import (
 )
 
 logger = logging.getLogger("skep.serve")
+# v133-F37: the actor a timed-out card records — the deadline, never a person
+# (the same string ACP's own card deadline records, actions.expire_acp_permission).
+TIMEOUT_ACTOR = "auto:timeout"
 
 # v59-F6: how often the ticker re-probes provider health. Before this wiring
 # run_provider_health_checks had no production caller at all — provider_health
@@ -155,7 +158,9 @@ class Ticker(threading.Thread):
                 )
                 continue
             try:
-                self._store.resolve_chat_action(card.action_id, status="denied", result=payload)
+                self._store.resolve_chat_action(
+                    card.action_id, status="denied", result=payload, actor=TIMEOUT_ACTOR
+                )  # v133-F37: the deadline decided, no human (I6)
             except (KeyError, ValueError):
                 continue  # resolved concurrently — that verdict stands
             log_denied_dispatch_asks(self._store, self._holder, card)  # I6: a timeout denies

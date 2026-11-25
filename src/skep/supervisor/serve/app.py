@@ -1254,8 +1254,9 @@ def create_app(
 
         # v47-F3: the PR assembly is shared with the chat's open_pr tool.
         return open_pr_from_branch(
-            run_store, holder.current.audit_dir, run, branch=branch, base=body.base
-        )
+            run_store, holder.current.audit_dir, run, branch=branch, base=body.base,
+            actor=principal(request),  # v133-F37: the ledger names who pushed (I13)
+        )  # fmt: skip
 
     @app.post("/api/runs/{task_id}/land")
     def land(task_id: str, body: ResolveRequest, request: Request) -> dict[str, Any]:
