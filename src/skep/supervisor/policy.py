@@ -29,6 +29,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths
+from .shell_prefixes import launched_command
 from .store import RunStore
 
 
@@ -100,7 +101,9 @@ VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_ver
 # (round 3): the exit status is the LAST list's after `;`/newline; in an
 # and-or list `&&` needs every side vacuous and `||` any side; a pipe, a
 # background `&` or a command substitution can hide the code anywhere.
-_VACUOUS_ARGV0 = frozenset({"true", ":", "test", "[", "echo", "printf", "ls", "cat"})
+_VACUOUS_ARGV0 = frozenset(
+    {"true", ":", "test", "[", "echo", "printf", "ls", "cat", "cd", "pushd", "popd"}
+)
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _MASKING_TOKENS = frozenset({"|", "&", "|&", ";;", ";&"})
@@ -260,6 +263,12 @@ def _segment_syntax_only(argv: list[str]) -> bool:
 
 
 def _segment_weak(argv: list[str]) -> bool:
+    # v133 R1 (Sol S1): a subshell, assignments and a launcher's own options
+    # (`env -C web`, `timeout 60`) only set the check up.
+    argv = [token for token in argv if token not in ("(", ")")]
+    while argv and _ASSIGNMENT.match(argv[0]):
+        argv = argv[1:]
+    argv = launched_command(argv)
     return _segment_vacuous(argv) or _segment_syntax_only(argv)
 
 

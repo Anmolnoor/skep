@@ -588,3 +588,48 @@ def test_f6_the_queen_shell_still_denies_serve_env(tmp_path: Path) -> None:
             assert _names_the_manual_step(str(decision.detail)), decision.detail
     finally:
         store.close()
+
+
+# --- R1 (Sol S1): setup before a syntax-only check is still syntax-only ------
+
+# A `cd` (or pushd, an env option, a launcher, a subshell) in front of the
+# check only sets it up; the check that decides the exit code is the same.
+NESTED_SYNTAX_ONLY = [
+    "cd web && node --check a.js",
+    "cd web && node --version",
+    "pushd web && node --check a.js",
+    "(cd web && node --check a.js)",
+    "sh -c 'cd web && node --check a.js'",
+    "env -C web node --check a.js",
+    "env -u CI node --check a.js",
+    "CI=1 timeout 60 node --check a.js",
+]
+NESTED_REAL = [
+    "cd web && npm test",
+    "cd web && node --check a.js && npm test",
+    "(cd web && npm test)",
+    "env -C web npm test",
+    "timeout 600 uv run pytest",
+]
+
+
+@pytest.mark.parametrize("command", NESTED_SYNTAX_ONLY)
+def test_r1_s1_setup_words_do_not_make_a_syntax_check_real(command: str) -> None:
+    reason = syntax_only_verify(command)
+    assert reason is not None and "syntax-only" in reason, (command, reason)
+    blocked = rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(command))
+    assert blocked is not None and "syntax-only" in blocked, (command, blocked)
+    with pytest.raises(HTTPException) as refused:
+        _gate_auto_apply(
+            {"auto_apply_verified_patch": True, "verify_command": command},
+            requested=True,
+            notes=[],
+        )
+    assert "syntax-only" in str(refused.value.detail)
+
+
+@pytest.mark.parametrize("command", NESTED_REAL)
+def test_r1_s1_setup_before_a_real_check_stays_real(command: str) -> None:
+    assert syntax_only_verify(command) is None, command
+    assert known_vacuous_verify(command) is None, command
+    assert rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(command)) is None
