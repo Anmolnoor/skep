@@ -4,7 +4,10 @@
 // without their action.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { loadApp } from "./harness.mjs";
+
+const DECK = JSON.parse(readFileSync(new URL("./fixtures/commands-web.json", import.meta.url), "utf8"));
 
 const settle = async (n = 8) => { for (let i = 0; i < n; i += 1) await new Promise(r => setTimeout(r, 0)); };
 
@@ -43,6 +46,7 @@ async function openChat({ messages = [], actions = [] } = {}) {
     if (path === "/api/projects") return { projects: [] };
     if (path === "/api/status") return { status: "ok", pending_approvals: 0, machine: "m" };
     if (path === "/api/tasks") return { tasks: [] };
+    if (path === "/api/commands") return DECK;
     throw new Error(`unexpected ${method} ${path}`);
   };
   app.streamSse = async (path, body, handlers) => { streams.push([path, body]); };
@@ -170,12 +174,12 @@ test("F21: with a card pending, typing works and Enter posts nothing until the c
   // Answering the card sends the queued message, once.
   chat.app.streamSse = async (path, body) => {
     chat.streams.push([path, body]);
-    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+    if (path.includes("/confirm")) chat.server.actions[0].status = "confirmed";
   };
   await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
   await settle();
   assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content]), [
-    ["/api/chats/c1/actions/a1/confirm", undefined],
+    ["/api/chats/c1/actions/a1/confirm?surface=web", undefined],
     ["/api/chats/c1/messages?surface=web", "next, do this"],
   ]);
 });
@@ -198,7 +202,7 @@ test("F22: queue one message, type a new draft, answer the card: the queued one 
   chat.input.value = "a draft I am still writing";
   chat.app.streamSse = async (path, body) => {
     chat.streams.push([path, body]);
-    if (path.endsWith("/confirm")) chat.server.actions[0].status = "confirmed";
+    if (path.includes("/confirm")) chat.server.actions[0].status = "confirmed";
   };
   await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === "Approve").click();
   await settle();
@@ -330,4 +334,261 @@ test("F24: a message sent in this session is the first ↑ recalls", async () =>
   assert.equal(chat.input.value, "just sent");
   chat.press("ArrowUp");
   assert.equal(chat.input.value, "old ask");
+});
+
+
+// ---------- v133 R1 (Sol review of F19–F24) ----------
+
+// S16: the queue drains only after the server's card state is read.
+test("R1 S16: a card the stream never announced holds the queue — nothing is posted into it", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "start";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "queued while it runs";
+  chat.press("Enter");
+  await settle();
+  chat.server.actions.push(card("a1")); // stored server-side; its `action` event was lost
+  finish();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["start"], "the queued message waits for the card");
+  assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "the missed card is drawn");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true);
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 1, "the queued message is kept");
+});
+
+test("R1 S16: a POST refused while a card waits leaves Send locked", async () => {
+  const chat = await openChat();
+  chat.app.streamSse = async () => {
+    chat.server.actions.push(card("a1")); // a background turn raised a card first
+    throw Object.assign(new Error("a card is waiting"), { status: 409 });
+  };
+  chat.input.value = "please do X";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "please do X");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "the card's lock survives the refusal");
+});
+
+// S6: a row is drawn exactly once, whichever of the stream and the poll
+// carries it — the stream's own rows matched by the ids it named (or, from
+// an older server that names none, by what it showed), never by provenance.
+async function turn(chat, { ids = false, background = null } = {}) {
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    if (ids) handlers.message({ content: "", message_id: 7 }); // F38: the event after the stored row
+  };
+  if (background) chat.server.messages.push(background);
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+}
+
+test("R1 S6: with no message ids, a Queen reply stored since the last poll is drawn after the turn, once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  await turn(chat, { background: msg(3, "assistant", "a background turn's reply") });
+  assert.equal(chat.textCount("a background turn's reply"), 1, "a plain-provenance row the stream never showed is drawn");
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("do the thing"), 1);
+  await chat.app.poll();
+  assert.equal(chat.textCount("a background turn's reply"), 1);
+  assert.equal(chat.textCount("the answer"), 1);
+});
+
+for (const ids of [true, false]) {
+  test(`R1 S6: a poll while the stream is finishing draws none of its rows again (ids: ${ids})`, async () => {
+    const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+    const api = chat.app.api;
+    let release;
+    let gated = false;
+    chat.app.api = async (method, path, body) => {
+      if (!gated && chat.streams.length && method === "GET" && path === "/api/chats") {
+        gated = true;
+        await new Promise(r => { release = r; });
+      }
+      return api(method, path, body);
+    };
+    await turn(chat, { ids });
+    assert.ok(gated, "the stream's finish is waiting on its refresh");
+    await chat.app.poll();
+    release();
+    await settle();
+    await chat.app.poll();
+    assert.equal(chat.textCount("do the thing"), 1);
+    assert.equal(chat.textCount("the answer"), 1);
+  });
+
+  test(`R1 S6: a refresh that fails after the stream leaves the message sent, and the next poll draws none of its rows again (ids: ${ids})`, async () => {
+    const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+    const api = chat.app.api;
+    let failed = false;
+    chat.app.api = async (method, path, body) => {
+      if (!failed && chat.streams.length && method === "GET" && path === "/api/chats") {
+        failed = true;
+        throw new Error("network down");
+      }
+      return api(method, path, body);
+    };
+    await turn(chat, { ids, background: msg(3, "assistant", "a background turn's reply") });
+    assert.ok(failed);
+    assert.equal(chat.input.value, "", "a message the server took is not handed back to the box");
+    await chat.app.poll();
+    assert.equal(chat.textCount("do the thing"), 1);
+    assert.equal(chat.textCount("the answer"), 1);
+    assert.equal(chat.textCount("a background turn's reply"), 1);
+    assert.equal(chat.main.querySelector(".composer-send").disabled, false);
+  });
+}
+
+test("R1 S6: with ids, an unnamed reply is drawn even in the streamed words; a blank tool-call round is not redrawn", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.thinking({ thinking: "let me look" });
+    chat.server.messages.push({ ...msg(6, "assistant", ""), thinking: "let me look", tool_calls: [{ id: "c" }] });
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 7 });
+  };
+  chat.server.messages.push(msg(3, "assistant", "the answer")); // a background reply, same words
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("the answer"), 2, "the streamed reply and the unnamed background one");
+  assert.equal(chat.textCount("let me look"), 1, "the streamed thinking is not drawn again");
+  assert.equal(chat.textCount("do the thing"), 1);
+});
+
+// S14: "executing" is a passing state — the next status replaces it.
+for (const [status, final] of [["confirmed", /Approved/], ["failed", /Failed — boom/]]) {
+  test(`R1 S14: a card seen running elsewhere ends on its real result (${status})`, async () => {
+    const chat = await openChat({ actions: [card("a1")] });
+    const [drawn] = chat.log.querySelectorAll(".confirm-card");
+    chat.server.actions[0].status = "executing";
+    await chat.app.poll();
+    assert.match(drawn.textContent, /Running — confirmed elsewhere/);
+    assert.ok(drawn.classList.contains("resolved"), "its buttons are gone while it runs");
+    await chat.app.poll();
+    assert.equal(drawn.querySelectorAll(".verdict").length, 1, "a quiet poll adds nothing");
+    Object.assign(chat.server.actions[0], { status, result: { error: "boom" } });
+    await chat.app.poll();
+    assert.doesNotMatch(drawn.textContent, /Running/);
+    assert.match(drawn.textContent, final);
+    assert.equal(drawn.querySelectorAll(".verdict").length, 1, "one verdict on the card");
+    assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1);
+  });
+}
+
+// S15: an explicitly addressed verdict is the decision, asked once — it goes
+// to the resolver now; /btw (read-only, which the server runs beside a
+// pending card) goes too; any other slash command stays in the box.
+test("R1 S15: /approve <id> typed under the pending card resolves it at once", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.app.streamSse = async (path, body) => {
+    chat.streams.push([path, body]);
+    if (path.includes("/actions/a1/confirm")) chat.server.actions[0].status = "confirmed";
+  };
+  chat.input.value = "/approve a1";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.streams.map(([path]) => path), ["/api/chats/c1/actions/a1/confirm?surface=web"]);
+  assert.equal(chat.input.value, "");
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0, "not queued");
+  assert.ok(chat.log.querySelector(".confirm-card").classList.contains("resolved"));
+});
+
+test("R1 S15: /deny <id> under a pending command card denies it on the commands endpoint and the card resolves", async () => {
+  const chat = await openChat({ actions: [card("o1", { source: "operator", tool: "set_role" })] });
+  const api = chat.app.api;
+  chat.app.api = async (method, path, body) => {
+    if (method === "POST" && path.endsWith("/commands/o1/deny")) chat.server.actions[0].status = "denied";
+    return api(method, path, body);
+  };
+  chat.input.value = "/deny o1";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.posts.map(([path]) => path), ["/api/chats/c1/commands/o1/deny"]);
+  assert.ok(chat.log.querySelector(".confirm-card").classList.contains("resolved"), "the card shows the verdict");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, false, "nothing waits any more");
+});
+
+test("R1 S15: /btw runs beside a pending card; /approve with no id stays in the box", async () => {
+  const chat = await openChat({ actions: [card("a1")] });
+  chat.input.value = "/btw what does this card do";
+  chat.press("Enter");
+  await settle();
+  assert.deepEqual(chat.streams.map(([path, body]) => [path, body.content, body.read_only]),
+    [["/api/chats/c1/messages", "what does this card do", true]]);
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "the card still holds the composer");
+  chat.input.value = "/approve";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "/approve");
+  assert.equal(chat.streams.length, 1);
+});
+
+// S17: a held chip's Send sends that message only; the others stay held.
+test("R1 S17: Send on the second of two held chips sends only that one; the first stays held", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "go";
+  chat.press("Enter");
+  await settle();
+  for (const text of ["first held", "second held"]) { chat.input.value = text; chat.press("Enter"); }
+  await chat.log.querySelector(".chat-stop").click();
+  finish();
+  await settle();
+  const chips = () => chat.main.querySelectorAll(".queued-steer-item");
+  assert.equal(chips().length, 2);
+  chat.app.streamSse = async (path, body) => { chat.streams.push([path, body]); };
+  await chips()[1].querySelectorAll("button").find(b => b.textContent === "Send").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["go", "second held"]);
+  assert.deepEqual(chips().map(c => c.querySelector(".queued-steer-text").textContent), ["first held"]);
+  assert.match(chips()[0].textContent, /held/);
+});
+
+test("R1 S6: F38's go-ahead line — text and id on one event — is drawn once", async () => {
+  const line = "run_shell could not run in this turn: it started on its own. Reply “go ahead”.";
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 7 });
+    chat.server.messages.push(msg(8, "assistant", line));
+    handlers.message({ content: `\n\n${line}`, message_id: 8 });
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("could not run in this turn"), 1);
+  assert.equal(chat.textCount("do the thing"), 1);
+});
+
+// ---------- F37: the web says which surface answered a chat card ----------
+
+test("F37: Approve, Deny and a typed /approve <id> on an assistant card send ?surface=web", async () => {
+  for (const [how, verb] of [["Approve", "confirm"], ["Deny", "deny"], ["typed", "confirm"]]) {
+    const chat = await openChat({ actions: [card("a1")] });
+    chat.app.streamSse = async (path, body) => {
+      chat.streams.push([path, body]);
+      if (path.includes("/actions/a1/")) chat.server.actions[0].status = verb === "confirm" ? "confirmed" : "denied";
+    };
+    if (how === "typed") { chat.input.value = "/approve a1"; chat.press("Enter"); }
+    else await chat.log.querySelector(".confirm-card").querySelectorAll("button").find(b => b.textContent === how).click();
+    await settle();
+    assert.deepEqual(chat.streams.map(([path]) => path), [`/api/chats/c1/actions/a1/${verb}?surface=web`], how);
+  }
 });

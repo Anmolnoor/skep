@@ -38,6 +38,8 @@ export function g10Provenance(g10) {
   if ((g10.commands || []).length) {
     rows.push(["command from", COMMANDS_SOURCE[g10.commands_source] || COMMANDS_SOURCE.unknown]);
   }
+  // v133 R1: a pinned check that only proves the code parses, in the record's words.
+  if (g10.syntax_only) rows.push(["syntax-only check", g10.syntax_only]);
   const counts = g10.test_counts;
   if (counts?.baseline || counts?.patched) {
     rows.push(["tests", `baseline ${countsLine(counts.baseline)} → patched ${countsLine(counts.patched)}`]);
