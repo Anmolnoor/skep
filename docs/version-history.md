@@ -3349,10 +3349,11 @@ you upgrade a home that is in use.
 
 One fix since 2.0.0 (#136):
 
-- When `skep onboard` checks a model endpoint and it answers 401 or 403, the
-  refusal now names a fix that fits the provider. 2.0.0 always said to run
-  `skep provider set-key <id>`, which is refused for a provider that is not
-  registered yet.
+- When onboarding tests a provider you named and its model-list or completion
+  request answers 401 or 403, the refusal now names a fix that fits the
+  provider. 2.0.0 always said to run `skep provider set-key <id>`, which is
+  refused for a provider that is not registered yet. (The check that keeps
+  the provider already configured, when you name none, is unchanged.)
   - An endpoint that uses the ChatGPT plan login: it says to sign in with
     `codex login`. Bedrock: it says to set working AWS credentials. Neither
     takes a stored key.
@@ -3360,8 +3361,8 @@ One fix since 2.0.0 (#136):
     Under a `--home` that is not the default one, its `set-key` command now
     carries that home.
   - Any other provider that is not registered yet, with a key variable named
-    (by `--api-key-env` or by the provider's preset): it says to set that
-    variable to a working key.
+    (by `--api-key-env`, at the interactive prompt, or by the provider's
+    preset): it says to set that variable to a working key.
   - Any other provider that is not registered yet, with no key variable
     named: the refusal prints the `skep provider add` command for it
     (protocol, endpoint and model), then `skep provider set-key`, then says
