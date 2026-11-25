@@ -30,7 +30,8 @@ def ollama() -> Iterator[FakeOllama]:
 def test_clock_line_format_is_pinned() -> None:
     pdt = timezone(timedelta(hours=-7), "PDT")
     line = operator_clock_line(datetime(2026, 7, 21, 5, 20, tzinfo=pdt))
-    assert line == ("Operator local time: 2026-07-21 05:20 PDT (UTC-7); store timestamps are UTC.")
+    # v134-F10 (T3): to the hour, so the request's start holds all hour
+    assert line == ("Operator local time: 2026-07-21 05:xx PDT (UTC-7); store timestamps are UTC.")
     # Half-hour offsets keep their minutes; UTC itself reads UTC+0.
     ist = timezone(timedelta(hours=5, minutes=30), "IST")
     assert "(UTC+5:30)" in operator_clock_line(datetime(2026, 1, 1, 12, 0, tzinfo=ist))

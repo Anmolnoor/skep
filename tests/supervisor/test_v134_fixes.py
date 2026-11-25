@@ -7,6 +7,7 @@ F4 (S1, I2 I8) a landing card never shows a syntax-only G10 pass as clean.
 F5 (N3) short run ids name one run.
 F8 (T1) the replay budget counts tool-call arguments; old ones are cut.
 F9 (T2) the context dial sizes the model's window, not how much history is resent.
+F10 (T3) the start of a request stays byte-identical between calls.
 """
 
 from __future__ import annotations
@@ -306,3 +307,31 @@ def test_a_huge_context_dial_still_caps_the_resent_history(rig: Rig) -> None:
     assert chat_num_ctx(rig.store) == 996_000  # ollama still gets the window asked for
     view = rig.client.get("/api/llm/config").json()
     assert (view["num_ctx"], view["replay_cap"]) == (996_000, AUTO_NUM_CTX_CAP)
+
+
+# ---------- F10 (T3): the request's start stays the same between calls ----------
+
+
+def test_the_clock_line_is_the_same_all_hour() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from skep.supervisor.serve.chat import operator_clock_line
+
+    zone = timezone(timedelta(hours=-7), "MST")
+    early = operator_clock_line(datetime(2026, 11, 25, 16, 1, tzinfo=zone))
+    late = operator_clock_line(datetime(2026, 11, 25, 16, 59, tzinfo=zone))
+    assert early == late
+    assert "2026-11-25 16:xx MST (UTC-7)" in early
+
+
+def test_activating_a_tool_appends_its_schema_and_never_reorders() -> None:
+    from skep.supervisor.serve.tools import CORE_TOOL_NAMES, TOOL_SPECS, advertised_tool_specs
+
+    names = [
+        t["function"]["name"] for t in TOOL_SPECS if t["function"]["name"] not in CORE_TOOL_NAMES
+    ]
+    first, last = names[0], names[-1]
+    before = advertised_tool_specs([last])
+    after = advertised_tool_specs([last, first])
+    assert after[: len(before)] == before  # the earlier request is a prefix
+    assert after[-1]["function"]["name"] == first

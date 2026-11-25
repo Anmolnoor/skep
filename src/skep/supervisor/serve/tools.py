@@ -2934,13 +2934,18 @@ def advertised_tool_specs(
     read_only: bool = False,
     hidden: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """The specs an indexed-delivery round advertises: core + this chat's
-    described-active tools, in registry order. read_only turns (v67 /btw)
+    """The specs an indexed-delivery round advertises: core (registry order)
+    then this chat's described-active tools, in the order described. read_only turns (v67 /btw)
     keep only the read-shaped part. ``hidden`` (P3-6): the tools the chat's
     role hides — never advertised."""
     source = READ_TOOL_SPECS if read_only else TOOL_SPECS
-    names = CORE_TOOL_NAMES | set(active)
-    return [t for t in source if t["function"]["name"] in names - hidden]
+    # v134-F10 (T3): core first, then each activation APPENDED in the order
+    # it was described — an activation slotted into registry order shifted
+    # every schema after it, and the schemas lead the request.
+    by_name = {t["function"]["name"]: t for t in source}
+    core = [t for t in source if t["function"]["name"] in CORE_TOOL_NAMES - hidden]
+    added = [by_name[n] for n in dict.fromkeys(active) if n in by_name and n not in CORE_TOOL_NAMES]
+    return core + [t for t in added if t["function"]["name"] not in hidden]
 
 
 def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:

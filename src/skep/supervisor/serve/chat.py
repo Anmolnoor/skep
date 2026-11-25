@@ -1262,8 +1262,11 @@ def operator_clock_line(now: datetime | None = None) -> str:
     sign = "+" if total_minutes >= 0 else "-"
     hours, minutes = divmod(abs(total_minutes), 60)
     utc = f"UTC{sign}{hours}" + (f":{minutes:02d}" if minutes else "")
+    # v134-F10 (T3): to the hour — the line sits ahead of the whole history,
+    # so a minute stamp changed every request's start and no provider prefix
+    # cache could ever match it.
     return (
-        f"Operator local time: {moment.strftime('%Y-%m-%d %H:%M')} {moment.tzname()} "
+        f"Operator local time: {moment.strftime('%Y-%m-%d %H')}:xx {moment.tzname()} "
         f"({utc}); store timestamps are UTC."
     )
 

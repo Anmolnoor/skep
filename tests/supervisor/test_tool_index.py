@@ -333,12 +333,15 @@ def test_the_full_setting_restores_the_old_array_byte_for_byte(
     assert "Tool index" not in body["messages"][0]["content"]
 
 
-def test_advertised_specs_ride_in_registry_order() -> None:
+def test_advertised_specs_ride_core_first_then_activations_in_order() -> None:
+    """v134-F10 (T3): core in registry order, then each described tool in the
+    order it was described — an activation only ever appends."""
     active = ["forget_memory", "read_file"]
     advertised = [t["function"]["name"] for t in advertised_tool_specs(active)]
     assert set(advertised) == set(CORE_TOOL_NAMES) | set(active)
     order = [t["function"]["name"] for t in TOOL_SPECS]
-    assert advertised == [n for n in order if n in set(advertised)]
+    core = [n for n in order if n in CORE_TOOL_NAMES]
+    assert advertised == [*core, *active]
     # read_only keeps only the read-shaped part.
     read_advertised = {t["function"]["name"] for t in advertised_tool_specs(active, read_only=True)}
     assert read_advertised == (set(CORE_TOOL_NAMES) | set(active)) - MUTATING_TOOL_NAMES
