@@ -6657,7 +6657,9 @@ def _no_auth_refusal(
     if "error" in manifest or manifest.get("engine_auth") is not None:
         return None
     engine = resolve_engine(str(manifest.get("engine") or "builtin"))
-    return no_auth_env_refusal(engine) if engine.external else None
+    if not engine.external:
+        return None
+    return no_auth_env_refusal(engine, serve_env=holder.current.home.parent / "serve.env")
 
 
 def _proposal_refusal(

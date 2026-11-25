@@ -181,3 +181,40 @@ def test_open_pr_grouping_an_already_landed_run_is_refused_at_proposal(
         assert policy_write_preview(store, holder, "open_pr", {"task_id": task_id}) == {}
     finally:
         store.close()
+
+
+# ---------- F26: NO AUTH ENV names the operator's manual steps (C1) ----------
+
+
+def test_the_no_auth_env_refusal_names_the_three_manual_steps(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.dispatch import no_auth_env_refusal
+    from skep.supervisor.engines import resolve_engine
+
+    for var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    serve_env = Path("/h/.skep/serve.env")
+    claude = str(no_auth_env_refusal(resolve_engine("claude_code"), serve_env=serve_env))
+    assert "NO AUTH ENV" in claude
+    assert "`claude setup-token`" in claude
+    assert "CLAUDE_CODE_OAUTH_TOKEN=<token>" in claude and str(serve_env) in claude
+    assert "restart skep serve" in claude
+    assert "the chat cannot do these steps" in claude
+    codex = str(no_auth_env_refusal(resolve_engine("codex"), serve_env=serve_env))
+    assert "OPENAI_API_KEY=<key>" in codex and "setup-token" not in codex
+    # the proposal refusal is the same text, with this home's serve.env
+    store, holder = _parts(config)
+    try:
+        _bind(
+            store, repo,
+            {"coding_engine": "claude_code", "verify_command": "uv run pytest",
+             "default_execution_mode": "sandbox"},
+        )  # fmt: skip
+        refused = mutation_execution_decision(
+            "dispatch_run", {"repo": str(repo), "instructions": "x"}, store=store, holder=holder
+        )
+        assert refused is not None and "`claude setup-token`" in str(refused.detail)
+        assert str(config.home.parent / "serve.env") in str(refused.detail)
+    finally:
+        store.close()

@@ -410,17 +410,27 @@ def _resolve_provider_routing(
     return decision, profile
 
 
-def no_auth_env_refusal(engine: CodingEngine) -> str | None:
+# v133-F26 (C1): how the operator mints an engine's token, where a CLI does it.
+_AUTH_MINT = {"claude_code": ("run `claude setup-token` and copy the token it prints", "token")}
+
+
+def no_auth_env_refusal(engine: CodingEngine, *, serve_env: Path | None = None) -> str | None:
     """v116-F1: the NO AUTH ENV refusal for an engine with none of its auth
     env set in this process, else None. v133-F25: the chat asks it when a
-    dispatch card would be proposed, and run_task again before any record."""
+    dispatch card would be proposed, and run_task again before any record.
+    v133-F26 (C1, I9): it names the operator's three manual steps — the chat
+    can neither mint the token nor write ``serve_env`` (the secret floor)."""
     if not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env):
         return None
+    mint, value = _AUTH_MINT.get(engine.name, (f"get a {engine.auth_env[0]} value", "key"))
+    where = str(serve_env) if serve_env is not None else "<home>/serve.env"
     return (
-        f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
-        f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
-        "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
-        "shell) — the line `skep doctor` prints for this engine"
+        f"coding_engine {engine.name!r}: NO AUTH ENV — none of "
+        f"{'/'.join(engine.auth_env)} is set in the environment the worker inherits. "
+        f"Three steps on this machine, and the chat cannot do these steps: (1) {mint}; "
+        f"(2) add the line `{engine.auth_env[0]}=<{value}>` to {where}; (3) restart skep "
+        "serve so the daemon loads it (`skep run` uses your shell's environment "
+        "instead). `skep doctor` then shows the engine ready"
     )
 
 
@@ -643,7 +653,7 @@ def run_task(
                 "`skep doctor` lists each engine; install it, or switch the project "
                 "to another engine (`skep project setup --engine builtin`)"
             )
-        refusal = no_auth_env_refusal(engine)
+        refusal = no_auth_env_refusal(engine, serve_env=config.home.parent / "serve.env")
         if refusal is not None:
             # ES-F122 (D20): a codex run on a project that opted in may use the
             # operator's ChatGPT plan login instead — checked HERE, before any
