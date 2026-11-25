@@ -3261,6 +3261,9 @@ async function viewChat(main, chatId) {
       reply = null;
     };
     let cardOpen = false;
+    // v133-F39 (G8): the stored ids this stream's message events named (F38's
+    // message_id) — the rows it drew, known instead of guessed.
+    const streamedIds = new Set();
     let spokenText = "";  // v53-F6: what the voice toggle reads aloud
     // v40-F1: consecutive tool events accumulate into one activity group; the
     // first content/thinking delta or action card closes it (the same
@@ -3306,6 +3309,7 @@ async function viewChat(main, chatId) {
     try {
       await streamSse(path, body, {
         message: (d) => {
+          if (d.message_id != null) streamedIds.add(Number(d.message_id));
           if (d.content) { hideWorking(); group = null; currentReply().append(d.content); spokenText += d.content; }
         },
         thinking: (d) => {
@@ -3357,7 +3361,12 @@ async function viewChat(main, chatId) {
         // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
         const unseen = messages.filter(m => m.id > drawnMessageId);
         replayGroup = null;
-        drawMessages(unseen.filter(m => (m.provenance || "").includes(":")));
+        // v133-F39: once the stream named its rows, an assistant row it did
+        // not name (a background turn's reply) is drawn; the rest, and every
+        // row of a stream that named none, keep the provenance rule.
+        const fromOutside = m => (streamedIds.size && m.role === "assistant"
+          ? !streamedIds.has(m.id) : (m.provenance || "").includes(":"));
+        drawMessages(unseen.filter(fromOutside));
         drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
         // v81-F13: an SSE drop loses the live `action` event — the refreshed
         // state re-draws any pending card the stream never delivered.

@@ -228,3 +228,39 @@ test("F34: the forensics G10 box tells the same two cases apart", () => {
   assert.equal(offline["exit codes"], "1");
   assert.equal(offline["re-verify did not run"], undefined);
 });
+
+// ---------- F39 (G8): the stream's message id, when it carries one ----------
+
+// A turn whose stream draws "the answer" live while a background turn (no
+// "kind:" author) stores its own reply in the same window.
+async function turnWithBackgroundReply(messageEvent) {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.server.messages.push(msg(5, "user", "go"));
+    chat.server.messages.push(msg(6, "assistant", "a background turn's reply"));
+    handlers.message(messageEvent({ content: "the answer" }));
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message(messageEvent({}, 7));
+  };
+  chat.input.value = "go";
+  chat.input.dispatchEvent({ type: "keydown", key: "Enter", shiftKey: false, preventDefault() {} });
+  await settle();
+  return chat;
+}
+
+test("F39: with message_id on the stream's message events, a background reply stored mid-stream is drawn and the streamed one is not redrawn", async () => {
+  const chat = await turnWithBackgroundReply((d, id) => (id ? { ...d, message_id: id } : d));
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("a background turn's reply"), 1, "a row the stream never announced is drawn");
+  assert.equal(chat.textCount("go"), 1, "the operator's own row is not drawn twice");
+  await chat.app.poll();
+  assert.equal(chat.textCount("a background turn's reply"), 1);
+  assert.equal(chat.routed(), 0);
+});
+
+test("F39: without the field, today's provenance rule stands exactly", async () => {
+  const chat = await turnWithBackgroundReply(d => d);
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("a background turn's reply"), 0, "today: an unmarked row stored mid-stream counts as drawn");
+  assert.equal(chat.textCount("go"), 1);
+});
