@@ -248,3 +248,46 @@ def test_a_g10_record_that_changed_after_the_card_was_drawn_refuses_the_confirm(
         assert all(a.status != "approved" for a in store.approvals_for(task_id))
     finally:
         store.close()
+
+
+# ---------- F13: the notice's mark and words carry the verdict (J2) ----------
+
+
+@pytest.mark.parametrize(
+    ("outcome", "confirmed", "codes", "green"),
+    [("failed", False, [1], False), ("tampered", False, [0], False), ("passed", True, [0], True)],
+)
+def test_the_run_notice_mark_comes_from_g10(
+    config: SupervisorConfig, repo: Path, tmp_path: Path,
+    outcome: str, confirmed: bool, codes: list[int], green: bool,
+) -> None:  # fmt: skip
+    from skep.supervisor.serve.run_status import run_terminal_text
+
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome=outcome, confirmed=confirmed, exit_codes=codes
+        )
+        line, _kind = run_terminal_text(store, task_id) or ("", "")
+        assert line.startswith("🟢") is green, line
+        if not green:
+            assert "worker said passed" in line  # the worker's claim beside the verdict
+    finally:
+        store.close()
+
+
+def test_a_policy_allowed_row_lists_as_allowed_by_policy(config: SupervisorConfig) -> None:
+    store = _store(config)
+    try:
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        store.record_resolved_chat_action(
+            chat_id, tool="read_file", args={"path": "a"}, result={"ok": True},
+            decided_by="global/operator-root",
+        )  # fmt: skip
+        clicked = store.add_chat_action(chat_id, tool="set_personality", args={"value": "x"})
+        store.resolve_chat_action(clicked, status="confirmed", result={"ok": True}, actor="u")
+        read, human = store.chat_actions(chat_id)
+        assert read.verdict == "allowed by policy"
+        assert human.verdict == "confirmed"
+    finally:
+        store.close()

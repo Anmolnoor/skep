@@ -497,6 +497,22 @@ def state_emoji(state: str) -> str:
     return STATE_EMOJI.get(state, "⚪")
 
 
+def run_mark(state: str, reverify: Any) -> str:
+    """v133-F13 (J2, I2, I8): a completed run's mark is the supervisor's
+    verdict when G10 recorded one — green means confirmed. A failure or a
+    tamper flag is red; any other unconfirmed record (could not run, landed
+    past the verified commit) is orange. No record, or nothing to re-verify,
+    keeps the state's mark."""
+    if (
+        state != "completed"
+        or reverify is None
+        or reverify.confirmed
+        or reverify.outcome == "not_applicable"
+    ):
+        return state_emoji(state)
+    return "🔴" if reverify.outcome in ("failed", "tampered") else "🟠"
+
+
 # v78-F1: the per-channel volume dial. Filters DELIVERY only — the chat row
 # and the web UI record everything whatever the level; it can silence pushes,
 # never allow anything. "approvals" delivers only pushes classified

@@ -30,7 +30,7 @@ from skep.worker_contract import TERMINAL_STATES, Event, EventType
 
 from ..store import RunStore
 from .cards import boundary
-from .channels import state_emoji
+from .channels import run_mark
 from .channels.outbound import push_to_chat_channel
 
 FAILED_STATES = frozenset({"failed", "rejected", "worker_timeout", "worker_crashed"})
@@ -294,7 +294,10 @@ def run_terminal_text(
         if reverify is not None and reverify.outcome == "tampered":
             # phase-01 1.2 (I8): a patch that rewrote its own tests is never
             # "ready to land" — the line is the tamper, with its evidence.
-            text = f"run {task_id[:13]}… completed{files} — {note}"
+            text = (
+                f"run {task_id[:13]}… completed{files} — worker said "
+                f"{reverify.worker_outcome or 'nothing'}, supervisor re-run tampered: {note}"
+            )
         else:
             unverified += f" — {note}" if note else ""
             text = (
@@ -350,7 +353,12 @@ def run_terminal_text(
         hosts = ", ".join(map(str, constraints["network_dropped"]))
         text += f" — lost the project's own hosts for this run: {hosts}"
     # v78-F2: the state glyph, prefixed once here — every consumer inherits it.
-    return f"{state_emoji(run.state)} {text}", kind
+    # v133-F13 (J2): the mark is G10's verdict when there is one, never the
+    # worker's claim — a DISAGREED or TEST-TAMPER notice is never green
+    mark = run_mark(
+        run.state, store.reverification_for(task_id) if run.state == "completed" else None
+    )
+    return f"{mark} {text}", kind
 
 
 def _salvaged_version(audit_dir: Path, task_id: str) -> int:

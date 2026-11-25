@@ -888,6 +888,9 @@ class ChatActionRecord:
     resolved_by: str | None = None
     resolved_surface: str | None = None
     evidence: dict[str, Any] | None = None
+    # v133-F13 (J2): the status in words for every listing — a row a rule
+    # decided reads "allowed by policy", never a human's "confirmed".
+    verdict: str = ""
 
     def fold_items(self) -> list[dict[str, Any]]:
         """Every call this card answers: its own first, then the folded ones."""
@@ -4953,6 +4956,11 @@ class RunStore:
             resolved_by=None if row[12] is None else str(row[12]),
             resolved_surface=None if row[13] is None else str(row[13]),
             evidence=None if row[14] is None else dict(json.loads(str(row[14]))),
+            verdict=(
+                "allowed by policy"
+                if row[12] == POLICY_RESOLVER and row[4] == "confirmed"
+                else str(row[4])
+            ),
         )
 
     @_locked
