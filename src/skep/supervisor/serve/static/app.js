@@ -3347,30 +3347,39 @@ async function viewChat(main, chatId) {
       working.remove();
       finishReply();
       speakReply(spokenText);
-      setComposerLocked(cardOpen);  // locked while a verdict is pending
-      const latest = await api("GET", "/api/chats");
-      chats = latest.chats;
-      activeChat = chats.find(chat => chat.chat_id === activeChatId) || activeChat;
-      if (activeChatId) {
-        detail = await api("GET", `/api/chats/${activeChatId}`);
-        messages = detail.messages;
-        actions = detail.actions;
-        activeChat = detail.chat;
-        // v133-F19: this turn's own rows were drawn live, so they only move
-        // the watermark; a row from outside (a run's terminal line, a
-        // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
-        const unseen = messages.filter(m => m.id > drawnMessageId);
-        replayGroup = null;
-        // v133-F39: once the stream named its rows, an assistant row it did
-        // not name (a background turn's reply) is drawn; the rest, and every
-        // row of a stream that named none, keep the provenance rule.
-        const fromOutside = m => (streamedIds.size && m.role === "assistant"
-          ? !streamedIds.has(m.id) : (m.provenance || "").includes(":"));
-        drawMessages(unseen.filter(fromOutside));
-        drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
-        // v81-F13: an SSE drop loses the live `action` event — the refreshed
-        // state re-draws any pending card the stream never delivered.
-        renderPendingCards();
+      // v133 R1 (S16): the lock — and with it the queue — waits for the
+      // server's card state below: a card whose `action` event the stream
+      // lost must hold a queued message, not receive it.
+      try {
+        const latest = await api("GET", "/api/chats");
+        chats = latest.chats;
+        activeChat = chats.find(chat => chat.chat_id === activeChatId) || activeChat;
+        if (activeChatId) {
+          detail = await api("GET", `/api/chats/${activeChatId}`);
+          messages = detail.messages;
+          actions = detail.actions;
+          activeChat = detail.chat;
+          // v133-F19: this turn's own rows were drawn live, so they only move
+          // the watermark; a row from outside (a run's terminal line, a
+          // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
+          const unseen = messages.filter(m => m.id > drawnMessageId);
+          replayGroup = null;
+          // v133-F39: once the stream named its rows, an assistant row it did
+          // not name (a background turn's reply) is drawn; the rest, and every
+          // row of a stream that named none, keep the provenance rule.
+          const fromOutside = m => (streamedIds.size && m.role === "assistant"
+            ? !streamedIds.has(m.id) : (m.provenance || "").includes(":"));
+          drawMessages(unseen.filter(fromOutside));
+          drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
+          // v81-F13: an SSE drop loses the live `action` event — the refreshed
+          // state re-draws any pending card the stream never delivered.
+          renderPendingCards();
+        }
+      } catch (e) {
+        // No card state read: Send follows what this stream saw, and the
+        // queue waits for the next reconcile rather than guessing.
+        send.disabled = cardOpen || !assistantReady;
+        flash("bad", `could not refresh the chat: ${e.message}`);
       }
       updateContextMeter();
       renderThreads(chats); // titles may have changed
@@ -3518,7 +3527,6 @@ async function viewChat(main, chatId) {
       bubble.remove();
       returnToBox(content);
       flash("bad", e.message);
-      send.disabled = false;
     }
     watchStatus();  // v43-F4: a dispatched run keeps reporting after the turn
     input.focus();

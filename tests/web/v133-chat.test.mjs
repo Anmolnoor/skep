@@ -331,3 +331,39 @@ test("F24: a message sent in this session is the first ↑ recalls", async () =>
   chat.press("ArrowUp");
   assert.equal(chat.input.value, "old ask");
 });
+
+
+// ---------- v133 R1 (Sol review of F19–F24) ----------
+
+// S16: the queue drains only after the server's card state is read.
+test("R1 S16: a card the stream never announced holds the queue — nothing is posted into it", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "start";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "queued while it runs";
+  chat.press("Enter");
+  await settle();
+  chat.server.actions.push(card("a1")); // stored server-side; its `action` event was lost
+  finish();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["start"], "the queued message waits for the card");
+  assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "the missed card is drawn");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true);
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 1, "the queued message is kept");
+});
+
+test("R1 S16: a POST refused while a card waits leaves Send locked", async () => {
+  const chat = await openChat();
+  chat.app.streamSse = async () => {
+    chat.server.actions.push(card("a1")); // a background turn raised a card first
+    throw Object.assign(new Error("a card is waiting"), { status: 409 });
+  };
+  chat.input.value = "please do X";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.input.value, "please do X");
+  assert.equal(chat.main.querySelector(".composer-send").disabled, true, "the card's lock survives the refusal");
+});
