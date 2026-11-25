@@ -19,11 +19,14 @@ import { providerShelf, stagedConnection } from "./js/pages/settings-provider.js
 
 // v130-F10: the working line's Stop. A direct POST — typed text queues behind
 // the turn (v103-F1), so a typed /stop would arrive only after it ended.
-function stopButton(chatId) {
+// v133-F23: `onStop` runs first, before the POST can fail — the chat holds
+// its local queue there.
+function stopButton(chatId, onStop = null) {
   return el("button", {
     type: "button",
     class: "chat-stop",
     onclick: async () => {
+      if (onStop) onStop();
       try { flash("ok", (await api("POST", `/api/chats/${chatId}/stop`)).detail); }
       catch (err) { flash("bad", err.message); }
     },
@@ -2438,6 +2441,10 @@ async function viewChat(main, chatId) {
   // is the first line for the same reason — the startup calls return before
   // they can reach `deliver`.
   let queued = [];
+  // v133-F23 (G6): Stop holds the queue — nothing queued is sent because
+  // Stop was pressed; the chips say "held" with Send and Discard.
+  let queueHeld = false;
+  const holdQueue = () => { queueHeld = true; renderQueued(); };
   // Text handed back to the box goes in front of whatever the operator is
   // typing now — nothing in the box is overwritten.
   const returnToBox = (text) => {
@@ -2445,21 +2452,27 @@ async function viewChat(main, chatId) {
     input.focus();
   };
   const renderQueued = () => {
+    if (!queued.length) queueHeld = false; // an empty queue holds nothing
     queuedNote.hidden = queued.length === 0;
+    const action = (label, onclick) =>
+      el("button", { type: "button", class: "ghost queued-steer-action", onclick }, label);
     queuedNote.replaceChildren(...queued.map((text, index) => {
       const take = () => { queued.splice(index, 1); renderQueued(); };
-      return el("div", { class: "queued-steer-item" },
-        el("span", { class: "chip tone-info" }, "queued"),
+      return el("div", { class: `queued-steer-item${queueHeld ? " held" : ""}` },
+        el("span", { class: `chip ${queueHeld ? "tone-warn" : "tone-info"}` },
+          queueHeld ? "held" : "queued"),
         el("span", { class: "queued-steer-text", title: text }, text),
-        el("button", { type: "button", class: "ghost queued-steer-action",
-          onclick: () => { take(); returnToBox(text); } }, "Edit"),
-        el("button", { type: "button", class: "ghost queued-steer-action", onclick: take }, "Cancel"));
+        queueHeld
+          ? action("Send", () => { queueHeld = false; renderQueued(); flushQueued(); })
+          : null,
+        action("Edit", () => { take(); returnToBox(text); }),
+        action(queueHeld ? "Discard" : "Cancel", take));
     }));
   };
   // The first queued message goes when the composer frees; the turn it
   // starts flushes the next one in its own finally. The box is not touched.
   const flushQueued = () => {
-    if (!queued.length || send.disabled || !assistantReady) return;
+    if (!queued.length || queueHeld || send.disabled || !assistantReady) return;
     const content = queued.shift();
     renderQueued();
     deliver(content);
@@ -3250,7 +3263,7 @@ async function viewChat(main, chatId) {
     // blank exactly while it is busiest. Shown after tool events, hidden the
     // moment real content streams, always the last element in the log.
     const working = el("div", { class: "chat-working", hidden: "" },
-      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId));
+      el("span", { class: "streaming-indicator" }, "Working"), stopButton(activeChatId, holdQueue));
     log.append(working);
     // v87-F7: the working line carries a local elapsed counter — a 3-minute
     // provider prefill or an await_runs block reads as "Thinking… · 142s",

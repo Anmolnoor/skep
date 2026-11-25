@@ -232,3 +232,55 @@ test("F22: a message refused with 409 comes back to the box", async () => {
   assert.ok(chat.app.flashes.some(([, text]) => /already running/.test(text)));
 });
 
+
+// ---------- F23 (G6): Stop holds the local queue ----------
+
+test("F23: Stop with a message queued sends nothing after; the chip is held with Send and Discard", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => {
+    chat.streams.push([path, body]);
+    return new Promise(resolve => { finish = resolve; });
+  };
+  chat.input.value = "start working";
+  chat.press("Enter");
+  await settle();
+  assert.equal(chat.streams.length, 1);
+  chat.input.value = "then this";
+  chat.press("Enter");
+  await settle();
+  await chat.log.querySelector(".chat-stop").click();
+  assert.deepEqual(chat.posts.map(([path]) => path), ["/api/chats/c1/stop"]);
+  finish();
+  await settle();
+  assert.equal(chat.streams.length, 1, "nothing queued is sent because Stop was pressed");
+  const chip = chat.main.querySelector(".queued-steer-item");
+  assert.ok(chip, "the queued message is kept");
+  assert.match(chip.textContent, /held/);
+  const labels = chip.querySelectorAll("button").map(b => b.textContent);
+  assert.ok(labels.includes("Send") && labels.includes("Discard"), labels.join(","));
+  chat.app.streamSse = async (path, body) => { chat.streams.push([path, body]); };
+  await chip.querySelectorAll("button").find(b => b.textContent === "Send").click();
+  await settle();
+  assert.deepEqual(chat.streams.map(([, body]) => body.content), ["start working", "then this"]);
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+});
+
+test("F23: Discard drops a held message and nothing is sent", async () => {
+  const chat = await openChat();
+  let finish;
+  chat.app.streamSse = (path, body) => { chat.streams.push([path, body]); return new Promise(r => { finish = r; }); };
+  chat.input.value = "go";
+  chat.press("Enter");
+  await settle();
+  chat.input.value = "later";
+  chat.press("Enter");
+  await chat.log.querySelector(".chat-stop").click();
+  finish();
+  await settle();
+  await chat.main.querySelector(".queued-steer-item").querySelectorAll("button").find(b => b.textContent === "Discard").click();
+  await settle();
+  assert.equal(chat.main.querySelectorAll(".queued-steer-item").length, 0);
+  assert.equal(chat.streams.length, 1);
+});
+
