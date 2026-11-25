@@ -10,6 +10,9 @@ import { api, el, liveRunStatus, openRunLink, relativeTime, shortTaskId, stateCh
 const section = (label, ...body) =>
   el("section", { class: "context-section" }, el("div", { class: "context-label" }, label), ...body);
 const none = text => el("p", { class: "note" }, text);
+// v134-F7 (N5): who raised a card — "assistant" read like the chat's role.
+const PROPOSERS = { assistant: "proposed by skep", operator: "your command", gate: "a worker's gate" };
+const proposer = source => PROPOSERS[source] || source;
 // TaskState minus TERMINAL_STATES: a gated run (pending_approval) has stopped;
 // its approval resumes it as a new run, and its card is under Waiting on you.
 const RUNNING = new Set(["created", "dispatched", "running"]);
@@ -35,7 +38,7 @@ export function renderContextPanel(panel, { chat, defaultModel, actions }) {
           title: "show this card in the thread",
           onclick: () => document.querySelector(`.confirm-card[data-action-id="${card.action_id}"]`)
             ?.scrollIntoView({ block: "center" }),
-        }, el("span", {}, card.tool), el("small", {}, `${card.source} · ${relativeTime(card.created_at)}`)))
+        }, el("span", {}, card.tool), el("small", {}, `${proposer(card.source)} · ${relativeTime(card.created_at)}`)))
         : none("Nothing.")),
     section("Runs here", runs),
     section("Spend, this thread", spend));

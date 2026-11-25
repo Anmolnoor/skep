@@ -173,3 +173,23 @@ test("F6 (W1, W2): a status event writes the transcript row and the panel row; a
   const [row] = log.querySelectorAll(`.live-run-status[data-task-id="${RUN_B}"]`);
   assert.equal(row.textContent, "failed");
 });
+
+// ---------- F7 (N5): a waiting card says who proposed it, not a role-like word ----------
+
+test("F7: Waiting on you names the proposer: skep for the Queen's cards, you for your commands", async () => {
+  const app = loadApp();
+  app.api = async (method, path) => (path.startsWith("/api/runs") ? { runs: [] }
+    : { chat: { last_5h: { total_tokens: 0 }, last_7d: { total_tokens: 0 } } });
+  const panel = app.el("aside", { class: "chat-context" });
+  const at = "2026-11-25T10:00:00Z";
+  await app.renderContextPanel(panel, {
+    chat: { chat_id: "c1", role: "builder", model: "m" }, defaultModel: "m",
+    actions: [
+      { action_id: "a1", tool: "land_run", status: "proposed", source: "assistant", created_at: at },
+      { action_id: "a2", tool: "workon", status: "proposed", source: "operator", created_at: at },
+    ],
+  });
+  const [queen, mine] = panel.querySelectorAll(".context-card").map(n => n.querySelector("small").textContent);
+  assert.match(queen, /^proposed by skep · /);
+  assert.match(mine, /^your command · /);
+});
