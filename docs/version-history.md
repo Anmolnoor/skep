@@ -3378,20 +3378,28 @@ One fix since 2.0.0 (#136):
 ## v2.1.0 — a chat that doesn't go silent, landing cards that say what the supervisor found, auto-landing that stays put (2026-11-25)
 
 One fix round since 2.0.1 (#139), from a day of live use on a fresh machine.
-It adds no new capability. Read "Before you upgrade" first: five things behave
+It adds no new capability. Read "Before you upgrade" first: six things behave
 differently.
 
 ### Before you upgrade
 
 - A remembered grant for a bare interpreter (`node`, `deno`, `bun`, `ruby`,
   `perl`, `php`, `lua`, `pwsh`, `awk`, as `bash` and `python` already were),
-  for its eval flag (`node -e`), or for one behind `env`, `timeout`, `nice`,
-  `uv run`, `poetry run` or `npx` stops matching. The next such command asks
-  again. A grant for a script (`node script.cjs`) still holds.
-- A saved plan whose `shell.run` step carries `cwd` no longer loads on resume;
-  the refusal says why. Dispatch the run again.
-- A `setup_project` card proposed before the upgrade, for a project that
-  already auto-lands, is refused when confirmed. Propose it again.
+  for its eval flag (`node -e`), or for one behind a launcher (`env`,
+  `timeout`, `nice` and the like) or `uv run`, `poetry run` or `npx` stops
+  matching. The next such command asks again. A grant for a script
+  (`node script.cjs`) still holds.
+- A saved plan whose `shell.run` step carries a key it does not take (`cwd`
+  in practice) no longer loads on resume; the refusal says why. Dispatch the
+  run again.
+- A project pinned to a syntax-only or version-only check (see
+  "Re-verification and auto-landing") stops auto-landing. If it is
+  `unlocked`, a re-setup is refused until you pin a real check or turn
+  `unlocked` off. A schedule on an external engine for it pauses.
+- Cards proposed before the upgrade (`setup_project`, `land_run`,
+  `approve_review`, `open_pr`) recorded nothing to bind to, so confirming one
+  acts on the current record, as it did in 2.0.1. To get a card bound to
+  what it shows, deny it and propose it again.
 - Landing a run the supervisor did not confirm is a high-tier card. Like
   other high-tier cards, on a messenger channel only that channel's admin
   can confirm it.
@@ -3409,10 +3417,11 @@ differently.
 - A card arriving, a card answered elsewhere and a run finishing update the
   chat page in place. The draft, the focus and the scroll position are kept.
 - The text box is not disabled while a card waits. A message typed then is
-  queued and shown as a chip with Edit and Cancel; a second queued message
-  no longer replaces the first; a message the server refuses comes back to
-  the box. `/approve <id>`, `/deny <id>` and `/btw` are sent at once when no
-  turn is streaming.
+  queued as its own chip with Edit and Cancel (before, a second one was
+  joined onto the first); a message the server refuses comes back to the
+  box. A slash command typed under a pending card is not queued: it stays in
+  the box until the card is answered, except `/approve <id>`, `/deny <id>`
+  and `/btw <text>`, which are sent at once when no turn is streaming.
 - Stop holds the messages queued at that moment. Each held chip has its own
   Send and Discard.
 - ↑ in an empty text box recalls the last message you sent in this chat; ↑
@@ -3429,8 +3438,9 @@ differently.
 
 ### Cards
 
-- A proposal that could only fail is refused before a card is made, with the
-  reason: a `run_shell` command that does not parse or is empty, a
+- A proposal from the Queen that could only fail is refused before a card is
+  made, with the reason: a `run_shell` command that does not parse or is
+  empty, a
   `diagnose_run` on a worktree that is gone, a `setup_project` with an
   unknown field, a coding dispatch whose engine has none of its auth
   environment set, a grouped `open_pr` over a run already landed on another
@@ -3475,7 +3485,9 @@ differently.
   `--prefix X` / `-C X`, or pnpm's `-C X`, when that directory is inside the
   worktree. This covers the baseline install and the re-install after a
   patched lockfile. Other forms (yarn `--cwd`, pnpm `--dir`, workspaces,
-  `pushd`) are not primed.
+  `pushd`) are not followed: the worktree root, or the last literal `cd`, is
+  primed instead. A directory that is not a literal path inside the worktree
+  primes nothing, and the record says so.
 - A dependency install that fails is recorded as "could not install
   dependencies", outcome `unavailable`, with no exit codes. Before, the
   installer's exit code was shown as the verify command's.
@@ -3484,10 +3496,11 @@ differently.
 - A patch that changes Yarn's installer config or release files, in the
   install directory or a directory above it inside the worktree, is not
   installed: the replay is `unavailable` and says why.
-- A syntax-only or version-only pin (`node --check`, `python -m py_compile`,
-  `bash -n`, `ruby -c`, `php -l`, `--version`, `--help`), also after `cd`,
-  `env`, `timeout` or a variable assignment, no longer counts as a real
-  check where skep acts without a human:
+- A syntax-only or version-only pin (for example `node --check`,
+  `python -m py_compile` or `compileall`, `bash -n`, `ruby -c`, `perl -c`,
+  `php -l`, `--version`, `--help`), also after `cd`, `env`, `timeout`, a
+  variable assignment, `uv run`, `poetry run` or `npx`, no longer counts as
+  a real check where skep acts without a human:
   - a run whose re-run commands are all such checks is not auto-landed;
   - a setup call that asks for auto-landing or for `unlocked` with such a
     pin is refused, and auto-landing that comes from a phase default or a
@@ -3503,8 +3516,9 @@ differently.
 - Changed files under `node_modules`, `.venv` or `site-packages` are no
   longer labelled test tampering. A patch that vendors files under those
   directories or `vendor/` still cannot land by itself. Test files and
-  runner config under `vendor/` are still flagged, because pytest collects
-  from it.
+  `conftest.py`, `pytest.ini`, `jest.config.*` and `vitest.config.*` under
+  `vendor/` are still flagged, because pytest collects from it; manifests
+  there (`pyproject.toml`, `package.json`, `setup.cfg`, `tox.ini`) are not.
 
 ### Workers and grants
 
@@ -3526,7 +3540,8 @@ differently.
   chat, `skep review --approve` and auto-landing.
 - `open_pr` and `skep pr open` write a ledger row for the push: who, when,
   the branch, the commit pushed, and the PR or the failure. The push sends
-  that commit, not the branch name.
+  that commit to the branch (`<commit>:refs/heads/<branch>`), so the local
+  branch no longer gets an upstream set.
 - A run notice takes its mark from the re-verification outcome when there is
   one: a disagreement or a tamper flag is not green. The Slack run summary
   and the channel run lines do the same.
