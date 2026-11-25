@@ -242,6 +242,28 @@ def test_a_gate_deny_that_lost_replies_in_the_chat(rig: Rig) -> None:
     assert "Too late to deny" in _assistant_lines(rig, chat_id)[-1]
 
 
+def test_r2_t6_a_gate_answered_in_approvals_names_that_answer_on_a_late_deny(
+    rig: Rig, repo: Path
+) -> None:
+    """The mirror card was superseded by the gate's own answer: the late
+    deny names that answer's actor and time from the approval row."""
+    chat_id, _task_id, review_id = _gated_run(rig, repo)
+    action_id = rig.store.add_chat_action(
+        chat_id, tool="approve_review", args={"review_id": review_id}, source="gate"
+    )
+    rig.store.resolve_approval(review_id, approved=True, actor="operator")  # Approvals view
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.resolved_at is not None
+
+    late = rig.client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+
+    assert late.status_code == 409
+    words = f"approved at {approval.resolved_at} by operator"
+    assert words in late.json()["detail"], late.json()["detail"]
+    line = _assistant_lines(rig, chat_id)[-1]
+    assert words in line and "unknown" not in line, line
+
+
 def test_a_deny_racing_a_confirm_in_flight_adds_no_row(rig: Rig) -> None:
     chat_id, action_id = _card(rig)
     assert rig.store.claim_chat_action(action_id)  # a confirm is executing it

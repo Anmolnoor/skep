@@ -535,15 +535,20 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     # E2: the winner's own words ("the engine already answered no: …"), when it left some
     return HTTPException(
         status_code=409,
-        detail=f"action {action_id!r} already {_verdict_words(action, status)}"
+        detail=f"action {action_id!r} already {_verdict_words(store, action, status)}"
         + (f": {note}" if note else ""),
     )
 
 
-def _verdict_words(action: ChatActionRecord | None, status: str) -> str:
+def _verdict_words(store: RunStore, action: ChatActionRecord | None, status: str) -> str:
     """v133-F33 (B3, I13): what won, from the record — "approved at <time>
     by <actor> (<surface>)". An actor the row does not hold is "unknown",
-    never a guessed person."""
+    never a guessed person. R2 (Sol T6): a gate mirror superseded by its
+    gate's own answer says that answer, from the approval row."""
+    if action is not None and action.source == "gate" and status == "superseded":
+        gate = store.get_approval(str(action.args.get("review_id") or ""))
+        if gate is not None and gate.resolved_at is not None:
+            return f"{gate.status} at {gate.resolved_at} by {gate.resolved_by or 'unknown'}"
     if action is None or action.resolved_at is None:
         return status
     word = {"confirmed": "approved", "failed": "approved (it then failed)"}.get(status, status)
@@ -563,7 +568,7 @@ def lost_deny(store: RunStore, chat_id: str, action_id: str) -> HTTPException:
             store.add_chat_message(
                 chat_id, role="assistant",
                 content=f"Too late to deny the {action.tool} card: it was already "
-                f"{_verdict_words(action, action.status)}.",
+                f"{_verdict_words(store, action, action.status)}.",
             )  # fmt: skip
         finally:
             lock.release()
