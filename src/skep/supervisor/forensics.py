@@ -173,6 +173,15 @@ def _commands_source(detail: str) -> str:
     return UNKNOWN
 
 
+def syntax_only(commands: list[str]) -> str | None:
+    """v133 (F-I1, I8): why G10's commands prove only that the code parses,
+    when every one of them is such a check; else None."""
+    from .policy import syntax_only_verify
+
+    reasons = [syntax_only_verify(command) for command in commands]
+    return reasons[0] if reasons and all(reasons) else None
+
+
 def _result(path: Path) -> dict[str, Any] | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -377,6 +386,7 @@ def build_run_forensics(store: RunStore, audit_dir: Path, task_id: str) -> dict[
                 "confirmed": reverify.confirmed,
                 "commands": reverify.commands,
                 "commands_source": _commands_source(reverify.detail),
+                "syntax_only": syntax_only(reverify.commands),
                 "exit_codes": reverify.exit_codes,
                 "tamper_flags": list(reverify.tamper_flags),
                 "test_counts": reverify.test_counts,

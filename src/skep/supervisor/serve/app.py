@@ -28,7 +28,7 @@ from skep.worker_contract import Event
 
 from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
-from ..forensics import _commands_source, build_run_forensics, filtered_decisions
+from ..forensics import _commands_source, build_run_forensics, filtered_decisions, syntax_only
 from ..store import RunStore
 from .actions import (
     allow_network_host_and_resume,
@@ -1387,7 +1387,11 @@ def create_app(
             # Phase 10 R2 I10: whose command G10 re-ran, as forensics reads it
             "reverification": None
             if reverify is None
-            else {**asdict(reverify), "commands_source": _commands_source(reverify.detail)},
+            else {
+                **asdict(reverify),
+                "commands_source": _commands_source(reverify.detail),
+                "syntax_only": syntax_only(reverify.commands),  # v133 (F-I1)
+            },
             # ES-F291 follow-up (I8): a landable patch with no G10 record says
             # so (still running, or never ran) instead of showing nothing.
             "reverification_missing": (
