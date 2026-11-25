@@ -2674,6 +2674,9 @@ async function viewChat(main, chatId) {
   // poll and the stream's finally draw only rows above it — a row is drawn
   // once, whichever of them sees it first.
   let drawnMessageId = 0;
+  // v133-F24 (G7): what the operator sent in this chat, oldest first — the
+  // ↑ recall walks it. Filled by replay (their own rows only) and by deliver.
+  const sentHistory = [];
   // v133-F19: a live event (the poll) updates what it concerns — new rows
   // appended, cards drawn or resolved — and never rebuilds #main, so a reply
   // a background turn stored shows within one poll. v133-F20: the terminal
@@ -3386,6 +3389,7 @@ async function viewChat(main, chatId) {
       replayGroup = null;
       if (isInternalNudge(message)) { noteLine(`skep: ${message.content}`); continue; }
       const own = message.role === "user" && authorLabel(message, null) === null;
+      if (own) sentHistory.push(message.content);
       renderChatMessage(log, message.role, message.content, {
         label: authorLabel(message,
           message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
@@ -3463,6 +3467,7 @@ async function viewChat(main, chatId) {
       return;
     }
     if (fromBox) input.value = "";
+    sentHistory.push(content);
     suggest.hidden = true;
     // v25-F1: a /command is intercepted BEFORE the LLM chat loop — parsed
     // here, executed against the HTTP API, never sent to the model.
@@ -3511,8 +3516,34 @@ async function viewChat(main, chatId) {
     updateAttachBadge();
     flash("ok", "image attached from clipboard");
   });
+  // v133-F24 (G7): ↑ in an empty box fills the last message sent in this
+  // chat; ↑ again walks back, ↓ forward and past the newest to the empty box.
+  // A draft is never replaced: ↑ acts only on an empty box or on a recalled
+  // message left as it was with the caret at its start; ↓ only on a recalled
+  // message with the caret on its last line.
+  let recallAt = null;
+  const recallStep = (back) => {
+    const recalling = recallAt !== null && input.value === sentHistory[recallAt];
+    if (back) {
+      const atStart = input.selectionStart === 0 && input.selectionEnd === 0;
+      if (input.value !== "" && !(recalling && atStart)) return false;
+      const at = recalling ? recallAt - 1 : sentHistory.length - 1;
+      if (at < 0) return recalling; // the oldest: stay on it
+      recallAt = at;
+    } else {
+      if (!recalling || input.value.slice(input.selectionEnd).includes("\n")) return false;
+      recallAt = recallAt + 1 < sentHistory.length ? recallAt + 1 : null;
+    }
+    input.value = recallAt === null ? "" : sentHistory[recallAt];
+    input.setSelectionRange(0, 0);
+    return true;
+  };
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { suggest.hidden = true; return; }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (recallStep(event.key === "ArrowUp")) event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); deliver(); }
   });
   input.focus();

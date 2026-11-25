@@ -46,6 +46,7 @@ class FakeNode {
   getAttribute(name) { return this.attributes[name] ?? null; }
   removeAttribute(name) { delete this.attributes[name]; }
   focus() {}
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatchEvent(event) {
     for (const fn of this.listeners[event.type] || []) fn(event);

@@ -284,3 +284,50 @@ test("F23: Discard drops a held message and nothing is sent", async () => {
   assert.equal(chat.streams.length, 1);
 });
 
+
+// ---------- F24 (G7): ↑ recalls this chat's own messages ----------
+
+test("F24: ↑ in an empty composer walks this chat's own messages back, ↓ forward; a draft is left alone", async () => {
+  const chat = await openChat({ messages: [
+    msg(1, "user", "first ask"),
+    msg(2, "assistant", "a reply"),
+    msg(3, "user", "run x completed", "worker:x"),
+    msg(4, "user", "This is the run we were working on.", "queen"),
+    msg(5, "user", "second ask"),
+  ] });
+  const { input, press } = chat;
+  input.selectionStart = input.selectionEnd = 0;
+  assert.ok(press("ArrowUp").prevented);
+  assert.equal(input.value, "second ask");
+  press("ArrowUp");
+  assert.equal(input.value, "first ask", "walks back past rows other authors wrote");
+  press("ArrowUp");
+  assert.equal(input.value, "first ask", "stops at the oldest");
+  press("ArrowDown");
+  assert.equal(input.value, "second ask");
+  press("ArrowDown");
+  assert.equal(input.value, "", "past the newest is the empty box again");
+  // A draft — multi-line, caret at the start — is never replaced.
+  input.value = "line one\nline two";
+  input.selectionStart = input.selectionEnd = 0;
+  const event = press("ArrowUp");
+  assert.equal(event.prevented, false);
+  assert.equal(input.value, "line one\nline two");
+  // Caret not at the start of an empty-looking recall: nothing either.
+  input.value = "typed";
+  input.selectionStart = input.selectionEnd = 5;
+  assert.equal(press("ArrowUp").prevented, false);
+  assert.equal(input.value, "typed");
+});
+
+test("F24: a message sent in this session is the first ↑ recalls", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "old ask")] });
+  chat.input.value = "just sent";
+  chat.press("Enter");
+  await settle();
+  chat.input.selectionStart = chat.input.selectionEnd = 0;
+  chat.press("ArrowUp");
+  assert.equal(chat.input.value, "just sent");
+  chat.press("ArrowUp");
+  assert.equal(chat.input.value, "old ask");
+});
