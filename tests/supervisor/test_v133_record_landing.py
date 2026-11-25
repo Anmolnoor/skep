@@ -1043,3 +1043,72 @@ def test_r2_a_branch_pr_body_lists_the_runs_its_card_listed_after_the_base_moves
         assert f"`{first}`" in body and f"`{last}`" in body, body
     finally:
         store.close()
+
+
+# ---------- v133 R3 (U2): a pending PR card shows the runs it recorded ----------
+
+
+def test_r3_u2_a_pending_pr_card_reread_after_the_base_moves_lists_the_runs_its_body_publishes(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+
+    from .conftest import git
+
+    bodies: list[str] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        bodies.append(str(kw["body"]))
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head=kw["expected_head"])
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        first, last = (
+            _run_with_g10(store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0])
+            for _ in range(2)
+        )
+        git(repo, "switch", "-qc", "skep/stack")
+        first_commit = _commit(repo, f"Apply skep task {first}", "a.txt")
+        _approve(store, first, "skep/stack", first_commit)
+        _approve(store, last, "skep/stack", _commit(repo, f"Apply skep task {last}", "b.txt"))
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        git(repo, "merge", "-q", "--ff-only", first_commit)  # the base moves past the first
+
+        pending = card_summary("open_pr", args, store=store, recorded=card, live_tier=True)
+        assert [run["task_id"] for run in pending["runs"]] == [first, last]
+        _execute(config, store, "open_pr", args, card)
+        [body] = bodies
+        assert f"`{first}`" in body and f"`{last}`" in body, body
+    finally:
+        store.close()
+
+
+def test_r3_u2_a_pending_pr_card_that_recorded_no_runs_shows_none_after_one_lands(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.serve.cards import card_summary, recorded_card
+
+    from .conftest import git
+
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        git(repo, "switch", "-qc", "skep/stack")
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        assert card["evidence"] == {"runs": []}  # recorded, and empty
+        _approve(store, task_id, "skep/stack", _commit(repo, f"Apply skep task {task_id}", "a.txt"))
+
+        pending = card_summary("open_pr", args, store=store, recorded=card, live_tier=True)
+        assert "runs" not in pending  # what the confirm publishes: no runs
+        legacy = {key: value for key, value in card.items() if key != "evidence"}
+        live = card_summary("open_pr", args, store=store, recorded=legacy, live_tier=True)
+        assert [run["task_id"] for run in live["runs"]] == [task_id]  # a pre-R3 card: live
+    finally:
+        store.close()

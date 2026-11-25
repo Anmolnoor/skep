@@ -878,8 +878,9 @@ def recorded_card(
         from .console import run_evidence
 
         runs = run_evidence(store, tool, args)
+        # R3 (U2): kept even when empty — the card shows what it recorded
+        record["evidence"] = {"runs": runs}
         if runs:
-            record["evidence"] = {"runs": runs}
             record["g10_bound"] = {
                 run["task_id"]: g10_fingerprint(store.reverification_for(run["task_id"]))
                 for run in runs
@@ -1275,15 +1276,20 @@ def card_summary(
     )
     if label is not None:  # v133-F12 (J1): the button says what approving does
         summary["action_label"] = label
-    if store is not None and live_tier:
+    evidence = (recorded or {}).get("evidence")
+    if evidence is not None:
+        # v133-F11/F16, R3 (U2): a card shows the runs it recorded when
+        # proposed, pending or resolved — the confirm acts on those; a
+        # recorded empty list stays empty
+        if evidence.get("runs"):
+            summary["runs"] = evidence["runs"]
+    elif store is not None and live_tier:
         # R4 K1: the thread's card is where a landing or PR is approved — it
         # names every run it lands or publishes, each with its G10 and V1.
+        # A card from before v133 R3 recorded none: it reads them live.
         from .console import run_evidence
 
         runs = run_evidence(store, tool, safe_args)
         if runs:
             summary["runs"] = runs
-    elif ((recorded or {}).get("evidence") or {}).get("runs"):
-        # v133-F11/F16: a resolved card shows the runs it recorded when proposed
-        summary["runs"] = (recorded or {})["evidence"]["runs"]
     return summary
