@@ -3361,8 +3361,8 @@ One fix since 2.0.0 (#136):
     Under a `--home` that is not the default one, its `set-key` command now
     carries that home.
   - Any other provider that is not registered yet, with a key variable named
-    (by `--api-key-env`, at the interactive prompt, or by the provider's
-    preset): it says to set that variable to a working key.
+    (by you, on any onboarding face, or by the provider's preset): it says to
+    set that variable to a working key.
   - Any other provider that is not registered yet, with no key variable
     named: the refusal prints the `skep provider add` command for it
     (protocol, endpoint and model), then `skep provider set-key`, then says
