@@ -4185,10 +4185,14 @@ def continue_settled_gates(
     started: list[str] = []
     for task_id, stage in store.queued_run_follow_ups():
         run = store.get_run(task_id) if stage == GATED else None
-        if run is None or run.state == "pending_approval":
-            continue
-        if run.state not in _SETTLED or store.get_setting(CONTINUE_CHAT_SETTING) is False:
-            store.clear_run_follow_up(task_id)  # handed to its successor, or switched off
+        if stage != GATED or (run is not None and run.state == "pending_approval"):
+            continue  # another kind of debt, or still waiting at its gate
+        if (
+            run is None
+            or run.state not in _SETTLED
+            or store.get_setting(CONTINUE_CHAT_SETTING) is False
+        ):
+            store.clear_run_follow_up(task_id)  # gone, handed to its successor, or switched off
             continue
         store.queue_run_follow_up(task_id, "queued")
         threading.Thread(

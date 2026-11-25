@@ -508,3 +508,21 @@ def test_the_streams_message_events_carry_the_stored_message_ids(rig: Rig) -> No
     assert all("content" in d for e, d in events if e is None)  # additive: content stays
     deltas = "".join(str(d["content"]) for e, d in events if e is None)
     assert "No runs yet." in deltas
+
+
+def test_a_settled_gate_with_continuations_switched_off_is_dropped_not_run(
+    rig: Rig, repo: Path
+) -> None:
+    from skep.supervisor.serve.run_status import CONTINUE_CHAT_SETTING
+
+    chat_id, task_id, review_id = _gated_run(rig, repo)
+    rig.ollama.script_reply("Paused at a gate.")
+    assert _continue(rig, task_id)[1]
+    rig.store.resolve_approval(review_id, approved=False, actor="chat-user")
+    Ticker(rig.holder, rig.store)._continue_settled_gates()  # engine-free: nothing to do
+    assert rig.store.queued_run_follow_ups() == [(task_id, chat_module.GATED)]
+
+    rig.store.set_setting(CONTINUE_CHAT_SETTING, False)
+    _sweep(rig)
+
+    assert len(_seeds(rig, chat_id)) == 1 and rig.store.queued_run_follow_ups() == []
