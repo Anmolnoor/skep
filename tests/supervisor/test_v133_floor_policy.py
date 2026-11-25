@@ -679,3 +679,49 @@ def test_r1_s7_an_unexpected_probe_failure_is_a_refusal(
     assert reason is not None and "could not" in reason, reason
     assert queen_skep_refusal(line, home=home, cwd=str(tmp_path)) is not None
     assert shell_read_target_unresolved(line, cwd=str(tmp_path)) is True
+
+
+# --- R1 (Sol S8): a launcher or runner does not narrow a broad interpreter --
+
+LAUNCHED_BROAD = [
+    ["env", "node"],
+    ["env", "FOO=1", "node", "-e"],
+    ["uv", "run", "python"],
+    ["uv", "run", "python3", "-c"],
+    ["timeout", "5", "bash"],
+    ["timeout", "5", "bash", "-c"],
+    ["npx", "node"],
+    ["nice", "-n", "5", "ruby", "-e"],
+]
+LAUNCHED_SCRIPTS = [
+    ["env", "node", "script.cjs"],
+    ["uv", "run", "python", "manage.py"],
+    ["timeout", "600", "bash", "run-tests.sh"],
+    ["npx", "tsc", "--noEmit"],
+    ["uv", "run", "pytest"],
+]
+
+
+@pytest.mark.parametrize("prefix", LAUNCHED_BROAD)
+def test_r1_s8_launched_broad_interpreter_refused_and_swept(prefix: list[str]) -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    reason = dangerous_prefix_reason(prefix)
+    assert reason is not None and "too broad" in reason, (prefix, reason)
+    kept, removed = filter_forbidden_shell_commands([prefix])
+    assert removed == [prefix] and kept == [], (prefix, kept)
+
+
+@pytest.mark.parametrize("prefix", LAUNCHED_SCRIPTS)
+def test_r1_s8_launched_script_still_grantable_and_kept(prefix: list[str]) -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    assert dangerous_prefix_reason(prefix) is None, prefix
+    assert filter_forbidden_shell_commands([prefix]) == ([prefix], [])
+
+
+def test_r1_s8_a_stored_bare_interpreter_is_swept_from_the_allowlist() -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    kept, removed = filter_forbidden_shell_commands([["node"], ["python3", "-c"], ["npm", "test"]])
+    assert kept == [["npm", "test"]] and removed == [["node"], ["python3", "-c"]]
