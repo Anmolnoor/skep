@@ -535,8 +535,39 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     # E2: the winner's own words ("the engine already answered no: …"), when it left some
     return HTTPException(
         status_code=409,
-        detail=f"action {action_id!r} already {status}" + (f": {note}" if note else ""),
+        detail=f"action {action_id!r} already {_verdict_words(action, status)}"
+        + (f": {note}" if note else ""),
     )
+
+
+def _verdict_words(action: ChatActionRecord | None, status: str) -> str:
+    """v133-F33 (B3, I13): what won, from the record — "approved at <time>
+    by <actor> (<surface>)". An actor the row does not hold is "unknown",
+    never a guessed person."""
+    if action is None or action.resolved_at is None:
+        return status
+    word = {"confirmed": "approved", "failed": "approved (it then failed)"}.get(status, status)
+    where = f" ({action.resolved_surface})" if action.resolved_surface else ""
+    return f"{word} at {action.resolved_at} by {action.resolved_by or 'unknown'}{where}"
+
+
+def lost_deny(store: RunStore, chat_id: str, action_id: str) -> HTTPException:
+    """v133-F33 (B3): a deny that lost the race also says so in the chat,
+    once — a flash on one page is not the record. The line waits for no turn:
+    a turn in flight gets no row between its calls, the 409 still says it."""
+    taken = card_taken(store, action_id)
+    action = store.get_chat_action(action_id)
+    lock = chat_turn_lock(chat_id)
+    if action is not None and action.resolved_at is not None and lock.acquire(blocking=False):
+        try:
+            store.add_chat_message(
+                chat_id, role="assistant",
+                content=f"Too late to deny the {action.tool} card: it was already "
+                f"{_verdict_words(action, action.status)}.",
+            )  # fmt: skip
+        finally:
+            lock.release()
+    return taken
 
 
 def card_refusal(surface: str, card: ChatActionRecord) -> str | None:
@@ -3630,6 +3661,8 @@ class ChatEngine:
             current = self.store.get_chat_action(action_id)
             if current is not None and current.status != "proposed":
                 # A Deny landing mid-confirm says what won, not just "busy".
+                if not confirm:
+                    raise lost_deny(self.store, chat_id, action_id) from None
                 raise card_taken(self.store, action_id) from None
             if action_id in _OPEN_CARDS.get(chat_id, ()) or not all(
                 item["tool_call_id"] for item in action.fold_items()
@@ -3660,8 +3693,10 @@ class ChatEngine:
                     high=high is not None, shown_items=items, surface=surface,
                 )  # fmt: skip
             more_pending = bool(blocking_cards(self.store, chat_id))
-        except BaseException:
+        except BaseException as exc:
             lock.release()
+            if not confirm and isinstance(exc, HTTPException) and exc.status_code == 409:
+                raise lost_deny(self.store, chat_id, action_id) from None  # v133-F33
             raise
         # v49-F3: the confirmer's stream carries what the mutation actually did
         # — the same 'tool' event shape free-executing tools emit. Before this,
@@ -4620,6 +4655,8 @@ def add_chat_routes(
             # ES-F1 (B15): the same claim as verdict_events — a double /land
             # confirm ran land_run twice.
             if not run_store.claim_chat_action(action_id):
+                if not confirm:  # v133-F33: a gate's deny that lost says so in the chat
+                    raise lost_deny(run_store, chat_id, action_id)
                 raise card_taken(run_store, action_id)
             tool = action.tool if confirm else "deny_review"
             args = action.args if confirm else {"review_id": str(action.args.get("review_id", ""))}
@@ -4680,7 +4717,7 @@ def add_chat_routes(
                     action_id, status="denied", result=payload, actor=COMMAND_ACTOR, surface=surface
                 )
             except ValueError:
-                raise card_taken(run_store, action_id) from None
+                raise lost_deny(run_store, chat_id, action_id) from None  # v133-F33
             log_denied_dispatch_asks(run_store, holder, action)
             record_denied_landing(run_store, action, actor=COMMAND_ACTOR)
         return {"action_id": action_id, "tool": action.tool, **payload}

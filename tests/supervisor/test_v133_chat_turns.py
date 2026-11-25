@@ -172,3 +172,81 @@ def test_channel_run_lines_take_their_mark_from_the_g10_verdict(rig: Rig, repo: 
     }  # fmt: skip
     header = str(run_summary_blocks(view)[0]["text"]["text"])  # type: ignore[index]
     assert "🟢" not in header and "🔴" in header
+
+
+# ---------- F33: a deny that lost says what won, from the record (B3) ----------
+
+
+def _assistant_lines(rig: Rig, chat_id: str) -> list[str]:
+    return [m.content for m in rig.store.chat_messages(chat_id) if m.role == "assistant"]
+
+
+def test_a_deny_after_an_approve_replies_with_when_and_who_from_the_record(rig: Rig) -> None:
+    rig.ollama.script_reply("done")
+    chat_id, action_id = _card(rig)
+    url = f"/api/chats/{chat_id}/actions/{action_id}"
+    assert rig.client.post(f"{url}/confirm?surface=web", json={"keep": "once"}).status_code == 200
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.resolved_at is not None
+    before = len(_assistant_lines(rig, chat_id))
+
+    late = rig.client.post(f"{url}/deny")
+
+    said = f"already approved at {action.resolved_at} by chat-user (web)"
+    assert late.status_code == 409 and said in late.json()["detail"]
+    lines = _assistant_lines(rig, chat_id)
+    assert len(lines) == before + 1 and said in lines[-1]  # in the chat, once
+    assert action.tool in lines[-1]
+
+
+def test_a_lost_deny_never_names_a_decider_the_record_does_not_hold(rig: Rig) -> None:
+    chat_id, action_id = _card(rig)
+    rig.store.resolve_chat_action(action_id, status="confirmed", result={"ok": True})
+
+    late = rig.client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+    assert late.status_code == 409  # an assistant card on the commands path: routed
+    late = rig.client.post(f"/api/chats/{chat_id}/actions/{action_id}/deny")
+
+    assert late.status_code == 409
+    assert "already approved at" in late.json()["detail"]
+    assert "by unknown" in late.json()["detail"]  # unknown stays unknown
+    assert "by unknown" in _assistant_lines(rig, chat_id)[-1]
+
+
+def test_a_canceled_command_that_lost_replies_in_the_chat(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(chat_module, "execute_mutation", lambda *a, **k: {"ran": True})
+    chat_id, action_id = _card(rig, source="operator")
+    base = f"/api/chats/{chat_id}/commands/{action_id}"
+    assert rig.client.post(f"{base}/confirm?surface=cli").status_code == 200
+
+    late = rig.client.post(f"{base}/deny")
+
+    assert late.status_code == 409
+    assert "already approved at" in late.json()["detail"]
+    assert "by operator-command (cli)" in late.json()["detail"]
+    assert "by operator-command (cli)" in _assistant_lines(rig, chat_id)[-1]
+
+
+def test_a_gate_deny_that_lost_replies_in_the_chat(rig: Rig) -> None:
+    chat_id, action_id = _card(rig, source="gate")
+    assert rig.store.claim_chat_action(action_id)
+    rig.store.resolve_chat_action(
+        action_id, status="confirmed", result={"ok": True}, claimed=True, actor="chat-user"
+    )
+
+    late = rig.client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+
+    assert late.status_code == 409 and "by chat-user" in late.json()["detail"]
+    assert "Too late to deny" in _assistant_lines(rig, chat_id)[-1]
+
+
+def test_a_deny_racing_a_confirm_in_flight_adds_no_row(rig: Rig) -> None:
+    chat_id, action_id = _card(rig)
+    assert rig.store.claim_chat_action(action_id)  # a confirm is executing it
+
+    late = rig.client.post(f"/api/chats/{chat_id}/actions/{action_id}/deny")
+
+    assert late.status_code == 409 and "already being confirmed" in late.json()["detail"]
+    assert _assistant_lines(rig, chat_id) == []  # its result lands; nothing to correct
