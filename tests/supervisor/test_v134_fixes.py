@@ -2,6 +2,7 @@
 
 F1 (S3, I8) a turn that raises anything still ends with a stored reply.
 F2 (S2) skep's own secrets never enter a chat; titles never carry a credential.
+F3 (D1) the worktree TTL sweep never counts a tree that is already gone.
 """
 
 from __future__ import annotations
@@ -140,3 +141,32 @@ def test_a_title_never_carries_a_credential_shaped_word() -> None:
     assert _title_from("Zq9Xr2Lm7Tb4Vw8Nc3Hp6Ks1Dy5Fg0Ju_Ae7Bo4Ci9W") == DEFAULT_TITLE
     assert _title_from("use key sk-abcdefghijkl1234 please") == "use key *** please"
     assert _title_from("fix the README typo") == "fix the README typo"
+
+
+# ---------- F3 (D1): the sweep never "removes" a tree that is gone ----------
+
+
+def test_the_ttl_sweep_skips_a_workspace_that_no_longer_exists(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Live test: a resume reused its parent's workspace, the tree was gone,
+    and the sweep logged "swept 1" every 30 s for days."""
+    import shutil
+
+    from skep.supervisor.dispatch import sweep_expired_preserved_worktrees
+
+    from .test_recover import _strand_run
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        store.transition(task_id, "failed", "agent exited 1")
+        store._conn.execute(
+            "UPDATE runs SET updated_at = '2020-01-01T00:00:00Z' WHERE task_id = ?", (task_id,)
+        )
+        store._conn.commit()
+        shutil.rmtree(workspace)
+
+        assert sweep_expired_preserved_worktrees(store, config) == 0
+    finally:
+        store.close()
