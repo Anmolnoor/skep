@@ -565,35 +565,94 @@ def _host_of(args: dict[str, Any]) -> str | None:
     return urllib.parse.urlparse(value).hostname or value
 
 
+def _shell_risk(args: dict[str, Any]) -> str:
+    argv = _argv_of(args)
+    if not argv:
+        return "runs a command on this machine"
+    if is_outbound_content_prefix(argv):
+        return (
+            "sends content outward — public and permanent, and never grantable, "
+            "so this cards every time (ADR 0044)"
+        )
+    if escalates(argv):
+        return "privilege escalation — it would launder every command guard beneath it"
+    if is_ops_mutating_command(argv):
+        return "changes machine state (service, files, or backups) — approve-once only"
+    command_line = args.get("command") or args.get("shell_command")
+    refusal = (
+        queen_command_line_refusal(command_line)
+        if isinstance(command_line, str) and command_line.strip()
+        else queen_shell_refusal(argv)
+    )
+    if refusal is not None:
+        # Should never reach a card (the verb refuses it outright), but if a
+        # path ever proposes one, say the engine's own reason, not a guess.
+        return refusal
+    return "runs a command on this machine"
+
+
+# v133-F29 (F-I6): the Queen's own host shell — no sandbox, the operator's login
+_HOST_SHELL_TOOLS = frozenset({"run_shell", "start_process"})
+HOST_SHELL = "on this machine as your account, outside the sandbox"
+
+
+def _credential_dirs() -> tuple[str, ...]:
+    """The home-relative paths where the secret floor's credentials live
+    (``HOME_SECRETS``): each listed path, and the folder of a listed file
+    (``.claude/.credentials.json`` → ``.claude``). Longest first."""
+    from ..secret_floor import HOME_SECRETS
+
+    found = set(HOME_SECRETS)
+    for entry in HOME_SECRETS:
+        folder, _, leaf = entry.rpartition("/")
+        if folder and "." in leaf[1:]:
+            found.add(folder)
+    return tuple(sorted(found, key=len, reverse=True))
+
+
+def _credential_dir_named(command: str) -> str | None:
+    homes = r"(?:~|\$HOME|\$\{HOME\}|/(?:home|Users)/[^/\s'\"]+)"
+    names = "|".join(re.escape(name) for name in _credential_dirs())
+    found = re.search(rf"{homes}/({names})(?=[/\s'\"]|$)", command)
+    return None if found is None else f"~/{found[1]}"
+
+
+def host_shell_risk(args: dict[str, Any], line: str) -> str:
+    """v133-F29 (F-I6, I8, I12): a run_shell / start_process card says it runs on
+    this machine as your account, outside the sandbox; one that starts an
+    agent CLI or names a credential directory says that too, in plain words."""
+    from ..engines import CODING_ENGINES
+    from ..shell_prefixes import command_line_segments, program_name
+
+    generic = line == "runs a command on this machine"
+    parts = [f"runs {HOST_SHELL}" if generic else f"{line} — it runs {HOST_SHELL}"]
+    command = str(args.get("command") or "")
+    agents = {engine.binary for engine in CODING_ENGINES.values() if engine.binary}
+    started = [
+        program_name(segment[0])
+        for segment in command_line_segments(command) or []
+        if segment and program_name(segment[0]) in agents
+    ]
+    if started:
+        parts.append(
+            f"it starts the agent CLI `{started[0]}` with your own login, not a sandboxed run"
+        )
+    folder = _credential_dir_named(command)
+    if folder is not None:
+        parts.append(f"it names {folder}, a credential directory")
+    return "; ".join(parts)
+
+
 def risk(tool: str, args: dict[str, Any]) -> str | None:
     """The specific reason this needs a human, or None when there is none.
 
     Never invents a line: a benign read renders no risk at all.
     """
+    if tool in _HOST_SHELL_TOOLS:
+        # v133-F29 (F-I6, I12): a host shell says where it runs and as whom
+        return host_shell_risk(args, _shell_risk(args))
     if tool in _SHELL_TOOLS:
-        argv = _argv_of(args)
-        if not argv:
-            return "runs a command on this machine"
-        if is_outbound_content_prefix(argv):
-            return (
-                "sends content outward — public and permanent, and never grantable, "
-                "so this cards every time (ADR 0044)"
-            )
-        if escalates(argv):
-            return "privilege escalation — it would launder every command guard beneath it"
-        if is_ops_mutating_command(argv):
-            return "changes machine state (service, files, or backups) — approve-once only"
-        command_line = args.get("command") or args.get("shell_command")
-        refusal = (
-            queen_command_line_refusal(command_line)
-            if isinstance(command_line, str) and command_line.strip()
-            else queen_shell_refusal(argv)
-        )
-        if refusal is not None:
-            # Should never reach a card (the verb refuses it outright), but if a
-            # path ever proposes one, say the engine's own reason, not a guess.
-            return refusal
-        return "runs a command on this machine"
+        return _shell_risk(args)
     if tool == "propose_schedule" and args.get("caste") == "script":
         # ES (lane F3): one click grants recurring host shell as the operator;
         # the card has to say so, with the exact command and interval.

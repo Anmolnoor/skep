@@ -5125,6 +5125,10 @@ def _execute_mutation(
     if name == "diagnose_run":
         # v107-F2: one bounded command in the kept evidence — sandboxed like
         # re-verification (I5), always carded (I6), reads the tree it names.
+        # v133-F29: the confirm asks the proposal's checks again (sandbox off)
+        refused = _diagnose_refusal(store, holder.current, str(args["task_id"]))
+        if refused is not None:
+            raise ValueError(refused)
         return actions.diagnose_run(
             store,
             holder.current,
@@ -6675,11 +6679,19 @@ def _shell_parse_refusal(command: str) -> str | None:
 
 
 def _diagnose_refusal(store: RunStore, config: Any, task_id: str) -> str | None:
-    """v133-F25 (A9, F-I7): why diagnose_run cannot run in ``task_id``'s
+    """v133-F25/F29 (A9, F-I7, F-I6): why diagnose_run cannot run in ``task_id``'s
     kept tree, or None. An unknown id is left for the confirm ("no run")."""
     record = store.get_run(task_id)
     if record is None:
         return None
+    if not config.sandbox:
+        # v133-F29 (K, I12): the kept tree is the worker's output — with the
+        # sandbox off the command would run on it unconfined, as the operator
+        return (
+            "diagnose_run runs only inside the sandbox, and the sandbox is off on this "
+            "home — it never runs a command on a worker's tree unconfined; read the audit "
+            "trail via get_run instead"
+        )
     workspace = Path(record.workspace or "")
     if not record.workspace or not workspace.is_dir():
         return (

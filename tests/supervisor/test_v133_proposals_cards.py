@@ -315,3 +315,49 @@ def test_a_setup_card_that_turns_auto_landing_on_is_high_and_names_the_branch(
         assert recorded["setup"]["verify_command"]["syntax_only"]
     finally:
         store.close()
+
+
+# ---------- F29: a host shell says where it runs; diagnose_run never unconfined (F-I6) ----------
+
+
+def test_a_host_shell_card_says_it_runs_outside_the_sandbox_as_you() -> None:
+    from skep.supervisor.serve.cards import risk
+
+    plain = str(risk("run_shell", {"command": "df -h"}))
+    assert "on this machine as your account, outside the sandbox" in plain
+    assert "outside the sandbox" in str(risk("start_process", {"command": "python -m http.server"}))
+    agent = str(risk("run_shell", {"command": 'cd /tmp && claude -p "Reply OK" --model opus'}))
+    assert "starts the agent CLI `claude`" in agent and "your own login" in agent
+    for command in ("ls -la ~/.claude", "cat $HOME/.codex/config.toml", "ls /home/al/.aws"):
+        line = str(risk("run_shell", {"command": command}))
+        assert "credential directory" in line, command
+    assert "credential" not in plain and "agent CLI" not in plain
+    # diagnose_run runs in the sandbox: its card makes no host-shell claim
+    assert "outside the sandbox" not in str(risk("diagnose_run", {"command": "ls"}))
+
+
+def test_diagnose_run_refuses_when_the_sandbox_is_off(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    """Sol's note (K): with the sandbox off, diagnose_run ran the command on
+    the worker's kept tree unconfined, as the operator. It refuses instead,
+    at proposal and at confirm."""
+    import dataclasses
+
+    off = dataclasses.replace(config, sandbox=False)
+    store = RunStore(predating_home(off.db_path))
+    holder = ConfigHolder(off, store)
+    try:
+        kept = tmp_path / "kept"
+        kept.mkdir()
+        task = mint_task(workspace=kept, instructions="x")
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        args = {"task_id": task.task_id, "command": "touch escaped"}
+        refused = mutation_execution_decision("diagnose_run", args, store=store, holder=holder)
+        assert refused is not None and refused.verdict == "deny"
+        assert "sandbox is off" in str(refused.detail)
+        with pytest.raises(ValueError, match="sandbox is off"):
+            _confirm(store, holder, "diagnose_run", args)
+        assert not (kept / "escaped").exists()
+    finally:
+        store.close()
