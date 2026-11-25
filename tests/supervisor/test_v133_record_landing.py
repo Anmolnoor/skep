@@ -250,6 +250,82 @@ def test_a_g10_record_that_changed_after_the_card_was_drawn_refuses_the_confirm(
         store.close()
 
 
+# ---------- R1 (Sol S4): one read of G10 for the check, the base and the note ----
+
+
+def _rerun_g10_on_claim(store: RunStore, task_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent re-verification lands its record right after the landing
+    checked the old one: inside the claim, before git and the note."""
+    claim = store.claim_approval
+
+    def claim_then_rerun(review_id: str) -> bool:
+        store.record_reverification(
+            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["npm test"], exit_codes=[0], detail="rerun", base_commit="f" * 40,
+        )  # fmt: skip
+        return claim(review_id)
+
+    monkeypatch.setattr(store, "claim_approval", claim_then_rerun)
+
+
+def test_r1_s4_a_record_that_changes_after_the_check_does_not_reach_the_landing(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import apply as apply_module
+
+    bases: list[Any] = []
+    monkeypatch.setattr(
+        apply_module, "apply_patch_on_branch", lambda *a, **k: bases.append(k["verified_base"])
+    )
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        _rerun_g10_on_claim(store, task_id, monkeypatch)
+        actions.land_run(store, actions.require_run(store, task_id), "chat-user", note="ok")
+        [approval] = store.approvals_for(task_id)
+        note = approval.resolution_note or ""
+        assert note.startswith("G10 failed:") and note.endswith("; ok"), note  # what was checked
+        assert bases == [None]  # the checked record confirmed no base; never the rerun's
+    finally:
+        store.close()
+
+
+def test_r1_s4_the_card_snapshot_given_explicitly_binds_the_landing(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller holding the claimed card passes its G10 snapshot; no executing
+    card row has to be found for the bind to hold."""
+    from fastapi import HTTPException
+
+    from skep.supervisor import apply as apply_module
+
+    landed: list[Any] = []
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", lambda *a, **k: landed.append(a))
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        shown = actions.g10_fingerprint(store.reverification_for(task_id))
+        store.record_reverification(
+            task_id, outcome="unavailable", worker_outcome="passed", confirmed=False,
+            commands=["npm test"], exit_codes=[], detail="npm ci failed",
+        )  # fmt: skip
+        run = actions.require_run(store, task_id)
+        with pytest.raises(HTTPException) as refused:
+            actions.land_run(store, run, "chat-user", note="ok", g10_shown=shown)
+        assert refused.value.status_code == 409
+        assert "changed since this card was shown" in str(refused.value.detail)
+        assert landed == []
+        current = actions.g10_fingerprint(store.reverification_for(task_id))
+        actions.land_run(store, run, "chat-user", note="ok", g10_shown=current)
+        assert len(landed) == 1
+    finally:
+        store.close()
+
+
 # ---------- F13: the notice's mark and words carry the verdict (J2) ----------
 
 
@@ -357,6 +433,189 @@ def test_open_pull_request_says_what_it_pushed_when_gh_then_fails(tmp_path: Path
         repo=tmp_path, branch="skep/x", base="main", title="t", body="b", runner=run
     )
     assert (result.opened, result.pushed, result.head) == (False, True, "c0ffee1234")
+
+
+# ---------- R1 (Sol S5): the commit checked and logged is the commit pushed ----
+
+
+def _github_repo_with_bare_origin(repo: Path, tmp_path: Path) -> Path:
+    """origin reads as GitHub (what open_pull_request requires) but pushes go
+    to a local bare repo, so the published commit can be read back."""
+    import subprocess
+
+    from .conftest import git
+
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    git(repo, "remote", "add", "origin", "git@github.com:me/repo.git")
+    git(repo, "config", "remote.origin.pushurl", str(bare))
+    return bare
+
+
+def _fake_github(
+    on_push: Any = None,
+) -> Any:
+    """Real git for everything but the GitHub reads and gh itself."""
+    import subprocess
+
+    def run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if "ls-remote" in args:
+            return subprocess.CompletedProcess(args, 0, "abc\trefs/heads/main\n", "")
+        if args[0] == "gh":
+            return subprocess.CompletedProcess(args, 0, "https://github.com/me/repo/pull/9\n", "")
+        if "push" in args and on_push is not None:
+            on_push()
+        return cast(subprocess.CompletedProcess[str], subprocess.run(args, **kw))
+
+    return run
+
+
+def test_r1_s5_a_branch_that_moves_before_the_push_publishes_the_checked_commit(
+    repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    bare = _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    checked = _commit(repo, "work", "w.txt")
+    git(repo, "switch", "-q", "main")
+
+    def move_branch() -> None:  # someone lands on the branch after the check
+        git(repo, "branch", "-f", "skep/work", _commit(repo, "late", "late.txt"))
+
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b",
+        runner=_fake_github(move_branch),
+    )  # fmt: skip
+    assert result.pushed and result.head == checked
+    published = git(bare, "rev-parse", "refs/heads/skep/work").stdout.strip()
+    assert published == checked  # the commit recorded is the commit published
+
+
+def test_r1_s5_an_expected_commit_that_is_not_the_tip_pushes_nothing(
+    repo: Path, tmp_path: Path
+) -> None:
+    import subprocess
+
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    bare = _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    shown = _commit(repo, "work", "w.txt")
+    tip = _commit(repo, "more", "w2.txt")
+    git(repo, "switch", "-q", "main")
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b",
+        runner=_fake_github(), expected_head=shown,
+    )  # fmt: skip
+    assert (result.opened, result.pushed, result.head) == (False, False, tip)
+    assert shown[:12] in result.detail and "nothing was pushed" in result.detail
+    probe = ["git", "-C", str(bare), "rev-parse", "--verify", "--quiet", "refs/heads/skep/work"]
+    assert subprocess.run(probe, capture_output=True, check=False).returncode != 0
+
+
+def test_r1_s5_a_branch_pr_pushes_the_head_its_claimed_card_showed(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import recorded_card
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import git
+
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        calls.append(kw)
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head=kw["expected_head"])
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        git(repo, "switch", "-qc", "skep/work")
+        drawn = _commit(repo, "work", "w.txt")
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/work", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        action_id = store.add_chat_action(chat_id, tool="open_pr", args=args, card=card)
+        assert store.claim_chat_action(action_id)
+        holder = ConfigHolder(config, store)
+        actions.open_pr_for_branch(holder, store, str(repo), branch="skep/work", base="main")
+        # a caller holding the card passes its head explicitly
+        actions.open_pr_for_branch(
+            holder, store, str(repo), branch="skep/work", base="main", expected_head=drawn
+        )
+        assert [call["expected_head"] for call in calls] == [drawn, drawn]
+    finally:
+        store.close()
+
+
+# ---------- R1 (Sol S11): gh that cannot start still leaves the push on record ----
+
+
+def test_r1_s11_gh_that_cannot_start_after_the_push_is_a_pushed_result(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    import subprocess
+
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    head = _commit(repo, "work", "w.txt")
+    git(repo, "switch", "-q", "main")
+    real = _fake_github()
+
+    def run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "gh":
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        return cast(subprocess.CompletedProcess[str], real(args, **kw))
+
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b", runner=run
+    )
+    assert (result.opened, result.pushed, result.head) == (False, True, head)
+    assert "gh" in result.detail and "could not start" in result.detail
+
+
+# ---------- R1 (Sol S12): an automatic landing records the commit it made ----
+
+
+def test_r1_s12_an_automatic_landing_records_its_commit(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.policy import VERIFIED_PATCH_RULE, maybe_auto_approve
+    from skep.supervisor.serve.console import landing_line
+
+    from .conftest import git
+
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0]
+        )
+        store.record_reverification(
+            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["uv run pytest"], exit_codes=[0], detail="re-ran clean",
+            base_commit=git(repo, "rev-parse", "HEAD").stdout.strip(),
+        )  # fmt: skip
+        approved = maybe_auto_approve(
+            store=store, rules=(VERIFIED_PATCH_RULE,), repo=repo, task_id=task_id,
+            verification_outcome="passed", risk_flags=(), verify_pinned=True,
+        )  # fmt: skip
+        assert approved is not None
+        made = git(repo, "rev-parse", f"refs/heads/{approved.branch}").stdout.strip()
+        assert store.landing_commits()[task_id] == made
+        assert landing_line(store, task_id) is None  # not "landed before v133"
+    finally:
+        store.close()
 
 
 # ---------- F15: a branch PR card names every run the push publishes (J5) ----------
@@ -486,6 +745,45 @@ def test_card_and_pr_body_state_worker_and_supervisor_results_apart(
         [body] = bodies
         assert "**Worker's result:** passed (the worker's own report)" in body
         assert f"**Supervisor's result:** {g10_words}" in body
+    finally:
+        store.close()
+
+
+# ---------- R1 (Sol S13): a branch PR's body carries the card's run evidence ----
+
+
+def test_r1_s13_a_branch_pr_body_names_each_landed_run_with_both_results(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.console import run_evidence
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import git
+
+    bodies: list[str] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        bodies.append(str(kw["body"]))
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head="h")
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        git(repo, "switch", "-qc", "skep/stack")
+        _approve(store, task_id, "skep/stack", _commit(repo, f"Apply skep task {task_id}", "a"))
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        [shown] = run_evidence(store, "open_pr", args)  # what the card shows
+        actions.open_pr_for_branch(
+            ConfigHolder(config, store), store, str(repo), branch="skep/stack", base="main"
+        )
+        [body] = bodies
+        assert f"`{task_id}`" in body, body
+        assert "worker's result: passed" in body and shown["supervisor"] in body, body
     finally:
         store.close()
 

@@ -703,15 +703,24 @@ def g10_note_line(reverify: Any) -> str | None:
     )
 
 
-def shown_g10_moved(store: RunStore, task_id: str) -> str | None:
+def shown_g10_moved(
+    store: RunStore, task_id: str, reverify: Any = None, *, shown: list[Any] | None = None
+) -> str | None:
     """v133-F12 (J1, I7): why the card now executing for ``task_id`` must
     not land it — the G10 record changed after the card was drawn — or None.
     The confirm paths claim a card ('executing') before they execute it, so
-    the card being confirmed is the executing one that bound this run."""
-    now = g10_fingerprint(store.reverification_for(task_id))
+    the card being confirmed is the executing one that bound this run.
+    R1 (Sol S4): ``reverify`` is the record the caller read once and lands
+    on (read here when None); ``shown`` is the claimed card's own snapshot,
+    for a caller that holds the card."""
+    now = g10_fingerprint(store.reverification_for(task_id) if reverify is None else reverify)
+    bound_snapshots = [shown] if shown is not None else []
     for card in store.executing_chat_actions():
         bound = (card.card or {}).get("g10_bound")
-        if isinstance(bound, dict) and task_id in bound and bound[task_id] != now:
+        if isinstance(bound, dict) and task_id in bound:
+            bound_snapshots.append(bound[task_id])
+    for snapshot in bound_snapshots:
+        if snapshot != now:
             return (
                 f"the supervisor's re-verification (G10) record for run {task_id} changed "
                 "since this card was shown, so nothing landed. Propose the landing again: "
@@ -1966,6 +1975,7 @@ def land_run(
     *,
     note: str | None = None,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Land a completed run's patch, creating the review if none exists (v23-F7).
 
@@ -1993,7 +2003,7 @@ def land_run(
     )
     if review_id is None:
         raise HTTPException(status_code=409, detail="nothing to land: this run produced no patch")
-    landed = apply_patch(store, run, review_id, actor, note, branch=branch)
+    landed = apply_patch(store, run, review_id, actor, note, branch=branch, g10_shown=g10_shown)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
     # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
     # result — say the terminal state in words a small model acts on (I9).
@@ -3528,23 +3538,30 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
-def shown_head_moved(store: RunStore, repo: Path, branch: str) -> str | None:
-    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
-    not push it — the branch's head is not the commit the card showed — or
-    None. Found the way ``shown_g10_moved`` finds its card: the claimed one."""
-    now = resolve_commit(repo, f"refs/heads/{branch}")
+def shown_head(store: RunStore, branch: str) -> str | None:
+    """The head the claimed open_pr card for ``branch`` showed, or None."""
     for card in store.executing_chat_actions():
         shown = (card.card or {}).get("head")
-        if (
-            card.tool == "open_pr"
-            and card.args.get("branch") == branch
-            and shown not in (None, now)
-        ):
-            return (
-                f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
-                f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
-                "open_pr again: the new card lists the runs the branch carries now"
-            )
+        if card.tool == "open_pr" and card.args.get("branch") == branch and shown is not None:
+            return str(shown)
+    return None
+
+
+def shown_head_moved(
+    store: RunStore, repo: Path, branch: str, shown: str | None = None
+) -> str | None:
+    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
+    not push it — the branch's head is not the commit the card showed — or
+    None. Found the way ``shown_g10_moved`` finds its card: the claimed one
+    (``shown``: that card's head, given by a caller that holds it)."""
+    now = resolve_commit(repo, f"refs/heads/{branch}")
+    shown = shown or shown_head(store, branch)
+    if shown not in (None, now):
+        return (
+            f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
+            f"it is now {(now or 'gone')[:12]}), so nothing was pushed. Propose "
+            "open_pr again: the new card lists the runs the branch carries now"
+        )
     return None
 
 
@@ -3557,6 +3574,7 @@ def open_pr_for_branch(
     base: str = "main",
     title: str | None = None,
     actor: str | None = None,
+    expected_head: str | None = None,
 ) -> dict[str, Any]:
     """v96-F4: open a PR for an existing local branch — the composer's button.
 
@@ -3584,19 +3602,47 @@ def open_pr_for_branch(
     )
     if exists.returncode != 0:
         raise HTTPException(status_code=404, detail=f"no local branch {branch!r}")
-    if store is not None and (moved := shown_head_moved(store, resolved, branch)) is not None:
+    # R1 (Sol S5): the push carries the commit the claimed card showed
+    expected_head = expected_head or (None if store is None else shown_head(store, branch))
+    if store is not None and (moved := shown_head_moved(store, resolved, branch, expected_head)):
         raise HTTPException(status_code=409, detail=moved)
+    body = (
+        f"Branch `{branch}` from the skep composer. Commits on it are "
+        "operator-approved landings or the operator's own work; merging stays "
+        "a separate confirmed step."
+    )
+    # R1 (Sol S13): the runs the card named (console.card_runs), each with
+    # the worker's result and G10's, from the store — as the card showed them
+    from .console import card_runs
+
+    args = {"branch": branch, "repo": str(resolved), "base": base}
+    ids = [] if store is None else card_runs(store, "open_pr", args)
+    if store is not None and ids:
+        entries = [
+            github.GroupedRun(
+                task_id=task_id,
+                summary=(record.summary or "") if (record := store.get_run(task_id)) else "",
+                verification=worker_result(store, task_id),
+                reverified=None if (g10 := store.reverification_for(task_id)) is None
+                else g10.confirmed,
+                supervisor=g10_line(g10),
+            )
+            for task_id in ids
+        ]  # fmt: skip
+        changed = list(
+            dict.fromkeys(path for t in ids for path in _changed_files(holder.current.audit_dir, t))
+        )
+        body = f"{body}\n\n" + github.default_grouped_pr_body(runs=entries, changed_files=changed)
     result = github.open_pull_request(
         repo=resolved,
         branch=branch,
         base=base,
+        expected_head=expected_head,
         title=title or f"skep: {branch}",
-        body=f"Branch `{branch}` from the skep composer. Commits on it are "
-        "operator-approved landings or the operator's own work; merging stays "
-        "a separate confirmed step.",
+        body=body,
     )
     return record_pr(
-        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=[]
+        store, result, actor=actor, repo=resolved, branch=branch, base=base, task_ids=ids
     )
 
 
@@ -3820,6 +3866,7 @@ def apply_patch(
     note: str | None,
     *,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> str:
     """Q5: applying the patch IS the approval action. Returns the branch.
 
@@ -3832,7 +3879,10 @@ def apply_patch(
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
     require_reverified(store, task_id)
-    moved = shown_g10_moved(store, task_id)  # v133-F12: the card's record, or none
+    # R1 (Sol S4): ONE read of G10 — the bind check, the landing base and the
+    # note all use it, so a re-verify landing mid-way changes none of them
+    reverify = store.reverification_for(task_id)
+    moved = shown_g10_moved(store, task_id, reverify, shown=g10_shown)  # v133-F12
     if moved is not None:
         raise HTTPException(status_code=409, detail=moved)
     repo = Path(str(run["repo"]))
@@ -3849,7 +3899,10 @@ def apply_patch(
     if not store.claim_approval(review_id):
         raise landing_taken(store, review_id)
     try:
-        failure = land_patch(store, repo, target, patch, task_id=task_id, actor=actor)
+        failure = land_patch(
+            store, repo, target, patch, task_id=task_id, actor=actor,
+            verified_base=reverify.base_commit if reverify and reverify.confirmed else None,
+        )  # fmt: skip
     except BaseException:
         store.unclaim_approval(review_id)
         raise
@@ -3873,7 +3926,7 @@ def apply_patch(
         raise HTTPException(status_code=409, detail=failure)
     # v133-F12 (J1, I13): a landing G10 did not confirm starts its note with
     # G10's own line from the store; the caller's note follows, never replaces it.
-    line = g10_note_line(store.reverification_for(task_id))
+    line = g10_note_line(reverify)
     if line is not None:
         note = f"{line}; {note}" if note else line
     store.resolve_approval(

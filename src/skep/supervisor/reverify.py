@@ -31,7 +31,6 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from fnmatch import fnmatch
-from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -43,7 +42,7 @@ from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .github import PR_HEAD_REF
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
-from .policy import ConfigUnreadable, test_config_changes, vendored_files
+from .policy import ConfigUnreadable, runner_unread, test_config_changes
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
@@ -327,9 +326,10 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
             )
         ]
         for old_mode, new_mode, code, path in changes:
-            if vendored_files((path,)):
+            if runner_unread(path):
                 # v133-F3 (A3): a vendored dependency's tests are not the
                 # project's; the patch still cannot land by itself (policy).
+                # R1 (Sol S9): not under vendor/, which pytest collects.
                 continue
             readable = new_mode in _REGULAR_MODES
             if _is_test_file(path):
@@ -420,7 +420,8 @@ _NODE_PRIME_INPUTS = frozenset({"package.json", *(lockfile for lockfile, _ in _N
 # What a patch must not change before an install (by basename, anywhere in
 # the tree): `.npmrc` can re-enable scripts or reroute the registry, a
 # yarn-path, a pnpmfile or pnpm-workspace.yaml settings are code or config
-# the installer obeys. `.yarn/` (yarn's releases) is matched as a prefix.
+# the installer obeys. A `.yarn/` directory (yarn's releases) is matched at
+# any depth too (v133 R1, Sol S2: yarn reads rc files up the tree).
 _NODE_INSTALLER_CONFIG = frozenset(
     {".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnpmfile.mjs", "pnpm-workspace.yaml"}
 )
@@ -437,7 +438,32 @@ _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # v133-F7 (A2): a pin's directory is primed only when every part of it is a
 # literal path (no `$`, `~`, glob or quote for the shell to rewrite).
 _LITERAL_DIR = re.compile(r"[A-Za-z0-9._@+/][A-Za-z0-9._@+/-]*")
-_NODE_DIR_FLAGS = ("--prefix", "-C")
+# v133 R1 (Sol S10): each tool's own directory flags (node has none: its `-C`
+# is --conditions). npm reads its flags up to `--`; npx and pnpm hand every
+# word after the command or script name to it.
+_NODE_DIR_FLAGS = {
+    "npm": frozenset({"--prefix", "-C"}),
+    "npx": frozenset({"--prefix", "-C"}),
+    "pnpm": frozenset({"-C"}),
+}
+
+
+def _node_dir_flags(words: list[str]) -> list[str]:
+    """The directories ``words`` (one Node command) names with its own flags."""
+    flags = _NODE_DIR_FLAGS.get(words[0], frozenset())
+    values: list[str] = []
+    rest = iter(words[1:])
+    for word in rest:
+        if word == "--":
+            break
+        name, eq, value = word.partition("=")
+        if eq and name == "--prefix" and name in flags:
+            values.append(value)
+        elif word in flags:
+            values.append(next(rest, ""))
+        elif not word.startswith("-") and words[0] != "npm":
+            break
+    return values
 
 
 def _pin_uses(commands: list[str], tools: frozenset[str]) -> bool:
@@ -469,8 +495,7 @@ def _node_dir(worktree: Path, commands: list[str]) -> str | None:
             if words[:1] == ["cd"]:
                 parts.append(words[1] if len(words) == 2 else "")
             elif words[:1] and words[0] in _NODE_TOOLS:
-                parts += [value for flag, value in pairwise(words) if flag in _NODE_DIR_FLAGS]
-                parts += [word.split("=", 1)[1] for word in words if word.startswith("--prefix=")]
+                parts += _node_dir_flags(words)
                 if not all(_LITERAL_DIR.fullmatch(part) for part in parts):
                     return None
                 root = worktree.resolve()
@@ -600,7 +625,7 @@ def _node_install_refusal(
         path
         for path in touched
         if PurePosixPath(path).name in _NODE_INSTALLER_CONFIG
-        or path.startswith(".yarn/")
+        or ".yarn" in PurePosixPath(path).parts[:-1]
         or path in protected
     )
     if config:
@@ -952,7 +977,13 @@ def reverify(
             env.update(_node_env(node_cache, reverify_tmp))
         package_manager = _package_manager(worktree, node_dir)
         protected: set[str] = set()
-        for rc in {str(PurePosixPath(base, name)) for base in ("", node_dir)
+        # v133 R1 (Sol S2): yarn merges every rc file from the install
+        # directory up to the root, so each one's yarnPath is protected
+        node_parts = PurePosixPath(node_dir).parts
+        ancestors = {
+            str(PurePosixPath(*node_parts[:depth])) for depth in range(len(node_parts) + 1)
+        }
+        for rc in {str(PurePosixPath(base, name)) for base in ancestors
                    for name in (".yarnrc", ".yarnrc.yml")}:  # fmt: skip
             with contextlib.suppress(OSError):
                 text = (worktree / rc).read_text(encoding="utf-8")

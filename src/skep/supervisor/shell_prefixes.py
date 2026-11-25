@@ -1122,6 +1122,32 @@ def _launcher_only_reason(prefix: Sequence[str]) -> str | None:
     return None
 
 
+# v133 R1 (Sol S8): runners that hand the rest of their argv to a program.
+_INTERPRETER_RUNNERS = (("uv", "run"), ("poetry", "run"), ("npx",))
+
+
+def _broad_interpreter(prefix: Sequence[str]) -> bool:
+    """A bare interpreter or its eval flag — also behind a launcher or runner
+    (``env node``, ``timeout 5 bash -c``, ``uv run python``): the entry would
+    cover every program the model hands it."""
+    argv = launched_command(prefix)
+    for runner in _INTERPRETER_RUNNERS:
+        if tuple(program_name(t) for t in argv[: len(runner)]) == runner:
+            argv = launched_command(argv[len(runner) :])
+            break
+    canon = [program_name(argv[0]), *argv[1:]] if argv else []
+    if len(canon) == 1:
+        return canon[0] in _BROAD_INTERPRETERS
+    if len(canon) != 2:
+        return False
+    if canon[0] in {"bash", "sh", "zsh", "fish"}:
+        return canon[1] in ("-c", "-lc")
+    if canon[0] in {"python", "python3"}:
+        return canon[1] == "-c"
+    flag = canon[1].casefold() if canon[0] == "pwsh" else canon[1]
+    return flag in _INTERPRETER_EVAL_FLAGS.get(canon[0], frozenset())
+
+
 def worker_allowlist_reason(prefix: list[str]) -> str | None:
     """``dangerous_prefix_reason`` plus the worker-allowlist-only refusal of a
     bare ``git`` (ES-F1, B124: PUT /api/policy accepted ``["git"]`` and a
@@ -1162,18 +1188,7 @@ def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     launcher_only = _launcher_only_reason(prefix)
     if launcher_only is not None:
         return launcher_only
-    if len(canon) == 1 and canon[0] in _BROAD_INTERPRETERS:
-        return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
-    if (
-        len(canon) <= 2
-        and canon[0] in {"bash", "sh", "zsh", "fish"}
-        and canon[1:] in (["-c"], ["-lc"])
-    ):
-        return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
-    if len(canon) <= 2 and canon[0] in {"python", "python3"} and canon[1:] == ["-c"]:
-        return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
-    eval_flags = _INTERPRETER_EVAL_FLAGS.get(canon[0], frozenset())
-    if len(canon) == 2 and (canon[1].casefold() if canon[0] == "pwsh" else canon[1]) in eval_flags:
+    if _broad_interpreter(prefix):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if canon in (["npm", "run"], ["uv", "run"]):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
@@ -1349,6 +1364,8 @@ def filter_forbidden_shell_commands(
             or is_ref_rewrite_command(argv)
             # ES-F1 (B124): a stored bare `git`/`timeout` covered `git push`.
             or _launcher_only_reason(argv) is not None
+            # v133 R1 (Sol S8): a stored bare interpreter (`node`, `env node`)
+            or _broad_interpreter(argv)
             or (len(argv) == 1 and program_name(argv[0]) == "git")
             or references_dead_worktree(argv)
             # v84-F4: a pre-v84 stored outbound grant (e.g. bare `xurl`) would

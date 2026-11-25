@@ -244,6 +244,43 @@ def test_f3_vendored_runner_config_still_tampered(repo: Path) -> None:
     assert _config_changes(repo, {"vendor/conftest.py": "x = 1\n"}) == ("vendor/conftest.py",)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "node_modules/a/jest.config.js",
+        "web/node_modules/b/vitest.config.ts",
+        "node_modules/c/conftest.py",
+        ".venv/lib/python3.12/site-packages/d/conftest.py",
+    ],
+)
+def test_r1_s9_runner_config_where_no_runner_looks_is_not_tampering(repo: Path, path: str) -> None:
+    """Sol S9: jest and vitest exclude node_modules by default and pytest
+    never recurses into it or a virtualenv, so a dependency's own runner
+    config there is not the project's. ``vendor/`` stays flagged: pytest
+    collects from it (``test_f3_vendored_runner_config_still_tampered``)."""
+    assert _config_changes(repo, {path: "x = 1\n"}) == ()
+
+
+def test_r1_s9_vendored_test_files_under_vendor_are_still_tampering(repo: Path) -> None:
+    """The per-file tamper scan draws the same line: a deleted test under
+    ``vendor/`` is one pytest would have collected; one under
+    ``node_modules`` is not."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    for name in ("vendor/lib/tests/test_a.py", "node_modules/m/tests/test_b.py"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("def test_x():\n    assert True\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "rm", "-q", "vendor/lib/tests/test_a.py", "node_modules/m/tests/test_b.py")
+    patch = repo.parent / "delete.patch"
+    patch.write_text(git(repo, "diff", "--cached", "--binary", base).stdout)
+    git(repo, "reset", "-q", "--hard", base)
+    flags = static_tamper_flags(repo, patch, base)
+    assert flags == ["test_file_deleted:vendor/lib/tests/test_a.py"], flags
+
+
 def test_f3_vendored_files_block_auto_landing() -> None:
     files = ("node_modules/a/package.json", "node_modules/a/index.js", "src/app.js")
     ctx = AutoApprovalContext(
@@ -588,3 +625,140 @@ def test_f6_the_queen_shell_still_denies_serve_env(tmp_path: Path) -> None:
             assert _names_the_manual_step(str(decision.detail)), decision.detail
     finally:
         store.close()
+
+
+# --- R1 (Sol S1): setup before a syntax-only check is still syntax-only ------
+
+# A `cd` (or pushd, an env option, a launcher, a subshell) in front of the
+# check only sets it up; the check that decides the exit code is the same.
+NESTED_SYNTAX_ONLY = [
+    "cd web && node --check a.js",
+    "cd web && node --version",
+    "pushd web && node --check a.js",
+    "(cd web && node --check a.js)",
+    "sh -c 'cd web && node --check a.js'",
+    "env -C web node --check a.js",
+    "env -u CI node --check a.js",
+    "CI=1 timeout 60 node --check a.js",
+]
+NESTED_REAL = [
+    "cd web && npm test",
+    "cd web && node --check a.js && npm test",
+    "(cd web && npm test)",
+    "env -C web npm test",
+    "timeout 600 uv run pytest",
+]
+
+
+@pytest.mark.parametrize("command", NESTED_SYNTAX_ONLY)
+def test_r1_s1_setup_words_do_not_make_a_syntax_check_real(command: str) -> None:
+    reason = syntax_only_verify(command)
+    assert reason is not None and "syntax-only" in reason, (command, reason)
+    blocked = rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(command))
+    assert blocked is not None and "syntax-only" in blocked, (command, blocked)
+    with pytest.raises(HTTPException) as refused:
+        _gate_auto_apply(
+            {"auto_apply_verified_patch": True, "verify_command": command},
+            requested=True,
+            notes=[],
+        )
+    assert "syntax-only" in str(refused.value.detail)
+
+
+@pytest.mark.parametrize("command", NESTED_REAL)
+def test_r1_s1_setup_before_a_real_check_stays_real(command: str) -> None:
+    assert syntax_only_verify(command) is None, command
+    assert known_vacuous_verify(command) is None, command
+    assert rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(command)) is None
+
+
+# --- R1 (Sol S7): a NUL in a path-shaped word, and a probe that fails ------
+
+
+def test_r1_s7_nul_in_a_path_word_never_raises(tmp_path: Path) -> None:
+    from skep.supervisor.secret_floor import shell_read_target_unresolved
+
+    home = _skep_home(tmp_path)
+    for line in ("cat a/b\x00c", "cat /a/b\x00c*", "cat ~/x\x00y"):
+        assert queen_skep_refusal(line, home=home, cwd=str(tmp_path)) is None, line
+        assert shell_secret_floor_reason(line, cwd=str(tmp_path), skep_home=home) is None
+        # skep cannot say what a C program makes of the line: HIGH card
+        assert shell_read_target_unresolved(line, cwd=str(tmp_path)) is True
+
+
+def test_r1_s7_a_protected_path_before_the_nul_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sh -c`` and execve read a C string: the word ends at the NUL, so the
+    floor judges what is left before it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = _skep_home(tmp_path)
+    reason = shell_secret_floor_reason(f"cat {tmp_path}/.ssh/id_rsa\x00x", cwd=str(tmp_path))
+    assert reason is not None and ".ssh" in reason, reason
+    serve_env = tmp_path / "skep" / "serve.env"
+    refusal = queen_skep_refusal(f"cat {serve_env}\x00x", home=home, cwd=str(tmp_path))
+    assert refusal is not None and "serve.env" in refusal, refusal
+
+
+def test_r1_s7_an_unexpected_probe_failure_is_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.secret_floor import shell_read_target_unresolved
+
+    home = _skep_home(tmp_path)
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        raise ValueError("probe broke")
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    line = "cat notes.txt"
+    reason = shell_secret_floor_reason(line, cwd=str(tmp_path), skep_home=home)
+    assert reason is not None and "could not" in reason, reason
+    assert queen_skep_refusal(line, home=home, cwd=str(tmp_path)) is not None
+    assert shell_read_target_unresolved(line, cwd=str(tmp_path)) is True
+
+
+# --- R1 (Sol S8): a launcher or runner does not narrow a broad interpreter --
+
+LAUNCHED_BROAD = [
+    ["env", "node"],
+    ["env", "FOO=1", "node", "-e"],
+    ["uv", "run", "python"],
+    ["uv", "run", "python3", "-c"],
+    ["timeout", "5", "bash"],
+    ["timeout", "5", "bash", "-c"],
+    ["npx", "node"],
+    ["nice", "-n", "5", "ruby", "-e"],
+]
+LAUNCHED_SCRIPTS = [
+    ["env", "node", "script.cjs"],
+    ["uv", "run", "python", "manage.py"],
+    ["timeout", "600", "bash", "run-tests.sh"],
+    ["npx", "tsc", "--noEmit"],
+    ["uv", "run", "pytest"],
+]
+
+
+@pytest.mark.parametrize("prefix", LAUNCHED_BROAD)
+def test_r1_s8_launched_broad_interpreter_refused_and_swept(prefix: list[str]) -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    reason = dangerous_prefix_reason(prefix)
+    assert reason is not None and "too broad" in reason, (prefix, reason)
+    kept, removed = filter_forbidden_shell_commands([prefix])
+    assert removed == [prefix] and kept == [], (prefix, kept)
+
+
+@pytest.mark.parametrize("prefix", LAUNCHED_SCRIPTS)
+def test_r1_s8_launched_script_still_grantable_and_kept(prefix: list[str]) -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    assert dangerous_prefix_reason(prefix) is None, prefix
+    assert filter_forbidden_shell_commands([prefix]) == ([prefix], [])
+
+
+def test_r1_s8_a_stored_bare_interpreter_is_swept_from_the_allowlist() -> None:
+    from skep.supervisor.shell_prefixes import filter_forbidden_shell_commands
+
+    kept, removed = filter_forbidden_shell_commands([["node"], ["python3", "-c"], ["npm", "test"]])
+    assert kept == [["npm", "test"]] and removed == [["node"], ["python3", "-c"]]

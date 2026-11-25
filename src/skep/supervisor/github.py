@@ -372,8 +372,14 @@ def open_pull_request(
     title: str,
     body: str,
     runner: Runner = subprocess.run,
+    expected_head: str | None = None,
 ) -> PullRequestResult:
     """Push ``branch`` and open a PR against ``base``. Honest failure, never raises.
+
+    v133 R1 (Sol S5): the commit read here is the one pushed, by its id, to
+    ``refs/heads/<branch>`` — a branch that moves afterwards is not what
+    gets published. ``expected_head`` (the claimed card's): a tip that is not
+    it pushes nothing.
 
     Phase 09 R3 (S16): gh is told the repo — origin's, as HOST/OWNER/REPO,
     so GH_HOST never redirects it — and a non-GitHub origin is refused
@@ -401,16 +407,30 @@ def open_pull_request(
         )
     tip = _run(runner, ["git", "-C", str(repo), "rev-parse", "--verify", f"refs/heads/{branch}"])
     head = tip.stdout.strip() or None if tip.returncode == 0 else None
-    push = _run(runner, ["git", "-C", str(repo), "push", "-u", "origin", branch])
+    if expected_head is not None and head != expected_head:
+        return PullRequestResult(
+            False,
+            None,
+            f"{branch} is at {(head or 'nothing')[:12]}, not the {expected_head[:12]} the card "
+            "showed, so nothing was pushed",
+            head=head,
+        )
+    source = f"{head}:refs/heads/{branch}" if head else branch
+    push = _run(runner, ["git", "-C", str(repo), "push", "origin", source])
     if push.returncode != 0:
         why = (push.stderr or push.stdout).strip()
         return PullRequestResult(False, None, f"git push failed: {why}", head=head)
-    created = _run(
-        runner,
-        ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
-         "--head", branch, "--title", title, "--body", body],
-        cwd=repo,
-    )  # fmt: skip
+    try:
+        created = _run(
+            runner,
+            ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
+             "--head", branch, "--title", title, "--body", body],
+            cwd=repo,
+        )  # fmt: skip
+    except OSError as exc:  # v133 R1 (Sol S11): the push happened; keep its record
+        return PullRequestResult(
+            False, None, f"gh could not start ({exc}) after the push", pushed=True, head=head
+        )
     if created.returncode != 0:
         why = (created.stderr or created.stdout).strip()
         return PullRequestResult(False, None, f"gh pr create failed: {why}", pushed=True, head=head)

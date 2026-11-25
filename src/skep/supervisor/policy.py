@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths
+from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths, resolve_commit
+from .shell_prefixes import launched_command
 from .store import RunStore
 
 
@@ -100,7 +101,9 @@ VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_ver
 # (round 3): the exit status is the LAST list's after `;`/newline; in an
 # and-or list `&&` needs every side vacuous and `||` any side; a pipe, a
 # background `&` or a command substitution can hide the code anywhere.
-_VACUOUS_ARGV0 = frozenset({"true", ":", "test", "[", "echo", "printf", "ls", "cat"})
+_VACUOUS_ARGV0 = frozenset(
+    {"true", ":", "test", "[", "echo", "printf", "ls", "cat", "cd", "pushd", "popd"}
+)
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _MASKING_TOKENS = frozenset({"|", "&", "|&", ";;", ";&"})
@@ -260,6 +263,12 @@ def _segment_syntax_only(argv: list[str]) -> bool:
 
 
 def _segment_weak(argv: list[str]) -> bool:
+    # v133 R1 (Sol S1): a subshell, assignments and a launcher's own options
+    # (`env -C web`, `timeout 60`) only set the check up.
+    argv = [token for token in argv if token not in ("(", ")")]
+    while argv and _ASSIGNMENT.match(argv[0]):
+        argv = argv[1:]
+    argv = launched_command(argv)
     return _segment_vacuous(argv) or _segment_syntax_only(argv)
 
 
@@ -355,9 +364,22 @@ _TEST_CONFIG_PARSED = ("pyproject.toml", "package.json", "setup.cfg", "tox.ini")
 _VENDORED_DIRS = frozenset({"node_modules", "vendor", ".venv", "site-packages"})
 
 
-def vendored_files(changed_files: tuple[str, ...]) -> tuple[str, ...]:
-    """The changed files under a vendored dependency directory."""
-    return tuple(p for p in changed_files if _VENDORED_DIRS & set(p.split("/")[:-1]))
+# v133 R1 (Sol S9): the vendored directories no test runner reads — jest and
+# vitest exclude node_modules by default, pytest never recurses into it or a
+# virtualenv. Not `vendor/`: pytest collects from it.
+_RUNNER_UNREAD_DIRS = _VENDORED_DIRS - {"vendor"}
+
+
+def vendored_files(
+    changed_files: tuple[str, ...], dirs: frozenset[str] = _VENDORED_DIRS
+) -> tuple[str, ...]:
+    """The changed files under a vendored dependency directory (``dirs``)."""
+    return tuple(p for p in changed_files if dirs & set(p.split("/")[:-1]))
+
+
+def runner_unread(path: str) -> bool:
+    """Is ``path`` under a vendored directory no test runner reads?"""
+    return bool(vendored_files((path,), _RUNNER_UNREAD_DIRS))
 
 
 def _dig(node: object, *keys: str) -> object:
@@ -537,7 +559,10 @@ def test_config_changes(
     hits = [
         path
         for path in changed_files
-        if any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+        if (
+            any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+            and not runner_unread(path)
+        )
         or path.startswith(".github/workflows/")
     ]
     vendored = vendored_files(changed_files)
@@ -848,6 +873,7 @@ def maybe_auto_approve(
         )
         return None
     store.resolve_approval(
-        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch
-    )
+        review_id, approved=True, actor=actor, note=note, landing_branch=target_branch,
+        landing_commit=resolve_commit(repo, f"refs/heads/{target_branch}"),  # R1 (Sol S12)
+    )  # fmt: skip
     return AutoApproval(rule_name=rule.name, review_id=review_id, note=note, branch=target_branch)
