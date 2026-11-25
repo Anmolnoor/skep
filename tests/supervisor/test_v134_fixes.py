@@ -3,6 +3,7 @@
 F1 (S3, I8) a turn that raises anything still ends with a stored reply.
 F2 (S2) skep's own secrets never enter a chat; titles never carry a credential.
 F3 (D1) the worktree TTL sweep never counts a tree that is already gone.
+F4 (S1, I2 I8) a landing card never shows a syntax-only G10 pass as clean.
 """
 
 from __future__ import annotations
@@ -168,5 +169,52 @@ def test_the_ttl_sweep_skips_a_workspace_that_no_longer_exists(
         shutil.rmtree(workspace)
 
         assert sweep_expired_preserved_worktrees(store, config) == 0
+    finally:
+        store.close()
+
+
+# ---------- F4 (S1): a syntax-only G10 pass is never shown as clean ----------
+
+
+def _passed_on(store: RunStore, repo: Path, tmp_path: Path, command: str) -> str:
+    from skep.supervisor.contracts_io import mint_task
+
+    task = mint_task(workspace=repo, instructions="land me")
+    store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+    store.transition(task.task_id, "completed")
+    patch = tmp_path / f"{task.task_id}.patch"
+    patch.write_text(
+        "diff --git a/.gitignore b/.gitignore\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/.gitignore\n@@ -0,0 +1 @@\n+node_modules\n",
+        encoding="utf-8",
+    )
+    store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    store.record_reverification(
+        task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+        commands=[command], exit_codes=[0],
+        detail="ok [command from the project's pinned verify_command]",
+    )  # fmt: skip
+    return str(task.task_id)
+
+
+def test_a_syntax_only_pass_on_untouched_files_is_marked_on_the_card(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.serve.actions import reverification_summary
+    from skep.supervisor.serve.console import run_evidence
+
+    store = RunStore(config.db_path)
+    try:
+        weak = _passed_on(store, repo, tmp_path, "node --check farm/index.js")
+        [run] = run_evidence(store, "land_run", {"task_id": weak})
+        assert "syntax-only" in run["g10_weak"]
+        assert "none of the files this patch changes" in run["g10_weak"]
+        assert run["supervisor"].startswith("G10 passed (syntax-only): ")
+        summary = reverification_summary(store.reverification_for(weak)) or {}
+        assert "syntax-only" in summary["syntax_only"]
+
+        real = _passed_on(store, repo, tmp_path, "npm test")
+        [run] = run_evidence(store, "land_run", {"task_id": real})
+        assert run["g10_weak"] is None and run["supervisor"].startswith("G10 passed: ")
     finally:
         store.close()

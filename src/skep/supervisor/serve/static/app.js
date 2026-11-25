@@ -285,11 +285,13 @@ function cardRuns(card) {
       el("span", { class: "mono" }, `run ${shortTaskId(run.task_id)}`),
       run.tamper ? el("p", { class: "banner bad", role: "alert" }, `⚠ V1 · ${run.tamper}`) : null,
       run.warning && run.warning !== run.tamper ? ` · ⚠ ${run.warning}` : null,
-      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null,
+      // v134-F4 (S1): a syntax-only pass is a warning, never "no warning"
+      run.g10_weak ? ` · ⚠ ${run.g10_weak}` : null,
+      !run.warning && !run.tamper && !run.g10_weak ? " · no G10 or V1 warning" : null,
       // v133-F34 (F-I3, J1): the worker's result and G10's apart, each in the
       // store's words; a landing from before v133 says what it lacks.
       run.worker ? el("p", { class: "note card-run-worker" }, run.worker) : null,
-      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" ? "" : " bad"}` },
+      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" && !run.g10_weak ? "" : " bad"}` },
         run.supervisor) : null,
       run.landing ? el("p", { class: "note card-run-landing" }, run.landing) : null))));
 }

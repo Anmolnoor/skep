@@ -26,6 +26,7 @@ from .actions import (
     approval_views,
     g10_facts,
     g10_line,
+    g10_weak,
     never_reverified_error,
     patch_digest,
     patch_path,
@@ -211,6 +212,7 @@ def run_evidence(store: RunStore, tool: str, args: dict[str, Any]) -> list[dict[
             "worker": "worker's own verification: "
             + (worker_result(store, task_id) or "not reported"),
             "supervisor": g10_line(store.reverification_for(task_id)),
+            "g10_weak": g10_weak(store, task_id),  # v134-F4 (S1)
         }
         for task_id in card_runs(store, tool, args)
     ]

@@ -44,6 +44,7 @@ from ..apply import (
     RefreshError,
     default_branch,
     land_patch,
+    patch_paths,
     refresh_clone,
     repo_default_branch,
     resolve_commit,
@@ -62,6 +63,7 @@ from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..ids import mint_uuid7
 from ..netproxy import domain_allowed
+from ..policy import syntax_only_verify
 from ..policy_baseline import NO_BASELINE_REASON, NoBaseline
 from ..policy_baseline import current_layer as current_baseline_layer
 from ..policy_baseline import layer_diff as baseline_layer_diff
@@ -534,6 +536,9 @@ def reverification_summary(reverify: Any) -> dict[str, Any] | None:
     }
     if reverify.pr:  # Phase 09 R1 (N6): the PR head and base this verdict is on
         summary |= {"head_commit": reverify.head_commit, "base_commit": reverify.base_commit}
+    # v134-F4 (S1, I8): a syntax-only pass says so where the Queen reads it
+    if why := _syntax_only(reverify.commands):
+        summary["syntax_only"] = why
     return summary
 
 
@@ -678,7 +683,36 @@ def g10_line(reverify: Any) -> str:
     command = " && ".join(facts["command"]) or "no command"
     ran = f"exit codes {facts['exit_codes']}" if facts["ran"] else "did not run"
     source = f" ({facts['source']})" if facts["source"] else ""
-    return f"G10 {facts['outcome']}: `{command}`{source}, {ran}"
+    # v134-F4 (S1): every face that quotes G10 (cards, PR bodies) marks it
+    weak = " (syntax-only)" if _syntax_only(facts["command"]) else ""
+    return f"G10 {facts['outcome']}{weak}: `{command}`{source}, {ran}"
+
+
+def _syntax_only(commands: Any) -> str | None:
+    """forensics.syntax_only (which imports this module's package): the reason
+    when every G10 command is syntax-only, else None."""
+    reasons = [syntax_only_verify(str(command)) for command in commands]
+    return reasons[0] if reasons and all(reasons) else None
+
+
+def g10_weak(store: RunStore, task_id: str) -> str | None:
+    """v134-F4 (S1, I2 I8): why a G10 pass proves little — the check only
+    parses code, and (when it names no changed file) not even this patch's.
+    Live test: `node --check <one file>` "passed" nine patches, none of which
+    touched that file, and the card read "no G10 or V1 warning"."""
+    reverify = store.reverification_for(task_id)
+    if reverify is None or reverify.outcome != "passed":
+        return None
+    why = _syntax_only(reverify.commands)
+    run = store.get_run(task_id)
+    patch = patch_path(store, task_id)
+    if why is None or run is None or patch is None:
+        return why
+    changed = patch_paths(Path(run.repo), patch)
+    words = " ".join(reverify.commands)
+    if changed and not any(path in words for path in changed):
+        why += "; it reads none of the files this patch changes"
+    return why
 
 
 def worker_result(store: RunStore, task_id: str) -> str | None:
