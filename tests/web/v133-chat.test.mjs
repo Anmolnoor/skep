@@ -102,3 +102,49 @@ test("F19: a message the live stream drew is not drawn again by the poll; a work
   assert.equal(chat.textCount("run abc completed"), 1, "a line another author stored during the stream is drawn");
   assert.equal(chat.routed(), 0);
 });
+
+// ---------- F20 (G1): live events update the node they concern ----------
+
+test("F20: a card arriving and a card resolved elsewhere do not rebuild #main; draft and scroll survive", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.input.value = "a draft in progress";
+  Object.assign(chat.log, { scrollTop: 100, scrollHeight: 1000, clientHeight: 300 });
+  chat.server.actions.push(card("a1"));
+  await chat.app.poll();
+  const drawn = chat.log.querySelectorAll(".confirm-card");
+  assert.equal(drawn.length, 1, "the card arriving is drawn");
+  chat.server.actions[0].status = "denied";
+  await chat.app.poll();
+  assert.ok(drawn[0].classList.contains("resolved"), "the verdict from elsewhere resolves the drawn card");
+  assert.equal(chat.log.querySelectorAll(".confirm-card").length, 1, "a card is drawn once");
+  assert.equal(chat.routed(), 0);
+  assert.equal(chat.main.children[0], chat.firstChild);
+  assert.equal(chat.input.value, "a draft in progress");
+  assert.equal(chat.log.scrollTop, 100, "the operator's scroll position is kept");
+});
+
+test("F20: a run's terminal event draws its stored line in place, with no rebuild", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  const source = FakeSource.last;
+  assert.ok(source, "the status stream is open");
+  chat.server.messages.push(msg(4, "user", "run abcdef completed — land it?", "worker:abcdef"));
+  source.emit("terminal", { task_id: "abcdef0123456789", state: "completed" });
+  await settle();
+  assert.equal(chat.routed(), 0);
+  assert.equal(chat.main.children[0], chat.firstChild);
+  assert.equal(chat.textCount("run abcdef completed"), 1);
+});
+
+
+test("F20: a quiet poll touches nothing on screen, not even the context panel", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")], actions: [card("a1")] });
+  const panel = chat.main.querySelector(".chat-context");
+  const before = [...panel.children];
+  const logBefore = [...chat.log.children];
+  await chat.app.poll();
+  assert.deepEqual([...panel.children], before);
+  assert.deepEqual([...chat.log.children], logBefore);
+  chat.server.actions[0].status = "confirmed";
+  await chat.app.poll();
+  assert.notDeepEqual([...panel.children], before, "a card resolved elsewhere redraws the panel");
+});

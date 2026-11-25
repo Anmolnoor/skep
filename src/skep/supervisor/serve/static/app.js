@@ -2580,9 +2580,10 @@ async function viewChat(main, chatId) {
       if (d.state === "completed") flash("ok", `run ${d.task_id.slice(0, 13)}… completed`);
       else flash("bad", `run ${d.task_id.slice(0, 13)}… ${d.state}${d.detail ? `: ${d.detail}` : ""}`);
       // The stored terminal line (v59-F2's call to action) is already in the
-      // transcript — redraw so it shows without a reload, v81-F13-style.
-      // Never mid-stream, never over a draft the operator is typing.
-      if (!chatStreamActive && !input.value.trim()) route();
+      // transcript — draw it without a reload. v133-F20: appended in place,
+      // never a rebuild, so a draft, focus and scroll survive; mid-stream the
+      // stream's finally draws it (a row from outside).
+      if (!chatStreamActive) reconcile().catch(() => {});
     });
     source.onerror = () => {
       source.close();
@@ -2647,11 +2648,19 @@ async function viewChat(main, chatId) {
   let drawnMessageId = 0;
   // v133-F19: a live event (the poll) updates what it concerns — new rows
   // appended, cards drawn or resolved — and never rebuilds #main, so a reply
-  // a background turn stored shows within one poll.
+  // a background turn stored shows within one poll. v133-F20: the terminal
+  // event and a card resolved elsewhere come here too; an operator scrolled
+  // up to read keeps their place.
   const reconcile = async () => {
     if (!activeChatId || chatStreamActive) return;
     const fresh = await api("GET", `/api/chats/${activeChatId}`);
     if (chatStreamActive) return; // a stream began meanwhile; its finally reconciles
+    const readingAt = log.scrollHeight - log.scrollTop - log.clientHeight > 40 ? log.scrollTop : null;
+    // The context panel redraws only when what it shows moved — a quiet poll
+    // touches nothing on screen.
+    const shown = (chat, acts) => JSON.stringify([chat?.title, chat?.role, chat?.model,
+      acts.map(a => [a.action_id, a.status])]);
+    const panelChanged = shown(activeChat, actions) !== shown(fresh.chat || activeChat, fresh.actions);
     detail = fresh;
     messages = fresh.messages;
     actions = fresh.actions;
@@ -2659,15 +2668,13 @@ async function viewChat(main, chatId) {
     replayGroup = null;
     drawMessages(messages.filter(m => m.id > drawnMessageId));
     renderPendingCards();
-    drawContext(activeChat, actions);
+    if (panelChanged) drawContext(activeChat, actions);
+    if (readingAt !== null) log.scrollTop = readingAt;
   };
   chatReconcile = reconcile;
   const setComposerLocked = (locked) => {
     input.disabled = locked || !assistantReady;
     send.disabled = locked || !assistantReady;
-    // v56-F6: let the global poll watch this chat's pending cards so a
-    // resolution on another surface unlocks the composer here.
-    pendingCardChatId = locked ? activeChatId : null;
     // v103-F1: a card resolved elsewhere unlocks this composer — a steer that
     // was waiting on that verdict goes now.
     if (!locked) flushQueued();
@@ -4994,13 +5001,12 @@ const POLL_MAX_MS = 60000;
 let pollDelay = POLL_MIN_MS;
 let pollTimer = null;
 // v56-F6 (ADR 0038): what the badge counts, the views must show. The poll
-// tracks the pending count and the chat whose composer a card has locked.
+// tracks the pending count; the open chat reconciles itself (v133-F20).
 let lastPendingApprovals = null;
-let pendingCardChatId = null;
 // v60-F1: true while a chat stream (message or card verdict) is being
 // consumed. Confirming a card resolves it server-side BEFORE the model's
 // continuation streams, so for those seconds the store shows zero proposed
-// cards while pendingCardChatId is still set — without this guard the v56-F6
+// cards while the composer is still locked — without this guard the v56-F6
 // poll called route() mid-stream, re-rendering the view and orphaning the
 // live stream's DOM (field test 2026-07-18: screen flicker, the follow-up
 // card invisible until it auto-denied, the chat apparently dead).
@@ -5044,23 +5050,14 @@ async function poll() {
       route(); // the approvals list / Home "waiting" panel re-render with the badge
     }
     lastPendingApprovals = status.pending_approvals;
-    if (pendingCardChatId && !chatStreamActive && hash.startsWith("#/chat")) {
-      // A card resolved elsewhere (second tab, deck, the auto-deny sweep)
-      // unlocks this composer within one poll cycle instead of on reload.
-      // v60-F1: never while a stream is in flight — the stream reconciles
-      // the composer itself in its finally, and a route() here would tear
-      // down the DOM the stream is appending to.
-      const detail = await api("GET", `/api/chats/${pendingCardChatId}`);
-      if (!detail.actions.some(blocksComposer)) {
-        pendingCardChatId = null;
-        route();
-      }
-    }
     if (chatReconcile && !chatStreamActive && hash.startsWith("#/chat/")) {
       // v81-F13: a card born while this view sat idle (background approval,
       // another tab, the ticker) appears within one poll instead of on
-      // reload. v133-F19: and so does a reply a background turn stored —
-      // the open view appends both in place; nothing is rebuilt.
+      // reload. v133-F19: and so does a reply a background turn stored.
+      // v56-F6 / v133-F20: a card resolved elsewhere (second tab, deck, the
+      // auto-deny sweep) resolves here and unlocks the composer — in place.
+      // v60-F1: never while a stream is in flight — the stream reconciles
+      // the view itself in its finally.
       await chatReconcile();
     }
     const taskBadge = document.getElementById("tasks-badge");
