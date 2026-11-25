@@ -703,15 +703,24 @@ def g10_note_line(reverify: Any) -> str | None:
     )
 
 
-def shown_g10_moved(store: RunStore, task_id: str) -> str | None:
+def shown_g10_moved(
+    store: RunStore, task_id: str, reverify: Any = None, *, shown: list[Any] | None = None
+) -> str | None:
     """v133-F12 (J1, I7): why the card now executing for ``task_id`` must
     not land it — the G10 record changed after the card was drawn — or None.
     The confirm paths claim a card ('executing') before they execute it, so
-    the card being confirmed is the executing one that bound this run."""
-    now = g10_fingerprint(store.reverification_for(task_id))
+    the card being confirmed is the executing one that bound this run.
+    R1 (Sol S4): ``reverify`` is the record the caller read once and lands
+    on (read here when None); ``shown`` is the claimed card's own snapshot,
+    for a caller that holds the card."""
+    now = g10_fingerprint(store.reverification_for(task_id) if reverify is None else reverify)
+    bound_snapshots = [shown] if shown is not None else []
     for card in store.executing_chat_actions():
         bound = (card.card or {}).get("g10_bound")
-        if isinstance(bound, dict) and task_id in bound and bound[task_id] != now:
+        if isinstance(bound, dict) and task_id in bound:
+            bound_snapshots.append(bound[task_id])
+    for snapshot in bound_snapshots:
+        if snapshot != now:
             return (
                 f"the supervisor's re-verification (G10) record for run {task_id} changed "
                 "since this card was shown, so nothing landed. Propose the landing again: "
@@ -1966,6 +1975,7 @@ def land_run(
     *,
     note: str | None = None,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Land a completed run's patch, creating the review if none exists (v23-F7).
 
@@ -1993,7 +2003,7 @@ def land_run(
     )
     if review_id is None:
         raise HTTPException(status_code=409, detail="nothing to land: this run produced no patch")
-    landed = apply_patch(store, run, review_id, actor, note, branch=branch)
+    landed = apply_patch(store, run, review_id, actor, note, branch=branch, g10_shown=g10_shown)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
     # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
     # result — say the terminal state in words a small model acts on (I9).
@@ -3820,6 +3830,7 @@ def apply_patch(
     note: str | None,
     *,
     branch: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> str:
     """Q5: applying the patch IS the approval action. Returns the branch.
 
@@ -3832,7 +3843,10 @@ def apply_patch(
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
     require_reverified(store, task_id)
-    moved = shown_g10_moved(store, task_id)  # v133-F12: the card's record, or none
+    # R1 (Sol S4): ONE read of G10 — the bind check, the landing base and the
+    # note all use it, so a re-verify landing mid-way changes none of them
+    reverify = store.reverification_for(task_id)
+    moved = shown_g10_moved(store, task_id, reverify, shown=g10_shown)  # v133-F12
     if moved is not None:
         raise HTTPException(status_code=409, detail=moved)
     repo = Path(str(run["repo"]))
@@ -3849,7 +3863,10 @@ def apply_patch(
     if not store.claim_approval(review_id):
         raise landing_taken(store, review_id)
     try:
-        failure = land_patch(store, repo, target, patch, task_id=task_id, actor=actor)
+        failure = land_patch(
+            store, repo, target, patch, task_id=task_id, actor=actor,
+            verified_base=reverify.base_commit if reverify and reverify.confirmed else None,
+        )  # fmt: skip
     except BaseException:
         store.unclaim_approval(review_id)
         raise
@@ -3873,7 +3890,7 @@ def apply_patch(
         raise HTTPException(status_code=409, detail=failure)
     # v133-F12 (J1, I13): a landing G10 did not confirm starts its note with
     # G10's own line from the store; the caller's note follows, never replaces it.
-    line = g10_note_line(store.reverification_for(task_id))
+    line = g10_note_line(reverify)
     if line is not None:
         note = f"{line}; {note}" if note else line
     store.resolve_approval(

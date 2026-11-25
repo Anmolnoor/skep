@@ -250,6 +250,82 @@ def test_a_g10_record_that_changed_after_the_card_was_drawn_refuses_the_confirm(
         store.close()
 
 
+# ---------- R1 (Sol S4): one read of G10 for the check, the base and the note ----
+
+
+def _rerun_g10_on_claim(store: RunStore, task_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent re-verification lands its record right after the landing
+    checked the old one: inside the claim, before git and the note."""
+    claim = store.claim_approval
+
+    def claim_then_rerun(review_id: str) -> bool:
+        store.record_reverification(
+            task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["npm test"], exit_codes=[0], detail="rerun", base_commit="f" * 40,
+        )  # fmt: skip
+        return claim(review_id)
+
+    monkeypatch.setattr(store, "claim_approval", claim_then_rerun)
+
+
+def test_r1_s4_a_record_that_changes_after_the_check_does_not_reach_the_landing(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import apply as apply_module
+
+    bases: list[Any] = []
+    monkeypatch.setattr(
+        apply_module, "apply_patch_on_branch", lambda *a, **k: bases.append(k["verified_base"])
+    )
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        _rerun_g10_on_claim(store, task_id, monkeypatch)
+        actions.land_run(store, actions.require_run(store, task_id), "chat-user", note="ok")
+        [approval] = store.approvals_for(task_id)
+        note = approval.resolution_note or ""
+        assert note.startswith("G10 failed:") and note.endswith("; ok"), note  # what was checked
+        assert bases == [None]  # the checked record confirmed no base; never the rerun's
+    finally:
+        store.close()
+
+
+def test_r1_s4_the_card_snapshot_given_explicitly_binds_the_landing(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller holding the claimed card passes its G10 snapshot; no executing
+    card row has to be found for the bind to hold."""
+    from fastapi import HTTPException
+
+    from skep.supervisor import apply as apply_module
+
+    landed: list[Any] = []
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", lambda *a, **k: landed.append(a))
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        shown = actions.g10_fingerprint(store.reverification_for(task_id))
+        store.record_reverification(
+            task_id, outcome="unavailable", worker_outcome="passed", confirmed=False,
+            commands=["npm test"], exit_codes=[], detail="npm ci failed",
+        )  # fmt: skip
+        run = actions.require_run(store, task_id)
+        with pytest.raises(HTTPException) as refused:
+            actions.land_run(store, run, "chat-user", note="ok", g10_shown=shown)
+        assert refused.value.status_code == 409
+        assert "changed since this card was shown" in str(refused.value.detail)
+        assert landed == []
+        current = actions.g10_fingerprint(store.reverification_for(task_id))
+        actions.land_run(store, run, "chat-user", note="ok", g10_shown=current)
+        assert len(landed) == 1
+    finally:
+        store.close()
+
+
 # ---------- F13: the notice's mark and words carry the verdict (J2) ----------
 
 

@@ -12,7 +12,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .worktree import TREE_LOCK
 
@@ -314,10 +314,21 @@ def moved_past_verified_base(repo: Path, branch: str, verified_base: str | None)
     return tip if verified_base is not None and tip is not None and tip != verified_base else None
 
 
+_FROM_STORE: Any = object()
+
+
 def land_patch(
-    store: RunStore, repo: Path, branch: str, patch_path: Path, *, task_id: str, actor: str
+    store: RunStore,
+    repo: Path,
+    branch: str,
+    patch_path: Path,
+    *,
+    task_id: str,
+    actor: str,
+    verified_base: str | None = _FROM_STORE,
 ) -> str | None:
     """``apply_patch_on_branch`` on the commit G10 verified (ES-F3, B131).
+    ``verified_base``: the one the caller already read (v133 R1, Sol S4).
 
     An append past that commit still lands (a human asked for the stack), but
     the record stops calling the run confirmed — every landing surface then
@@ -334,7 +345,8 @@ def land_patch(
     )
     if landed is not None:
         return f"this task already landed on {landed}; a task lands once — dispatch a follow-up"
-    verified_base = store.verified_base(task_id)
+    if verified_base is _FROM_STORE:
+        verified_base = store.verified_base(task_id)
     moved = moved_past_verified_base(repo, branch, verified_base)
     failure = apply_patch_on_branch(
         repo, branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base
