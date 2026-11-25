@@ -240,7 +240,7 @@ def test_a_g10_record_that_changed_after_the_card_was_drawn_refuses_the_confirm(
         with pytest.raises(HTTPException) as refused:
             execute_mutation(
                 "land_run", args, store=store, holder=ConfigHolder(config, store),
-                runner=cast(Any, None), actor="chat-user", chat_id=chat_id,
+                runner=cast(Any, None), actor="chat-user", chat_id=chat_id, card=card,
             )  # fmt: skip
         assert refused.value.status_code == 409
         assert "changed since this card was shown" in str(refused.value.detail)
@@ -545,12 +545,11 @@ def test_r1_s5_a_branch_pr_pushes_the_head_its_claimed_card_showed(
         action_id = store.add_chat_action(chat_id, tool="open_pr", args=args, card=card)
         assert store.claim_chat_action(action_id)
         holder = ConfigHolder(config, store)
+        # R2: the confirm hands the clicked card to the tool layer, which
+        # passes its head; a face with no card pushes the live head
+        _execute(config, store, "open_pr", args, card)
         actions.open_pr_for_branch(holder, store, str(repo), branch="skep/work", base="main")
-        # a caller holding the card passes its head explicitly
-        actions.open_pr_for_branch(
-            holder, store, str(repo), branch="skep/work", base="main", expected_head=drawn
-        )
-        assert [call["expected_head"] for call in calls] == [drawn, drawn]
+        assert [call["expected_head"] for call in calls] == [drawn, None]
     finally:
         store.close()
 
@@ -696,8 +695,9 @@ def test_a_branch_pr_whose_head_moved_after_the_card_was_drawn_is_refused(
         assert store.claim_chat_action(action_id)
         with pytest.raises(HTTPException) as refused:
             actions.open_pr_for_branch(
-                ConfigHolder(config, store), store, str(repo), branch="skep/work", base="main"
-            )
+                ConfigHolder(config, store), store, str(repo), branch="skep/work", base="main",
+                expected_head=card["head"],
+            )  # fmt: skip
         assert refused.value.status_code == 409
         assert drawn[:12] in str(refused.value.detail)
         assert pushed == []
@@ -850,5 +850,142 @@ def test_policy_views_name_their_layer_and_put_grants_under_the_asked_key(
         key = next(e for e in rsop["keys"] if e["key"] == "allowed_shell_commands")
         assert {"command": "npm test", "source": "learned@grant:project"} in key["effective"]
         assert "grants included" in key["effective_note"]
+    finally:
+        store.close()
+
+
+# ---------- R2 (Sol S4, S5, S13): the clicked card is the only snapshot ----------
+
+
+def _execute(config: SupervisorConfig, store: RunStore, tool: str, args: Any, card: Any) -> Any:
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation
+
+    return execute_mutation(
+        tool, args, store=store, holder=ConfigHolder(config, store),
+        runner=cast(Any, None), actor="chat-user", card=card,
+    )  # fmt: skip
+
+
+def test_r2_a_stale_claimed_card_for_the_same_run_never_vetoes_a_fresh_one(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two chats claim two cards for one run, drawn on different G10 records:
+    the fresh one lands, the stale one is refused — each by its own snapshot."""
+    from fastapi import HTTPException
+
+    from skep.supervisor import apply as apply_module
+    from skep.supervisor.serve.cards import recorded_card
+
+    landed: list[Any] = []
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", lambda *a, **k: landed.append(a))
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        args = {"task_id": task_id}
+        stale = recorded_card("land_run", args, None, store) or {}
+        store.record_reverification(
+            task_id, outcome="unavailable", worker_outcome="passed", confirmed=False,
+            commands=["npm test"], exit_codes=[], detail="npm ci failed",
+        )  # fmt: skip
+        fresh = recorded_card("land_run", args, None, store) or {}
+        ids = []
+        for card in (stale, fresh):
+            chat_id = store.create_chat(title="t", model=None).chat_id
+            ids.append(store.add_chat_action(chat_id, tool="land_run", args=args, card=card))
+            assert store.claim_chat_action(ids[-1])  # both confirms are executing
+        _execute(config, store, "land_run", args, fresh)
+        assert len(landed) == 1
+        with pytest.raises(HTTPException) as refused:
+            _execute(config, store, "land_run", args, stale)
+        assert refused.value.status_code == 409
+        assert "changed since this card was shown" in str(refused.value.detail)
+        assert len(landed) == 1
+    finally:
+        store.close()
+
+
+def _repo_with_branch(root: Path, branch: str, name: str) -> tuple[Path, str]:
+    from .conftest import git
+
+    repo = root / name
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    _commit(repo, "seed", "seed.txt")
+    git(repo, "switch", "-qc", branch)
+    head = _commit(repo, f"work in {name}", "w.txt")
+    git(repo, "switch", "-q", "main")
+    return repo, head
+
+
+def test_r2_two_repos_with_the_same_branch_each_push_their_own_cards_head(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import recorded_card
+
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        calls.append(kw)
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head=kw["expected_head"])
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        cards = []
+        for name in ("one", "two"):
+            repo, head = _repo_with_branch(tmp_path, "skep/maintain", name)
+            args = {"branch": "skep/maintain", "repo": str(repo), "base": "main"}
+            card = recorded_card("open_pr", args, None, store) or {}
+            assert card["head"] == head
+            chat_id = store.create_chat(title="t", model=None).chat_id
+            action_id = store.add_chat_action(chat_id, tool="open_pr", args=args, card=card)
+            assert store.claim_chat_action(action_id)
+            cards.append((args, card, head))
+        for args, card, _head in reversed(cards):
+            _execute(config, store, "open_pr", args, card)
+        assert [call["expected_head"] for call in calls] == [cards[1][2], cards[0][2]]
+    finally:
+        store.close()
+
+
+def test_r2_a_branch_pr_body_lists_the_runs_its_card_listed_after_the_base_moves(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import github
+    from skep.supervisor.serve.cards import recorded_card
+
+    from .conftest import git
+
+    bodies: list[str] = []
+
+    def fake(**kw: Any) -> github.PullRequestResult:
+        bodies.append(str(kw["body"]))
+        return github.PullRequestResult(True, "u", "opened", pushed=True, head=kw["expected_head"])
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    store = _store(config)
+    try:
+        first, last = (
+            _run_with_g10(store, repo, tmp_path, outcome="passed", confirmed=True, exit_codes=[0])
+            for _ in range(2)
+        )
+        git(repo, "switch", "-qc", "skep/stack")
+        first_commit = _commit(repo, f"Apply skep task {first}", "a.txt")
+        _approve(store, first, "skep/stack", first_commit)
+        _approve(store, last, "skep/stack", _commit(repo, f"Apply skep task {last}", "b.txt"))
+        git(repo, "switch", "-q", "main")
+        args = {"branch": "skep/stack", "repo": str(repo), "base": "main"}
+        card = recorded_card("open_pr", args, None, store) or {}
+        assert [run["task_id"] for run in card["evidence"]["runs"]] == [first, last]
+        git(repo, "merge", "-q", "--ff-only", first_commit)  # the base moves before the click
+        _execute(config, store, "open_pr", args, card)
+        [body] = bodies
+        assert f"`{first}`" in body and f"`{last}`" in body, body
     finally:
         store.close()

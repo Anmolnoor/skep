@@ -4715,13 +4715,27 @@ def add_chat_routes(
         # over instead of standing beside it as a twin (the B-pair: a typed
         # /approve while the gate-mirror card is pending). Identical args
         # return the pending card itself; changed args supersede it first.
+        # v133 R1 (S3; J1, I7) / R2 (T3): a typed /land, /approve, /pr or /setup
+        # records what it showed, like the Queen's card, so its confirm is bound
+        # to it (actions.shown_g10_moved, tools' setup check).
+        recorded = (
+            recorded_card(body.tool, body.args, None, run_store)
+            if body.tool in ("land_run", "approve_review", "open_pr", "setup_project")
+            else None
+        ) or {}
         duplicate = pending_duplicate_action(run_store, chat_id, body.tool, body.args)
         if duplicate is not None:
             pending, identical = duplicate
             # An assistant card cannot be resolved through the command
             # endpoints (409 below), so the typed command takes it over;
-            # operator/gate cards are handed back as the standing question.
-            if identical and pending.source in ("operator", "gate"):
+            # operator/gate cards are handed back as the standing question —
+            # unless what it showed has moved (R2, Sol S3): that card could
+            # only refuse, so a fresh one replaces it.
+            stale = any(
+                (pending.card or {}).get(key) != recorded.get(key)
+                for key in ("g10_bound", "head", "setup")
+            )
+            if identical and not stale and pending.source in ("operator", "gate"):
                 return {
                     "action_id": pending.action_id,
                     "tool": pending.tool,
@@ -4737,14 +4751,6 @@ def add_chat_routes(
                     "already_pending": True,
                 }
             run_store.supersede_chat_action(pending.action_id, note=_SUPERSEDED_BY_NEWER)
-        # v133 R1 (S3; J1, I7): a typed /land, /approve or /pr records the runs
-        # and the G10 record it showed, like the Queen's card, so its confirm
-        # is bound to them (actions.shown_g10_moved).
-        recorded = (
-            recorded_card(body.tool, body.args, None, run_store)
-            if body.tool in ("land_run", "approve_review", "open_pr")
-            else None
-        ) or {}
         if body.tool in _GATE_TOOLS:  # R2 (Neon): the label survives the gate's resolution
             label, remedy = boundary(body.tool, body.args, store=run_store)
             recorded |= {"boundary": label, **({"remediation": remedy} if remedy else {})}
@@ -4758,7 +4764,11 @@ def add_chat_routes(
             "description": tool_description(body.tool),
             # R1 G6: the store-backed card an assistant proposal gets (ChatEngine._card)
             "card": card_summary(
-                body.tool, body.args, tool_description(body.tool), store=run_store
+                body.tool,
+                body.args,
+                tool_description(body.tool),
+                store=run_store,
+                recorded=recorded,
             ),
         }
 
@@ -4822,6 +4832,7 @@ def add_chat_routes(
                     runner=runner,
                     actor=COMMAND_ACTOR,
                     chat_id=chat_id,
+                    card=action.card if confirm else None,  # R2 (Sol S4): the clicked card
                 )
                 payload: dict[str, Any] = executed_payload(tool, result)
                 if not confirm:

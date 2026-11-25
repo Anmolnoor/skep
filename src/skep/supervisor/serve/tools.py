@@ -4834,6 +4834,12 @@ def setup_card_facts(store: RunStore, args: dict[str, Any]) -> dict[str, Any] | 
     return facts
 
 
+def _g10_shown(card: dict[str, Any] | None, run: dict[str, Any]) -> list[Any] | None:
+    """R2 (Sol S4): the G10 record the clicked card showed for ``run``; None
+    with no card (the live record)."""
+    return ((card or {}).get("g10_bound") or {}).get(str(run["task_id"]))
+
+
 def execute_mutation(
     name: str,
     args: dict[str, Any],
@@ -5970,7 +5976,10 @@ def _execute_mutation(
             return resumed_result
         note = None if args.get("note") is None else str(args["note"])
         requested_branch = _queen_landing_branch(store, run, args.get("branch"))
-        landed = actions.apply_patch(store, run, review_id, actor, note, branch=requested_branch)
+        landed = actions.apply_patch(
+            store, run, review_id, actor, note, branch=requested_branch,
+            g10_shown=_g10_shown(card, run),  # R2 (Sol S4): the clicked card's
+        )  # fmt: skip
         applied: dict[str, Any] = {"action": "applied", "branch": landed}
         # v20-F3: warn on landing when the supervisor could not re-verify the run.
         warning = actions.reverification_warning(store.reverification_for(str(run["task_id"])))
@@ -5985,6 +5994,7 @@ def _execute_mutation(
             actor,
             note=None if args.get("note") is None else str(args["note"]),
             branch=_queen_landing_branch(store, run, args.get("branch")),
+            g10_shown=_g10_shown(card, run),  # R2 (Sol S4): the clicked card's
         )
     if name == "open_pr":
         # v47-F3: land (if needed) then PR — supervisor-side, on the operator's
@@ -6005,6 +6015,9 @@ def _execute_mutation(
                 base=str(args.get("base") or "main"),
                 title=None if args.get("title") is None else str(args["title"]),
                 actor=actor,  # v133-F36 (F14, I13): the ledger row names who pushed
+                # R2 (Sol S5, S13): the clicked card's head and runs, nobody else's
+                expected_head=None if card is None else card.get("head"),
+                shown_runs=None if card is None else (card.get("evidence") or {}).get("runs", []),
             )
         if grouped_ids:
             # v54-F4: several related runs → one shared branch, one PR.
@@ -6019,6 +6032,7 @@ def _execute_mutation(
                 base=str(args.get("base") or "main"),
                 note=None if args.get("note") is None else str(args["note"]),
                 title=None if args.get("title") is None else str(args["title"]),
+                g10_bound=None if card is None else card.get("g10_bound"),
             )
         run = actions.require_run(store, str(args["task_id"]))
         return actions.open_pr_for_run(
@@ -6028,6 +6042,7 @@ def _execute_mutation(
             actor,
             base=str(args.get("base") or "main"),
             note=None if args.get("note") is None else str(args["note"]),
+            g10_shown=_g10_shown(card, run),
         )
     if name == "merge_pr":
         # v47-F5: the only base-branch advance, strictly behind the confirm the
@@ -6173,27 +6188,40 @@ def _execute_mutation(
             phase=str(args.get("phase") or "build"),
         )
     if name == "setup_project":
-        template_names = args.get("template_names")
-        overrides = setup_overrides(args)
-        return setup_project_record(
-            run_store=store,
-            root=repos_root(holder),
-            project_id=str(args["project_id"]),
-            name=str(args["name"]),
-            # v25-F1: the command deck sets up by pack; the pack owns strategy.
-            strategy=None if args.get("strategy") is None else str(args["strategy"]),
-            pack_name=None if args.get("pack") is None else str(args["pack"]),
-            phase=str(args.get("phase") or "build"),
-            repo_path=None if args.get("repo_path") is None else str(args["repo_path"]),
-            repo_slug=None if args.get("repo_slug") is None else str(args["repo_slug"]),
-            template_names=(
-                []
-                if template_names is None
-                else [str(template_name) for template_name in template_names]
-            ),
-            policy_overrides=overrides,
-            seed_default_schedules=bool(args.get("seed_default_schedules", True)),
-        )
+        from .registry import project_setup_lock
+
+        with project_setup_lock(store):  # re-entrant: the write below takes it too
+            shown = (card or {}).get("setup")
+            # R2 (Sol T3; I6, I7): the pin and auto-landing effect the clicked
+            # card showed are what this write does now, or nothing is written
+            if shown is not None and setup_card_facts(store, args) != shown:
+                raise HTTPException(
+                    status_code=409,
+                    detail="this project's setup changed since this card was shown (its "
+                    "verify pin or auto-landing effect would differ), so nothing was "
+                    "written. Propose it again: the new card shows what it does now",
+                )
+            template_names = args.get("template_names")
+            overrides = setup_overrides(args)
+            return setup_project_record(
+                run_store=store,
+                root=repos_root(holder),
+                project_id=str(args["project_id"]),
+                name=str(args["name"]),
+                # v25-F1: the command deck sets up by pack; the pack owns strategy.
+                strategy=None if args.get("strategy") is None else str(args["strategy"]),
+                pack_name=None if args.get("pack") is None else str(args["pack"]),
+                phase=str(args.get("phase") or "build"),
+                repo_path=None if args.get("repo_path") is None else str(args["repo_path"]),
+                repo_slug=None if args.get("repo_slug") is None else str(args["repo_slug"]),
+                template_names=(
+                    []
+                    if template_names is None
+                    else [str(template_name) for template_name in template_names]
+                ),
+                policy_overrides=overrides,
+                seed_default_schedules=bool(args.get("seed_default_schedules", True)),
+            )
     if name == "dispatch_run":
         # v109-F6: computed BEFORE the submit so the hint names the PRIOR
         # run, never the one this dispatch creates — a hint, not a block.

@@ -318,6 +318,49 @@ def test_a_setup_card_that_turns_auto_landing_on_is_high_and_names_the_branch(
         store.close()
 
 
+# ---------- R2 (Sol T3): a setup card is bound to the effect it showed ----------
+
+
+def test_r2_a_setup_confirm_after_a_phase_change_is_refused_not_landed_silently(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """The card showed no auto-landing change; the project moved phase while it
+    was open, so the same write would now turn auto-landing on. Refused."""
+    from fastapi import HTTPException
+
+    store, holder = _parts(config)
+    try:
+        policy = {"verify_command": "uv run pytest", "auto_apply_verified_patch": False}
+        _bind(store, repo, policy, phase="maintain")
+        args = {"project_id": "proj", "name": "proj", "phase": "maintain"}
+        recorded, _summary = _setup_card(store, args)
+        assert "auto_landing" not in recorded["setup"]  # the card shows no change
+        from skep.supervisor.serve.registry import set_project_phase
+
+        set_project_phase(store, "proj", "build")  # the project moves while the card is open
+        with pytest.raises(HTTPException) as refused:
+            execute_mutation(
+                "setup_project", args, store=store, holder=holder,
+                runner=None, actor="tester", card=recorded,  # type: ignore[arg-type]
+            )  # fmt: skip
+        assert refused.value.status_code == 409
+        assert "changed since this card was shown" in str(refused.value.detail)
+        stored = store.get_project_policy("proj")
+        assert stored is not None and stored.phase == "build"
+        assert stored.policy.get("auto_apply_verified_patch") is not True
+        # a card drawn now shows the change, and its confirm writes it
+        recorded, _summary = _setup_card(store, args)
+        assert recorded["setup"]["auto_landing"]["new"] is True
+        execute_mutation(
+            "setup_project", args, store=store, holder=holder,
+            runner=None, actor="tester", card=recorded,  # type: ignore[arg-type]
+        )  # fmt: skip
+        stored = store.get_project_policy("proj")
+        assert stored is not None and stored.phase == "maintain"
+    finally:
+        store.close()
+
+
 # ---------- F29: a host shell says where it runs; diagnose_run never unconfined (F-I6) ----------
 
 

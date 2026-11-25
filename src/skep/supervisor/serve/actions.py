@@ -706,26 +706,21 @@ def g10_note_line(reverify: Any) -> str | None:
 def shown_g10_moved(
     store: RunStore, task_id: str, reverify: Any = None, *, shown: list[Any] | None = None
 ) -> str | None:
-    """v133-F12 (J1, I7): why the card now executing for ``task_id`` must
-    not land it — the G10 record changed after the card was drawn — or None.
-    The confirm paths claim a card ('executing') before they execute it, so
-    the card being confirmed is the executing one that bound this run.
-    R1 (Sol S4): ``reverify`` is the record the caller read once and lands
-    on (read here when None); ``shown`` is the claimed card's own snapshot,
-    for a caller that holds the card."""
+    """v133-F12 (J1, I7): why the clicked card must not land ``task_id`` —
+    the G10 record changed after the card was drawn — or None. ``shown`` is
+    that card's own snapshot (R2: the only one; no other card is consulted);
+    a face with no card (None) acts on the live record. R1 (Sol S4):
+    ``reverify`` is the record the caller read once and lands on (read here
+    when None)."""
+    if shown is None:
+        return None
     now = g10_fingerprint(store.reverification_for(task_id) if reverify is None else reverify)
-    bound_snapshots = [shown] if shown is not None else []
-    for card in store.executing_chat_actions():
-        bound = (card.card or {}).get("g10_bound")
-        if isinstance(bound, dict) and task_id in bound:
-            bound_snapshots.append(bound[task_id])
-    for snapshot in bound_snapshots:
-        if snapshot != now:
-            return (
-                f"the supervisor's re-verification (G10) record for run {task_id} changed "
-                "since this card was shown, so nothing landed. Propose the landing again: "
-                "the new card shows the current record"
-            )
+    if shown != now:
+        return (
+            f"the supervisor's re-verification (G10) record for run {task_id} changed "
+            "since this card was shown, so nothing landed. Propose the landing again: "
+            "the new card shows the current record"
+        )
     return None
 
 
@@ -3538,24 +3533,11 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
-def shown_head(store: RunStore, branch: str) -> str | None:
-    """The head the claimed open_pr card for ``branch`` showed, or None."""
-    for card in store.executing_chat_actions():
-        shown = (card.card or {}).get("head")
-        if card.tool == "open_pr" and card.args.get("branch") == branch and shown is not None:
-            return str(shown)
-    return None
-
-
-def shown_head_moved(
-    store: RunStore, repo: Path, branch: str, shown: str | None = None
-) -> str | None:
-    """v133-F15 (J5, I7): why the open_pr card executing for ``branch`` must
-    not push it — the branch's head is not the commit the card showed — or
-    None. Found the way ``shown_g10_moved`` finds its card: the claimed one
-    (``shown``: that card's head, given by a caller that holds it)."""
+def shown_head_moved(repo: Path, branch: str, shown: str | None) -> str | None:
+    """v133-F15 (J5, I7): why the clicked open_pr card must not push
+    ``branch`` — its head is not the commit the card showed (``shown``) — or
+    None. No card (None): the live head."""
     now = resolve_commit(repo, f"refs/heads/{branch}")
-    shown = shown or shown_head(store, branch)
     if shown not in (None, now):
         return (
             f"{branch} moved since this card was shown (it showed {str(shown)[:12]}, "
@@ -3575,8 +3557,12 @@ def open_pr_for_branch(
     title: str | None = None,
     actor: str | None = None,
     expected_head: str | None = None,
+    shown_runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """v96-F4: open a PR for an existing local branch — the composer's button.
+
+    R2 (Sol S5, S13): ``expected_head`` and ``shown_runs`` are the clicked
+    card's head and run evidence; a face with no card reads both live.
 
     No run required: the branch's commits are already operator-approved work
     (landings, or the operator's own hands). The PR is a proposal — the base
@@ -3602,32 +3588,35 @@ def open_pr_for_branch(
     )
     if exists.returncode != 0:
         raise HTTPException(status_code=404, detail=f"no local branch {branch!r}")
-    # R1 (Sol S5): the push carries the commit the claimed card showed
-    expected_head = expected_head or (None if store is None else shown_head(store, branch))
-    if store is not None and (moved := shown_head_moved(store, resolved, branch, expected_head)):
+    # R1 (Sol S5): the push carries the commit the clicked card showed
+    if (moved := shown_head_moved(resolved, branch, expected_head)) is not None:
         raise HTTPException(status_code=409, detail=moved)
     body = (
         f"Branch `{branch}` from the skep composer. Commits on it are "
         "operator-approved landings or the operator's own work; merging stays "
         "a separate confirmed step."
     )
-    # R1 (Sol S13): the runs the card named (console.card_runs), each with
-    # the worker's result and G10's, from the store — as the card showed them
-    from .console import card_runs
+    # R1/R2 (Sol S13): the runs the clicked card named, each with the worker's
+    # result and G10's as that card showed them; with no card, read live
+    # (console.run_evidence, what a card would show now)
+    from .console import run_evidence
 
     args = {"branch": branch, "repo": str(resolved), "base": base}
-    ids = [] if store is None else card_runs(store, "open_pr", args)
+    if shown_runs is None:
+        shown_runs = [] if store is None else run_evidence(store, "open_pr", args)
+    ids = [str(run["task_id"]) for run in shown_runs]
     if store is not None and ids:
         entries = [
             github.GroupedRun(
-                task_id=task_id,
-                summary=(record.summary or "") if (record := store.get_run(task_id)) else "",
-                verification=worker_result(store, task_id),
-                reverified=None if (g10 := store.reverification_for(task_id)) is None
-                else g10.confirmed,
-                supervisor=g10_line(g10),
+                task_id=str(run["task_id"]),
+                summary=(record.summary or "") if (record := store.get_run(run["task_id"])) else "",
+                verification=str(run.get("worker") or "").removeprefix(
+                    "worker's own verification: "
+                ) or None,
+                reverified=None,
+                supervisor=run.get("supervisor"),
             )
-            for task_id in ids
+            for run in shown_runs
         ]  # fmt: skip
         changed = list(
             dict.fromkeys(path for t in ids for path in _changed_files(holder.current.audit_dir, t))
@@ -3654,6 +3643,7 @@ def open_pr_for_run(
     *,
     base: str = "main",
     note: str | None = None,
+    g10_shown: list[Any] | None = None,
 ) -> dict[str, Any]:
     """v47-F3: land (if needed), then open the PR — keyed by the run.
 
@@ -3669,7 +3659,7 @@ def open_pr_for_run(
         )
     branch = applied_branch_for(store, task_id)
     if branch is None:
-        landed = land_run(store, run, actor, note=note or "approved via PR")
+        landed = land_run(store, run, actor, note=note or "approved via PR", g10_shown=g10_shown)
         branch = str(landed["branch"])
     return open_pr_from_branch(store, audit_dir, run, branch=branch, base=base, actor=actor)
 
@@ -3693,6 +3683,7 @@ def open_pr_for_runs(
     base: str = "main",
     note: str | None = None,
     title: str | None = None,
+    g10_bound: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """v54-F4 (ADR 0034): land N related runs on ONE shared branch, open ONE PR.
 
@@ -3735,7 +3726,8 @@ def open_pr_for_runs(
     for run in runs:
         if applied_branch_for(store, str(run["task_id"])) is None:
             require_reverified(store, str(run["task_id"]))
-            if (moved := shown_g10_moved(store, str(run["task_id"]))) is not None:
+            shown = (g10_bound or {}).get(str(run["task_id"]))  # the clicked card's
+            if (moved := shown_g10_moved(store, str(run["task_id"]), shown=shown)) is not None:
                 raise HTTPException(status_code=409, detail=moved)  # v133-F12: before any lands
     branch = _grouped_branch(title, str(runs[0]["task_id"]))
     for run in runs:
@@ -3755,7 +3747,10 @@ def open_pr_for_runs(
                 detail=f"run {task_id} already landed on {existing!r}; it cannot "
                 f"also join {branch!r} — open its PR from that branch instead",
             )
-        land_run(store, run, actor, note=note or f"grouped PR on {branch}", branch=branch)
+        land_run(
+            store, run, actor, note=note or f"grouped PR on {branch}", branch=branch,
+            g10_shown=(g10_bound or {}).get(task_id),
+        )  # fmt: skip
     entries = [
         github.GroupedRun(
             task_id=str(run["task_id"]),

@@ -159,3 +159,60 @@ def test_diagnose_run_itself_refuses_with_the_sandbox_off(
         assert not (kept / "escaped").exists()
     finally:
         store.close()
+
+
+def test_r2_a_retyped_land_after_the_record_moved_supersedes_the_stale_card(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    """S3: an identical /land hands back the pending card only while its
+    snapshot still holds; a stale one is superseded by a fresh card."""
+    client = serve_client(config)
+    store = _store(config)
+    try:
+        task_id = _run_with_g10(
+            store, repo, tmp_path, outcome="failed", confirmed=False, exit_codes=[1]
+        )
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        base = f"/api/chats/{chat_id}/commands"
+        body = {"tool": "land_run", "args": {"task_id": task_id}}
+        first = client.post(base, json=body).json()
+        again = client.post(base, json=body).json()
+        assert again["action_id"] == first["action_id"] and again["already_pending"]
+        store.record_reverification(
+            task_id, outcome="unavailable", worker_outcome="passed", confirmed=False,
+            commands=["npm test"], exit_codes=[], detail="npm ci failed",
+        )  # fmt: skip
+        fresh = client.post(base, json=body).json()
+        assert fresh["action_id"] != first["action_id"] and not fresh.get("already_pending")
+        old = store.get_chat_action(first["action_id"])
+        assert old is not None and old.status == "superseded"
+        new = store.get_chat_action(fresh["action_id"])
+        assert new is not None and new.status == "proposed"
+    finally:
+        store.close()
+
+
+def test_r2_a_typed_setup_card_records_and_renders_the_setup_facts(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """T3: /setup records the pin and auto-landing facts the Queen's setup card
+    does, and its card shows them."""
+    client = serve_client(config)
+    store = _store(config)
+    try:
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        args = {
+            "project_id": "proj", "name": "proj", "repo_path": str(repo),
+            "policy_overrides": {"verify_command": "uv run pytest"},
+        }  # fmt: skip
+        made = client.post(
+            f"/api/chats/{chat_id}/commands", json={"tool": "setup_project", "args": args}
+        )
+        assert made.status_code == 201, made.text
+        action = store.get_chat_action(made.json()["action_id"])
+        assert action is not None
+        setup = (action.card or {})["setup"]
+        assert setup["verify_command"]["new"] == "uv run pytest"
+        assert made.json()["card"]["setup"] == setup
+    finally:
+        store.close()
