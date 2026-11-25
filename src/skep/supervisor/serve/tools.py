@@ -49,7 +49,7 @@ from .settings import (
     DEFAULT_TICKER_INTERVAL,
     TICKER_INTERVAL_SECONDS,
     ConfigHolder,
-    policy_view,
+    global_policy_view,
 )
 
 CHAT_TOOL_ACTOR = "chat-user"
@@ -4174,7 +4174,8 @@ def execute_read_tool(
             "chat_cards_pending": pending,
         }
     if name == "get_policy":
-        return policy_view(store, holder.current)
+        # v133-F36 (F18, A7): the view says it is the global layer only
+        return global_policy_view(store, holder.current)
     if name == "list_templates":
         return {
             "templates": [
@@ -6003,6 +6004,7 @@ def _execute_mutation(
                 branch=str(args["branch"]),
                 base=str(args.get("base") or "main"),
                 title=None if args.get("title") is None else str(args["title"]),
+                actor=actor,  # v133-F36 (F14, I13): the ledger row names who pushed
             )
         if grouped_ids:
             # v54-F4: several related runs → one shared branch, one PR.

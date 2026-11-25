@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig, mint_task
+from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
 
@@ -476,5 +477,123 @@ def test_a_same_phase_re_setup_keeps_a_stored_auto_dispatch_off(
         _bind(store, repo, {"auto_dispatch_allowed": False}, phase="build")
         moved = setup("maintain", {})  # a phase move re-derives it, as before
         assert moved["policy"]["auto_dispatch_allowed"] is True
+    finally:
+        store.close()
+
+
+# ---------- F36: wave 1's record, wired into the tool and CLI faces (F11 F14 F18) ----------
+
+
+def test_get_policy_from_chat_labels_itself_the_global_layer(config: SupervisorConfig) -> None:
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    store, holder = _parts(config)
+    try:
+        view = execute_read_tool("get_policy", {}, store=store, holder=holder)
+        assert view["layer"] == "global" and "global layer only" in view["layer_note"]
+    finally:
+        store.close()
+
+
+def _fake_pr(monkeypatch: pytest.MonkeyPatch, bodies: list[str]) -> None:
+    from skep.supervisor import cli_cmds, github
+
+    def fake(**kwargs: Any) -> github.PullRequestResult:
+        bodies.append(str(kwargs.get("body") or ""))
+        return github.PullRequestResult(True, "https://x/pull/1", "opened", True, "c0ffee12")
+
+    monkeypatch.setattr(github, "open_pull_request", fake)
+    monkeypatch.setattr(cli_cmds, "open_pull_request", fake)
+
+
+def test_open_pr_in_branch_mode_records_the_chat_actor(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from .conftest import git
+
+    _fake_pr(monkeypatch, [])
+    store, holder = _parts(config)
+    try:
+        git(repo, "branch", "skep/stack")
+        _confirm(store, holder, "open_pr", {"branch": "skep/stack", "repo": str(repo)})
+        [row] = store.pr_pushes()
+        assert (row["actor"], row["branch"]) == ("tester", "skep/stack")
+    finally:
+        store.close()
+
+
+def test_the_cli_pr_paths_record_the_push_and_the_supervisor_result(
+    config: SupervisorConfig, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    import getpass
+    import shutil
+
+    from skep.supervisor import cli_cmds
+
+    from .conftest import git
+
+    bodies: list[str] = []
+    _fake_pr(monkeypatch, bodies)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="x")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.record_reverification(
+            task.task_id, outcome="failed", worker_outcome="passed", confirmed=False,
+            commands=["uv run pytest"], exit_codes=[1], detail="1 failed",
+        )  # fmt: skip
+        record = store.get_run(task.task_id)
+        assert record is not None
+        cli_cmds.open_pr_for_branch(
+            store, record, "skep/x", base="main", audit_dir=tmp_path, actor="op"
+        )
+        line = actions.g10_line(store.reverification_for(task.task_id))
+        assert line and line in bodies[-1]  # the supervisor's own words, from the store
+        [row] = store.pr_pushes()
+        assert (row["actor"], row["task_ids"], row["head_commit"]) == (
+            "op",
+            [task.task_id],
+            "c0ffee12",
+        )
+    finally:
+        store.close()
+    git(repo, "branch", "skep/cli")
+    home = config.home.parent
+    monkeypatch.setattr(cli_cmds, "build_config", lambda *_a: config)
+    assert cli_cmds.cmd_pr_open(
+        argparse.Namespace(home=home, repo=str(repo), branch="skep/cli", base="main", title=None)
+    ) == 0  # fmt: skip
+    store = RunStore(config.db_path)
+    try:
+        assert store.pr_pushes()[-1]["actor"] == getpass.getuser()
+    finally:
+        store.close()
+
+
+def test_a_cli_merge_records_who_resolved_its_card(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    import getpass
+
+    from skep.supervisor import cli_cmds, github
+    from skep.supervisor.serve import cards
+
+    pin = {"repo": "acme/widget", "number": 7, "head_commit": "a" * 40, "base_commit": "b" * 40}
+    monkeypatch.setattr(cli_cmds, "build_config", lambda *_a: config)
+    monkeypatch.setattr(cli_cmds, "_pr_repo", lambda _args: repo)
+    monkeypatch.setattr(cards, "merge_pin", lambda *_a: pin)
+    monkeypatch.setattr(cards, "merge_line", lambda _pin: "pinned")
+    monkeypatch.setattr(
+        github, "merge_pull_request", lambda **_: github.MergeResult(True, "merged", "c" * 40)
+    )
+    args = argparse.Namespace(home=config.home.parent, repo=str(repo), number="7", method="merge")
+    assert cli_cmds.cmd_pr_merge(args) == 0
+    store = RunStore(config.db_path)
+    try:
+        [action] = [a for c in store.list_chats() for a in store.chat_actions(c.chat_id)]
+        assert (action.resolved_by, action.resolved_surface) == (getpass.getuser(), "cli")
     finally:
         store.close()
