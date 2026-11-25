@@ -17,7 +17,7 @@ from typing import Any
 
 from ...roles import ROLE_LESS_CHAT_ROLE
 from ..commands import CommandRefused, commands_for, resolve
-from . import ChannelConfig, ChannelMessage, channel_admin, state_emoji
+from . import ChannelConfig, ChannelMessage, channel_admin, run_mark
 
 Reply = tuple[str, list[dict[str, object]]]
 
@@ -84,7 +84,8 @@ def status_text(store: Any) -> str:
     approvals = store.pending_approvals()
     lines = [f"skep: {len(active)} running · {len(approvals)} approval(s) waiting"]
     for record in [r for r in runs if r.state == "pending_approval"][:3]:
-        lines.append(f"{state_emoji(record.state)} run {record.task_id[:13]}… needs your approval")
+        mark = run_mark(record.state, None)  # v133-F37: gated, so no G10 verdict yet
+        lines.append(f"{mark} run {record.task_id[:13]}… needs your approval")
     return "\n".join(lines)
 
 
@@ -94,7 +95,9 @@ def runs_text(store: Any, count: int = 5) -> str:
         return "skep: no runs yet"
     lines = []
     for record in runs:
-        line = f"{state_emoji(record.state)} {record.task_id[:13]}… {record.state}"
+        # v133-F37 (J2): the mark is G10's verdict when it recorded one
+        mark = run_mark(record.state, store.reverification_for(record.task_id))
+        line = f"{mark} {record.task_id[:13]}… {record.state}"
         if record.summary:
             line += f": {record.summary[:60]}"
         lines.append(line)
