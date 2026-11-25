@@ -379,6 +379,17 @@ def high_tier(
         if existing is None or existing.worker_kind == "script":  # unknown: fail closed
             return f"a script schedule {SCRIPT_SENTENCE}"
     overrides = safe.get("policy_overrides")
+    if tool == "setup_project" and store is not None:
+        # v133-F28 (J9, I1, I6): the lane that lands with no human, turned on
+        # by this write — asked for or derived from a phase default
+        from .tools import setup_card_facts
+
+        landing = (setup_card_facts(store, safe) or {}).get("auto_landing") or {}
+        if landing.get("new") is True:
+            return (
+                f"it turns auto-landing on: G10-confirmed patches land on {landing['branch']} "
+                "with no human approval"
+            )
     if tool == "setup_project" and (
         safe.get("unlocked") is True
         or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
@@ -738,6 +749,29 @@ def pr_review_pin_line(args: dict[str, Any], manifest: dict[str, Any] | None) ->
     )
 
 
+def setup_line(setup: dict[str, Any]) -> str | None:
+    """v133-F28 (J9, F-I1): the setup card's line — the pin before and after
+    (syntax-only marked) and any auto-landing change with its branch."""
+    if setup.get("error"):
+        return f"its effect could not be previewed: {setup['error']}"
+    parts: list[str] = []
+    pin = setup.get("verify_command") or {}
+    if pin.get("old") != pin.get("new"):
+        old, new = (f"`{pin[key]}`" if pin.get(key) else "none" for key in ("old", "new"))
+        parts.append(f"verify_command: {old} → {new}")
+    if pin.get("syntax_only"):
+        parts.append(f"{pin['syntax_only']} — it cannot qualify a patch for auto-landing")
+    landing = setup.get("auto_landing")
+    if landing:
+        asked = landing.get("asked")
+        if landing.get("new"):  # unasked, only a phase default turns it on
+            how = "asked for" if asked else "from the phase default"
+            parts.append(f"auto-landing: off → ON ({how}), lands on {landing['branch']}")
+        else:
+            parts.append(f"auto-landing: on → off ({'asked for' if asked else 'derived'})")
+    return "; ".join(parts) or None
+
+
 def recorded_card(
     tool: str,
     args: dict[str, Any],
@@ -758,6 +792,12 @@ def recorded_card(
         record["manifest"] = manifest
     if tool == "dispatch_run" and (pin_line := pr_review_pin_line(args, manifest)) is not None:
         record["pin_warning"] = pin_line
+    if tool == "setup_project":  # v133-F28: the pin and auto-landing, as previewed
+        from .tools import setup_card_facts
+
+        setup = setup_card_facts(store, args)
+        if setup is not None:
+            record["setup"] = setup
     if schedule_role is not None:
         record["schedule_role"] = schedule_role
     if tool == "propose_schedule":
@@ -1031,6 +1071,12 @@ def card_summary(
     push = (recorded or {}).get("push")
     if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
         danger = f"{push} — {danger}"
+    setup = (recorded or {}).get("setup")
+    if tool == "setup_project" and isinstance(setup, dict):
+        summary["setup"] = setup
+        line = setup_line(setup)
+        if line is not None:  # v133-F28: before the generic line, never instead
+            danger = line if danger is None else f"{line} — {danger}"
     pin_warning = (recorded or {}).get("pin_warning")
     if pin_warning:  # v133-F27 (A5): before the review runs, not after G10
         danger = pin_warning if danger is None else f"{pin_warning} — {danger}"

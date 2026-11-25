@@ -254,3 +254,64 @@ def test_a_pr_review_dispatch_on_an_unpinned_project_says_so_on_its_card(
         assert "pin_warning" not in card(args)[0]
     finally:
         store.close()
+
+
+# ---------- F28: the setup card shows the pin and auto-landing (J9, F-I1) ----------
+
+
+def _setup_card(store: RunStore, args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    from skep.supervisor.serve.cards import card_summary, high_tier, recorded_card
+
+    high = high_tier("setup_project", args, store=store)
+    recorded = recorded_card("setup_project", args, high, store) or {}
+    return recorded, card_summary("setup_project", args, store=store, recorded=recorded)
+
+
+def test_the_setup_card_shows_a_syntax_only_pin_change_and_no_landing_change(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    store, _holder = _parts(config)
+    try:
+        _bind(
+            store, repo,
+            {"verify_command": "uv run pytest", "auto_apply_verified_patch": False},
+            phase="maintain",
+        )  # fmt: skip
+        args = {
+            "project_id": "proj", "name": "proj", "phase": "maintain",
+            "policy_overrides": {"verify_command": "node --check a.js"},
+        }  # fmt: skip
+        recorded, summary = _setup_card(store, args)
+        pin = recorded["setup"]["verify_command"]
+        assert (pin["old"], pin["new"]) == ("uv run pytest", "node --check a.js")
+        assert "syntax-only" in str(pin["syntax_only"])
+        assert "auto_landing" not in recorded["setup"]  # F5: the stored "off" holds
+        risk = str(summary["risk"])
+        assert "`uv run pytest` → `node --check a.js`" in risk and "syntax-only" in risk
+        assert "auto-landing:" not in risk
+    finally:
+        store.close()
+
+
+def test_a_setup_card_that_turns_auto_landing_on_is_high_and_names_the_branch(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    store, _holder = _parts(config)
+    try:
+        _bind(store, repo, {"verify_command": "uv run pytest"})  # build: off
+        args = {"project_id": "proj", "name": "proj", "phase": "maintain"}  # derived, not asked
+        recorded, summary = _setup_card(store, args)
+        landing = recorded["setup"]["auto_landing"]
+        assert landing == {"old": False, "new": True, "asked": False, "branch": "skep/maintain"}
+        assert recorded["tier"] == "high" and "auto-landing on" in recorded["high"]
+        assert summary["tier"] == "high"
+        assert "auto-landing: off → ON (from the phase default), lands on skep/maintain" in str(
+            summary["risk"]
+        )
+        # the same phase move with a syntax-only pin cannot turn it on: not HIGH
+        _bind(store, repo, {"verify_command": "node --check a.js"})
+        recorded, _summary = _setup_card(store, args)
+        assert "auto_landing" not in recorded["setup"] and "tier" not in recorded
+        assert recorded["setup"]["verify_command"]["syntax_only"]
+    finally:
+        store.close()

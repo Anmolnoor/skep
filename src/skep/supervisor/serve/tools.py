@@ -4702,6 +4702,95 @@ def policy_write_preview(
     return fields
 
 
+def setup_overrides(args: dict[str, Any]) -> dict[str, Any]:
+    """The policy overrides a setup_project call writes: ``policy_overrides``
+    plus its sugar args (engine, codex_chatgpt_login, groups, unlocked). The
+    confirm and the card's preview (v133-F28) read the same overrides."""
+    overrides = _object_arg(args, "policy_overrides")
+    if args.get("engine") is not None:
+        # v95-F4: the CLI's --engine sugar (v94-F5) for the chat tool —
+        # validated at setup so a typo refuses naming the choices (I9);
+        # an explicit policy_overrides.coding_engine wins over the sugar.
+        from ..engines import resolve_engine
+
+        resolve_engine(str(args["engine"]))
+        overrides.setdefault("coding_engine", str(args["engine"]))
+    if args.get("codex_chatgpt_login") is not None:
+        # ES-F121 (D20): same sugar shape; validated as a bool at setup.
+        overrides.setdefault("codex_chatgpt_login", args["codex_chatgpt_login"])
+    if args.get("groups"):
+        # v97-F4: same sugar shape as engine= — known-name vetting happens
+        # in setup_project_record (one point for chat/CLI/HTTP, I5).
+        if not isinstance(args["groups"], list):
+            raise ValueError("groups must be a list of policy group names")
+        overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
+    if args.get("unlocked") is not None:
+        # ES-F141: sugar like engine=; the preconditions are vetted where
+        # every face's write lands (registry.unlocked_block_reason, I5).
+        # Uncoerced: bool("false") is True, and the HIGH tier reads `is True`.
+        overrides.setdefault("unlocked", args["unlocked"])
+    return overrides
+
+
+def _auto_landing(policy: dict[str, Any]) -> bool:
+    # an unlocked project lands G10-confirmed patches too (ADR 0061)
+    return policy.get("auto_apply_verified_patch") is True or policy.get("unlocked") is True
+
+
+def setup_card_facts(store: RunStore, args: dict[str, Any]) -> dict[str, Any] | None:
+    """v133-F28 (J9, F-I1, I6, I8): what a setup_project card would change,
+    from the side-effect-free preview of the very write its confirm makes —
+    the pin before and after (and whether the new one is syntax-only, F4),
+    and any change to auto-landing, asked for or derived (a phase default,
+    F5), with the branch it lands on. ``{"error"}`` when the preview fails
+    (the confirm reports it); None for a call that names no project."""
+    from ..policy import syntax_only_verify
+    from .registry import preview_project_setup
+
+    if not args.get("project_id") or not args.get("name"):
+        return None
+    stored = store.get_project_policy(str(args["project_id"]))
+    old = {} if stored is None else dict(stored.policy)
+    try:
+        template_names = args.get("template_names")
+        preview = preview_project_setup(
+            root=Path(store.db_path).parent.parent / "repos",  # registry.repos_root
+            run_store=store,
+            project_id=str(args["project_id"]),
+            name=str(args["name"]),
+            strategy=None if args.get("strategy") is None else str(args["strategy"]),
+            phase=str(args.get("phase") or "build"),
+            pack_name=None if args.get("pack") is None else str(args["pack"]),
+            repo_path=None if args.get("repo_path") is None else str(args["repo_path"]),
+            repo_slug=None if args.get("repo_slug") is None else str(args["repo_slug"]),
+            template_names=[] if template_names is None else [str(t) for t in template_names],
+            policy_overrides=setup_overrides(args),
+        )
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+    new = dict(preview["effective_policy"])
+    old_pin, new_pin = str(old.get("verify_command") or ""), str(new.get("verify_command") or "")
+    facts: dict[str, Any] = {
+        "verify_command": {
+            "old": old_pin,
+            "new": new_pin,
+            "syntax_only": syntax_only_verify(new_pin) if new_pin else None,
+        }
+    }
+    if _auto_landing(old) != _auto_landing(new):
+        asked = {"auto_apply_verified_patch", "unlocked"} & set(setup_overrides(args))
+        branch = new.get("auto_apply_branch") if _auto_landing(new) else None
+        facts["auto_landing"] = {
+            "old": _auto_landing(old),
+            "new": _auto_landing(new),
+            "asked": bool(asked),
+            "branch": str(branch or "skep/<task_id>") if _auto_landing(new) else None,
+        }
+    return facts
+
+
 def execute_mutation(
     name: str,
     args: dict[str, Any],
@@ -6037,29 +6126,7 @@ def _execute_mutation(
         )
     if name == "setup_project":
         template_names = args.get("template_names")
-        overrides = _object_arg(args, "policy_overrides")
-        if args.get("engine") is not None:
-            # v95-F4: the CLI's --engine sugar (v94-F5) for the chat tool —
-            # validated at setup so a typo refuses naming the choices (I9);
-            # an explicit policy_overrides.coding_engine wins over the sugar.
-            from ..engines import resolve_engine
-
-            resolve_engine(str(args["engine"]))
-            overrides.setdefault("coding_engine", str(args["engine"]))
-        if args.get("codex_chatgpt_login") is not None:
-            # ES-F121 (D20): same sugar shape; validated as a bool at setup.
-            overrides.setdefault("codex_chatgpt_login", args["codex_chatgpt_login"])
-        if args.get("groups"):
-            # v97-F4: same sugar shape as engine= — known-name vetting happens
-            # in setup_project_record (one point for chat/CLI/HTTP, I5).
-            if not isinstance(args["groups"], list):
-                raise ValueError("groups must be a list of policy group names")
-            overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
-        if args.get("unlocked") is not None:
-            # ES-F141: sugar like engine=; the preconditions are vetted where
-            # every face's write lands (registry.unlocked_block_reason, I5).
-            # Uncoerced: bool("false") is True, and the HIGH tier reads `is True`.
-            overrides.setdefault("unlocked", args["unlocked"])
+        overrides = setup_overrides(args)
         return setup_project_record(
             run_store=store,
             root=repos_root(holder),
