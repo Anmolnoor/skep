@@ -43,7 +43,7 @@ from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .github import PR_HEAD_REF
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
-from .policy import ConfigUnreadable, test_config_changes
+from .policy import ConfigUnreadable, test_config_changes, vendored_files
 from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
@@ -327,6 +327,10 @@ def _static_tamper_flags(repo: Path, patch_path: Path, base: str, head: str | No
             )
         ]
         for old_mode, new_mode, code, path in changes:
+            if vendored_files((path,)):
+                # v133-F3 (A3): a vendored dependency's tests are not the
+                # project's; the patch still cannot land by itself (policy).
+                continue
             readable = new_mode in _REGULAR_MODES
             if _is_test_file(path):
                 if code == "D":

@@ -684,6 +684,21 @@ def test_a_guard_that_cannot_read_the_patch_fails_closed(
     assert flags == ["tamper_check_failed:OSError"]
 
 
+def test_vendored_files_are_not_test_tampering(repo: Path) -> None:
+    """v133-F3 (A3): a vendored dependency's own tests and skip markers are not
+    the project's tests (Alfin run 01a211bd: 224 flags, all under node_modules).
+    The patch still cannot land by itself: policy.rule_block_reason."""
+    _seed(repo)
+
+    def vendor(r: Path) -> None:
+        tests = r / "node_modules" / "mocha" / "test"
+        tests.mkdir(parents=True)
+        (tests / "a.test.js").write_text("describe.skip('x', () => {});\n")
+        (r / "node_modules" / "mocha" / "lib.js").write_text("it.skip('y');\n")
+
+    assert reverify_mod.static_tamper_flags(repo, _patch(repo, "vendor", vendor), "HEAD") == []
+
+
 def test_baseline_cleanup_removes_only_what_the_baseline_added(tmp_path: Path) -> None:
     """Review R2 (Opus): an ignored file the prime left (an in-place editable
     build) is not the baseline's; only paths that appear afterwards are."""
