@@ -8,6 +8,8 @@ F5 (N3) short run ids name one run.
 F8 (T1) the replay budget counts tool-call arguments; old ones are cut.
 F9 (T2) the context dial sizes the model's window, not how much history is resent.
 F10 (T3) the start of a request stays byte-identical between calls.
+F11 a scheduled prompt whose turn ended on an error reports the tick failed
+    (pinned by test_injection_alarm's mid-turn raise).
 """
 
 from __future__ import annotations
@@ -71,6 +73,26 @@ def test_a_turn_that_raises_stores_a_reply_and_ends_with_an_error(
     assert any(event == "error" for event, _ in events)
     replies = [m for m in rig.store.chat_messages(chat_id) if m.role == "assistant"]
     assert replies and "OSError" in replies[-1].content
+
+
+def test_an_analyst_whose_turn_raised_reports_an_error_not_an_answer(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (N1): F1 turns the exception into an error event — the
+    analyst loop must still report it as a failure."""
+    from skep.supervisor.serve.chat import run_analysis_tasks
+
+    def boom(self: ChatEngine, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
+        raise OSError(36, "File name too long")
+
+    monkeypatch.setattr(ChatEngine, "_system_prompt", boom)
+    holder = ConfigHolder(rig.config, rig.store)
+    result = run_analysis_tasks(
+        rig.store, holder, Dispatcher(store=rig.store, holder=holder), rig.config.home,
+        ["why?"], None,
+    )  # fmt: skip
+    [entry] = result["analyses"]
+    assert "OSError" in entry["error"] and "answer" not in entry
 
 
 def test_a_too_long_worktree_word_is_dead_not_a_crash(tmp_path: Path) -> None:
@@ -139,6 +161,21 @@ def test_a_serve_env_value_counts_as_a_skep_secret(tmp_path: Path) -> None:
     )
     assert own_secret_in(f"use {secret} now", home) == ("serve.env CLAUDE_CODE_OAUTH_TOKEN")
     assert own_secret_in("abc is not a secret, it is too short", home) is None
+
+
+def test_serve_env_config_values_and_comments_are_not_secrets(tmp_path: Path) -> None:
+    """Review R1 (S3): only credential-named keys count — a URL the operator
+    pastes into a question is not their key."""
+    from skep.supervisor.secret_floor import own_secret_in
+
+    home = tmp_path / "supervisor"
+    home.mkdir()
+    (tmp_path / "serve.env").write_text(
+        "OLLAMA_HOST=http://127.0.0.1:11434\n# docs: see https://example.com/?a=very-long-value\n",
+        encoding="utf-8",
+    )
+    assert own_secret_in("why does http://127.0.0.1:11434 refuse?", home) is None
+    assert own_secret_in("https://example.com/?a=very-long-value", home) is None
 
 
 def test_a_title_never_carries_a_credential_shaped_word() -> None:

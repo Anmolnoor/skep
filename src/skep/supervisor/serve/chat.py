@@ -2607,7 +2607,10 @@ class ChatEngine:
                 f"{redact(str(exc))[:300]}). The details are in serve.log; send your "
                 "message again to retry.",
             )
-            yield ("error", {"detail": f"internal error: {type(exc).__name__}"})
+            yield (
+                "error",
+                {"detail": f"internal error: {type(exc).__name__}: {redact(str(exc))[:300]}"},
+            )
         finally:
             inner.close()
             marks.discard(chat_id)
@@ -4165,6 +4168,7 @@ def run_scheduled_prompt(
         return ("the bound chat was mid-turn, so this tick was skipped", False)
     parts: list[str] = []
     alarms: list[dict[str, Any]] = []
+    failed: str | None = None
     started = now_stamp()
     try:
         if chained is not None:
@@ -4194,6 +4198,8 @@ def run_scheduled_prompt(
         for event, data in events:
             if event == "alarm":
                 alarms.append(data)
+            if event == "error":  # v134-F11: the turn ended on an error (provider or internal)
+                failed = str(data.get("detail") or "error")
             if event is None and isinstance(data.get("content"), str):
                 parts.append(str(data["content"]))
             if time.monotonic() > deadline:
@@ -4212,6 +4218,8 @@ def run_scheduled_prompt(
             source = schedule.chain if chained is not None else None
             line = alarm_line(schedule.name, source, alarms, chained, started)
             send_alarm(holder, store, home, chat_id, schedule=schedule.name, line=line)
+    if failed is not None:
+        return (f"prompt tick failed mid-turn: {failed}", False)
     reply = "".join(parts).strip()
     if not reply:
         return ("the scheduled turn produced no reply", False)
@@ -4379,6 +4387,7 @@ def run_completion_turn(
         )
     )
     parts: list[str] = []
+    failed: str | None = None
     # ES-F2 (B13): queue behind the turn in flight — this runs on its own
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
@@ -4410,6 +4419,8 @@ def run_completion_turn(
                 read_only=False,  # it may propose — a card is the human's trigger
                 unattended=True,  # store reads only; nobody may be watching
             ):
+                if event == "error":  # review R1 (N1): the turn stored its own line
+                    failed = str(data.get("detail") or "error")
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
@@ -4421,6 +4432,8 @@ def run_completion_turn(
             )  # fmt: skip
             return (f"continuation failed mid-turn: {exc}", False)
     _turn_done(store, task_id, gated=gated)
+    if failed is not None:  # never pushed to a messenger as if it were the reply
+        return (f"continuation failed mid-turn: {failed}", False)
     reply = "".join(parts).strip()
     from .channels.outbound import push_to_chat_channel
     from .run_status import run_terminal_text
@@ -4509,6 +4522,8 @@ def run_analysis_tasks(
                 protocol=protocol,
                 read_only=True,
             ):
+                if event == "error":  # review R1 (N1): F1 turns a raise into this event
+                    error = str(data.get("detail") or "error")
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # one dead analyst must not lose the others

@@ -137,8 +137,8 @@ def test_one_dead_analyst_does_not_lose_the_others(
         )
         first, second = result["analyses"]
         assert first["answer"] == "first analyst fine"
-        # The turn loop's own honesty (v62-F1) surfaces the failure as the
-        # analyst's answer — never a silent empty entry.
-        assert "provider dropped" in second["answer"]
+        # v134 review R1 (N1): the turn's error event makes it an error entry —
+        # never a failure line passed off as the analyst's answer.
+        assert "analyst turn failed" in second["error"] and "answer" not in second
     finally:
         store.close()
