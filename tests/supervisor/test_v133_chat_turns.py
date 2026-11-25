@@ -353,3 +353,136 @@ def test_a_gate_settled_across_a_restart_still_gets_its_turn(rig: Rig, repo: Pat
     _sweep(rig)
 
     assert len(_seeds(rig, chat_id)) == 2
+
+
+# ---------- F32: a turn that cannot go on says why (G8, B2) ----------
+
+
+def _join_new_threads(before: set[Any]) -> None:
+    import threading
+
+    for thread in set(threading.enumerate()) - before:
+        thread.join(10)
+
+
+def test_a_follow_up_held_by_another_card_names_that_card_once(rig: Rig) -> None:
+    import threading
+
+    chat_id, first = _card(rig)
+    _, second = _card(rig, chat_id=chat_id)
+    for answered in (first, second):  # clicked while another turn ran (D18)
+        rig.store.resolve_chat_action(answered, status="confirmed", result={"ok": True})
+        rig.store.queue_follow_up(answered, "chat-user")
+    holder = rig.store.add_chat_action(chat_id, tool="run_shell", args={"command": "npm test"})
+    before = set(threading.enumerate())
+
+    chat_module._queue_follow_up(rig.engine, first, "chat-user")
+    _join_new_threads(before)
+    chat_module._queue_follow_up(rig.engine, second, "chat-user")
+    _join_new_threads(before)
+
+    notes = [line for line in _assistant_lines(rig, chat_id) if "npm test" in line]
+    assert len(notes) == 1, _assistant_lines(rig, chat_id)  # once, not per follow-up
+    assert "run_shell" in notes[0] and "Approve" in notes[0]
+    held = rig.store.get_chat_action(holder)
+    assert held is not None and held.status == "proposed"  # a note, never a verdict
+
+
+def test_an_unattended_refusal_ends_the_turn_with_what_to_type(rig: Rig, repo: Path) -> None:
+    from skep.supervisor.serve import actions
+
+    actions.remember_action_for_session(
+        rig.store, tool="run_shell", args={"command": "python3 build.py --fast"}, actor="op",
+        tier="always",
+    )  # fmt: skip
+    chat_id, task_id, _ = _gated_run(rig, repo)
+    rig.store.transition(task_id, "completed")
+    rig.store.add_chat_taint(chat_id, untrusted=1)
+    rig.ollama.script_tool_call("run_shell", {"command": "python3 build.py --fast"})
+    rig.ollama.script_reply("I would rebuild with python3 build.py --fast.")
+
+    reply, ok = _continue(rig, task_id)
+
+    assert ok, reply
+    last = _assistant_lines(rig, chat_id)[-1]
+    assert "run_shell" in last and "go ahead" in last  # the one thing to type
+    assert "go ahead" in reply  # the phone hears it too
+    assert rig.store.pending_chat_actions(chat_id) == []  # still no card, no run
+    assert rig.store.queued_run_follow_ups() == []
+
+
+def test_a_continuation_that_could_not_start_says_so_in_the_chat(
+    rig: Rig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi import HTTPException
+
+    chat_id, task_id, _ = _gated_run(rig, repo)
+    rig.store.transition(task_id, "failed")
+
+    def no_model(self: Any, chat: Any) -> Any:
+        raise HTTPException(status_code=409, detail="no default model is set")
+
+    monkeypatch.setattr(ChatEngine, "resolved_llm", no_model)
+    reply, ok = _continue(rig, task_id)
+
+    assert not ok and "no default model" in reply
+    last = _assistant_lines(rig, chat_id)[-1]
+    assert task_id[:12] in last and "no default model is set" in last
+
+
+def test_a_continuation_that_broke_mid_turn_says_so_in_the_chat(
+    rig: Rig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat_id, task_id, _ = _gated_run(rig, repo)
+    rig.store.transition(task_id, "failed")
+
+    def broken(self: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        raise RuntimeError("provider socket closed")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ChatEngine, "turn_events", broken)
+    _, ok = _continue(rig, task_id)
+
+    assert not ok
+    last = _assistant_lines(rig, chat_id)[-1]
+    assert task_id[:12] in last and "provider socket closed" in last
+    assert "send any message" in last.lower()
+
+
+def test_a_broken_run_finish_callback_posts_a_line_instead_of_nothing(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from skep.supervisor.serve import app as app_module
+
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(store=store, holder=holder)
+    serve_client(config, store=store, dispatcher=runner)
+    try:
+        chat_id = store.create_chat(title="cb", model=None).chat_id
+        task = mint_task(workspace=repo, instructions="x")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        action_id = store.add_chat_action(chat_id, tool="dispatch_run", args={})
+        store.resolve_chat_action(action_id, status="confirmed", result={"task_id": task.task_id})
+        store.transition(task.task_id, "failed")
+
+        def notice(*_: Any, **__: Any) -> None:
+            raise OSError("disk full")
+
+        def turn(*_: Any, **__: Any) -> tuple[str, bool]:
+            raise RuntimeError("store locked")
+
+        monkeypatch.setattr(app_module, "notify_run_terminal", notice)
+        monkeypatch.setattr(app_module, "run_completion_turn", turn)
+        before = set(threading.enumerate())
+        assert runner.on_run_finished is not None
+        runner.on_run_finished(str(task.task_id))  # a broken notice no longer stops the turn
+        _join_new_threads(before)
+
+        lines = [m.content for m in store.chat_messages(chat_id) if m.role == "assistant"]
+        assert len(lines) == 1 and "store locked" in lines[0]
+        assert str(task.task_id)[:12] in lines[0]
+    finally:
+        store.close()

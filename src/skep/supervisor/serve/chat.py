@@ -30,7 +30,7 @@ import time
 import uuid
 import weakref
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from itertools import chain
@@ -685,7 +685,11 @@ def _queue_follow_up(
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
         with chat_turn_lock(chat_id):
             # claimed before the turn: a restart from here on never reruns it
-            if not engine.store.claim_follow_up(action_id) or blocking_cards(engine.store, chat_id):
+            if not engine.store.claim_follow_up(action_id):
+                return
+            holding = blocking_cards(engine.store, chat_id)
+            if holding:  # v133-F32 (G8): say which card holds the chat, not nothing
+                _say_held(engine.store, chat_id, holding[0])
                 return
             verdict = "denied" if action.status == "denied" else "confirmed"
             note = engine.store.add_chat_message(
@@ -723,6 +727,19 @@ def _queue_follow_up(
             push_desk_turn(engine.store, engine.home, chat_id, desk, private=private)
 
     threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
+
+
+def _say_held(store: RunStore, chat_id: str, card: ChatActionRecord) -> None:
+    """v133-F32: the line a held follow-up leaves — the card that holds the
+    chat and what to click. Once: a second follow-up held by the same card
+    finds the line already last and adds nothing. A note, never a verdict."""
+    line = (
+        f"Waiting on your open card before I continue: {card.tool} — "
+        f"{headline(card.tool, card.args)}. Approve or Deny it and I'll pick up from there."
+    )
+    last = store.chat_messages(chat_id)[-1:]
+    if not (last and last[0].role == "assistant" and last[0].content == line):
+        store.add_chat_message(chat_id, role="assistant", content=line)
 
 
 def resume_follow_ups(engine: ChatEngine) -> int:
@@ -2517,15 +2534,38 @@ class ChatEngine:
         marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS if channel else set()
         marks.add(chat_id)
         _STOP_REQUESTS.pop(chat_id, None)  # v130-F10: a stale stop is not for this turn
+        inner = self._turn_events(
+            chat_id, base_url=base_url, api_key=api_key, model=model,
+            protocol=protocol, read_only=read_only, unattended=unattended,
+            schedule=schedule,
+        )  # fmt: skip
+        refused: list[str] = []  # v133-F32 (B2): steps this unattended turn could not take
         try:
-            yield from self._turn_events(
-                chat_id, base_url=base_url, api_key=api_key, model=model,
-                protocol=protocol, read_only=read_only, unattended=unattended,
-                schedule=schedule,
-            )  # fmt: skip
+            for event, data in inner:
+                result = data.get("result") if event == "tool" else None
+                if isinstance(result, dict) and result.get("unattended") and not read_only:
+                    refused.append(str(data.get("tool")))
+                elif event == "done" and refused:
+                    yield self._go_ahead(chat_id, refused)
+                    refused = []
+                yield event, data
         finally:
+            inner.close()
             marks.discard(chat_id)
             _OPEN_CARDS.pop(chat_id, None)  # D18: this turn's round is closed
+
+    def _go_ahead(self, chat_id: str, refused: list[str]) -> ChatEvent:
+        """v133-F32 (B2): an unattended turn that refused a step ends with the
+        one thing to type. Typing it starts an attended turn, which may only
+        propose, as ever: the line grants nothing."""
+        names = ", ".join(dict.fromkeys(refused))
+        line = (
+            f"{names} could not run in this turn: it started on its own (a run "
+            "finished, or skep restarted) and nobody was there to approve it. "
+            "Reply “go ahead” and I'll continue in a turn you start."
+        )
+        self.store.add_chat_message(chat_id, role="assistant", content=line)
+        return (None, {"content": f"\n\n{line}"})
 
     def _turn_events(
         self,
@@ -2538,7 +2578,7 @@ class ChatEngine:
         read_only: bool = False,
         unattended: bool = False,
         schedule: str | None = None,
-    ) -> Iterator[ChatEvent]:
+    ) -> Generator[ChatEvent, None, None]:
         previous_read_tool: str | None = None
         hidden = off_menu(read_only=read_only, unattended=unattended)  # v121-F2
         # v59-F7: byte-identical read call returning a byte-identical result is
@@ -2949,6 +2989,8 @@ class ChatEngine:
                             ),
                             "decided_by": decision.decided_by,
                         }
+                        if unattended:
+                            waiting["unattended"] = True  # v133-F32: the turn ends with "go ahead"
                         previous_read_tool = None
                         self.store.add_chat_message(
                             chat_id,
@@ -3210,7 +3252,11 @@ class ChatEngine:
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
                         turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
-                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}"}
+                        refusal_row: dict[str, Any] = {
+                            "error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}",
+                            "unattended": True,  # v133-F32: the turn ends with "go ahead"
+                        }
+                        result = refusal_row
                         previous_read_tool = name
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
@@ -4198,6 +4244,7 @@ def run_completion_turn(
         base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
     except HTTPException as exc:
         store.clear_run_follow_up(task_id)
+        say_continuation_failed(store, task_id, str(exc.detail))  # v133-F32
         return (f"continuation could not run: {exc.detail}", False)
 
     # The facts go in the seed rather than making the model call get_run first:
@@ -4269,6 +4316,11 @@ def run_completion_turn(
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
             _turn_done(store, task_id, gated=gated)
+            # v133-F32 (G8): said in the chat, not only in the return value
+            store.add_chat_message(
+                chat_id, role="assistant",
+                content=continuation_failed_line(task_id, f"my follow-up turn failed ({exc})"),
+            )  # fmt: skip
             return (f"continuation failed mid-turn: {exc}", False)
     _turn_done(store, task_id, gated=gated)
     reply = "".join(parts).strip()
@@ -4283,6 +4335,27 @@ def run_completion_turn(
     if reply and run_terminal_text(store, task_id, completion_opt_in=False) is None:
         push_to_chat_channel(store, home, chat_id, reply, kind="info")
     return (reply, bool(reply))
+
+
+def continuation_failed_line(task_id: str, why: str) -> str:
+    """v133-F32 (G8): the line a run-finish continuation leaves when it
+    cannot go on — silence is never the end state."""
+    return (
+        f"Run {task_id[:12]} finished, but I could not continue: {why}. "
+        "Send any message to continue."
+    )
+
+
+def say_continuation_failed(store: RunStore, task_id: str, why: str) -> None:
+    """v133-F32: post that line in the run's chat (none bound: nothing to
+    say), behind any turn in flight. Never call it holding the chat's lock."""
+    chat_id = _bound_chat(store, task_id)
+    if chat_id is None or store.get_chat(chat_id) is None:
+        return
+    with chat_turn_lock(chat_id):
+        store.add_chat_message(
+            chat_id, role="assistant", content=continuation_failed_line(task_id, why)
+        )
 
 
 def _turn_done(store: RunStore, task_id: str, *, gated: bool) -> None:
