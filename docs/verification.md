@@ -116,8 +116,8 @@ one it is `unavailable`, never `failed`.
 | Outcome | Meaning |
 | --- | --- |
 | `passed` | Patch applied and every command exited `0`. |
-| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. The tail of the output is kept (from pytest's short summary on, when there is one), and the whole output, up to its last 200 KB, is written to `reverify.output.txt` in the run's evidence directory. |
-| `unavailable` | Skep could not honestly re-run the check: the command was not installed (exit 127), the sandbox could not be built, the dependency install failed or was refused (see above), the worker claimed changed files but left no patch, or there was no command to run. |
+| `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. The tail of the output is kept (from pytest's short summary on, when there is one), and the whole output, up to its last 200 KB, is written to `reverify.output.txt` in the run's evidence directory. When that output shows a failed name lookup (`EAI_AGAIN`, `ENOTFOUND`, `Temporary failure in name resolution`), the detail adds that the replay runs offline by design, so a check that installs or downloads for itself fails there. |
+| `unavailable` | Skep could not honestly re-run the check: the command was not installed (exit 127), the sandbox could not be built, the dependency install failed (the detail then starts `could not install dependencies` and names the installer and its exit code; no exit code is recorded, because the command never ran) or was refused (see above), the worker claimed changed files but left no patch, or there was no command to run. |
 | `not_applicable` | The run changed no files or produced no patch, so there is nothing to re-verify. Shown as `nothing to re-verify`, without an alarm. |
 
 A run is `confirmed` only when the worker reported verification `passed` and

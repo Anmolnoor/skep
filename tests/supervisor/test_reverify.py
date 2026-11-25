@@ -747,7 +747,7 @@ def test_a_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
     )
     assert outcome.outcome == "unavailable"
-    assert outcome.exit_codes == [7]
+    assert outcome.exit_codes == []  # v133-F8: the pin never ran
     assert "never confirmed against the old dependencies" in outcome.detail
     assert "no wheel for dep 2.0" in outcome.detail
     lines = log.read_text(encoding="utf-8").splitlines()
@@ -1031,7 +1031,7 @@ def test_a_failed_node_prime_is_unavailable_not_patch_guilt(
     (bin_dir / "npm").write_text("#!/bin/sh\necho 'registry down' >&2\nexit 9\n", encoding="utf-8")
     outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
     assert outcome.outcome == "unavailable"
-    assert outcome.exit_codes == [9]
+    assert outcome.exit_codes == []  # v133-F8: the pin never ran
     assert "npm ci --ignore-scripts" in outcome.detail and "was not run" in outcome.detail
 
 
@@ -1051,7 +1051,7 @@ def test_a_node_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
         repo, config, _node_lock_bump_patch(tmp_path), bin_dir, log, "npm test"
     )
     assert outcome.outcome == "unavailable"
-    assert outcome.exit_codes == [7]
+    assert outcome.exit_codes == []  # v133-F8: the pin never ran
     assert "never confirmed against the old dependencies" in outcome.detail
     assert "no tarball for jest 2.0.0" in outcome.detail
     assert [line.split()[1] for line in log.read_text(encoding="utf-8").splitlines()] == [

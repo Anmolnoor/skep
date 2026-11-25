@@ -237,3 +237,118 @@ def test_f7_the_baseline_clean_keeps_the_primed_web_node_modules(tmp_path: Path)
     keep = (*reverify_mod._BASELINE_KEEP, "web/node_modules")
     assert reverify_mod._untracked(wt, keep) == {"web/state.txt"}
     assert "web/node_modules/jest/index.js" in reverify_mod._untracked(wt)
+
+
+# ---------- F8 (F-I5): an install failure is not a verify that ran ----------
+
+
+def _failing_tool(bin_dir: Path, tool: str, body: str) -> None:
+    (bin_dir / tool).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    (bin_dir / tool).chmod(0o755)
+
+
+def _assert_install_failure(outcome: ReverifyOutcome, install: str) -> None:
+    """F-I5 / F8: the record names the install; no exit code reads as the pin's."""
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert outcome.exit_codes == []  # the verification command never ran
+    first = outcome.detail.splitlines()[0]
+    assert first.startswith(reverify_mod.INSTALL_FAILED), first
+    assert install in first and "was not run" in first, first
+
+
+def test_f8_a_failed_baseline_node_install_is_reported_as_the_install(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _web_project(repo)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    _failing_tool(bin_dir, "npm", "echo 'npm ERR! code E500' >&2; exit 9")
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, "cd web && npm test")
+    _assert_install_failure(outcome, "npm ci --ignore-scripts exited 9")
+    assert "npm ERR! code E500" in outcome.detail
+
+
+def test_f8_a_failed_node_reinstall_after_the_patch_is_reported_as_the_install(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _web_project(repo)
+    bin_dir, log = _pwd_stubs(tmp_path)
+    _failing_tool(
+        bin_dir, "npm", '[ -e ../patched_marker.txt ] && { echo "no tarball" >&2; exit 7; }; exit 0'
+    )
+    patch = _marker_patch(tmp_path, _web_lock_bump())
+    outcome = _run(repo, config, patch, bin_dir, log, "cd web && npm test")
+    _assert_install_failure(outcome, "npm ci --ignore-scripts exited 7")
+
+
+def _uv_repo(repo: Path) -> None:
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    (repo / "uv.lock").write_text('version = 1\nrequires-python = ">=3.11"\n', encoding="utf-8")
+    _commit(repo, "uv project")
+
+
+def _uv_lock_bump() -> str:
+    return (
+        "diff --git a/uv.lock b/uv.lock\n"
+        "--- a/uv.lock\n"
+        "+++ b/uv.lock\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-version = 1\n"
+        "+version = 2\n"
+        ' requires-python = ">=3.11"\n'
+    )
+
+
+@pytest.mark.parametrize("patched_only", [False, True])
+def test_f8_a_failed_uv_sync_is_reported_as_the_install(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, patched_only: bool
+) -> None:
+    _uv_repo(repo)
+    bin_dir = tmp_path / "uvbin"
+    bin_dir.mkdir()
+    guard = "[ -e patched_marker.txt ] || exit 0; " if patched_only else ""
+    _failing_tool(bin_dir, "uv", f'{guard}[ "$1" = sync ] && exit 3; exit 0')
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_marker_patch(tmp_path, _uv_lock_bump()),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+    )
+    _assert_install_failure(outcome, "uv sync exited 3")
+
+
+@pytest.mark.parametrize(
+    "lookup_error",
+    [
+        "npm ERR! request to https://registry.npmjs.org/slugify failed, reason: "
+        "getaddrinfo EAI_AGAIN registry.npmjs.org",
+        "Error: getaddrinfo ENOTFOUND registry.npmjs.org",
+        "pip: Temporary failure in name resolution",
+    ],
+)
+def test_f8_a_verify_that_needs_the_network_says_the_replay_is_offline(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, lookup_error: str
+) -> None:
+    """Alfin 01a211e5: the worker's script installed its own deps; G10's
+    replay has no network by design and failed EAI_AGAIN with no word why."""
+    bin_dir, log = _pwd_stubs(tmp_path)
+    _failing_tool(bin_dir, "node", f"echo '{lookup_error}' >&2; exit 1")
+    outcome = _run(
+        repo, config, _marker_patch(tmp_path), bin_dir, log, "node scripts/verify-node-farm.cjs"
+    )
+    assert outcome.outcome == "failed", outcome.detail
+    assert outcome.exit_codes == [1]
+    first = outcome.detail.splitlines()[0]
+    assert reverify_mod.OFFLINE_NOTE in first, first
+
+
+def test_f8_a_plain_failure_carries_no_offline_note(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    bin_dir, log = _pwd_stubs(tmp_path)
+    _failing_tool(bin_dir, "node", "echo 'AssertionError: 1 !== 2' >&2; exit 1")
+    outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, "node check.js")
+    assert outcome.outcome == "failed"
+    assert reverify_mod.OFFLINE_NOTE not in outcome.detail

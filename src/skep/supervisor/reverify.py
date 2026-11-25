@@ -748,6 +748,18 @@ def _run_command(
 
 
 _OUTPUT_TAIL_CHARS = 2000
+# v133-F8 (F-I5): a dependency install that fails is not the pin failing — the
+# record leads with this and carries no exit code (the pin never ran; the
+# installer's code is in the text), so no surface reads it as "ran and failed".
+INSTALL_FAILED = "could not install dependencies"
+# ... and a pin that failed on a name lookup failed because the replay is
+# offline by design, which the record says (Alfin run 01a211e5: EAI_AGAIN).
+OFFLINE_NOTE = (
+    "the replay runs offline (no network, by design) and this output shows a failed "
+    "network lookup: a check that installs or downloads for itself fails here — pin "
+    "a command that uses the dependencies primed from the lockfile"
+)
+_NETWORK_LOOKUP_FAILURES = ("EAI_AGAIN", "ENOTFOUND", "Temporary failure in name resolution")
 # Review R1 (F1): what survives the clean after the baseline run — the primed
 # environments (uv's .venv, node_modules, the worktree-local caches) and the
 # re-verify scratch dir; nothing the baseline's tests wrote.
@@ -987,8 +999,8 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [prime_code],
-                    "could not prime the baseline uv environment for offline "
+                    [],
+                    f"{INSTALL_FAILED} — could not prime the baseline uv environment for offline "
                     f"re-verification (uv sync exited {prime_code}); the "
                     "verification command was not run",
                 )
@@ -1005,9 +1017,9 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [prime_code],
-                    "could not prime the baseline Node dependencies for offline "
-                    f"re-verification ({node_install} exited {prime_code})"
+                    [],
+                    f"{INSTALL_FAILED} — could not prime the baseline Node dependencies "
+                    f"for offline re-verification ({node_install} exited {prime_code})"
                     f"{': ' + missing if missing else ''}; the "
                     "verification command was not run\n--- install output (tail) ---\n"
                     f"{_output_tail(prime_output) or '(no output)'}",
@@ -1147,9 +1159,9 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [resync_code],
-                    "the patch changes the lockfile and its packages could not be "
-                    f"primed (uv sync exited {resync_code}); the verification command "
+                    [],
+                    f"{INSTALL_FAILED} — the patch changes the lockfile and its packages "
+                    f"could not be primed (uv sync exited {resync_code}); the verification command "
                     "was not run — a dependency change is never confirmed against the "
                     "old dependencies\n--- uv sync output (tail) ---\n"
                     f"{_output_tail(resync_output) or '(no output)'}",
@@ -1201,9 +1213,9 @@ def reverify(
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
-                    [reprime_code],
-                    "the patch changes the lockfile and its packages could not be "
-                    f"primed ({install} exited {reprime_code})"
+                    [],
+                    f"{INSTALL_FAILED} — the patch changes the lockfile and its packages "
+                    f"could not be primed ({install} exited {reprime_code})"
                     f"{': ' + missing if missing else ''}; the verification "
                     "command was not run — a dependency change is never confirmed "
                     "against the old dependencies\n--- install output (tail) ---\n"
@@ -1268,11 +1280,12 @@ def reverify(
             evidence = f"; full output: {output_path}"
         failed = next((o for c, o in zip(exit_codes, outputs, strict=True) if c != 0), "")
         failed_tail = _output_tail(failed)
+        offline = f"; {OFFLINE_NOTE}" if any(e in failed for e in _NETWORK_LOOKUP_FAILURES) else ""
         return ReverifyOutcome(
             "failed",
             commands,
             exit_codes,
-            f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
+            f"re-run exit codes {exit_codes} (expected all 0){primed}{offline}{evidence}\n"
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
             test_counts=test_counts,
         )
