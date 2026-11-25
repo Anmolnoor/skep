@@ -555,6 +555,36 @@ def test_r1_s5_a_branch_pr_pushes_the_head_its_claimed_card_showed(
         store.close()
 
 
+# ---------- R1 (Sol S11): gh that cannot start still leaves the push on record ----
+
+
+def test_r1_s11_gh_that_cannot_start_after_the_push_is_a_pushed_result(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    import subprocess
+
+    from skep.supervisor.github import open_pull_request
+
+    from .conftest import git
+
+    _github_repo_with_bare_origin(repo, tmp_path)
+    git(repo, "switch", "-qc", "skep/work")
+    head = _commit(repo, "work", "w.txt")
+    git(repo, "switch", "-q", "main")
+    real = _fake_github()
+
+    def run(args: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "gh":
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        return cast(subprocess.CompletedProcess[str], real(args, **kw))
+
+    result = open_pull_request(
+        repo=repo, branch="skep/work", base="main", title="t", body="b", runner=run
+    )
+    assert (result.opened, result.pushed, result.head) == (False, True, head)
+    assert "gh" in result.detail and "could not start" in result.detail
+
+
 # ---------- F15: a branch PR card names every run the push publishes (J5) ----------
 
 

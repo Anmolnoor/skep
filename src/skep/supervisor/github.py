@@ -420,12 +420,17 @@ def open_pull_request(
     if push.returncode != 0:
         why = (push.stderr or push.stdout).strip()
         return PullRequestResult(False, None, f"git push failed: {why}", head=head)
-    created = _run(
-        runner,
-        ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
-         "--head", branch, "--title", title, "--body", body],
-        cwd=repo,
-    )  # fmt: skip
+    try:
+        created = _run(
+            runner,
+            ["gh", "pr", "create", "--repo", f"{GITHUB_HOST}/{origin}", "--base", base,
+             "--head", branch, "--title", title, "--body", body],
+            cwd=repo,
+        )  # fmt: skip
+    except OSError as exc:  # v133 R1 (Sol S11): the push happened; keep its record
+        return PullRequestResult(
+            False, None, f"gh could not start ({exc}) after the push", pushed=True, head=head
+        )
     if created.returncode != 0:
         why = (created.stderr or created.stdout).strip()
         return PullRequestResult(False, None, f"gh pr create failed: {why}", pushed=True, head=head)
