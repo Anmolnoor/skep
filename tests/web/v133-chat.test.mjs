@@ -381,7 +381,7 @@ async function turn(chat, { ids = false, background = null } = {}) {
     chat.server.messages.push(msg(5, "user", "do the thing"));
     handlers.message({ content: "the answer" });
     chat.server.messages.push(msg(7, "assistant", "the answer"));
-    if (ids) handlers.message({ message_id: 7 });
+    if (ids) handlers.message({ content: "", message_id: 7 }); // F38: the event after the stored row
   };
   if (background) chat.server.messages.push(background);
   chat.input.value = "do the thing";
@@ -454,7 +454,7 @@ test("R1 S6: with ids, an unnamed reply is drawn even in the streamed words; a b
     chat.server.messages.push({ ...msg(6, "assistant", ""), thinking: "let me look", tool_calls: [{ id: "c" }] });
     handlers.message({ content: "the answer" });
     chat.server.messages.push(msg(7, "assistant", "the answer"));
-    handlers.message({ message_id: 7 });
+    handlers.message({ content: "", message_id: 7 });
   };
   chat.server.messages.push(msg(3, "assistant", "the answer")); // a background reply, same words
   chat.input.value = "do the thing";
@@ -554,4 +554,25 @@ test("R1 S17: Send on the second of two held chips sends only that one; the firs
   assert.deepEqual(chat.streams.map(([, body]) => body.content), ["go", "second held"]);
   assert.deepEqual(chips().map(c => c.querySelector(".queued-steer-text").textContent), ["first held"]);
   assert.match(chips()[0].textContent, /held/);
+});
+
+test("R1 S6: F38's go-ahead line — text and id on one event — is drawn once", async () => {
+  const line = "run_shell could not run in this turn: it started on its own. Reply “go ahead”.";
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 7 });
+    chat.server.messages.push(msg(8, "assistant", line));
+    handlers.message({ content: `\n\n${line}`, message_id: 8 });
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("could not run in this turn"), 1);
+  assert.equal(chat.textCount("do the thing"), 1);
 });
