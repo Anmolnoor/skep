@@ -3,6 +3,7 @@
 F7 (A2): re-verify primes Node deps in the directory the pin runs in.
 F8 (F-I5): a failed install is not a verify that ran; offline failures say so.
 F9 (A4): the malformed-reply counter is a streak, not a per-run total.
+F10 (A8): a shell.run step with `cwd` (or any key it does not take) is refused.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.contracts_io import DEFAULT_BUDGET
 from skep.supervisor.dispatch import run_task
@@ -462,3 +463,105 @@ def test_f9_the_plan_loop_still_fails_on_four_bad_replies_in_a_row(
     outcome, result = _worker_run(repo, tmp_path, monkeypatch, [_BAD_REPLY] * 4)
     assert outcome.record.state == "failed"
     assert result["usage"]["provider_calls"] == 4
+
+
+# ---------- F10 (A8): shell.run refuses a key it does not take ----------
+
+_CWD_STEP = {"argv": ["npm", "ci"], "cwd": "1-node-farm/final", "purpose": "run"}
+
+
+def _assert_teaches(message: str) -> None:
+    assert "'cwd'" in message, message
+    assert "argv, command, purpose, verify, timeout_seconds" in message, message
+    assert "npm --prefix" in message and "git -C" in message, message
+    assert "repo-relative path" in message, message
+
+
+def test_f10_a_shell_step_with_cwd_is_refused_naming_the_alternatives() -> None:
+    from skep.workers.llm_plan import LlmPlanError, validate_shell_run_arguments
+
+    with pytest.raises(LlmPlanError) as caught:
+        validate_shell_run_arguments(_CWD_STEP)
+    _assert_teaches(str(caught.value))
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"argv": ["npm", "--prefix", "web", "ci"], "purpose": "run"},
+        {"argv": ["node", "web/check.js"], "purpose": "verify", "timeout_seconds": 30},
+        {"command": "git -C web status", "verify": True},
+    ],
+)
+def test_f10_a_step_without_an_unsupported_key_is_unchanged(args: dict[str, Any]) -> None:
+    from skep.workers.llm_plan import validate_shell_run_arguments
+
+    validate_shell_run_arguments(args)
+
+
+def _cwd_plan() -> dict[str, Any]:
+    return {
+        "summary": "install in the app folder",
+        "required_tools": ["shell.run"],
+        "steps": [
+            {"tool": "shell.run", "args": _CWD_STEP},
+            {"tool": "shell.run", "args": {"argv": ["node", "check.js"], "purpose": "verify"}},
+        ],
+        "verify": {},
+    }
+
+
+def test_f10_a_stored_plan_with_cwd_is_refused_on_load() -> None:
+    """The replay path: a checkpoint written before v133 that carries `cwd`
+    fails to load with the same teaching error — it never replays a step
+    that would run at the root while the plan said a subfolder."""
+    from skep.worker_contract.worker_state import RESUME_CHECKPOINT_STATE_KEY
+    from skep.workers.llm_plan import LlmPlanError
+    from skep.workers.runtime_plugins import RESUME_CHECKPOINT_PLUGIN
+
+    state = {RESUME_CHECKPOINT_STATE_KEY: {"version": 1, "plan": _cwd_plan()}}
+    with pytest.raises(LlmPlanError) as caught:
+        RESUME_CHECKPOINT_PLUGIN.checkpoint_from_state(state)
+    _assert_teaches(str(caught.value))
+
+
+def test_f10_the_capability_refuses_cwd_before_anything_runs(tmp_path: Path) -> None:
+    """The react path calls the capability directly: the refusal is a
+    teaching observation, and the command never starts."""
+    from skep.workers.capabilities import CapabilityDenied, CapabilityRegistry
+
+    events: list[tuple[Any, Any]] = []
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    with pytest.raises(CapabilityDenied) as caught:
+        registry.invoke("shell.run", {"argv": ["touch", "made.txt"], "cwd": "web"})
+    _assert_teaches(str(caught.value))
+    assert not (tmp_path / "made.txt").exists()
+    assert events == []
+
+
+def test_f10_a_plan_with_cwd_is_repaired_before_any_step_runs(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        server.script_reply(json.dumps(_cwd_plan()))
+        server.script_reply(_recovery_good_plan())
+        outcome = run_task(repo, "Create generated.py.", config=config, permissions=permissions)
+        bodies = server.chat_bodies()
+    finally:
+        server.stop()
+    assert outcome.record.state == "completed", outcome.record.summary
+    repair = json.dumps(bodies[1])
+    assert "cwd" in repair and "npm --prefix" in repair
+    store = RunStore(config.db_path)
+    try:
+        commands = [
+            e.payload.get("command")
+            for e in store.events_for(outcome.record.task_id)
+            if e.type.value == "command.start"
+        ]
+    finally:
+        store.close()
+    assert not any("npm" in str(command) for command in commands), commands

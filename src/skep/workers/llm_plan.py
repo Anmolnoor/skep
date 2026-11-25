@@ -25,7 +25,11 @@ from skep.supervisor.serve.llm import (
 )
 from skep.supervisor.store import RunStore
 from skep.worker_contract import MemoryContextEntry
-from skep.workers.capabilities import builtin_tool_manifest, tracked_file_readable
+from skep.workers.capabilities import (
+    builtin_tool_manifest,
+    shell_run_unknown_keys,
+    tracked_file_readable,
+)
 from skep.workers.worker_runtime import memory_block as _memory_block
 
 
@@ -896,6 +900,8 @@ def validate_shell_run_arguments(arguments: object) -> None:
         raise LlmPlanError(
             "shell.run argv must be a non-empty list or command must be a non-empty string"
         )
+    if unknown := shell_run_unknown_keys(arguments):
+        raise LlmPlanError(unknown)
     raw_argv = arguments.get("argv")
     raw_command = arguments.get("command")
     if isinstance(raw_argv, list) and raw_argv:

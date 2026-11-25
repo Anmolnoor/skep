@@ -449,6 +449,28 @@ def _workspace_fingerprint(root: Path) -> dict[str, str]:
     return fingerprint
 
 
+# v133-F10 (A8): the keys shell.run reads. Any other key was silently dropped —
+# a plan step's `cwd` ran its command at the worktree root (Alfin run 01a211cc:
+# `npm ci` found no lockfile there). Honouring `cwd` needs it in policy, grants,
+# receipts and replay (a command matched in one directory must not run in
+# another), so an unknown key is refused with what to do instead.
+SHELL_RUN_KEYS = ("argv", "command", "purpose", "verify", "timeout_seconds")
+
+
+def shell_run_unknown_keys(arguments: Mapping[str, Any]) -> str:
+    """The refusal for a shell.run step carrying keys it does not take; empty
+    when it carries none."""
+    unknown = sorted(str(key) for key in arguments if key not in SHELL_RUN_KEYS)
+    if not unknown:
+        return ""
+    return (
+        f"shell.run does not take {', '.join(repr(key) for key in unknown)}; it takes only "
+        f"{', '.join(SHELL_RUN_KEYS)}, and every command runs at the worktree root. To work "
+        "in a subfolder, use the tool's own directory flag (npm --prefix web ci, "
+        "pnpm -C web test, git -C web status) or a repo-relative path (node web/check.js)"
+    )
+
+
 def _shell_purpose(arguments: Mapping[str, Any]) -> str:
     if arguments.get("purpose") is not None:
         return str(arguments["purpose"])
@@ -1043,6 +1065,8 @@ class CapabilityRegistry:
         )
 
     def _shell_policy_inputs(self, arguments: Mapping[str, Any]) -> tuple[list[str], str, str]:
+        if unknown := shell_run_unknown_keys(arguments):
+            raise CapabilityDenied(unknown)
         raw_argv = arguments.get("argv")
         raw_command = arguments.get("command")
         if isinstance(raw_argv, list) and raw_argv:
