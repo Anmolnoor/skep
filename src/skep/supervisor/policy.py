@@ -364,9 +364,22 @@ _TEST_CONFIG_PARSED = ("pyproject.toml", "package.json", "setup.cfg", "tox.ini")
 _VENDORED_DIRS = frozenset({"node_modules", "vendor", ".venv", "site-packages"})
 
 
-def vendored_files(changed_files: tuple[str, ...]) -> tuple[str, ...]:
-    """The changed files under a vendored dependency directory."""
-    return tuple(p for p in changed_files if _VENDORED_DIRS & set(p.split("/")[:-1]))
+# v133 R1 (Sol S9): the vendored directories no test runner reads — jest and
+# vitest exclude node_modules by default, pytest never recurses into it or a
+# virtualenv. Not `vendor/`: pytest collects from it.
+_RUNNER_UNREAD_DIRS = _VENDORED_DIRS - {"vendor"}
+
+
+def vendored_files(
+    changed_files: tuple[str, ...], dirs: frozenset[str] = _VENDORED_DIRS
+) -> tuple[str, ...]:
+    """The changed files under a vendored dependency directory (``dirs``)."""
+    return tuple(p for p in changed_files if dirs & set(p.split("/")[:-1]))
+
+
+def runner_unread(path: str) -> bool:
+    """Is ``path`` under a vendored directory no test runner reads?"""
+    return bool(vendored_files((path,), _RUNNER_UNREAD_DIRS))
 
 
 def _dig(node: object, *keys: str) -> object:
@@ -546,7 +559,10 @@ def test_config_changes(
     hits = [
         path
         for path in changed_files
-        if any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+        if (
+            any(fnmatch(os.path.basename(path), g) for g in _TEST_CONFIG_GLOBS)
+            and not runner_unread(path)
+        )
         or path.startswith(".github/workflows/")
     ]
     vendored = vendored_files(changed_files)

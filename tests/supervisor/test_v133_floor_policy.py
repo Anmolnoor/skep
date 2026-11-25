@@ -244,6 +244,43 @@ def test_f3_vendored_runner_config_still_tampered(repo: Path) -> None:
     assert _config_changes(repo, {"vendor/conftest.py": "x = 1\n"}) == ("vendor/conftest.py",)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "node_modules/a/jest.config.js",
+        "web/node_modules/b/vitest.config.ts",
+        "node_modules/c/conftest.py",
+        ".venv/lib/python3.12/site-packages/d/conftest.py",
+    ],
+)
+def test_r1_s9_runner_config_where_no_runner_looks_is_not_tampering(repo: Path, path: str) -> None:
+    """Sol S9: jest and vitest exclude node_modules by default and pytest
+    never recurses into it or a virtualenv, so a dependency's own runner
+    config there is not the project's. ``vendor/`` stays flagged: pytest
+    collects from it (``test_f3_vendored_runner_config_still_tampered``)."""
+    assert _config_changes(repo, {path: "x = 1\n"}) == ()
+
+
+def test_r1_s9_vendored_test_files_under_vendor_are_still_tampering(repo: Path) -> None:
+    """The per-file tamper scan draws the same line: a deleted test under
+    ``vendor/`` is one pytest would have collected; one under
+    ``node_modules`` is not."""
+    from skep.supervisor.reverify import static_tamper_flags
+
+    for name in ("vendor/lib/tests/test_a.py", "node_modules/m/tests/test_b.py"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("def test_x():\n    assert True\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "rm", "-q", "vendor/lib/tests/test_a.py", "node_modules/m/tests/test_b.py")
+    patch = repo.parent / "delete.patch"
+    patch.write_text(git(repo, "diff", "--cached", "--binary", base).stdout)
+    git(repo, "reset", "-q", "--hard", base)
+    flags = static_tamper_flags(repo, patch, base)
+    assert flags == ["test_file_deleted:vendor/lib/tests/test_a.py"], flags
+
+
 def test_f3_vendored_files_block_auto_landing() -> None:
     files = ("node_modules/a/package.json", "node_modules/a/index.js", "src/app.js")
     ctx = AutoApprovalContext(
