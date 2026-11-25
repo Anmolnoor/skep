@@ -135,3 +135,27 @@ def test_the_terminal_chat_says_which_surface_answered_a_model_card(
     repl = cli_chat.ChatRepl(cast(Any, Client()), {"chat_id": "c1"}, show_thinking=False)
     repl._apply_card_verb({"action_id": "a1", "source": "assistant"}, "deny")
     assert paths == ["/api/chats/c1/actions/a1/deny?surface=cli"]
+
+
+def test_diagnose_run_itself_refuses_with_the_sandbox_off(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    """F29 (I12): the action refuses, so the REST face cannot run a command
+    on a worker's kept tree unconfined either."""
+    import dataclasses
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve import actions
+
+    off = dataclasses.replace(config, sandbox=False)
+    store = _store(off)
+    try:
+        kept = tmp_path / "kept"
+        kept.mkdir()
+        task = mint_task(workspace=kept, instructions="x")
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        with pytest.raises(ValueError, match="sandbox is off"):
+            actions.diagnose_run(store, off, task.task_id, command="touch escaped")
+        assert not (kept / "escaped").exists()
+    finally:
+        store.close()

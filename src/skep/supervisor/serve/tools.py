@@ -6729,13 +6729,7 @@ def _diagnose_refusal(store: RunStore, config: Any, task_id: str) -> str | None:
     if record is None:
         return None
     if not config.sandbox:
-        # v133-F29 (K, I12): the kept tree is the worker's output — with the
-        # sandbox off the command would run on it unconfined, as the operator
-        return (
-            "diagnose_run runs only inside the sandbox, and the sandbox is off on this "
-            "home — it never runs a command on a worker's tree unconfined; read the audit "
-            "trail via get_run instead"
-        )
+        return actions.DIAGNOSE_SANDBOX_OFF  # v133-F29 (K, I12)
     workspace = Path(record.workspace or "")
     if not record.workspace or not workspace.is_dir():
         return (

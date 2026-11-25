@@ -3974,6 +3974,13 @@ def gate_taken(store: RunStore, review_id: str) -> HTTPException:
 # v107-F2: diagnose_run bounds — generous enough for one test file, capped
 # so a card can never grant an unbounded supervisor-side process.
 DIAGNOSE_DEFAULT_TIMEOUT_SECONDS = 120.0
+# v133-F29 (K, I12): the kept tree is the worker's output — with the sandbox
+# off the command would run on it unconfined, as the operator.
+DIAGNOSE_SANDBOX_OFF = (
+    "diagnose_run runs only inside the sandbox, and the sandbox is off on this "
+    "home — it never runs a command on a worker's tree unconfined; read the audit "
+    "trail via get_run instead"
+)
 DIAGNOSE_MAX_TIMEOUT_SECONDS = 600.0
 DIAGNOSE_OUTPUT_CAP = 10_000
 
@@ -4001,6 +4008,8 @@ def diagnose_run(
     record = store.get_run(task_id)
     if record is None:
         raise ValueError(f"no run {task_id!r} — list_runs shows recent task ids")
+    if not config.sandbox:
+        raise ValueError(DIAGNOSE_SANDBOX_OFF)  # v133-F29 (I12): every face, not only chat
     workspace = Path(record.workspace or "")
     if not record.workspace or not workspace.is_dir():
         raise ValueError(
