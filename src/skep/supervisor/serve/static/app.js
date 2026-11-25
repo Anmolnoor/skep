@@ -3286,6 +3286,9 @@ async function viewChat(main, chatId) {
     // v133-F39 (G8): the stored ids this stream's message events named (F38's
     // message_id) — the rows it drew, known instead of guessed.
     const streamedIds = new Set();
+    // v133 R2 (S6/T7): the tool events this stream showed, as "name result"
+    // keys — a stored tool row counts as drawn only against one of these.
+    const shownTools = [];
     let spokenText = "";  // v53-F6: what the voice toggle reads aloud
     // v40-F1: consecutive tool events accumulate into one activity group; the
     // first content/thinking delta or action card closes it (the same
@@ -3339,6 +3342,7 @@ async function viewChat(main, chatId) {
         },
         tool: (d) => {
           finishReply();
+          shownTools.push([d.tool, JSON.stringify(d.result ?? null)]);
           // v90-F3: `decision` rides only an auto-allowed mutation — one that
           // ran because a grant already covered it. Those get a receipt card
           // instead of a bare transcript line; everything else is unchanged.
@@ -3376,13 +3380,30 @@ async function viewChat(main, chatId) {
       // assistant row whose text this stream showed. The operator's own row
       // by the text sent; tool rows by their live tool events. Anything else
       // — a run's terminal line, a schedule, a nudge — was not drawn.
+      // v133 R2 (S6/T7): an id is proof only once its text arrived (an id
+      // can come first, then the stream drop), and a tool row is drawn only
+      // if this stream showed its tool event — same result first, then same
+      // name — so a background turn's tool row is not swallowed.
       let ownText = typeof body.content === "string" ? body.content : null;
       const shownText = [spokenText, spokenText.replace(/<think>[\s\S]*?<\/think>/g, "")];
+      const shown = (text) => shownText.some(all => all.includes(text));
+      const toolKey = (m) => {
+        try { return JSON.stringify(JSON.parse(m.content || "null")); } catch { return m.content; }
+      };
+      const claimTool = (match) => {
+        const at = shownTools.findIndex(match);
+        if (at >= 0) shownTools.splice(at, 1);
+        return at >= 0;
+      };
       streamRule = (m) => {
         const text = (m.content || "").trim();
-        if (streamedIds.has(m.id) || m.role === "tool") return true;
+        if (m.role === "tool") {
+          return claimTool(([name, result]) => name === m.tool_name && result === toolKey(m))
+            || claimTool(([name]) => name === m.tool_name);
+        }
+        if (streamedIds.has(m.id)) return !text || shown(text);
         if (m.role === "assistant") {
-          return !text || (!streamedIds.size && shownText.some(shown => shown.includes(text)));
+          return !text || (!streamedIds.size && shown(text));
         }
         if (m.role === "user" && ownText !== null && m.content === ownText && authorLabel(m, null) === null) {
           ownText = null;

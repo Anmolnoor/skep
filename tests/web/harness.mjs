@@ -77,6 +77,8 @@ class FakeNode {
     }
   }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+  // The working line's label (a live tool event) is its first element child.
+  get firstElementChild() { return this.children.find(c => c.nodeType === 1) ?? null; }
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.

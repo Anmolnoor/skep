@@ -592,3 +592,70 @@ test("F37: Approve, Deny and a typed /approve <id> on an assistant card send ?su
     assert.deepEqual(chat.streams.map(([path]) => path), [`/api/chats/c1/actions/a1/${verb}?surface=web`], how);
   }
 });
+
+// ---------- v133 R2 (Sol's second review) ----------
+
+// S6/T7: a row counts as drawn only when this stream put it on the page — an
+// id names text only once that text arrived; a tool row only when this
+// stream showed its tool event.
+const toolRows = (chat, name) =>
+  chat.log.querySelectorAll(".agent-thread-tool").filter(n => n.textContent === name).length;
+
+test("R2 S6: an id whose text never arrived — the stream dropped — is drawn by the reconcile, once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(7, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 7 });
+    chat.server.messages.push(msg(8, "assistant", "stopped by web"));
+    handlers.message({ content: "", message_id: 8 }); // the old order: id first, then the drop
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("stopped by web"), 1, "the row whose text never came is drawn");
+  assert.equal(chat.textCount("the answer"), 1);
+  assert.equal(chat.textCount("do the thing"), 1);
+});
+
+test("R2 S6: the old order — id, then its text — is drawn once", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    chat.server.messages.push(msg(8, "assistant", "stopped by web"));
+    handlers.message({ content: "", message_id: 8 });
+    handlers.message({ content: "stopped by web" });
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(chat.textCount("stopped by web"), 1);
+});
+
+test("R2 S6: a tool row a background turn wrote is drawn; the stream's own tool row is not drawn again", async () => {
+  const chat = await openChat({ messages: [msg(1, "user", "hello")] });
+  const toolRow = (id, name, result) =>
+    ({ ...msg(id, "tool", JSON.stringify(result)), tool_name: name, provenance: null });
+  chat.app.streamSse = async (path, body, handlers) => {
+    chat.streams.push([path, body]);
+    chat.server.messages.push(msg(5, "user", "do the thing"));
+    chat.server.messages.push(toolRow(6, "list_runs", { ok: true, runs: [] })); // a background turn's
+    chat.server.messages.push(toolRow(7, "get_run", { ok: true, state: "done" }));
+    handlers.tool({ tool: "get_run", args: {}, result: { ok: true, state: "done" } });
+    handlers.message({ content: "the answer" });
+    chat.server.messages.push(msg(8, "assistant", "the answer"));
+    handlers.message({ content: "", message_id: 8 });
+  };
+  chat.input.value = "do the thing";
+  chat.press("Enter");
+  await settle();
+  await chat.app.poll();
+  assert.equal(toolRows(chat, "list_runs"), 1, "the background tool row is drawn");
+  assert.equal(toolRows(chat, "get_run"), 1, "the streamed tool row is drawn once");
+  assert.equal(chat.textCount("the answer"), 1);
+});
