@@ -1,19 +1,36 @@
 """v133 B2: the worker and re-verify fixes from the Alfin live test.
 
 F7 (A2): re-verify primes Node deps in the directory the pin runs in.
+F8 (F-I5): a failed install is not a verify that ran; offline failures say so.
+F9 (A4): the malformed-reply counter is a streak, not a per-run total.
 """
 
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from skep.supervisor import SupervisorConfig
+from skep.supervisor.cli_cmds import build_config
+from skep.supervisor.contracts_io import DEFAULT_BUDGET
+from skep.supervisor.dispatch import run_task
 from skep.supervisor.reverify import ReverifyOutcome, reverify
 
 from .conftest import git
+from .fake_openai import FakeOpenAI
+from .test_coding_minimal_worker import (
+    _RECOVERY_DENIED_PLAN,
+    _react_done,
+    _react_verify_action,
+    _react_write_action,
+    _recovery_good_plan,
+    _repair_test_setup,
+    _verify_steps_are_the_pin,  # noqa: F401 -- autouse: verify steps are the pin
+)
 from .test_reverify import _npm_lock, _RecordingWall
 
 reverify_mod = importlib.import_module("skep.supervisor.reverify")
@@ -352,3 +369,96 @@ def test_f8_a_plain_failure_carries_no_offline_note(
     outcome = _run(repo, config, _marker_patch(tmp_path), bin_dir, log, "node check.js")
     assert outcome.outcome == "failed"
     assert reverify_mod.OFFLINE_NOTE not in outcome.detail
+
+
+# ---------- F9 (A4): the malformed-reply counter is a streak ----------
+
+_BAD_REPLY = "I will now write the file, here is my plan: not JSON at all"
+
+
+def _worker_run(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replies: list[str],
+    *,
+    protocol: str | None = None,
+    max_provider_calls: int | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    extra: dict[str, Any] = {}
+    if protocol is not None:
+        extra["planning_protocol"] = protocol
+    if max_provider_calls is not None:
+        extra["budget"] = DEFAULT_BUDGET.model_copy(
+            update={"max_provider_calls": max_provider_calls}
+        )
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        for reply in replies:
+            server.script_reply(reply)
+        outcome = run_task(
+            repo, "Create generated.py that prints ok.", config=config, permissions=permissions,
+            **extra,
+        )  # fmt: skip
+    finally:
+        server.stop()
+    result = json.loads(
+        (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
+    )
+    return outcome, result
+
+
+def test_f9_react_survives_bad_replies_between_good_steps(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Alfin 01a211bf-c6ed: the fourth bad reply of a whole run killed it,
+    however many good steps came between."""
+    replies = [_BAD_REPLY, _BAD_REPLY, _react_write_action()]
+    replies += [_BAD_REPLY, _BAD_REPLY, _react_verify_action()]
+    replies += [_BAD_REPLY, _BAD_REPLY, _react_done()]
+    outcome, result = _worker_run(repo, tmp_path, monkeypatch, replies, protocol="react")
+    assert outcome.record.state == "completed", outcome.record.summary
+    assert result["usage"]["provider_calls"] == 9
+
+
+def test_f9_react_still_fails_on_four_bad_replies_in_a_row(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replies = [_react_write_action(), *[_BAD_REPLY] * 4]
+    outcome, result = _worker_run(repo, tmp_path, monkeypatch, replies, protocol="react")
+    assert outcome.record.state == "failed"
+    summary = outcome.record.summary or ""
+    assert summary.startswith("react run failed: LlmPlanError: "), summary
+    assert result["usage"]["provider_calls"] == 5
+
+
+def test_f9_react_bad_and_good_replies_still_stop_at_the_call_budget(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The streak resets; the run's provider-call budget still bounds the total."""
+    replies = [_BAD_REPLY, _react_write_action()] * 6
+    outcome, result = _worker_run(
+        repo, tmp_path, monkeypatch, replies, protocol="react", max_provider_calls=5
+    )
+    assert outcome.record.state == "failed"
+    assert result["usage"]["provider_calls"] == 5
+
+
+def test_f9_the_plan_loop_resets_the_streak_after_a_valid_plan(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replies = [_BAD_REPLY, _BAD_REPLY, _RECOVERY_DENIED_PLAN]
+    replies += [_BAD_REPLY, _BAD_REPLY, _recovery_good_plan()]
+    outcome, result = _worker_run(repo, tmp_path, monkeypatch, replies)
+    assert outcome.record.state == "completed", outcome.record.summary
+    assert result["usage"]["provider_calls"] == 6
+
+
+def test_f9_the_plan_loop_still_fails_on_four_bad_replies_in_a_row(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, result = _worker_run(repo, tmp_path, monkeypatch, [_BAD_REPLY] * 4)
+    assert outcome.record.state == "failed"
+    assert result["usage"]["provider_calls"] == 4
