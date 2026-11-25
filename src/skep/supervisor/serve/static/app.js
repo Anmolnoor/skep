@@ -2628,6 +2628,7 @@ async function viewChat(main, chatId) {
     closeLiveWorkerSources();
     clearInterval(runRowsTick);
     if (window.__skepStatusES) { window.__skepStatusES.close(); window.__skepStatusES = null; }
+    chatReconcile = null;
   };
   const maybeMountWorkerActivity = (raw) => {
     const result = unwrapToolResult(raw);
@@ -2640,6 +2641,27 @@ async function viewChat(main, chatId) {
       if (chatStreamActive) trackRun(String(result.task_id));
     }
   };
+  // v133-F19 (G8): the highest stored message id this view has drawn. The
+  // poll and the stream's finally draw only rows above it — a row is drawn
+  // once, whichever of them sees it first.
+  let drawnMessageId = 0;
+  // v133-F19: a live event (the poll) updates what it concerns — new rows
+  // appended, cards drawn or resolved — and never rebuilds #main, so a reply
+  // a background turn stored shows within one poll.
+  const reconcile = async () => {
+    if (!activeChatId || chatStreamActive) return;
+    const fresh = await api("GET", `/api/chats/${activeChatId}`);
+    if (chatStreamActive) return; // a stream began meanwhile; its finally reconciles
+    detail = fresh;
+    messages = fresh.messages;
+    actions = fresh.actions;
+    activeChat = fresh.chat || activeChat;
+    replayGroup = null;
+    drawMessages(messages.filter(m => m.id > drawnMessageId));
+    renderPendingCards();
+    drawContext(activeChat, actions);
+  };
+  chatReconcile = reconcile;
   const setComposerLocked = (locked) => {
     input.disabled = locked || !assistantReady;
     send.disabled = locked || !assistantReady;
@@ -3279,6 +3301,13 @@ async function viewChat(main, chatId) {
         messages = detail.messages;
         actions = detail.actions;
         activeChat = detail.chat;
+        // v133-F19: this turn's own rows were drawn live, so they only move
+        // the watermark; a row from outside (a run's terminal line, a
+        // schedule, a webhook — a "kind:" author) stored meanwhile is drawn.
+        const unseen = messages.filter(m => m.id > drawnMessageId);
+        replayGroup = null;
+        drawMessages(unseen.filter(m => (m.provenance || "").includes(":")));
+        drawnMessageId = Math.max(drawnMessageId, ...unseen.map(m => m.id));
         // v81-F13: an SSE drop loses the live `action` event — the refreshed
         // state re-draws any pending card the stream never delivered.
         renderPendingCards();
@@ -3302,7 +3331,8 @@ async function viewChat(main, chatId) {
   // v40-F1: replay batches consecutive tool records into one activity group,
   // so a refresh reconstructs exactly what the live stream drew.
   let replayGroup = null;
-  for (const message of messages) {
+  const drawMessages = (list) => { for (const message of list) {
+    drawnMessageId = Math.max(drawnMessageId, message.id || 0);
     if (message.role === "tool") {
       let result = null;
       try { result = JSON.parse(message.content || "null"); }
@@ -3331,7 +3361,8 @@ async function viewChat(main, chatId) {
         chatId: activeChatId,
       });
     }
-  }
+  } };
+  drawMessages(messages);
   renderPendingCards();
   scrollBottom();
   watchStatus();  // v43-F4: reopening a chat with a live run resumes the status line
@@ -4974,6 +5005,8 @@ let pendingCardChatId = null;
 // live stream's DOM (field test 2026-07-18: screen flicker, the follow-up
 // card invisible until it auto-denied, the chat apparently dead).
 let chatStreamActive = false;
+// v133-F19: the open chat view's in-place refresh (null on any other page).
+let chatReconcile = null;
 
 async function poll() {
   // Skip the fetch entirely while the tab is hidden.
@@ -5023,16 +5056,12 @@ async function poll() {
         route();
       }
     }
-    const openChatMatch = !chatStreamActive && hash.match(/^#\/chat\/(.+)$/);
-    if (openChatMatch) {
-      // v81-F13: the inverse direction — a card born while this view sat idle
-      // (background approval, another tab, the ticker) appears within one
-      // poll instead of on reload. route() replays history, which draws it.
-      const detail = await api("GET", `/api/chats/${openChatMatch[1]}`);
-      const undrawn = detail.actions.some(action =>
-        action.status === "proposed"
-        && !document.querySelector(`.confirm-card[data-action-id="${action.action_id}"]`));
-      if (undrawn) route();
+    if (chatReconcile && !chatStreamActive && hash.startsWith("#/chat/")) {
+      // v81-F13: a card born while this view sat idle (background approval,
+      // another tab, the ticker) appears within one poll instead of on
+      // reload. v133-F19: and so does a reply a background turn stored —
+      // the open view appends both in place; nothing is rebuilt.
+      await chatReconcile();
     }
     const taskBadge = document.getElementById("tasks-badge");
     const { tasks } = await api("GET", "/api/tasks");
