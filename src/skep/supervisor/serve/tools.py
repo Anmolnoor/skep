@@ -5014,16 +5014,12 @@ def _execute_mutation(
         # read_file last-guard pattern): a confirmed card must still never
         # push/commit/switch/sudo, and a repo cwd the rule lane refused
         # stays refused on confirm (denied space unreachable by confirmation).
-        import shlex
         import subprocess
 
         shell_command = str(args["command"])
         shell_cwd = None if args.get("cwd") is None else str(args["cwd"])
-        try:
-            if not shlex.split(shell_command):
-                raise ValueError("command must be a non-empty shell command")
-        except ValueError as exc:
-            raise ValueError(f"command could not be parsed: {exc}") from exc
+        if (unparsed := _shell_parse_refusal(shell_command)) is not None:  # R2 (T9): one parser
+            raise ValueError(unparsed)
         last_guard = decision or queen_shell_decision(
             store,
             holder,
@@ -6824,7 +6820,7 @@ def _proposal_refusal(
     change between the card and the click."""
     why: str | None = None
     if name == "run_shell":
-        why = _shell_parse_refusal(str(args.get("command") or "x"))
+        why = _shell_parse_refusal(str(args.get("command") or ""))  # R2 (T9): as typed
     elif name == "diagnose_run":
         why = _diagnose_refusal(store, holder.current, str(args.get("task_id") or ""))
     elif name == "setup_project":

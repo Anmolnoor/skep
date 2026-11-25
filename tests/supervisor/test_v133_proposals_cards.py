@@ -71,6 +71,22 @@ def test_an_unparseable_shell_command_is_refused_at_proposal_and_at_confirm(
         store.close()
 
 
+@pytest.mark.parametrize("command", ["", "   "])
+def test_r2_t9_an_empty_shell_command_is_refused_at_proposal_as_at_confirm(
+    config: SupervisorConfig, command: str
+) -> None:
+    store, holder = _parts(config)
+    try:
+        args = {"command": command}
+        refused = mutation_execution_decision("run_shell", args, store=store, holder=holder)
+        assert refused is not None and refused.verdict == "deny"
+        assert "non-empty shell command" in str(refused.detail)
+        with pytest.raises(ValueError, match="non-empty shell command"):
+            _confirm(store, holder, "run_shell", args)
+    finally:
+        store.close()
+
+
 def test_diagnose_run_on_a_swept_worktree_is_refused_at_proposal(
     config: SupervisorConfig, repo: Path, tmp_path: Path
 ) -> None:
