@@ -171,9 +171,9 @@ def test_f2_learnable_description_says_prefix() -> None:
 
     from skep.supervisor import policy_templates
 
-    text = json.loads(
-        (Path(policy_templates.__file__).parent / "descriptions.json").read_text()
-    )["builder"]["shell-learnable"]
+    text = json.loads((Path(policy_templates.__file__).parent / "descriptions.json").read_text())[
+        "builder"
+    ]["shell-learnable"]
     assert "prefix" in text, text
 
 
@@ -263,3 +263,142 @@ def test_f3_no_vendored_files_no_vendored_reason() -> None:
     )
     blocked = rule_block_reason(VERIFIED_PATCH_RULE, ctx)
     assert blocked is None or "vendors" not in blocked, blocked
+
+
+# --- F4 (F-I1): a syntax-only or version-only pin never auto-lands ----------
+
+from fastapi import HTTPException  # noqa: E402
+
+from skep.supervisor import SupervisorConfig  # noqa: E402
+from skep.supervisor.policy import (  # noqa: E402
+    known_vacuous_verify,
+    syntax_only_verify,
+)
+from skep.supervisor.serve.registry import (  # noqa: E402
+    _gate_auto_apply,
+    unlocked_block_reason,
+)
+
+SYNTAX_ONLY = [
+    "node --check f.js",
+    "node -c 1-node-farm/final/index.js",
+    "nodejs --check f.js",
+    "python -m py_compile app.py",
+    "python3 -m compileall src",
+    "uv run python -m py_compile app.py",
+    "bash -n deploy.sh",
+    "sh -n x.sh",
+    "ruby -c app.rb",
+    "perl -c app.pl",
+    "php -l index.php",
+    "node --version",
+    "uv --help",
+    "node --check a.js && node --check b.js",
+    "npm test; node --check f.js",  # the exit status is the last list's
+    "sh -c 'node --check f.js'",
+    "env CI=1 node --check f.js",
+]
+REAL_CHECKS = [
+    "uv run pytest",
+    "npm test",
+    "tsc --noEmit",
+    "npx tsc --noEmit",
+    "npx eslint .",
+    "ruff check .",
+    "cargo test",
+    "go test ./...",
+    "node test.js",
+    "node --test",
+    "node --check f.js && npm test",
+    "node --check f.js; npm test",
+    "python -m pytest",
+    "bash -n x.sh && bash run-tests.sh",
+]
+
+
+@pytest.mark.parametrize("command", SYNTAX_ONLY)
+def test_f4_syntax_only_pin_is_named(command: str) -> None:
+    reason = syntax_only_verify(command)
+    assert reason is not None and "syntax-only" in reason, (command, reason)
+    assert "G10" not in reason
+
+
+@pytest.mark.parametrize("command", REAL_CHECKS)
+def test_f4_real_checks_are_not_syntax_only(command: str) -> None:
+    assert syntax_only_verify(command) is None, command
+    assert known_vacuous_verify(command) is None, command
+
+
+def test_f4_a_vacuous_pin_is_not_called_syntax_only() -> None:
+    """Each pin gets one name: ``true`` stays known-vacuous."""
+    assert syntax_only_verify("true") is None
+    assert syntax_only_verify("git diff --check") is None
+
+
+def test_f4_gate_refuses_auto_landing_on_a_syntax_only_pin() -> None:
+    policy: dict[str, object] = {
+        "auto_apply_verified_patch": True,
+        "verify_command": "node --check f.js",
+    }
+    with pytest.raises(HTTPException) as refused:
+        _gate_auto_apply(dict(policy), requested=True, notes=[])
+    assert refused.value.status_code == 400 and "syntax-only" in str(refused.value.detail)
+    notes: list[str] = []
+    _gate_auto_apply(policy, requested=False, notes=notes)
+    assert policy["auto_apply_verified_patch"] is False
+    assert any("syntax-only" in note for note in notes), notes
+
+
+def test_f4_gate_keeps_a_real_pin() -> None:
+    policy: dict[str, object] = {"auto_apply_verified_patch": True, "verify_command": "npm test"}
+    _gate_auto_apply(policy, requested=True, notes=[])
+    assert policy["auto_apply_verified_patch"] is True
+
+
+def _landing_ctx(*commands: str) -> AutoApprovalContext:
+    return AutoApprovalContext(
+        verification_outcome="passed",
+        reverify_confirmed=True,
+        changed_files=("src/app.js",),
+        verify_pinned=True,
+        reverify_commands=commands,
+    )
+
+
+def test_f4_rule_blocks_a_landing_g10_passed_on_a_syntax_only_pin() -> None:
+    blocked = rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx("node --check f.js"))
+    assert blocked is not None and "syntax-only" in blocked, blocked
+    assert "landable by hand" in blocked
+
+
+@pytest.mark.parametrize(
+    "commands", [("npm test",), ("uv run pytest",), ("node --check f.js", "npm test")]
+)
+def test_f4_rule_lands_on_a_real_check(commands: tuple[str, ...]) -> None:
+    assert rule_block_reason(VERIFIED_PATCH_RULE, _landing_ctx(*commands)) is None
+
+
+def test_f4_unlocked_needs_more_than_a_syntax_check(config: SupervisorConfig) -> None:
+    store = RunStore(config.db_path)
+    try:
+        reason = unlocked_block_reason(
+            store, {"unlocked": True, "verify_command": "node --check f.js"}
+        )
+    finally:
+        store.close()
+    assert reason is not None and "syntax-only" in reason, reason
+
+
+def test_f4_setup_names_a_syntax_only_pin(repo: Path, config: SupervisorConfig) -> None:
+    from .conftest import serve_client
+
+    response = serve_client(config).post(
+        "/api/projects/setup",
+        json={
+            "project_id": "syn", "name": "syn", "strategy": "trusted_local_dev",
+            "repo_path": str(repo), "phase": "build",
+            "policy_overrides": {"verify_command": "node --check index.js"},
+        },
+    )  # fmt: skip
+    assert response.status_code == 201, response.text
+    assert any("syntax-only" in note for note in response.json()["notes"]), response.json()

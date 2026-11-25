@@ -31,7 +31,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
-from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify
+from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify, syntax_only_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
     PROJECT_STRATEGIES,
@@ -613,7 +613,8 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
             "unlocked=true needs a pinned verify_command: a patch lands without a "
             f"human only after skep re-runs the project's own check. {PIN_HINT}."
         )
-    vacuous = known_vacuous_verify(str(policy.get("verify_command")))
+    pin = str(policy.get("verify_command"))
+    vacuous = known_vacuous_verify(pin) or syntax_only_verify(pin)  # v133-F4
     if vacuous is not None:
         return f"unlocked=true needs a real check: {cannot_land_on(vacuous)}."
     probe = sandbox_availability()
@@ -642,7 +643,7 @@ def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str
     if policy.get("auto_apply_verified_patch") is not True:
         return
     pin = str(policy.get("verify_command") or "").strip()
-    vacuous = known_vacuous_verify(pin) if pin else None
+    vacuous = (known_vacuous_verify(pin) or syntax_only_verify(pin)) if pin else None  # v133-F4
     if pin and vacuous is None:
         return
     why = (
@@ -1283,6 +1284,10 @@ def setup_project_record(
         requested="auto_apply_verified_patch" in (policy_overrides or {}),
         notes=notes,
     )
+    syntax_only = syntax_only_verify(str(base_policy.get("verify_command") or ""))
+    if syntax_only and not any("syntax-only" in note for note in notes):
+        # v133-F4 (F-I1): the pin is named for what it checks
+        notes.append(f"{syntax_only}; patches land by approval until a real check is pinned.")
     try:
         project = validate_project_definition(
             project_id=project_id,
