@@ -251,7 +251,7 @@ your phone. See
 
 ## Status
 
-As of 2.0.1:
+As of 2.1.0:
 
 | Works today | Being wired up | Opinions pending code |
 |---|---|---|

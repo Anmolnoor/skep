@@ -3374,3 +3374,164 @@ One fix since 2.0.0 (#136):
   masks, the `provider add` command shows a placeholder where the URL goes:
   put your URL there, quoted for the shell, before you run it. The provider's
   own error text earlier in the same refusal is unchanged.
+
+## v2.1.0 — a chat that doesn't go silent, landing cards that say what the supervisor found, auto-landing that stays put (2026-11-25)
+
+One fix round since 2.0.1 (#139), from a day of live use on a fresh machine.
+It adds no new capability. Read "Before you upgrade" first: five things behave
+differently.
+
+### Before you upgrade
+
+- A remembered grant for a bare interpreter (`node`, `deno`, `bun`, `ruby`,
+  `perl`, `php`, `lua`, `pwsh`, `awk`, as `bash` and `python` already were),
+  for its eval flag (`node -e`), or for one behind `env`, `timeout`, `nice`,
+  `uv run`, `poetry run` or `npx` stops matching. The next such command asks
+  again. A grant for a script (`node script.cjs`) still holds.
+- A saved plan whose `shell.run` step carries `cwd` no longer loads on resume;
+  the refusal says why. Dispatch the run again.
+- A `setup_project` card proposed before the upgrade, for a project that
+  already auto-lands, is refused when confirmed. Propose it again.
+- Landing a run the supervisor did not confirm is a high-tier card. Like
+  other high-tier cards, on a messenger channel only that channel's admin
+  can confirm it.
+- The store gains columns and one table on first start. Rows written before
+  the upgrade read as "unknown" for the new fields.
+
+### The chat
+
+- A shell command with a word longer than a file name can be (a long quoted
+  prompt, a heredoc body) no longer ends the chat turn with no reply. The
+  crash happened on Python 3.12 and 3.13.
+- The web chat draws a reply that a background turn stored (a run finishing,
+  a card's follow-up) within one poll. Before, it was drawn only when
+  something else rebuilt the page.
+- A card arriving, a card answered elsewhere and a run finishing update the
+  chat page in place. The draft, the focus and the scroll position are kept.
+- The text box is not disabled while a card waits. A message typed then is
+  queued and shown as a chip with Edit and Cancel; a second queued message
+  no longer replaces the first; a message the server refuses comes back to
+  the box. `/approve <id>`, `/deny <id>` and `/btw` are sent at once when no
+  turn is streaming.
+- Stop holds the messages queued at that moment. Each held chip has its own
+  Send and Discard.
+- ↑ in an empty text box recalls the last message you sent in this chat; ↑
+  again walks back and ↓ forward.
+- A run that paused at a gate gets one more chat turn when the gate is
+  answered and the run reaches a final state, including when the gate was
+  answered outside the chat or across a restart.
+- A background turn that cannot go on says why in the chat: a follow-up held
+  by another open card names that card; a refused step ends with what to
+  click or type; a failed run-finish notice posts a line.
+- A deny that arrives after the card was approved answers with when it was
+  approved and by whom, from the record ("unknown" when the record holds no
+  actor).
+
+### Cards
+
+- A proposal that could only fail is refused before a card is made, with the
+  reason: a `run_shell` command that does not parse or is empty, a
+  `diagnose_run` on a worktree that is gone, a `setup_project` with an
+  unknown field, a coding dispatch whose engine has none of its auth
+  environment set, a grouped `open_pr` over a run already landed on another
+  branch. The same checks still run when the card is confirmed.
+- `diagnose_run` refuses when the sandbox is switched off, from chat and
+  from REST. Before, it ran the command on the worker's kept tree unconfined.
+- Landing a run whose re-verification failed, was flagged as test tampering
+  or could not run is one card labelled for that outcome ("Land despite
+  failed supervisor verification"), high tier, showing the command the
+  supervisor ran, whether it ran, its exit codes and the outcome. The
+  approval note begins with a line the store writes from that record. The
+  landing is not refused: the human verdict decides.
+- A landing, a branch PR push and a `setup_project` confirm are checked
+  against the card that was clicked. If the re-verification record, the
+  branch head, or the pin or auto-landing effect of the setup changed after
+  the card was drawn, the confirm is refused and a new proposal shows the
+  current state. This holds for cards from chat, including typed `/land`,
+  `/approve`, `/pr` and `/setup`; the REST approve endpoints and
+  `skep review --approve` act on the current record, as before.
+- A branch PR card lists the runs whose landing commit is between the base
+  and the branch head, each with the worker's own result and the
+  supervisor's result on separate lines. A pending card shows the runs it
+  recorded, and the PR body is built from the same record.
+- A `setup_project` card shows the verify command before and after, marks a
+  syntax-only command, and shows a change to auto-landing or to its branch,
+  whether asked for or derived from the phase. A card that turns
+  auto-landing on is high tier.
+- A `run_shell` card says the command runs on this machine as your account,
+  outside the sandbox, and says so separately when it starts an agent CLI or
+  reads a credential directory.
+- A `dispatch_run` card shows the base ref and commit. For a managed clone
+  it says the commit is the one before the clone refreshes, and the dispatch
+  result reports the commit the run started from.
+- The refusal for an engine with no auth environment names the three steps
+  only the operator can take (`claude setup-token`, the line in `serve.env`,
+  the restart). The `serve.env` refusals say the same.
+
+### Re-verification and auto-landing
+
+- Node dependencies are installed in the directory the pinned command's
+  first Node command runs in: after literal `cd X` steps, or npm's and npx's
+  `--prefix X` / `-C X`, or pnpm's `-C X`, when that directory is inside the
+  worktree. This covers the baseline install and the re-install after a
+  patched lockfile. Other forms (yarn `--cwd`, pnpm `--dir`, workspaces,
+  `pushd`) are not primed.
+- A dependency install that fails is recorded as "could not install
+  dependencies", outcome `unavailable`, with no exit codes. Before, the
+  installer's exit code was shown as the verify command's.
+- A verify command that fails on a name lookup says the replay runs offline
+  by design.
+- A patch that changes Yarn's installer config or release files, in the
+  install directory or a directory above it inside the worktree, is not
+  installed: the replay is `unavailable` and says why.
+- A syntax-only or version-only pin (`node --check`, `python -m py_compile`,
+  `bash -n`, `ruby -c`, `php -l`, `--version`, `--help`), also after `cd`,
+  `env`, `timeout` or a variable assignment, cannot qualify a patch for
+  auto-landing, cannot be saved together with auto-landing, and closes the
+  verify-pin gate of an unattended external-engine schedule. It can still be
+  the pin for a run a human lands. The run page marks it.
+- Re-running project setup in the same phase keeps a stored "off" for
+  auto-landing and for auto-dispatch, and the stored auto-landing branch (a
+  named branch, or per-task branches), unless the call names that key. A
+  phase change applies the new phase's defaults, as before.
+- Changed files under `node_modules`, `.venv` or `site-packages` are no
+  longer labelled test tampering. A patch that vendors files under those
+  directories or `vendor/` still cannot land by itself. Test files and
+  runner config under `vendor/` are still flagged, because pytest collects
+  from it.
+
+### Workers and grants
+
+- A `shell.run` step with a key it does not take is refused when the plan is
+  read; `cwd` is the one seen in the field. The message names the accepted
+  keys and what to use instead (`npm --prefix`, `pnpm -C`, `git -C`, a
+  repo-relative path). Before, the key was dropped and the command ran at
+  the worktree root.
+- The limit on malformed model replies counts replies in a row. A valid
+  reply resets it; the run's call budget still bounds the total.
+
+### The record
+
+- A card row records who resolved it, the surface as the client reported it,
+  and the evidence the card carried. The web page and `skep chat` now send
+  the surface.
+- A row a policy rule decided with no human reads "allowed by policy".
+- A landing records the commit it made, read in the landing worktree, from
+  chat, `skep review --approve` and auto-landing.
+- `open_pr` and `skep pr open` write a ledger row for the push: who, when,
+  the branch, the commit pushed, and the PR or the failure. The push sends
+  that commit, not the branch name.
+- A run notice takes its mark from the re-verification outcome when there is
+  one: a disagreement or a tamper flag is not green. The Slack run summary
+  and the channel run lines do the same.
+- The run page and `skep run forensics` mark a syntax-only check and tell a
+  failed dependency install from a check that ran. Forensics labels each row
+  as a policy decision, a worker capability decision or an observation.
+- `get_policy` labels its answer as the global layer; the resultant-policy
+  view lists the effective shell grants with where each came from.
+
+### Not in this release
+
+Honouring a plan step's `cwd`, a no-card tier for read-only probes, a
+server-side message queue and steering, and per-dispatch model options each
+need a design decision first.
