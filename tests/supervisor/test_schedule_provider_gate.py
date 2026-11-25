@@ -501,6 +501,7 @@ def test_all_five_gates_open_runs_the_external_engine(
         ("strict_reads", {"strict_read_confinement": False}, "--strict-reads"),
         ("verify_pin", {"verify_command": "git diff --check"}, "--verify-command"),
         ("verify_pin", {"verify_command": ""}, "--verify-command"),
+        ("verify_pin", {"verify_command": "node --check index.js"}, "syntax-only"),
         ("engine_auth", {"binary": False}, "'codex' is not on the worker's PATH"),
         ("engine_auth", {"auth": False}, "OPENAI_API_KEY"),
         ("landing", {"auto_apply_branch": "main"}, "skep/<slug>"),
