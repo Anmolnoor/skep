@@ -458,18 +458,27 @@ def _plan_failure_summary(reason: str) -> str:
     return f"LLM coding plan failed: {flat}" if flat else "LLM coding plan failed."
 
 
-_RAW_REPLY_BYTES = 2048
+_REPLY_EXCERPT_CHARS = 600
 
 
-def _record_raw_reply(stream: _EventStream, raw_content: str) -> None:
-    """v134-F17: a reply the planner could not parse, kept for forensics — the
-    first ~2 KB, a credential masked BEFORE the cut."""
-    from skep.supervisor.policy_v3 import redact
+def _reply_excerpt(raw_content: str) -> str:
+    """v134-F17 r1: the start of the last reply the planner could not parse,
+    for the failure details — never per reply on the event stream. URL
+    userinfo masked too (``redact_export``), a credential masked BEFORE the
+    cut, a lone surrogate replaced (pydantic cannot serialise one). Best
+    effort: it never fails the failure path; empty when it cannot be built."""
+    try:
+        from skep.supervisor.policy_v3 import redact_export
 
-    stream.emit(
-        EventType.HEARTBEAT,
-        {"phase": "provider reply rejected", "raw_reply": redact(raw_content)[:_RAW_REPLY_BYTES]},
-    )
+        text = raw_content.encode("utf-8", "replace").decode()
+        return redact_export(text)[:_REPLY_EXCERPT_CHARS].strip()
+    except Exception:
+        return ""
+
+
+def _with_reply(details: str, raw_content: str | None) -> str:
+    excerpt = _reply_excerpt(raw_content) if raw_content else ""
+    return f"{details}; last reply: {excerpt}" if excerpt else details
 
 
 def _failure_cause(exc: BaseException) -> str:
@@ -1129,7 +1138,6 @@ def _execute_llm_plan(
                     transport_failures += 1
                     continue
             else:
-                _record_raw_reply(stream, raw_content)
                 invalid_replies += 1
                 if invalid_replies <= _PLAN_REPAIR_ROUNDS and budget_left:
                     # Self-repair pass: feed the invalid output and the
@@ -1143,7 +1151,7 @@ def _execute_llm_plan(
                 stream=stream,
                 out_path=out_path,
                 summary=_plan_failure_summary(str(exc)),
-                details=str(exc),
+                details=_with_reply(str(exc), raw_content),
                 usage=_tallied_usage(tokens, provider_calls),
             )
         provider_calls += 1
@@ -1648,7 +1656,6 @@ def _execute_react(
                     transport_failures += 1
                     continue
             else:
-                _record_raw_reply(stream, exc.raw_content)
                 invalid_replies += 1
                 if invalid_replies <= _PLAN_REPAIR_ROUNDS and budget_left:
                     stream.emit(EventType.HEARTBEAT, {"phase": "replanning after invalid reply"})
@@ -1670,7 +1677,7 @@ def _execute_react(
                 out_path=out_path,
                 # L31: the cause, one line — never a bare "react run failed."
                 summary=f"react run failed: {_failure_cause(exc)}",
-                details=str(exc),
+                details=_with_reply(str(exc), exc.raw_content),
                 usage=_tallied_usage(tokens, provider_calls),
             )
         provider_calls += 1
