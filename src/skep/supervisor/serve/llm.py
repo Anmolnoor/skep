@@ -105,9 +105,12 @@ class OllamaError(Exception):
     from a transient failure (retry identical) without parsing the message.
     """
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(self, message: str, *, status: int | None = None, body: str = "") -> None:
         super().__init__(message)
         self.status = status
+        # v134-F22 r2: the whole error body, for decisions the capped message
+        # can miss (a field named only in error.param, or past the cap)
+        self.body = body
 
 
 def resolve_api_key(home: Path) -> str | None:
@@ -1174,9 +1177,25 @@ def _open_stream_lines(
                     + (f": {detail}" if detail else "")
                     + _login_refused(base_url, response.status_code),
                     status=response.status_code,
+                    body=response.text,
                 )
             yield from response.iter_lines()
             return
+
+
+def _one_leading_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """v134-F22 r1: the leading system rows as ONE message, joined the way
+    the anthropic/bedrock/responses wires join them. ollama and openai-compat
+    send rows verbatim, and many chat templates refuse a second system
+    message; the joined text still starts with the stable prompt, which is
+    all their automatic prefix caches need."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    if lead < 2:
+        return messages
+    text = "\n\n".join(str(m.get("content") or "") for m in messages[:lead] if m.get("content"))
+    return [{"role": "system", "content": text}, *messages[lead:]]
 
 
 def _ollama_chat_stream(
@@ -1190,6 +1209,7 @@ def _ollama_chat_stream(
     num_ctx: int | None = None,
     max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
+    messages = _one_leading_system(messages)
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
@@ -1333,19 +1353,21 @@ def _openai_chat_stream(
     timeout: float,
 ) -> Iterator[dict[str, Any]]:
     unanswered: list[str] = []
+    messages = _one_leading_system(messages)
     messages = [_openai_wire_message(m, i, unanswered) for i, m in enumerate(messages)]
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
+    # v134-F22: the usage chunk (and its cached-token count) is opt-in on the
+    # OpenAI wire; DeepSeek sends usage on its last chunk either way.
+    if base_url not in _NO_STREAM_OPTIONS:
+        body["stream_options"] = {"include_usage": True}
+    asked_usage = "stream_options" in body
+    answered = False  # a choice came back: the reply is real, not an empty 200
     pending_calls: dict[int, dict[str, str]] = {}
+    usage: dict[str, Any] | None = None
     try:
-        for line in _open_stream_lines(
-            f"{openai_style_prefix(base_url)}/chat/completions",
-            base_url,
-            headers=_headers(api_key),
-            body=body,
-            timeout=timeout,
-        ):
+        for line in _openai_stream_lines(base_url, api_key, body=body, timeout=timeout):
             stripped = line.strip()
             if not stripped or not stripped.startswith("data:"):
                 continue
@@ -1360,7 +1382,10 @@ def _openai_chat_stream(
                 # read as complete and an error-only one as a stall (I8).
                 detail = error.get("message") if isinstance(error, dict) else None
                 raise OllamaError(str(detail or error))
-            for choice in payload.get("choices", []):
+            if isinstance(payload.get("usage"), dict):
+                usage = payload["usage"]
+            for choice in payload.get("choices") or []:
+                answered = True
                 delta = choice.get("delta") or {}
                 thinking = _openai_delta_thinking(delta)
                 if thinking:
@@ -1387,16 +1412,80 @@ def _openai_chat_stream(
                         }
                     }
                     pending_calls = {}
+        final: list[dict[str, Any]] = []
         if pending_calls:
-            yield {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": _final_openai_tool_calls(pending_calls),
+            final.append(
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": _final_openai_tool_calls(pending_calls),
+                    }
                 }
-            }
-    except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+            )
+        if usage is not None:
+            details = usage.get("prompt_tokens_details")
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if cached is None:
+                cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek's own name
+            final.append(
+                usage_chunk(usage.get("prompt_tokens"), usage.get("completion_tokens"), cached)
+            )
+        # v134-F22 r5: the endpoint is remembered as refusing stream_options
+        # only after a retry without it came back whole — a choice arrived and
+        # the terminal usage, if any, parsed — and before the last yield, which
+        # a caller may stop at
+        if asked_usage and "stream_options" not in body and answered:
+            _NO_STREAM_OPTIONS.add(base_url)
+        yield from final
+    # TypeError: a usage count that is a dict or list (v134-F22 r6)
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
+
+
+# v134-F22 r1: base URLs that refused ``stream_options`` (a strict server
+# rejects the unknown field) — remembered for the life of the process.
+_NO_STREAM_OPTIONS: set[str] = set()
+
+
+def _openai_stream_lines(
+    base_url: str, api_key: str | None, *, body: dict[str, Any], timeout: float
+) -> Iterator[str]:
+    """The chat/completions stream; a 400 or 422 that names ``stream_options``
+    is retried once without it. _open_stream_lines raises OllamaError only
+    before the first line, so the retry never repeats stream data."""
+    url = f"{openai_style_prefix(base_url)}/chat/completions"
+    headers = _headers(api_key)
+    try:
+        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
+    except OllamaError as exc:
+        # v134-F22 r3: a validation refusal only (400/422) — a 401 or 403 that
+        # lists the request's fields is about the key, not the field
+        if "stream_options" not in body or exc.status not in (400, 422):
+            raise
+        if "stream_options" not in exc.body:
+            raise
+        # the parser remembers the endpoint once the retry answered (v134-F22 r5)
+        body.pop("stream_options")
+        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
+
+
+def usage_chunk(
+    prompt: Any, completion: Any, cached: Any = None, cache_creation: Any = None
+) -> dict[str, Any]:
+    """v134-F22: the terminal chunk, shaped like ollama's — ``done`` plus the
+    counts the provider reported. Absent stays absent, never zero-filled (I8):
+    ``cached_tokens`` is the cache-hit share of ``prompt_eval_count``."""
+    chunk: dict[str, Any] = {"message": {"role": "assistant", "content": ""}, "done": True}
+    for key, value in (
+        ("prompt_eval_count", prompt),
+        ("eval_count", completion),
+        ("cached_tokens", cached),
+        ("cache_creation_tokens", cache_creation),
+    ):
+        if value is not None:
+            chunk[key] = int(value)
+    return chunk
 
 
 # -- anthropic (v72-F1) -------------------------------------------------------
@@ -1460,8 +1549,20 @@ def _anthropic_call_arguments(function: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _anthropic_cache_breakpoints(base_url: str) -> bool:
+    """v134-F22: block-level ``cache_control`` only on Anthropic's own API.
+    The Anthropic-wire presets elsewhere (MiniMax, Kimi) document no
+    block-level breakpoints — Kimi honors only a top-level field and caches
+    by default — so they keep the plain body."""
+    return httpx.URL(base_url).host == "api.anthropic.com"
+
+
 def _anthropic_payload(
-    *, model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    cache_breakpoints: bool = False,
 ) -> dict[str, Any]:
     """Ollama-shaped history → Messages API body.
 
@@ -1561,12 +1662,46 @@ def _anthropic_payload(
         "messages": merged,
         "stream": True,
     }
-    if system_parts:
+    if system_parts and cache_breakpoints:
+        # v134-F22: one block per system row, the breakpoint on the first
+        # (the system prompt), so a later row — a digest, a transient nudge —
+        # never shifts the cached prefix (tools, then system).
+        body["system"] = [{"type": "text", "text": part} for part in system_parts]
+        body["system"][0]["cache_control"] = {"type": "ephemeral"}
+    elif system_parts:
         body["system"] = "\n\n".join(system_parts)
     converted_tools = _anthropic_tools(tools)
     if converted_tools:
+        if cache_breakpoints:
+            # marking a tool caches every tool definition before it. r1: the
+            # last CORE tool, not the last one — core leads in registry order
+            # and a describe_tools activation is appended after it, so the
+            # marked block never moves. No core tool: the last tool.
+            from .tools import CORE_TOOL_NAMES  # local: tools imports this module
+
+            core = [i for i, t in enumerate(converted_tools) if t["name"] in CORE_TOOL_NAMES]
+            mark = core[-1] if core else -1
+            converted_tools[mark]["cache_control"] = {"type": "ephemeral"}
         body["tools"] = converted_tools
     return body
+
+
+def _anthropic_usage_chunk(usage: dict[str, Any]) -> dict[str, Any]:
+    """``input_tokens`` counts only what follows the last cache breakpoint."""
+    return uncached_usage_chunk(
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        usage.get("cache_read_input_tokens"),
+        usage.get("cache_creation_input_tokens"),
+    )
+
+
+def uncached_usage_chunk(fresh: Any, completion: Any, read: Any, write: Any) -> dict[str, Any]:
+    """For a wire whose input count leaves out the cache reads and writes
+    (Anthropic, Bedrock Converse): the prompt total adds them back, so it
+    reads like every other protocol's prompt count."""
+    prompt = None if fresh is None else int(fresh) + int(read or 0) + int(write or 0)
+    return usage_chunk(prompt, completion, read, write)
 
 
 def _anthropic_chat_stream(
@@ -1579,10 +1714,18 @@ def _anthropic_chat_stream(
     timeout: float,
     max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    body = _anthropic_payload(model=model, messages=messages, tools=tools)
+    body = _anthropic_payload(
+        model=model,
+        messages=messages,
+        tools=tools,
+        cache_breakpoints=_anthropic_cache_breakpoints(base_url),
+    )
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
     pending_calls: dict[int, dict[str, str]] = {}
+    # v134-F22: message_start carries the input and cache counts,
+    # message_delta the cumulative output count.
+    usage: dict[str, Any] = {}
     try:
         for line in _open_stream_lines(
             f"{base_url.rstrip('/')}/v1/messages",
@@ -1599,6 +1742,10 @@ def _anthropic_chat_stream(
                 continue
             payload = json.loads(data)
             kind = payload.get("type")
+            if kind in ("message_start", "message_delta"):
+                source = payload.get("message") if kind == "message_start" else payload
+                reported = (source or {}).get("usage") or {}
+                usage.update({k: v for k, v in reported.items() if v is not None})
             if kind == "content_block_start":
                 block = payload.get("content_block") or {}
                 if block.get("type") == "tool_use":
@@ -1639,6 +1786,8 @@ def _anthropic_chat_stream(
                     "tool_calls": _final_openai_tool_calls(pending_calls),
                 }
             }
+        if usage:
+            yield _anthropic_usage_chunk(usage)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 
@@ -2593,8 +2742,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             "measured_locally": True,
             "authoritative_meter": "https://ollama.com/settings",
             "note": (
-                "counted from skep's own requests (ollama reports token "
-                "counts per call); other clients on the account are not seen"
+                "counted from skep's own requests (each provider reports token "
+                "counts per call; cached_tokens is null where it reports no cache "
+                "hits); other clients on the account are not seen"
             ),
             "last_5h": run_store.llm_usage_totals(hours=5),
             "last_7d": run_store.llm_usage_totals(hours=24 * 7),

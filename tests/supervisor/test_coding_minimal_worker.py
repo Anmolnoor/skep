@@ -6,7 +6,8 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +32,7 @@ from skep.worker_contract import (
     AutonomyDecisionPayload,
     Permissions,
     TaskIntent,
+    TaskState,
 )
 from skep.worker_contract.task import ApprovalVerdict
 from skep.workers import coding_minimal as coding_worker
@@ -2218,6 +2220,7 @@ def test_default_coding_worker_fails_after_exhausted_plan_repairs(
     # v70-F7: the summary names the reason — every surface that shows only
     # the summary (run list, chat working line, plan.created) tells the truth.
     assert outcome.record.summary == "LLM coding plan failed: verify must be an object"
+    # v134-F17 r2: the details name the reason and carry no model text
     assert outcome.record.verification_details == "verify must be an object"
     result = json.loads(
         (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
@@ -5779,3 +5782,158 @@ def test_a_failure_notice_masks_a_credential_in_the_exception_text(
     events = stream.path.read_text(encoding="utf-8")
     for text in (result.summary, result.verification.details, events):
         assert canary not in text
+
+
+def _unparseable_reply() -> str:
+    # built at runtime: URL userinfo the bare redactor misses, and a lone
+    # escaped surrogate (json.loads keeps it) that pydantic cannot serialise
+    return "see https://" + "q" * 24 + "@git.example/x.git \ud800 " + "not a plan " * 400
+
+
+def _run_unparseable(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> tuple[Any, str]:
+    task = mint_task(
+        workspace=repo,
+        instructions="Write generated.py.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+        planning_protocol=protocol,
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+
+    def fake_request(*args: object, **kwargs: object) -> object:
+        exc = LlmPlanError("reply is not JSON")
+        exc.raw_content = _unparseable_reply()
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_edit_plan", fake_request)
+    monkeypatch.setattr(coding_worker, "request_next_action", fake_request)
+    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+    return read_result(tmp_path / "out.json"), stream.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("protocol", ["plan", "react"])
+def test_v134_f17_a_run_that_gives_up_on_unparseable_replies_stores_none_of_them(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> None:
+    """v134-F17 r2: no redactor catches a credential written as prose, so no
+    part of a rejected reply is stored — not per reply, not in the terminal
+    details (review r2: those reach the event stream and the chat). The run
+    still ends with the normal failure, naming the parse error."""
+    result, events = _run_unparseable(repo, tmp_path, monkeypatch, protocol)
+
+    assert result.status is TaskState.FAILED
+    assert result.verification.details == "reply is not JSON"
+    assert "not a plan" not in events and "git.example" not in events
+
+
+@pytest.mark.parametrize("request_fn", ["request_edit_plan", "request_next_action"])
+def test_v134_f17_a_reply_with_a_lone_surrogate_can_be_sent_back_for_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request_fn: str
+) -> None:
+    """v134-F17 r2: the repair pass sends the rejected reply back; a lone
+    surrogate (json.loads keeps an escaped one) made that request unencodable."""
+    from skep.workers import llm_plan
+
+    monkeypatch.setattr(llm_plan, "_endpoint", lambda profile: "http://llm.invalid")
+    monkeypatch.setattr(
+        llm_plan,
+        "_provider_chunks",
+        lambda *a, **k: iter(["not json \ud800"]),
+    )
+    provider = cast(Any, SimpleNamespace(profile=None))
+    with pytest.raises(LlmPlanError) as caught:
+        if request_fn == "request_edit_plan":
+            llm_plan.request_edit_plan(
+                provider, workspace=tmp_path, instructions="x", network_allowlist=["*"]
+            )
+        else:
+            llm_plan.request_next_action(provider, conversation=[])
+    raw = caught.value.raw_content
+    assert raw is not None and raw.startswith("not json")
+    raw.encode("utf-8")  # raises on a lone surrogate
+
+
+def test_v134_f17_the_heartbeat_carries_no_raw_reply() -> None:
+    from skep.worker_contract.events import HeartbeatPayload
+
+    assert set(HeartbeatPayload.model_fields) == {"phase"}
+
+
+def test_v134_f18_a_resumed_react_run_is_told_only_the_worktree_survived(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F18: a run made /tmp/nm, paused for approval, and the approved
+    `cp` into it failed on resume — the resumed sandbox gets a fresh /tmp
+    (01a211bf). /tmp stays per-launch; the resumed worker is told so."""
+    from skep.workers.runtime_plugins import RESUME_CHECKPOINT_PLUGIN
+
+    RESUME_CHECKPOINT_PLUGIN.write_react_checkpoint(
+        repo,
+        conversation=[{"role": "user", "content": "copy the build into /tmp/nm"}],
+        changed_files=[],
+        commands=[],
+        verification=None,
+        provider_calls=1,
+    )
+    worker_state = json.loads((repo / ".artifacts" / "resume-checkpoint.json").read_text())
+    task = mint_task(
+        workspace=repo,
+        instructions="Copy the build into /tmp/nm.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+        planning_protocol="react",
+        worker_state=worker_state,
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+    seen: list[list[dict[str, Any]]] = []
+
+    def fake_next(*args: object, conversation: list[dict[str, Any]], **kwargs: object) -> object:
+        seen.append([dict(message) for message in conversation])
+        exc = LlmPlanError("stop here")
+        exc.raw_content = "x"
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_next_action", fake_next)
+    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+
+    resumed_with = json.loads(seen[0][-1]["content"])["observation"]
+    assert "APPROVED" in resumed_with
+    assert "$TMPDIR" in resumed_with and ".toolchain/tmp" in resumed_with
+
+
+def test_v134_f18_the_planner_knows_a_pause_keeps_only_the_worktree(tmp_path: Path) -> None:
+    """The default plan protocol resumes from its cursor without asking the
+    model again, so the rule rides the approval rules it plans with."""
+    system = _plan_messages(workspace=tmp_path, instructions="x")[0]["content"]
+    assert "A pause for approval keeps only your worktree" in system
+    # v134-F18 r1: /tmp is fresh only under bubblewrap (Seatbelt and workspace
+    # mode keep it), so the rule points at $TMPDIR — in the worktree, kept
+    # through a pause, never in the patch — not at a /tmp claim and a cleanup.
+    assert "$TMPDIR" in system and "remove them before you finish" not in system
+
+
+def test_v134_f18_the_scratch_dir_the_worker_is_told_is_dispatchs_tmpdir(tmp_path: Path) -> None:
+    """The prompt names `.toolchain/tmp` because shell.run runs argv with no
+    shell — a literal `$TMPDIR/x` would land in the worktree. It must be the
+    very dir dispatch sets TMPDIR to, and one the patch excludes."""
+    from skep.supervisor.dispatch import _toolchain_env
+    from skep.supervisor.engines import resolve_engine
+    from skep.worker_contract import BOOKKEEPING_DIRS
+    from skep.workers.llm_plan import PAUSE_KEEPS_ONLY_THE_WORKTREE
+
+    env = _toolchain_env(tmp_path, resolve_engine(None), tmp_path / "cache")
+    scratch = Path(env["TMPDIR"]).relative_to(tmp_path)
+    assert f"`{scratch.as_posix()}`" in PAUSE_KEEPS_ONLY_THE_WORKTREE
+    assert scratch.parts[0] in BOOKKEEPING_DIRS

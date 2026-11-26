@@ -24,7 +24,7 @@ from skep.supervisor.serve.llm import (
     chat_stream,
 )
 from skep.supervisor.store import RunStore
-from skep.worker_contract import MemoryContextEntry
+from skep.worker_contract import TOOLCHAIN_DIR, MemoryContextEntry
 from skep.workers.capabilities import (
     builtin_tool_manifest,
     shell_run_unknown_keys,
@@ -41,6 +41,13 @@ class LlmPlanError(Exception):
     """
 
     raw_content: str | None = None
+
+
+def _encodable(text: str) -> str:
+    """v134-F17 r2: a reply as it can be sent back. A provider's JSON may
+    carry an escaped lone surrogate, which json.loads keeps and no encoder
+    takes, so the repair request carrying the reply failed (review r2)."""
+    return text.encode("utf-8", "replace").decode()
 
 
 class LlmUpstreamError(LlmPlanError):
@@ -101,8 +108,10 @@ class WorkerProvider:
 class ProviderUsageTally:
     """v79-F4: token counts harvested from the provider stream, per attempt.
 
-    ollama's final chunk reports prompt_eval_count/eval_count; the other
-    protocols' normalized chunks carry no counts — absent stays None, never
+    Every wire ends its stream with ollama's final-chunk shape,
+    prompt_eval_count/eval_count: ollama natively, Bedrock in its own
+    adapter, and since v134-F22 openai-compat, Anthropic and Responses via
+    ``usage_chunk``. A count the provider did not report stays None, never
     guessed (I8). One tally per worker attempt, threaded explicitly: no
     module state (an in-process dispatcher may run workers concurrently)."""
 
@@ -378,7 +387,7 @@ def request_edit_plan(
     try:
         return _parse_plan(content, default_verify=pin_verify_argv(verify_command))
     except LlmPlanError as exc:
-        exc.raw_content = content
+        exc.raw_content = _encodable(content)
         raise
 
 
@@ -518,6 +527,19 @@ def _verify_rules(verify_command: str) -> str:
     )
 
 
+# v134-F18: a resumed run may get a fresh /tmp (01a211bf: mkdir /tmp/nm, pause,
+# the approved cp into it failed under bubblewrap). r1: /tmp is fresh only
+# there — Seatbelt and workspace mode keep it — so the rule names the scratch
+# dir that always survives: dispatch's $TMPDIR, in the worktree's bookkeeping
+# (never in the patch). Named by path too: shell.run runs argv, no shell.
+PAUSE_KEEPS_ONLY_THE_WORKTREE = (
+    "A pause for approval keeps only your worktree, so put scratch files in $TMPDIR, "
+    f"which is `{TOOLCHAIN_DIR}/tmp` inside it: it survives the pause and is never "
+    "part of the patch. /tmp and anything else outside the worktree may be gone when "
+    "the run resumes. "
+)
+
+
 def _shell_approval_rules(shell_allowlist: Sequence[Sequence[str]]) -> str:
     """v127-F1 (I5/I9): the approval rules as the task resolved them, never
     a hard-coded claim — ``ls``/``find`` stopped five scheduled runs because
@@ -527,13 +549,13 @@ def _shell_approval_rules(shell_allowlist: Sequence[Sequence[str]]) -> str:
         return (
             "Approval rules: no shell command runs without approval (other than the "
             "pinned verify above, when there is one); anything else stops the run for "
-            "the operator. "
+            "the operator. " + PAUSE_KEEPS_ONLY_THE_WORKTREE
         )
     listed = ", ".join(f"`{prefix}`" for prefix in prefixes)
     return (
         f"Approval rules: these shell commands run without approval: {listed} "
         "(as argv prefixes, plus the pinned verify above, when there is one); anything "
-        "else stops the run for the operator. "
+        "else stops the run for the operator. " + PAUSE_KEEPS_ONLY_THE_WORKTREE
     )
 
 
@@ -1117,7 +1139,7 @@ def request_next_action(
     try:
         return _parse_react_reply(_json_object(content))
     except LlmPlanError as exc:
-        exc.raw_content = content
+        exc.raw_content = _encodable(content)
         raise
 
 

@@ -42,6 +42,13 @@ class FakeOpenAI:
         self.listing_bad_gzip = False
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
+        # v134-F22 r1: a strict server refuses request fields it does not
+        # know, in OpenAI's own words, with a 400 before any stream data.
+        self.rejected_fields: set[str] = set()
+        # v134-F22 r2: name a rejected field only in error.param, the way
+        # strict servers do, under a generic message (or a long list of them)
+        self.rejection_message: str | None = None
+        self.rejection_status = 400
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -195,13 +202,18 @@ class FakeOpenAI:
                     self._refuse()
                 elif self.path == "/v1/chat/completions":
                     problem = fake.strict and check("openai", openai_chat_errors(body))
+                    unknown = sorted(fake.rejected_fields & set(body or {}))
+                    param = None
+                    if unknown:
+                        problem = f"Unrecognized request argument supplied: {unknown[0]}"
+                        if fake.rejection_message is not None:
+                            problem, param = fake.rejection_message, unknown[0]
                     if problem:
-                        self._send(
-                            400,
-                            json.dumps(
-                                {"error": {"message": problem, "type": "invalid_request_error"}}
-                            ).encode(),
-                        )
+                        error = {"message": problem, "type": "invalid_request_error"}
+                        if param:
+                            error["param"] = param
+                        status = fake.rejection_status if unknown else 400
+                        self._send(status, json.dumps({"error": error}).encode())
                         return
                     if is_probe(body):  # Phase 05: answered, no scripted turn spent
                         fake.script_reply("pong")

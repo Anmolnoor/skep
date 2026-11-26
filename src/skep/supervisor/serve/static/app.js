@@ -5,7 +5,7 @@ import { renderContextPanel } from "./room.js";
 import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
-import { el, iconButton, notFound } from "./js/dom.js";
+import { drawVerdictRow, el, holdVerdict, iconButton, notFound } from "./js/dom.js";
 import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
@@ -2711,15 +2711,20 @@ async function viewChat(main, chatId) {
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
     const keep = keepSelect(d.card);
+    const row = el("div", { class: "actions" }, approve, refuse, keep);
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
     const card = el("div", { class: cardClass(d.card), "data-action-id": d.action_id },
       ...cardBody(d),
       whyLine(d),
       keepCovers(d.card),
       cardReplay(d.card),
-      el("div", { class: "actions" }, approve, refuse, keep));
+      row);
+    // v134-F21 r2: keyed, so a chat redrawn mid-request draws this card held;
+    // r3: the Inbox's key for the same card, so a verdict there holds it here
+    const key = `card:${d.action_id}`;
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         // R5-2 (K2): a confirm names how many items this card rendered — the
         // server refuses (409, nothing ran) a card that now holds another set.
@@ -2731,14 +2736,16 @@ async function viewChat(main, chatId) {
       catch (e) {
         if (verb === "confirm" && e.status === 409 && /you were shown/.test(e.message)) {
           flash("bad", "this card changed — review it again; nothing ran");
+          hold.landed();
           route(); // the thread redraws the card as it is now
           return;
         }
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        hold.failed();
         return;
       }
+      hold.landed();
       resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
       watchStatus();  // v92-F3: a confirmed card can dispatch or revive a run
     };
@@ -2800,15 +2807,19 @@ async function viewChat(main, chatId) {
   const commandCard = (d, notes = []) => {
     const approve = el("button", { class: "primary" }, d.card?.action_label || "Confirm");
     const refuse = el("button", { class: "danger" }, "Cancel");
+    const row = el("div", { class: "actions" }, approve, refuse);
     const card = el("div", { class: "confirm-card command-card", "data-action-id": d.action_id },
       ...cardBody(d),
       notes.map(note => el("p", { class: "note" }, note)),
-      el("div", { class: "actions" }, approve, refuse));
+      row);
+    const key = `card:${d.action_id}`; // v134-F21 r2/r3: the Inbox's key
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
+        hold.landed();
         commandResult(verb === "confirm" ? `${d.tool}: result` : `${d.tool}: canceled`, result, d.tool);
         await followProject(d.tool, result);
         resolveCardUI(card, verb === "confirm" ? "✓ Confirmed" : "✗ Canceled", verb);
@@ -2816,7 +2827,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        hold.failed();
       }
       setComposerLocked(anyCardPending());
     };
@@ -2833,19 +2844,23 @@ async function viewChat(main, chatId) {
   // (a deny only narrows). Never locks the composer.
   const elsewhereCard = (d) => {
     const cancel = el("button", { class: "danger" }, "Cancel");
+    const row = el("div", { class: "actions" }, cancel);
     const card = el("div", { class: "confirm-card command-card elsewhere-card", "data-action-id": d.action_id },
       ...cardBody(d),
       el("p", { class: "note" }, d.web_refusal),
-      el("div", { class: "actions" }, cancel));
+      row);
+    const key = `card:${d.action_id}`; // v134-F21 r3 (Terra): held across a redraw
+    drawVerdictRow(key, row);
     cancel.addEventListener("click", async () => {
-      cancel.disabled = true;
+      const hold = holdVerdict(key, row);
       try {
         const result = await api("POST", `/api/chats/${activeChatId}/commands/${d.action_id}/deny`);
+        hold.landed();
         commandResult(`${d.tool}: canceled`, result, d.tool);
         resolveCardUI(card, "✗ Canceled", "deny");
       } catch (e) {
         flash("bad", e.message);
-        cancel.disabled = false;
+        hold.failed();
       }
       setComposerLocked(anyCardPending());
     });
@@ -2861,16 +2876,21 @@ async function viewChat(main, chatId) {
   const gateCard = (d) => {
     const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
+    const row = el("div", { class: "actions" }, approve, refuse);
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
       ...cardBody(d),
       whyLine(d),
-      el("div", { class: "actions" }, approve, refuse));
+      row);
+    // v134-F21 r2: the gate's own key, shared with the Approvals view and Inbox
+    const key = d.args?.review_id ? `gate:${d.args.review_id}` : `card:${d.action_id}`;
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
+        hold.landed();
         commandResult(verb === "confirm" ? "approve_review: result" : "deny_review: result", result,
           verb === "confirm" ? "approve_review" : "deny_review");
         resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
@@ -2878,7 +2898,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        hold.failed();
       }
     };
     approve.addEventListener("click", verdict("confirm"));
@@ -3975,23 +3995,35 @@ async function viewRunDetail(main, taskId) {
   // Approval actions, right where the operator is looking.
   const actions = el("div", { class: "actions" });
   const pending = detail.approvals.filter(a => a.status === "pending");
+  // v134-F21 r1: the gate's key when one is open, so a verdict in flight
+  // from the Approvals view or the Inbox holds this row too.
+  const verdictKey = pending.length ? `gate:${pending[0].review_id}` : `run:${taskId}`;
+  // v134-F21 r3: a gate the click opens is held under its own key too — a
+  // redraw before the verdict returns keys the row gate:<new id>
+  let openedHold = null;
   const act = (label, cls, fn) => {
     const b = el("button", { class: cls }, label);
     b.addEventListener("click", async () => {
-      b.disabled = true;
+      const held = holdVerdict(verdictKey, actions); // v134-F21: one verdict at a time
       const before = location.hash;
       try {
         await fn();
+        held.landed();
+        openedHold?.landed();
         // If the action navigated, hashchange already re-rendered — a second
         // route() here would interleave with it and duplicate the view.
         if (location.hash === before) route();
-      } catch (e) { flash("bad", e.message); b.disabled = false; }
+      } catch (e) { flash("bad", e.message); held.failed(); openedHold?.failed(); }
+      openedHold = null;
     });
     return b;
   };
-  const ensureReview = async () =>
-    pending.length ? pending[0].review_id
-      : (await api("POST", `/api/runs/${taskId}/approvals`)).review_id;
+  const ensureReview = async () => {
+    if (pending.length) return pending[0].review_id;
+    const id = (await api("POST", `/api/runs/${taskId}/approvals`)).review_id;
+    openedHold = holdVerdict(`gate:${id}`, actions);
+    return id;
+  };
   // v19-F1: one approval can carry a batch of shell commands.
   const batchCommands = pending.length ? approvalCommands(pending[0]) : null;
   const isBatch = batchCommands && batchCommands.length > 1;
@@ -4029,6 +4061,7 @@ async function viewRunDetail(main, taskId) {
       }));
     }
   }
+  drawVerdictRow(verdictKey, actions); // r1: redrawn mid-request, it is drawn held
   if (actions.children.length) main.append(actions);
   for (const approval of detail.approvals) {
     main.append(el("p", { class: "note" },
@@ -4276,18 +4309,20 @@ async function viewApprovals(main) {
       card.append(el("p", { class: "note" }, `${batchCommands.length} commands in this plan:`), list);
     }
     const actions = el("div", { class: "actions" });
+    const key = `gate:${approval.review_id}`;
     const verdict = (label, cls, path, body) => {
       const button = el("button", { class: cls }, label);
       button.addEventListener("click", async () => {
-        button.disabled = true;
+        const held = holdVerdict(key, actions); // v134-F21: one verdict at a time
         const before = location.hash;
         try {
           const result = await api("POST", `/api/approvals/${approval.review_id}/${path}`, body);
+          held.landed();
           if (result.suggestion) flash("ok", result.suggestion);
           if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
           if (result.url) flash("ok", `PR: ${result.url}`);
           if (location.hash === before) route();
-        } catch (e) { flash("bad", e.message); button.disabled = false; }
+        } catch (e) { flash("bad", e.message); held.failed(); }
       });
       return button;
     };
@@ -4310,6 +4345,7 @@ async function viewApprovals(main) {
       );
     }
     if (run.state === "completed") actions.append(verdict("Open PR", "ghost", "pr", {}));
+    drawVerdictRow(key, actions); // r1: redrawn mid-request, it is drawn held
     card.append(actions);
     return card;
   };
@@ -4692,7 +4728,13 @@ async function renderAssistantTab(panel) {
   const usageLine = el("p", { class: "note" }, "");
   llmCard.append(usageLine);
   api("GET", "/api/llm/usage").then(usage => {
-    const fmt = w => `${w.total_tokens.toLocaleString()} tok / ${w.requests} req`;
+    // v134-F22: the provider's cache hits sit beside the input count; a
+    // provider that reports none (ollama) shows nothing, never a fake 0.
+    // r1: measured against the input of the rows that reported a cache count.
+    const fmt = w => `${w.prompt_tokens.toLocaleString()} in`
+      + (w.cached_tokens == null ? "" : ` (${w.cached_tokens.toLocaleString()} of `
+        + `${w.cache_reported_prompt_tokens.toLocaleString()} cached)`)
+      + ` + ${w.completion_tokens.toLocaleString()} out tok / ${w.requests} req`;
     usageLine.replaceChildren(
       `Usage counted by skep — last 5h: ${fmt(usage.last_5h)} · last 7d: ${fmt(usage.last_7d)}. `
       + "The account's own 5h/weekly meter (all clients) lives at ",

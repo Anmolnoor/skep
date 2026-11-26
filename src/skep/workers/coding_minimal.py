@@ -51,6 +51,7 @@ from .capabilities import (
 )
 from .llm_plan import (
     DEFAULT_VERIFY_ARGV,
+    PAUSE_KEEPS_ONLY_THE_WORKTREE,
     LlmEditPlan,
     LlmPlanError,
     LlmToolPlan,
@@ -1550,7 +1551,8 @@ def _execute_react(
                     {
                         "observation": (
                             "the operator APPROVED the gated action - grants are "
-                            "active; re-issue it to execute, or continue"
+                            "active; re-issue it to execute, or continue. "
+                            + PAUSE_KEEPS_ONLY_THE_WORKTREE.strip()
                         )
                     },
                     ensure_ascii=True,

@@ -43,12 +43,16 @@ def ollama() -> Iterator[FakeOllama]:
     server.stop()
 
 
-def _line_for(name: str) -> str:
-    (line,) = [
+def _lines_for(name: str) -> list[str]:
+    return [
         entry
         for entry in TOOL_INDEX_BLOCK.splitlines()
         if entry.startswith(f"- {name}") and entry[2 + len(name) :][:1] in ("", "*", "(")
     ]
+
+
+def _line_for(name: str) -> str:
+    (line,) = _lines_for(name)
     return line
 
 
@@ -57,21 +61,24 @@ def test_the_encoder_states_the_confirmation_path_once_not_per_tool() -> None:
     with the executor — six tools in that set never said 'PROPOSE' in their
     prose, and the old index under-reported them (I8)."""
     assert _line_for("land_run").startswith("- land_run*(")
-    assert _line_for("dispatch_run").startswith("- dispatch_run*")  # prose said no
+    assert _line_for("run_code").startswith("- run_code*(")  # prose said no
     assert not _line_for("git_diff").startswith("- git_diff*")
     # The boilerplate the legend replaces is gone from every gloss.
     assert "PROPOSE" not in TOOL_INDEX_BLOCK
     assert "requires user confirmation" not in TOOL_INDEX_BLOCK
 
 
-def test_a_core_tool_is_name_only_because_its_schema_is_in_the_request() -> None:
-    """Zero information loss, provably: advertised_tool_specs ships the full
-    schema for every core tool in the same request."""
+def test_a_core_tool_has_no_index_line_because_its_schema_is_in_the_request() -> None:
+    """v134-F23: zero information loss, provably — advertised_tool_specs ships
+    the full schema for every core tool in the same request, so its name-only
+    index line (v99-F1) was paid twice. Activation-only tools keep theirs."""
     for name in CORE_TOOL_NAMES:
-        mark = "*" if name in MUTATING_TOOL_NAMES else ""
-        assert _line_for(name) == f"- {name}{mark}"
+        assert _lines_for(name) == [], name
     advertised = {t["function"]["name"] for t in advertised_tool_specs([])}
     assert advertised >= set(CORE_TOOL_NAMES)
+    assert _line_for("list_notes").startswith("- list_notes(")
+    assert "every tool you can call, by category" not in TOOL_INDEX_BLOCK
+    assert "tools list" in TOOL_INDEX_BLOCK  # the header says where the rest are
 
 
 def test_a_gloss_that_only_restates_the_name_is_dropped() -> None:
@@ -96,17 +103,17 @@ def test_the_index_is_generated_from_the_registry() -> None:
     categorized = [n for cat in TOOL_CATEGORIES.values() for n in cat]
     assert set(categorized) == names  # nothing uncategorized, nothing stale
     assert len(categorized) == len(set(categorized))  # exactly one category each
-    for name in names:
-        # v99-F1: a core tool renders name-only (its full schema is in the
-        # same request); everything else renders name(args). Coverage is what
-        # this test protects — a tool missing from the index is invisible.
+    for name in names - CORE_TOOL_NAMES:
+        # Every non-core tool renders name(args); a core tool's full schema is
+        # in the same request instead (v134-F23). Coverage is what this test
+        # protects — a tool in neither place is invisible.
         mark = "*" if name in MUTATING_TOOL_NAMES else ""
-        needle = f"\n- {name}{mark}\n" if name in CORE_TOOL_NAMES else f"{name}{mark}("
-        assert needle in TOOL_INDEX_BLOCK + "\n", name
+        assert f"{name}{mark}(" in TOOL_INDEX_BLOCK, name
     for category in TOOL_CATEGORIES:
-        assert f"[{category}]" in TOOL_INDEX_BLOCK
-    # One line per tool: header + category headers + tool lines.
-    assert TOOL_INDEX_BLOCK.count("\n- ") == len(names)
+        if set(TOOL_CATEGORIES[category]) - CORE_TOOL_NAMES:
+            assert f"[{category}]" in TOOL_INDEX_BLOCK
+    # One line per non-core tool: header + category headers + tool lines.
+    assert TOOL_INDEX_BLOCK.count("\n- ") == len(names - CORE_TOOL_NAMES)
     # The index teaches the next step and the card rule (I9). The legend
     # promises the confirmation PATH, not an unconditional card: read_file and
     # search_files are in MUTATING_TOOL_NAMES and are routinely auto-allowed,
@@ -196,7 +203,12 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     first — which buys it back with zero net growth. Measured, role-less
     (assistant) chat: 20,822 → 20,818; builder (no hidden tools, the widest
     core): 24,664 → 24,584; operator: 24,584 → 24,504. All three are pinned
-    now — the builder chat is the heavier floor and was never measured."""
+    now — the builder chat is the heavier floor and was never measured.
+
+    v134-F23 ratchets DOWN: core tools lose their name-only index lines
+    (their schemas are in the request) and dispatch_run's spec sheds its
+    repetition. Measured: role-less chat 21,189 → 20,985; builder 25,081 →
+    24,622; operator 25,001 → 24,542. The pin moves 25.1KB → 24.65KB."""
     client = configured_client(config, ollama)
     for create in ({}, {"role": "builder"}, {"role": "operator"}):
         chat_id = client.post("/api/chats", json=create).json()["chat_id"]
@@ -204,9 +216,9 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
         client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
         body = ollama.chat_bodies()[-1]
         floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
-        assert floor <= 25_100, (create, floor)
+        assert floor <= 24_650, (create, floor)
         context = client.get(f"/api/chats/{chat_id}").json()["context"]
-        assert context["floor_chars"] <= 25_100, create
+        assert context["floor_chars"] <= 24_650, create
 
 
 def test_describe_tools_activates_and_the_next_round_advertises(
@@ -363,8 +375,8 @@ def test_search_web_and_read_url_ride_the_core_for_roles_that_may_use_them(
         client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
         advertised = {t["function"]["name"] for t in ollama.chat_bodies()[-1]["tools"]}
         assert {"search_web", "read_url"} <= advertised, create
-    assert _line_for("search_web") == "- search_web"
-    assert _line_for("read_url") == "- read_url*"
+    # v134-F23: core, so no index line — the full schema is in the request
+    assert _lines_for("search_web") == _lines_for("read_url") == []
     read_only = {t["function"]["name"] for t in advertised_tool_specs([], read_only=True)}
     assert "search_web" in read_only and "read_url" not in read_only
 

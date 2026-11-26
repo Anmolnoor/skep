@@ -20,7 +20,7 @@
    app.js boots on load, so its helpers come in through the import cycle —
    safe because this module only declares at top level. */
 import { api } from "../api.js";
-import { el } from "../dom.js";
+import { drawVerdictRow, el, holdVerdict } from "../dom.js";
 import { streamSse } from "../sse.js";
 import { routeLive } from "./run-detail.js";
 import { getState, setState } from "../store.js";
@@ -195,6 +195,7 @@ function reviewRow(item) {
   const face = FACE[item.kind](item);
   const loud = item.tamper || item.warning || item.high;
   const { approve, label, elsewhere, deny, stream, items } = verdicts(item);
+  const key = `${item.kind}:${item.id}`; // v134-F21 r1: a gate's is "gate:<review_id>"
   const decide = (text, verb, call) => {
     const node = el("button", { type: "button", class: verb === "approve" ? "primary" : "danger ghost" }, text);
     node.addEventListener("click", async () => {
@@ -204,10 +205,11 @@ function reviewRow(item) {
         if (!reason) return;
         body = { reason };
       }
-      node.disabled = true;
+      const held = holdVerdict(key, node.parentNode); // v134-F21: one verdict at a time
       let outcome;
       try { outcome = await send(path, body, stream, items); }
-      catch (e) { flash("bad", e.message); node.disabled = false; return; }
+      catch (e) { flash("bad", e.message); held.failed(); return; }
+      held.landed();
       const done = `${verb === "approve" ? "approved" : "denied"} ${face.title}`;
       if (outcome.failed) flash("bad", `${face.title}: ${outcome.failed}`);
       else if (outcome.warning) flash("warn", `${done} — ⚠ ${outcome.warning}`);
@@ -216,6 +218,11 @@ function reviewRow(item) {
     });
     return node;
   };
+  const row = el("div", { class: "inbox-actions" },
+    approve ? decide(label || "Approve", "approve", approve)
+      : el("a", { class: "inbox-elsewhere", href: elsewhere[0] }, elsewhere[1]),
+    deny ? decide("Deny", "deny", deny) : null);
+  drawVerdictRow(key, row); // r1: redrawn mid-request, it is drawn held
   const mirrored = item.mirrored_by || [];
   const commands = item.commands || [];
   const folded = item.items || [];
@@ -241,10 +248,7 @@ function reviewRow(item) {
       ? el("small", {}, `also asked in ${mirrored.length} chat card${mirrored.length === 1 ? "" : "s"} — resolved with it: `,
         mirrored.flatMap((m, i) => [i ? ", " : null, el("a", { href: `#/chat/${m.chat_id}` }, m.tool)]))
       : null,
-    el("div", { class: "inbox-actions" },
-      approve ? decide(label || "Approve", "approve", approve)
-        : el("a", { class: "inbox-elsewhere", href: elsewhere[0] }, elsewhere[1]),
-      deny ? decide("Deny", "deny", deny) : null));
+    row);
 }
 
 // j/k (and the arrows) move focus between rows; Enter opens one — it is a

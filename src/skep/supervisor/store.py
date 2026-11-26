@@ -582,7 +582,11 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     model TEXT NOT NULL,
     prompt_tokens INTEGER NOT NULL,
     completion_tokens INTEGER NOT NULL,
-    chat_id TEXT  -- W42b: which chat spent it (NULL: before the column)
+    chat_id TEXT,  -- W42b: which chat spent it (NULL: before the column)
+    -- v134-F22: the provider's cache-hit share of prompt_tokens, and
+    -- Anthropic's cache writes. NULL: not reported (ollama, older rows).
+    cached_tokens INTEGER,
+    cache_creation_tokens INTEGER
 );
 -- v83-F8: operator-started background processes (start_process). The row is
 -- the record; liveness is reconciled against the real pid on every read so
@@ -1502,6 +1506,10 @@ class RunStore:
         if "chat_id" not in usage_columns:
             # W42b: the tally per chat, not only global.
             self._conn.execute("ALTER TABLE llm_usage ADD COLUMN chat_id TEXT")
+        for column in ("cached_tokens", "cache_creation_tokens"):
+            if column not in usage_columns:
+                # v134-F22: rows from before read as NULL — not reported.
+                self._conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {column} INTEGER")
         provider_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(provider_profiles)")
         }
@@ -3354,26 +3362,48 @@ class RunStore:
 
     @_locked
     def record_llm_usage(
-        self, *, model: str, prompt_tokens: int, completion_tokens: int, chat_id: str | None = None
+        self,
+        *,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        chat_id: str | None = None,
+        cached_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
     ) -> None:
         cutoff = (datetime.now(UTC) - timedelta(days=self._USAGE_RETENTION_DAYS)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
         self._conn.execute("DELETE FROM llm_usage WHERE created_at < ?", (cutoff,))
         self._conn.execute(
-            "INSERT INTO llm_usage (created_at, model, prompt_tokens, completion_tokens, chat_id)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (_now(), model, prompt_tokens, completion_tokens, chat_id),
+            "INSERT INTO llm_usage (created_at, model, prompt_tokens, completion_tokens, chat_id,"
+            " cached_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                _now(),
+                model,
+                prompt_tokens,
+                completion_tokens,
+                chat_id,
+                cached_tokens,
+                cache_creation_tokens,
+            ),
         )
         self._conn.commit()
 
     @_locked
-    def llm_usage_totals(self, *, hours: float, chat_id: str | None = None) -> dict[str, int]:
-        """The tally over the last ``hours``; with ``chat_id``, that chat's share."""
+    def llm_usage_totals(
+        self, *, hours: float, chat_id: str | None = None
+    ) -> dict[str, int | None]:
+        """The tally over the last ``hours``; with ``chat_id``, that chat's share.
+        The cache sums are None when no row in the window reported one (SQL
+        SUM over only NULLs) — never a fake 0. ``cache_reported_prompt_tokens``
+        is the input of only the rows that reported a cache count: the honest
+        base for the cached share when ollama rows (no cache field) mix in."""
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         row = self._conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0),"
-            " COALESCE(SUM(completion_tokens), 0)"
+            " COALESCE(SUM(completion_tokens), 0), SUM(cached_tokens), SUM(cache_creation_tokens),"
+            " SUM(CASE WHEN cached_tokens IS NOT NULL THEN prompt_tokens END)"
             " FROM llm_usage WHERE created_at >= ? AND (? IS NULL OR chat_id = ?)",
             (cutoff, chat_id, chat_id),
         ).fetchone()
@@ -3382,6 +3412,9 @@ class RunStore:
             "prompt_tokens": int(row[1]),
             "completion_tokens": int(row[2]),
             "total_tokens": int(row[1]) + int(row[2]),
+            "cached_tokens": None if row[3] is None else int(row[3]),
+            "cache_creation_tokens": None if row[4] is None else int(row[4]),
+            "cache_reported_prompt_tokens": None if row[5] is None else int(row[5]),
         }
 
     # -- project policies (vx Stage A) ----------------------------------------

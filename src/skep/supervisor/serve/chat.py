@@ -2206,12 +2206,18 @@ class ChatEngine:
         if budget_cap is not None:
             budget = min(budget, budget_cap)
         replay, dropped = self._replay(chat_id, chat, budget=budget)
+        # v134-F22 r1: what changes mid-chat (the untrusted note, the digest)
+        # rides a second system row after the byte-stable prompt, so
+        # Anthropic's system breakpoint covers only the prompt. The wires that
+        # send rows verbatim join leading system rows back into the one
+        # message they always sent (_one_leading_system).
+        notes: list[str] = []
         if (
             UNTRUSTED_OPEN in system
             or UNTRUSTED_OPEN in summary
             or any(UNTRUSTED_OPEN in str(m.get("content") or "") for m in replay)
         ):
-            system = f"{system}\n\n{UNTRUSTED_NOTE}"
+            notes.append(UNTRUSTED_NOTE)
         if summary or dropped:
             # L19: the digest is lossy (ADR 0037) — say so, and where the rest is
             block = (
@@ -2222,8 +2228,11 @@ class ChatEngine:
                 block += f"\n{summary}"
             if dropped:
                 block += f"\n[{dropped} older messages not shown]"
-            system = f"{system}\n\n{block}"
-        return [{"role": "system", "content": system}, *replay]
+            notes.append(block)
+        rows = [{"role": "system", "content": system}]
+        if notes:
+            rows.append({"role": "system", "content": "\n\n".join(notes)})
+        return [*rows, *replay]
 
     def _replay(self, chat_id: str, chat: Any, *, budget: int) -> tuple[list[dict[str, Any]], int]:
         """The transcript slice the model sees: newest-first within budget;
@@ -2487,6 +2496,9 @@ class ChatEngine:
                     prompt_tokens=int(chunk.get("prompt_eval_count") or 0),
                     completion_tokens=int(chunk.get("eval_count") or 0),
                     chat_id=chat_id,
+                    # v134-F22: absent when the provider reports no cache field
+                    cached_tokens=chunk.get("cached_tokens"),
+                    cache_creation_tokens=chunk.get("cache_creation_tokens"),
                 )
             yield chunk
 

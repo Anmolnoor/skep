@@ -40,6 +40,7 @@ from .llm import (
     _headers,
     _open_stream_lines,
     openai_style_prefix,
+    usage_chunk,
 )
 
 
@@ -165,12 +166,11 @@ def _final_chunk(payload: dict[str, Any]) -> dict[str, Any]:
     ollama key names."""
     response = payload.get("response")
     usage = response.get("usage") if isinstance(response, dict) else None
-    chunk: dict[str, Any] = {"message": {"role": "assistant", "content": ""}, "done": True}
-    for wire, key in (("input_tokens", "prompt_eval_count"), ("output_tokens", "eval_count")):
-        value = usage.get(wire) if isinstance(usage, dict) else None
-        if value is not None:
-            chunk[key] = int(value)
-    return chunk
+    if not isinstance(usage, dict):
+        usage = {}
+    details = usage.get("input_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None  # v134-F22
+    return usage_chunk(usage.get("input_tokens"), usage.get("output_tokens"), cached)
 
 
 _THINKING_EVENTS = frozenset(

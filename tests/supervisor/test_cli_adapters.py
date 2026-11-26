@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +253,7 @@ def test_failure_details_stay_bounded_for_a_chatty_agent(
     )
     details = result.verification.details
     assert "THE LAST WORDS" in details  # the *end*, which is where the error is
-    assert len(details) < 300
+    assert len(details) < 700  # v134-F16: ~600 chars of tail, up from 200
 
 
 def test_all_cli_adapters_share_one_body() -> None:
@@ -517,3 +518,276 @@ def test_v126_f5_castes_without_memory_in_their_prompt_say_not_delivered() -> No
     for module in (reviewer, audit, script_worker):
         payload = module._task_start_payload(task)
         assert str(payload["memory_delivered"]).startswith("not delivered"), module.__name__
+
+
+def test_v134_f14_whitespace_only_findings_are_a_risk_note_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F14: one trailing space failed a Claude Code run on the live test
+    with a bare "git diff --check failed" — the findings go to stdout, which the
+    details never read. The adapter's check is hygiene; G10 (the pinned
+    verify_command) decides what is verified, so whitespace is a risk note and
+    the run still completes with its patch."""
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\nPath('spaced.py').write_text('x = 1 \\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.COMPLETED
+    assert result.verification.outcome is VerificationOutcome.PASSED
+    assert "spaced.py:1: trailing whitespace." in result.verification.details
+    assert result.risk_flags == ["diff-check-whitespace"]
+    assert any(a.kind == "patch" for a in result.artifacts)
+    assert result.changed_files == ["spaced.py"]
+
+
+def test_v134_f14_a_leftover_conflict_marker_still_fails_and_says_where(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\n"
+        "Path('merged.py').write_text('x = 1 \\n<<<<<<< HEAD\\ny = 2\\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.FAILED
+    assert result.verification.outcome is VerificationOutcome.FAILED
+    assert "merged.py:2: leftover conflict marker" in result.verification.details
+
+
+def _real_diff_check(tmp_path: Path, files: dict[str, str]) -> str:
+    """What `git diff --check` really prints for ``files`` written over a
+    committed baseline — the fixture is git's output, never a hand-typed guess."""
+    workspace = _seed_repo(tmp_path)
+    for name in files:
+        (workspace / name).write_text("base\n", encoding="utf-8")
+    _git(workspace, "add", ".")
+    _git(workspace, "commit", "-qm", "baseline")
+    for name, text in files.items():
+        (workspace / name).write_text(text, encoding="utf-8")
+    proc = subprocess.run(
+        ["git", "-C", str(workspace), "diff", "--check"], capture_output=True, text=True
+    )
+    assert proc.returncode == 2, proc  # git's "the check found problems" code
+    return proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("files", "whitespace_only"),
+    [
+        ({"a.py": "x = 1 \n"}, True),
+        ({"a.py": " \tx = 1\n"}, True),
+        ({"a.py": "x = 1\n\n"}, True),  # a blank line at EOF
+        ({"a.py": "x = 1 \n", "b.py": " \ty\n", "c.py": "z\n\n"}, True),
+        # the echoed line can say anything; it is skipped by position, not read
+        ({"a.py": "b.py:3: leftover conflict marker \n"}, True),
+        # a header that starts with "+" is still a header (Sol's misread class)
+        ({"+notes.txt": "x \n"}, True),
+        ({"a.py": "<<<<<<< HEAD\n"}, False),
+        ({"a.py": "x = 1 \n", "b.py": "<<<<<<< HEAD\ny\n"}, False),
+    ],
+)
+def test_v134_f14_whitespace_classifier_reads_real_git_output(
+    tmp_path: Path, files: dict[str, str], whitespace_only: bool
+) -> None:
+    """v134-F14 r1: git prints `path:line: message` and then echoes the
+    offending `+line`; the classifier read the echo as content and misjudged
+    real output. It now parses the headers and skips the echo under each."""
+    from skep.workers.cli_adapter import _diff_check_findings, _whitespace_only
+
+    findings = _diff_check_findings(_real_diff_check(tmp_path, files))
+    assert findings and all(":" in line and not line.startswith("+x") for line in findings)
+    assert _whitespace_only(findings) is whitespace_only
+
+
+def test_v134_f14_unknown_or_empty_output_is_not_whitespace() -> None:
+    from skep.workers.cli_adapter import _diff_check_findings, _whitespace_only
+
+    assert _whitespace_only(_diff_check_findings("")) is False
+    assert _whitespace_only(_diff_check_findings("a.py:1: a message git adds later\n")) is False
+    assert _whitespace_only(_diff_check_findings("warning: something else\n")) is False
+
+
+def test_v134_f14_a_timed_out_check_is_never_whitespace_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F14 r1: a check killed at its timeout has partial output — the
+    conflict marker may sit past the cut. Only a completed check classifies."""
+    from skep.workers import cli_adapter
+
+    real_run = cli_adapter._run
+
+    def run(argv: list[str], **kwargs: Any) -> Any:
+        proc, record = real_run(argv, **kwargs)
+        if kwargs["purpose"] == "verify":
+            proc = subprocess.CompletedProcess(argv, -1, proc.stdout, "command timed out after 1s")
+        return proc, record
+
+    monkeypatch.setattr(cli_adapter, "_run", run)
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\nPath('spaced.py').write_text('x = 1 \\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.FAILED
+    assert result.risk_flags == []
+    assert "spaced.py:1: trailing whitespace." in result.verification.details
+
+
+def test_v134_f14_details_keep_the_finding_lines_not_the_echoed_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F14 r1: the echoed `+line` is the file's content — a `.env` value
+    rode into verification_details. Only `path:line: message` is kept."""
+    value = "v" * 20  # built at runtime: no credential-shaped literal in git
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\n"
+        f"Path('settings.py').write_text('MODE = \"{value}\" \\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.COMPLETED
+    assert "settings.py:1: trailing whitespace." in result.verification.details
+    assert value not in result.verification.details
+
+
+def test_v134_f14_the_agent_tail_in_the_details_is_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "p" * 24  # built at runtime
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        f"print('push failed for https://{secret}@git.example/x.git')\nraise SystemExit(1)\n",
+    )
+    assert result.status is TaskState.FAILED
+    assert "https://***@git.example/x.git" in result.verification.details
+    assert secret not in result.verification.details
+
+
+def test_v134_f14_a_credential_the_tail_cut_would_split_is_masked_first() -> None:
+    secret = "p" * 24  # built at runtime
+    words = "I pushed the branch and it failed. " * 15
+    tail = _tail_of(f"see https://{secret}@git.example/x.git " + words[:560])
+    assert "p" * 6 not in tail
+
+
+def test_v134_f14_the_whitespace_risk_flag_blocks_the_default_auto_landing_rules() -> None:
+    """The flag is what keeps a declarative rule from landing the patch
+    unattended (forbid_risk_flags=True on every default rule)."""
+    from skep.supervisor.policy import (
+        SAFE_DEPENDENCY_RULE,
+        VERIFIED_PATCH_RULE,
+        AutoApprovalContext,
+        evaluate,
+    )
+
+    def ctx(risk_flags: tuple[str, ...]) -> AutoApprovalContext:
+        return AutoApprovalContext(
+            verification_outcome="passed",
+            reverify_confirmed=True,
+            risk_flags=risk_flags,
+            changed_files=("uv.lock",),
+            verify_pinned=True,
+            reverify_commands=("uv run pytest",),
+        )
+
+    rules = (VERIFIED_PATCH_RULE, SAFE_DEPENDENCY_RULE)
+    assert evaluate(rules, ctx(())) is not None  # the control: it would land
+    assert evaluate(rules, ctx(("diff-check-whitespace",))) is None
+
+
+def test_v134_f15_a_timed_out_agent_keeps_its_partial_output(tmp_path: Path) -> None:
+    """v134-F15: on POSIX TimeoutExpired carries bytes even under text=True, and
+    the adapter kept only str — a run killed at its wall clock (01a2123b, mid
+    `npm install`) left no trace of what it was doing."""
+    import json
+
+    from skep.workers.cli_adapter import _agent_tail, _EventStream, _run
+
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = "import sys,time; print('installing deps', flush=True); "
+    script += "sys.stderr.write('npm WARN caf\\u00e9\\n'); sys.stderr.flush(); time.sleep(30)"
+    proc, _record = _run(
+        [sys.executable, "-c", script], cwd=tmp_path, timeout=1, stream=stream, purpose="agent"
+    )
+    assert proc.returncode == -1
+    assert "installing deps" in proc.stdout
+    assert "npm WARN café" in proc.stderr
+    assert _agent_tail(proc).endswith("npm WARN café\ncommand timed out after 1s")
+    result = json.loads((tmp_path / "events.ndjson").read_text().splitlines()[-1])
+    assert "installing deps" in result["payload"]["stdout"]
+
+
+def test_v134_f15_a_timed_out_agent_that_wrote_only_stdout_keeps_its_words(
+    tmp_path: Path,
+) -> None:
+    """v134-F15 r1: the timeout note filled stderr, which the tail reads
+    first, so an agent that writes to stdout (claude --print, codex) and hung
+    was summed up as just "command timed out". Its own words come first."""
+    from skep.workers.cli_adapter import _agent_tail, _EventStream, _run
+
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = "import time; print('I was halfway through editing parser.py', flush=True); "
+    script += "time.sleep(30)"
+    proc, _record = _run(
+        [sys.executable, "-c", script], cwd=tmp_path, timeout=1, stream=stream, purpose="agent"
+    )
+    assert proc.returncode == -1
+    assert proc.stderr == "command timed out after 1s"  # the event still says why
+    assert _agent_tail(proc) == (
+        "I was halfway through editing parser.py\ncommand timed out after 1s"
+    )
+
+
+@pytest.mark.parametrize("timeout", [1, 30])
+def test_v134_f15_a_credential_an_agent_prints_is_masked_in_its_command_event(
+    tmp_path: Path, timeout: int
+) -> None:
+    """v134-F15 r4 (Sol): F15 began keeping a timed-out agent's partial
+    output in the command event; a run that finished already kept its full
+    output. Both are now masked like every other stored detail."""
+    import json
+
+    from skep.workers.cli_adapter import _EventStream, _run
+
+    secret = "q" * 24
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = f"import sys,time; print('see https://{secret}@git.example/x', flush=True); "
+    script += f"sys.stderr.write('Authorization: Bearer {secret}\\n'); sys.stderr.flush(); "
+    script += "time.sleep(5)" if timeout == 1 else "pass"
+    _run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        timeout=timeout,
+        stream=stream,
+        purpose="agent",
+    )
+    payload = json.loads((tmp_path / "events.ndjson").read_text().splitlines()[-1])["payload"]
+    for field in ("stdout", "stderr", "stdout_tail", "stderr_tail"):
+        assert secret not in payload[field], field
+    assert "git.example" in payload["stdout"]
+
+
+def _tail_of(stdout: str) -> str:
+    from skep.workers.cli_adapter import _agent_tail
+
+    return _agent_tail(subprocess.CompletedProcess(["agent"], 0, stdout, ""))
+
+
+def test_v134_f16_the_agent_tail_starts_at_a_sentence() -> None:
+    """v134-F16: the last words were cut to 200 chars mid-word ("ts in the
+    worktree…"). Keep about 600 and start where a sentence starts."""
+    words = "I edited the parser and ran the tests in the worktree. " * 20
+    tail = _tail_of(words + "All tests pass.")
+    assert 400 < len(tail) <= 600
+    assert tail.startswith("I edited the parser")
+    assert tail.endswith("All tests pass.")
+
+
+def test_v134_f16_without_a_sentence_the_tail_starts_at_a_word() -> None:
+    tail = _tail_of(" ".join(f"word{n}" for n in range(400)))
+    assert 400 < len(tail) <= 600
+    first = tail.split()[0]
+    assert first.startswith("word") and first[4:].isdigit()
+    assert tail.endswith("word399")

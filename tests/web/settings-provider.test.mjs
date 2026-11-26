@@ -31,7 +31,7 @@ function modelsApp(routes = {}) {
   const calls = [];
   const table = {
     "GET /api/llm/config": LLM,
-    "GET /api/llm/usage": { last_5h: { total_tokens: 0, requests: 0 }, last_7d: { total_tokens: 0, requests: 0 } },
+    "GET /api/llm/usage": { last_5h: { total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, requests: 0, cached_tokens: null }, last_7d: { total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, requests: 0, cached_tokens: null } },
     "GET /api/llm/models": { models: ["llama3.2"] },
     "GET /api/provider-presets": { presets: [] },
     "GET /api/providers": PROVIDERS,

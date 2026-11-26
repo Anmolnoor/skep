@@ -63,6 +63,63 @@ def test_search_web_zero_hits_is_a_result_but_backend_failure_is_an_error() -> N
         search_web("q", run=lambda query, limit: (_ for _ in ()).throw(RuntimeError("throttled")))
 
 
+_NOTHING = "no page matched, or the search engines did not answer"
+
+
+def test_ddgs_no_results_says_it_cannot_tell_empty_from_unanswered() -> None:
+    """v134-F20 r1: ddgs raises its bare DDGSException("No results found.")
+    both when every engine answered with nothing and when its wait for slow
+    engines ran out (ddgs.py _search_sync), so skep cannot call it an empty
+    result. It says both readings, without claiming the backend failed; an
+    engine error or a timeout still fails as before."""
+    from ddgs.exceptions import DDGSException, TimeoutException
+
+    def raising(exc: Exception) -> Callable[[str, int], list[dict[str, Any]]]:
+        def run(query: str, limit: int) -> list[dict[str, Any]]:
+            raise exc
+
+        return run
+
+    with pytest.raises(WebSearchError, match=_NOTHING) as nothing:
+        search_web("q", run=raising(DDGSException("No results found.")))
+    assert "backend failed" not in str(nothing.value)
+    assert "rephrase the query or try again" in str(nothing.value)
+    with pytest.raises(WebSearchError, match="backend failed"):
+        search_web("q", run=raising(DDGSException("https://html.duckduckgo.com 403")))
+    with pytest.raises(WebSearchError, match="backend failed"):
+        search_web("q", run=raising(TimeoutException("No results found.")))
+
+
+def test_ddgs_slow_engines_past_its_wait_are_not_reported_as_an_empty_search() -> None:
+    """v134-F20 r1 (review): two engines slower than ddgs's own wait, one of
+    them raising, end in the same "No results found." as a search that matched
+    nothing — real ddgs, mocked engines, no network."""
+    import time
+
+    from ddgs import DDGS
+
+    class SlowEngine:
+        def __init__(self, provider: str, fail: bool) -> None:
+            self.provider = self.name = provider
+            self.fail = fail
+
+        def search(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+            time.sleep(0.3)
+            if self.fail:
+                raise RuntimeError("engine down")
+            return [{"title": "late", "href": "https://example.com/late", "body": ""}]
+
+    def run(query: str, limit: int) -> list[dict[str, Any]]:
+        client = DDGS(timeout=cast(Any, 0.05))
+        engines = [SlowEngine("one", fail=True), SlowEngine("two", fail=False)]
+        cast(Any, client)._get_engines = lambda category, backend: engines
+        return list(client.text(query, max_results=limit))
+
+    with pytest.raises(WebSearchError, match=_NOTHING) as nothing:
+        search_web("q", run=run)
+    assert "backend failed" not in str(nothing.value)
+
+
 def test_search_web_times_out_instead_of_hanging_the_queen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1132,3 +1189,25 @@ def test_no_address_is_dialled_after_the_deadline(monkeypatch: pytest.MonkeyPatc
         websearch.fetch_url_text("https://two.example/", resolve=two)
     time.sleep(0.6)  # the abandoned reader has had time to try the next address
     assert len(sent) == 1
+
+
+def test_an_empty_search_is_not_called_a_failure_by_the_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """v134-F20 r1: the tool passes the search's own words through — an
+    empty-or-unanswered search does not reach the Queen as "failed"."""
+    from skep.supervisor import RunStore
+
+    def _empty(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        raise WebSearchError("the search returned nothing: no page matched")
+
+    monkeypatch.setattr("skep.supervisor.serve.websearch.search_web", _empty)
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
+    try:
+        result = execute_read_tool(
+            "search_web", {"query": "x"}, store=store, holder=_holder(tmp_path, store)
+        )
+    finally:
+        store.close()
+    assert result["results"] == []
+    assert result["error"] == "web search: the search returned nothing: no page matched"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -203,29 +204,43 @@ def _run(
     except FileNotFoundError as exc:
         proc = subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        proc = subprocess.CompletedProcess(argv, -1, stdout, stderr or "command timed out")
+        # v134-F15: on POSIX the partial output is bytes even under text=True.
+        stdout, stderr = (
+            out.decode("utf-8", errors="replace") if isinstance(out, bytes) else out or ""
+            for out in (exc.stdout, exc.stderr)
+        )
+        note = f"command timed out after {timeout}s"
+        stderr = f"{stderr.rstrip()}\n{note}" if stderr.strip() else note
+        proc = subprocess.CompletedProcess(argv, -1, stdout, stderr)
     finally:
         done.set()
         beater.join()
     duration_ms = int((time.monotonic() - started) * 1000)
+    from skep.supervisor.policy_v3 import redact_export
+
+    # v134-F15 r4: the stored output is masked, finished or timed out
+    # (proc keeps the raw text the adapter itself reads)
+    stdout, stderr = redact_export(proc.stdout), redact_export(proc.stderr)
     stream.emit(
         EventType.COMMAND_RESULT,
         {
             "command": command,
             "exit_code": proc.returncode,
             "duration_ms": duration_ms,
-            "stdout_tail": proc.stdout[-200:],
-            "stderr_tail": proc.stderr[-200:],
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout_tail": stdout[-200:],
+            "stderr_tail": stderr[-200:],
+            "stdout": stdout,
+            "stderr": stderr,
         },
     )
     return proc, CommandRecord(command=command, exit_code=proc.returncode, purpose=purpose)
 
 
-def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 200) -> str:
+# v134-F15 r1: the note _run appends to a timed-out command's stderr.
+_TIMEOUT_NOTE = re.compile(r"(?:\A|\n)(command timed out after \d+s)\Z")
+
+
+def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str:
     """v100-F8: the agent's own last words, for the operator-visible details.
 
     stderr first, falling back to stdout — `claude --print` reports API errors on
@@ -234,8 +249,66 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 200) -> str
     transcript (the full text stays in the COMMAND_RESULT event), because
     Verification.details is rendered in cards and CLI output.
     """
-    text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
-    return text[-limit:].strip()
+    from skep.supervisor.policy_v3 import redact_export
+
+    stderr = proc.stderr or ""
+    # v134-F15 r1: on a timeout _run appends its note to stderr, which hid the
+    # words of an agent that writes to stdout (claude --print, codex): the
+    # tail is the agent's own partial output, then the note.
+    note = _TIMEOUT_NOTE.search(stderr) if proc.returncode == -1 else None
+    if note:
+        stderr = stderr[: note.start()]
+    # v134-F14 r1: masked BEFORE the cut, so a cut never leaves half of one.
+    text = redact_export(stderr.strip() or (proc.stdout or "").strip())
+    if len(text) > limit:
+        # v134-F16: start at a sentence, else a word, when one starts in the
+        # first half — a 200-char hard cut read "ts in the worktree". The one
+        # extra char tells whether the cut already sits on a word boundary.
+        tail = text[-limit - 1 :]
+        head = tail[: limit // 2]
+        start = re.search(r"[.!?]\s+|\n", head) or re.search(r"\s", head)
+        text = tail[start.end() if start else 1 :].strip()
+    if note:
+        return f"{text}\n{note[1]}" if text else note[1]
+    return text
+
+
+# v134-F14: what `git diff --check` reports that is whitespace and nothing else.
+_WHITESPACE_FINDINGS = frozenset(
+    {"trailing whitespace", "space before tab in indent", "new blank line at EOF"}
+)
+_FINDING = re.compile(r".+:\d+: (?P<message>.+)")
+
+
+def _diff_check_findings(stdout: str) -> list[str]:
+    """`git diff --check` output without the echoed patch lines.
+
+    git prints ``path:line: message``; a whitespace message ends with "." and
+    the offending line follows it, echoed with a ``+`` (a blank line at EOF
+    and a conflict marker echo nothing). The echo is file content: it can say
+    anything, even look like a finding, so it is skipped by position, never
+    read (v134-F14 r1).
+    """
+    kept: list[str] = []
+    echo_next = False
+    for line in stdout.split("\n"):
+        if echo_next:
+            echo_next = False
+        elif line:
+            kept.append(line)
+            echo_next = line.endswith(".") and not line.endswith(": new blank line at EOF.")
+    return kept
+
+
+def _whitespace_only(findings: list[str]) -> bool:
+    """True when every finding is a whitespace problem (git joins several on
+    one line with ", "). A conflict marker, or anything unknown, is not."""
+    matches = [_FINDING.fullmatch(line) for line in findings]
+    return bool(findings) and all(
+        match is not None
+        and set(match["message"].removesuffix(".").split(", ")) <= _WHITESPACE_FINDINGS
+        for match in matches
+    )
 
 
 def _git(workspace: Path, *args: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -353,6 +426,11 @@ def _execute(
 
     label = spec.worker_version.split("-adapter-")[0]
     agent_tail = _agent_tail(agent_proc)
+    # v134-F14: `git diff --check` reports on STDOUT; stderr was all we read.
+    # r1: only the `path:line: message` lines — the echo is file content.
+    found = _diff_check_findings(verify_proc.stdout)
+    findings = "\n".join(line for line in found if _FINDING.fullmatch(line))[:600]
+    risk_flags: list[str] = []
     if agent_proc.returncode != 0:
         status = TaskState.FAILED
         outcome = VerificationOutcome.NOT_ATTEMPTED
@@ -367,16 +445,31 @@ def _execute(
         if agent_tail:
             details = f"{details}: {agent_tail}"
         summary = f"{label} completed but produced no patch."
+    elif verify_proc.returncode > 0 and _whitespace_only(found):
+        # r1: a COMPLETED check only — a timeout (-1) leaves partial output.
+        # v134-F14: a hygiene check, not the verdict — G10 re-runs the
+        # project's pinned verify_command on this patch either way.
+        status = TaskState.COMPLETED
+        outcome = VerificationOutcome.PASSED
+        details = f"git diff --check found whitespace problems only: {findings}"
+        summary = f"{label} produced a patch with whitespace problems."
+        risk_flags.append("diff-check-whitespace")
     elif verify_proc.returncode != 0:
         status = TaskState.FAILED
         outcome = VerificationOutcome.FAILED
-        details = verify_proc.stderr.strip() or "git diff --check failed"
+        details = "git diff --check failed"
+        reason = findings or verify_proc.stderr.strip()
+        if reason:
+            details = f"{details}: {reason}"
         summary = f"{label} produced a patch but diff verification failed."
     else:
         status = TaskState.COMPLETED
         outcome = VerificationOutcome.PASSED
         details = "git diff --check passed"
         summary = f"{label} produced a verified patch."
+    from skep.supervisor.policy_v3 import redact_export
+
+    details = redact_export(details)  # v134-F14 r1: the agent tail, git's stderr
 
     stream.emit(
         EventType.VERIFY_RESULT,
@@ -399,7 +492,7 @@ def _execute(
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,
         usage=Usage(provider_calls=1 if agent_proc.returncode != 127 else 0),
-        risk_flags=[],
+        risk_flags=risk_flags,
     )
     _write_result(out_path, result)
     return EXIT_COMPLETED if status is TaskState.COMPLETED else EXIT_FAILED
