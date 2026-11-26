@@ -105,9 +105,12 @@ class OllamaError(Exception):
     from a transient failure (retry identical) without parsing the message.
     """
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(self, message: str, *, status: int | None = None, body: str = "") -> None:
         super().__init__(message)
         self.status = status
+        # v134-F22 r2: the whole error body, for decisions the capped message
+        # can miss (a field named only in error.param, or past the cap)
+        self.body = body
 
 
 def resolve_api_key(home: Path) -> str | None:
@@ -1174,6 +1177,7 @@ def _open_stream_lines(
                     + (f": {detail}" if detail else "")
                     + _login_refused(base_url, response.status_code),
                     status=response.status_code,
+                    body=response.text,
                 )
             yield from response.iter_lines()
             return
@@ -1442,7 +1446,7 @@ def _openai_stream_lines(
         status = exc.status or 0
         if "stream_options" not in body or not 400 <= status < 500:
             raise
-        if "stream_options" not in str(exc):
+        if "stream_options" not in exc.body:
             raise
         _NO_STREAM_OPTIONS.add(base_url)
         body.pop("stream_options")

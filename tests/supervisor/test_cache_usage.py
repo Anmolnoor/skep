@@ -147,6 +147,19 @@ def test_a_server_that_refuses_stream_options_is_retried_once_without_it(
     assert [("stream_options" in b) for b in openai.chat_bodies()] == [True, False, False]
 
 
+@pytest.mark.parametrize("message", ["Invalid request.", "bad value; " * 60])
+def test_a_refusal_that_names_stream_options_only_in_its_body_is_retried(
+    openai: FakeOpenAI, message: str
+) -> None:
+    """v134-F22 r2 (Sol, Opus): a strict server can name the field only in
+    error.param, or past the 300 chars the error text keeps."""
+    openai.rejected_fields = {"stream_options"}
+    openai.rejection_message = message
+    openai.script_reply("ok")
+    assert _say(openai, "hi") == "ok"
+    assert [("stream_options" in b) for b in openai.chat_bodies()] == [True, False]
+
+
 @pytest.mark.parametrize("refusal", ["other field", "bad key"])
 def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
     if refusal == "other field":
