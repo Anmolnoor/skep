@@ -267,12 +267,23 @@ def test_store_keeps_cached_tokens_and_old_rows_read_as_unknown(config: Supervis
     assert totals["prompt_tokens"] == 110
 
 
+# The table exactly as 2.2.0 created it, trailing comment included: DROP
+# COLUMN cannot fake it (SQLite 3.47 rejects the rewritten text), and the
+# migration's ADD COLUMN must cope with the real stored text.
+_PRE_F22_LLM_USAGE = """CREATE TABLE llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    chat_id TEXT  -- W42b: which chat spent it (NULL: before the column)
+)"""
+
+
 def test_an_older_store_gains_the_cache_columns(tmp_path: Path) -> None:
     db = tmp_path / "s.db"
-    RunStore(db).close()
     with sqlite3.connect(db) as conn:
-        conn.execute("ALTER TABLE llm_usage DROP COLUMN cached_tokens")
-        conn.execute("ALTER TABLE llm_usage DROP COLUMN cache_creation_tokens")
+        conn.execute(_PRE_F22_LLM_USAGE)
         conn.execute(
             "INSERT INTO llm_usage (created_at, model, prompt_tokens, completion_tokens)"
             " VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'm', 5, 1)"
