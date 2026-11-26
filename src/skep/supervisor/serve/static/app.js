@@ -2719,8 +2719,9 @@ async function viewChat(main, chatId) {
       keepCovers(d.card),
       cardReplay(d.card),
       row);
-    // v134-F21 r2: keyed, so a chat redrawn mid-request draws this card held
-    const key = `action:${d.action_id}`;
+    // v134-F21 r2: keyed, so a chat redrawn mid-request draws this card held;
+    // r3: the Inbox's key for the same card, so a verdict there holds it here
+    const key = `card:${d.action_id}`;
     drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
       const hold = holdVerdict(key, row); // double-click guard
@@ -2811,7 +2812,7 @@ async function viewChat(main, chatId) {
       ...cardBody(d),
       notes.map(note => el("p", { class: "note" }, note)),
       row);
-    const key = `action:${d.action_id}`; // v134-F21 r2
+    const key = `card:${d.action_id}`; // v134-F21 r2/r3: the Inbox's key
     drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
       const hold = holdVerdict(key, row); // double-click guard
@@ -2843,19 +2844,23 @@ async function viewChat(main, chatId) {
   // (a deny only narrows). Never locks the composer.
   const elsewhereCard = (d) => {
     const cancel = el("button", { class: "danger" }, "Cancel");
+    const row = el("div", { class: "actions" }, cancel);
     const card = el("div", { class: "confirm-card command-card elsewhere-card", "data-action-id": d.action_id },
       ...cardBody(d),
       el("p", { class: "note" }, d.web_refusal),
-      el("div", { class: "actions" }, cancel));
+      row);
+    const key = `card:${d.action_id}`; // v134-F21 r3 (Terra): held across a redraw
+    drawVerdictRow(key, row);
     cancel.addEventListener("click", async () => {
-      cancel.disabled = true;
+      const hold = holdVerdict(key, row);
       try {
         const result = await api("POST", `/api/chats/${activeChatId}/commands/${d.action_id}/deny`);
+        hold.landed();
         commandResult(`${d.tool}: canceled`, result, d.tool);
         resolveCardUI(card, "✗ Canceled", "deny");
       } catch (e) {
         flash("bad", e.message);
-        cancel.disabled = false;
+        hold.failed();
       }
       setComposerLocked(anyCardPending());
     });
@@ -2878,7 +2883,7 @@ async function viewChat(main, chatId) {
       whyLine(d),
       row);
     // v134-F21 r2: the gate's own key, shared with the Approvals view and Inbox
-    const key = d.args?.review_id ? `gate:${d.args.review_id}` : `action:${d.action_id}`;
+    const key = d.args?.review_id ? `gate:${d.args.review_id}` : `card:${d.action_id}`;
     drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
       const hold = holdVerdict(key, row); // double-click guard

@@ -289,17 +289,14 @@ async function chatCard(request, posts) {
   return main.querySelector(".command-card").querySelector(".actions");
 }
 
-test("chat card: a chat redrawn while its confirm is in flight draws the card held", async () => {
-  // v134-F21 r2 (Sol): reopening the chat mid-request drew live buttons
-  const request = inFlight();
-  const posts = [];
+function chatApp(request, posts, card = ROLE_CARD) {
   const app = loadApp();
   app.api = async (method, path) => {
     if (method === "POST") { posts.push(path); return request.promise; }
     if (path === "/api/commands") return DECK;
     if (path === "/api/llm/config") return { configured: true, default_model: "m" };
     if (path === "/api/chats") return { chats: [{ chat_id: "c1", title: "t" }] };
-    if (path === "/api/chats/c1") return { chat: { chat_id: "c1", title: "t" }, messages: [], actions: [ROLE_CARD] };
+    if (path === "/api/chats/c1") return { chat: { chat_id: "c1", title: "t" }, messages: [], actions: [card] };
     if (path === "/api/roles") return { roles: [], default: null };
     if (path === "/api/llm/models") return { models: [] };
     if (path === "/api/projects") return { projects: [] };
@@ -310,19 +307,42 @@ test("chat card: a chat redrawn while its confirm is in flight draws the card he
   app.setInterval = () => 0;
   app.clearInterval = () => {};
   app.watchStatus = () => {};
-  const first = app.document.createElement("main");
-  await app.viewChat(first, "c1");
-  const pressed = button(first.querySelector(".command-card").querySelector(".actions"), "Confirm").click();
-  await tick();
-  const again = app.document.createElement("main");
-  await app.viewChat(again, "c1");
-  const row = again.querySelector(".command-card").querySelector(".actions");
-  assert.ok(row.querySelectorAll("button").every(b => b.disabled), "the redrawn card is held");
-  await button(row, "Cancel").click();
-  request.reject(new Error("refused"));
-  await pressed;
-  assert.deepEqual(posts, ["/api/chats/c1/commands/a-role/confirm"]);
-  assert.ok(row.querySelectorAll("button").every(b => !b.disabled), "a failure gives the buttons back");
+  return app;
+}
+
+async function chatRow(app) {
+  const main = app.document.createElement("main");
+  await app.viewChat(main, "c1");
+  return main.querySelector(".command-card").querySelector(".actions");
+}
+
+for (const [name, card, label] of [
+  ["chat card", ROLE_CARD, "Confirm"],
+  ["answer-elsewhere card", { ...ROLE_CARD, web_refusal: "answer it in skep chat" }, "Cancel"],
+]) {
+  test(`${name}: a chat redrawn while its verdict is in flight draws the card held`, async () => {
+    // v134-F21 r2/r3 (Sol, Terra): reopening the chat mid-request drew live buttons
+    const request = inFlight();
+    const posts = [];
+    const app = chatApp(request, posts, card);
+    const pressed = button(await chatRow(app), label).click();
+    await tick();
+    const row = await chatRow(app);
+    assert.ok(row.querySelectorAll("button").every(b => b.disabled), "the redrawn card is held");
+    await button(row, "Cancel").click();
+    request.reject(new Error("refused"));
+    await pressed;
+    assert.equal(posts.length, 1, posts);
+    assert.ok(row.querySelectorAll("button").every(b => !b.disabled), "a failure gives the buttons back");
+  });
+}
+
+test("chat card: a verdict in flight from the Inbox draws the chat's card held", async () => {
+  // v134-F21 r3 (Opus): the Inbox keys a chat card card:<action_id>; so does the chat
+  const app = chatApp(inFlight(), []);
+  app.holdVerdict("card:a-role", app.el("div"));
+  const row = await chatRow(app);
+  assert.ok(row.querySelectorAll("button").every(b => b.disabled));
 });
 
 test("chat card: a double click on Confirm sends one request", async () => {
