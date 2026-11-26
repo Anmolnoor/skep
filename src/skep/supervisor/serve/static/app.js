@@ -285,11 +285,13 @@ function cardRuns(card) {
       el("span", { class: "mono" }, `run ${shortTaskId(run.task_id)}`),
       run.tamper ? el("p", { class: "banner bad", role: "alert" }, `⚠ V1 · ${run.tamper}`) : null,
       run.warning && run.warning !== run.tamper ? ` · ⚠ ${run.warning}` : null,
-      !run.warning && !run.tamper ? " · no G10 or V1 warning" : null,
+      // v134-F4 (S1): a syntax-only pass is a warning, never "no warning"
+      run.g10_weak ? ` · ⚠ ${run.g10_weak}` : null,
+      !run.warning && !run.tamper && !run.g10_weak ? " · no G10 or V1 warning" : null,
       // v133-F34 (F-I3, J1): the worker's result and G10's apart, each in the
       // store's words; a landing from before v133 says what it lacks.
       run.worker ? el("p", { class: "note card-run-worker" }, run.worker) : null,
-      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" ? "" : " bad"}` },
+      run.supervisor ? el("p", { class: `card-run-supervisor${run.g10?.outcome === "passed" && !run.g10_weak ? "" : " bad"}` },
         run.supervisor) : null,
       run.landing ? el("p", { class: "note card-run-landing" }, run.landing) : null))));
 }
@@ -1418,7 +1420,12 @@ function unwrapToolResult(raw) {
   return raw;
 }
 
-function shortTaskId(id) { return String(id || "").slice(0, 8); }
+// v134-F5 (N3): 13, not 8 — a UUIDv7's first 8 hex chars change only every
+// ~65 s, so runs started together shared one (01a211bf three times).
+// ponytail: 13 = the full millisecond; runs minted in the same ms (not the
+// dispatch path, which makes a worktree per run) still share one — go to 18
+// (adds 12 random bits) if that ever shows.
+function shortTaskId(id) { return String(id || "").slice(0, 13); }
 
 // v128-F11: a confirmed /workon set up a project — the chat moves onto it.
 // The server binds only an EMPTY slot, and a new chat already sits on the
@@ -1548,212 +1555,61 @@ function renderActivityGroup(log, options = {}) {
   };
 }
 
-// v40-F3 (v35): the worker activity block — live run telemetry inline in the
-// chat, rendered BY REFERENCE from the existing run endpoints (never copied
-// into the transcript; the events table stays the single source of truth).
-// READ-ONLY by design: approvals resolve on the run page or via /approve —
-// this block never grows buttons (no shadow approval surface).
-const ACTIVE_RUN_STATES = new Set(["created", "dispatched", "running"]);
+// v134-F6 (W1, the operator's ask): one line per worker in the transcript —
+// what it is, its state or live progress on the right, and Open ↗ for the
+// run page in a new tab (the serve token is in localStorage, shared across
+// tabs). The commands, files and plan the old block expanded are on that
+// page. READ-ONLY: a row never approves (no shadow approval surface).
+// The status span carries data-task-id: the chat view's status stream
+// writes every span of a run, the transcript's and the side panel's (W2).
 const DISPATCHED_RESULT_STATES = new Set(["dispatched", "research_dispatched"]);
-const MAX_LIVE_WORKER_BLOCKS = 3;
-const liveWorkerSources = new Set();
+// TaskState minus TERMINAL_STATES (a gated run has stopped; its approval
+// resumes it as a new run).
+const LIVE_RUN_STATES = new Set(["created", "dispatched", "running"]);
 // v92-F1: terminal announcements dedupe here — the status stream replays
 // terminals for 30s after a reconnect (v56-F7), and the post-redraw
 // resubscribe must not re-flash (or re-redraw) the same ending.
 const notifiedTerminalRuns = new Set();
 
-function closeLiveWorkerSources() {
-  for (const source of liveWorkerSources) source.close();
-  liveWorkerSources.clear();
+function runStateWords(state) {
+  return state === "pending_approval" ? "waiting for your approval" : String(state || "?");
 }
 
-// Pure diffstat over a unified diff: count +/- body lines, skip the
-// +++/--- file headers.
-function diffstat(text) {
-  let added = 0;
-  let removed = 0;
-  for (const line of String(text || "").split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) added += 1;
-    else if (line.startsWith("-")) removed += 1;
-  }
-  return { added, removed };
+// A run's status span; the live drawer finds it by its task id.
+function liveRunStatus(taskId, state) {
+  return el("span", { class: `live-run-status state ${state || ""}`, "data-task-id": taskId },
+    runStateWords(state));
 }
 
-function workerRow(body, summary, detailNode = null) {
-  const row = el("div", { class: "worker-activity-row" });
-  const label = el("span", { class: "worker-activity-row-summary" }, summary);
-  if (detailNode) {
-    detailNode.classList.add("worker-activity-row-detail");
-    row.append(
-      el("button", {
-        class: "worker-activity-row-header",
-        type: "button",
-        onclick: () => row.classList.toggle("open"),
-      },
-        label,
-        el("span", { class: "agent-thread-chevron", "aria-hidden": "true" }, "\u203a")),
-      detailNode);
-  } else {
-    row.append(el("div", { class: "worker-activity-row-header static" }, label));
-  }
-  body.append(row);
-  return { row, setSummary(next) { label.textContent = next; } };
+function openRunLink(taskId) {
+  return el("a", {
+    class: "open-run", href: `#/runs/${taskId}`, target: "_blank", rel: "noopener",
+    title: "open this run's page in a new tab",
+  }, "Open \u2197");
 }
 
 function renderWorkerActivity(log, taskId, options = {}) {
   const short = shortTaskId(taskId);
-  const chip = el("span", { class: "state running" }, "running");
-  const title = el("span", { class: "worker-activity-title" }, `Worker ${short}`);
-  const diffPill = el("span", { class: "worker-activity-diff hidden" });
-  const body = el("div", { class: "worker-activity-body" });
-  const block = el("section", { class: "worker-activity open" },
-    el("div", { class: "worker-activity-header" },
-      el("button", {
-        class: "worker-activity-toggle",
-        type: "button",
-        onclick: () => block.classList.toggle("open"),
-      },
-        title, chip, diffPill,
-        el("span", { class: "agent-thread-chevron", "aria-hidden": "true" }, "\u203a")),
-      el("a", { class: "worker-activity-link", href: `#/runs/${taskId}` }, "open run \u2192")),
-    body);
-  log.append(block);
+  const what = el("span", { class: "worker-row-what" }, `Worker ${short}`);
+  const status = liveRunStatus(taskId, "dispatched");
+  const row = el("div", { class: "worker-row" }, what, status, openRunLink(taskId));
+  log.append(row);
   if (options.scroll) options.scroll();
-
-  const setState = (state) => {
-    chip.textContent = state || "?";
-    chip.className = `state ${state || ""}`;
-  };
-
-  // Grouped rows, F1-style: a status line (latest heartbeat wins), a current
-  // commands group, a current files group; a different event type closes the
-  // open group so consecutive events fold and interleaved ones split.
-  let statusRow = null;
-  let commandRow = null;
-  let commands = [];
-  let fileRow = null;
-  let files = [];
-  const closeGroups = () => { commandRow = null; commands = []; fileRow = null; files = []; };
-
-  const feed = (view) => {
-    const type = String(view.type || "");
-    const payload = view.payload && typeof view.payload === "object" ? view.payload : {};
-    if (type === "heartbeat") {
-      const line = `worker running \u2014 phase: ${payload.phase || "working"}`;
-      if (!statusRow) statusRow = workerRow(body, line);
-      else statusRow.setSummary(line);
-    } else if (type === "command.start") {
-      // its command.result carries everything, including the tails
-    } else if (type === "command.result") {
-      fileRow = null; files = [];
-      if (!commandRow) { commandRow = workerRow(body, "", el("div", {})); commands = []; }
-      commands.push(payload);
-      const failures = commands.filter(c => Number(c.exit_code) !== 0).length;
-      commandRow.setSummary(`ran ${commands.length} command${commands.length === 1 ? "" : "s"}`
-        + (failures ? ` (${failures} failed)` : ""));
-      const failed = Number(payload.exit_code) !== 0;
-      const item = el("div", { class: `worker-command${failed ? " failed" : ""}` },
-        el("div", { class: "mono worker-command-line" },
-          `exit ${payload.exit_code}`
-          + (payload.duration_ms != null ? ` \u00b7 ${payload.duration_ms}ms` : "")
-          + ` \u00b7 ${payload.command || ""}`));
-      if (payload.stdout_tail) {
-        item.append(el("pre", { class: "mono worker-command-output" }, payload.stdout_tail));
-      }
-      if (payload.stderr_tail) {
-        item.append(el("pre", { class: "mono worker-command-output" }, payload.stderr_tail));
-      }
-      commandRow.row.querySelector(".worker-activity-row-detail").append(item);
-    } else if (type === "file.changed") {
-      commandRow = null; commands = [];
-      if (!fileRow) { fileRow = workerRow(body, "", el("div", {})); files = []; }
-      files.push(payload);
-      fileRow.setSummary(`changed ${files.length} file${files.length === 1 ? "" : "s"}`);
-      fileRow.row.querySelector(".worker-activity-row-detail").append(
-        el("div", { class: "mono worker-command-line" },
-          `${payload.kind || "edit"}  ${payload.path || ""}`));
-    } else if (type === "plan.created") {
-      closeGroups();
-      const steps = Array.isArray(payload.steps) ? payload.steps : [];
-      workerRow(body, `planned ${steps.length} step${steps.length === 1 ? "" : "s"}`,
-        el("ul", { class: "worker-plan" }, steps.map(step => el("li", {}, String(step)))));
-    } else if (type === "approval.requested") {
-      closeGroups();
-      body.append(el("div", { class: "worker-activity-gate" },
-        el("strong", {}, "waiting for your approval"),
-        ` \u2014 ${payload.reason || payload.action || ""}. `
-        + "Open the run page or use /approvals."));
-    } else if (type === "verify.result") {
-      closeGroups();
-      workerRow(body, `verification: ${payload.outcome || "?"}`,
-        payload.details
-          ? el("pre", { class: "mono worker-command-output" }, String(payload.details))
-          : null);
-    } else if (type === "task.terminal") {
-      closeGroups();
-      if (payload.summary) workerRow(body, String(payload.summary));
-    } else if (type !== "task.start" && type !== "run.created") {
-      const line = summarizeRunEvent(view);
-      if (line) workerRow(body, `${type}: ${line}`);
+  api("GET", `/api/runs/${taskId}`).then(({ run }) => {
+    const task = String(run.instructions || "").trim().split("\n")[0];
+    const repo = String(run.repo || "").split("/").filter(Boolean).pop();
+    what.textContent = [`Worker ${short}`, repo, task].filter(Boolean).join(" \u00b7 ");
+    if (run.instructions) what.setAttribute("title", String(run.instructions));
+    // a live status line may have written the span already: it wins
+    if (status.getAttribute("data-live") !== "1") {
+      status.className = `live-run-status state ${run.state || ""}`;
+      status.textContent = runStateWords(run.state);
     }
-    if (options.scroll) options.scroll();
-  };
-
-  const finalize = async (state) => {
-    setState(state);
-    if (state === "completed") {
-      try {
-        // v106-F9: only ask for a diff that exists — no-patch completions
-        // were a steady 404 drumbeat in serve.log.
-        const detail = await api("GET", `/api/runs/${taskId}`);
-        if (!(detail.artifacts || []).some((a) => a.kind === "patch")) return;
-        const diff = await api("GET", `/api/runs/${taskId}/diff`);
-        const { added, removed } = diffstat(diff);
-        diffPill.classList.remove("hidden");
-        diffPill.replaceChildren(
-          el("span", { class: "diff-add" }, `+${added}`), " ",
-          el("span", { class: "diff-del" }, `\u2212${removed}`));
-      } catch { /* no patch artifact */ }
-    }
-    if (options.scroll) options.scroll();
-  };
-
-  (async () => {
-    let run;
-    try { run = (await api("GET", `/api/runs/${taskId}`)).run; }
-    catch { title.textContent = `Worker ${short} (run not found)`; setState("failed"); return; }
-    if (run.repo) title.textContent = `Worker ${short} \u00b7 ${run.repo}`;
-    setState(run.state);
-    if (!ACTIVE_RUN_STATES.has(run.state)) {
-      // Terminal (or gated): one replay from the audit events — a refresh
-      // after terminal rebuilds the identical block.
-      try {
-        const { events } = await api("GET", `/api/runs/${taskId}/events`);
-        for (const view of events) feed(view);
-      } catch { /* header still stands */ }
-      await finalize(run.state);
-      return;
-    }
-    if (liveWorkerSources.size >= MAX_LIVE_WORKER_BLOCKS) {
-      // Browsers cap per-origin connections; older blocks stay static.
-      body.append(el("p", { class: "note" }, "live view capped \u2014 open run \u2192 for the stream"));
-      return;
-    }
-    const source = new EventSource(`/api/runs/${taskId}/events?stream=1`);
-    liveWorkerSources.add(source);
-    // D7: the browser's own reconnect replays the run from its first event.
-    const feedOnce = onceByEventId(feed);
-    source.onmessage = (message) => feedOnce(JSON.parse(message.data));
-    source.addEventListener("done", (message) => {
-      source.close();
-      liveWorkerSources.delete(source);
-      let state = null;
-      try { state = JSON.parse(message.data).state; } catch { state = null; }
-      finalize(state || run.state);
-    });
-  })();
-  return block;
+    // review R1 (S2): a row drawn after the status stream drained (a
+    // continuation's dispatch) asks for the stream again
+    if (LIVE_RUN_STATES.has(run.state) && options.onActive) options.onActive();
+  }).catch(() => { status.textContent = "status unavailable"; });
+  return row;
 }
 
 // ---------- Home (the hive at a glance) ----------
@@ -2556,46 +2412,71 @@ async function viewChat(main, chatId) {
     if (chat) titleHeader(chat); // the first turn names it
     return renderContextPanel(contextPanel, { chat, defaultModel: llm.default_model, actions: acts });
   };
-  // v92-F1 (was v43-F4's single shared line): the worker loader — one pulsing
-  // row per live run this chat owns, phase from the status SSE, seconds
-  // counted here so the timer runs from dispatch instead of jumping on
-  // heartbeat boundaries. Ephemeral on purpose — nothing lands in the
-  // transcript. Field test 2026-07-26: a run that gated and finished between
-  // boundaries showed nothing at all, and the chat read as stuck.
-  const statusLine = el("div", { class: "worker-loader", "aria-live": "polite" });
-  const liveRunRows = new Map(); // task_id -> {node, textEl, phase, startedAt}
+  // v92-F1: a live run's status — phase from the status SSE, seconds counted
+  // here so the timer runs from dispatch instead of jumping on heartbeat
+  // boundaries. v134-F6 (W1, W2): written into every status span of that
+  // run — its transcript row and its row in the side panel — instead of a
+  // stack of rows under the transcript (gone). v134-F6 (N2): only a run the
+  // status stream or this stream's own dispatch calls live is live; a
+  // replayed dispatch shows its stored state (the stack showed 26 finished
+  // runs as "dispatched · 26s" forever).
+  const liveRunRows = new Map(); // task_id -> {phase, startedAt}
   const elapsedLabel = (ms) => {
     const secs = Math.max(0, Math.round(ms / 1000));
     return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`;
   };
+  const runSpans = (taskId) => layout.querySelectorAll(`.live-run-status[data-task-id="${taskId}"]`);
   const drawRunRows = () => {
     for (const [taskId, row] of liveRunRows) {
-      row.textEl.textContent =
-        `worker ${shortTaskId(taskId)} · ${row.phase} · ${elapsedLabel(Date.now() - row.startedAt)}`;
+      for (const span of runSpans(taskId)) {
+        span.setAttribute("data-live", "1");
+        span.className = "live-run-status state running";
+        span.textContent = `${row.phase} · ${elapsedLabel(Date.now() - row.startedAt)}`;
+      }
     }
   };
   const trackRun = (taskId, { phase = null, startedAt = null } = {}) => {
-    let row = liveRunRows.get(taskId);
-    if (!row) {
-      const textEl = el("span", { class: "streaming-indicator" });
-      row = {
-        node: el("a", { class: "worker-loader-row", href: `#/runs/${taskId}` }, textEl),
-        textEl, phase: "dispatched", startedAt: Date.now(),
-      };
-      liveRunRows.set(taskId, row);
-      statusLine.append(row.node);
-    }
+    const row = liveRunRows.get(taskId) || { phase: "dispatched", startedAt: Date.now() };
+    liveRunRows.set(taskId, row);
     if (phase) row.phase = phase;
     if (startedAt !== null) row.startedAt = startedAt;
     drawRunRows();
   };
-  const untrackRun = (taskId) => {
-    const row = liveRunRows.get(taskId);
-    if (row) { row.node.remove(); liveRunRows.delete(taskId); }
+  const untrackRun = (taskId, state) => {
+    liveRunRows.delete(taskId);
+    for (const span of runSpans(taskId)) {
+      span.removeAttribute("data-live");
+      span.className = `live-run-status state ${state || ""}`;
+      span.textContent = runStateWords(state);
+    }
   };
   const runRowsTick = setInterval(drawRunRows, 1000);
+  // review R1 (S1): a live run whose terminal event never comes — the stream
+  // closed (its cap, a drop, a restart) or the run ended before the stream
+  // opened and is past the server's replay window — settles from the store.
+  const settleLiveRuns = () => {
+    for (const taskId of [...liveRunRows.keys()]) {
+      api("GET", `/api/runs/${taskId}`).then(({ run }) => {
+        if (!LIVE_RUN_STATES.has(run.state)) untrackRun(taskId, run.state);
+        // review R2 (S1): still live and no stream (the server's 30-minute
+        // cap, a drop) — reopen it, or its end would never arrive. One
+        // pending reopen, 5 s out: a stream that fails at once (a deleted
+        // chat) must not spin close → settle → reopen at network speed.
+        else if (!window.__skepStatusES && !reopenTimer) {
+          reopenTimer = setTimeout(() => {
+            reopenTimer = null;
+            if (!window.__skepStatusES) watchStatus();
+          }, 5000);
+        }
+      }).catch(() => {});
+    }
+  };
+  const panelAskedFor = new Set();
+  let viewGone = false; // review R2 (N1): set by cleanup — a late read reopens nothing
+  let reopenTimer = null;
   const watchStatus = () => {
-    if (!activeChatId) return;
+    if (!activeChatId || viewGone) return;
+    settleLiveRuns();
     if (window.__skepStatusES) window.__skepStatusES.close();
     let source;
     try { source = new EventSource(`/api/chats/${activeChatId}/status`); }
@@ -2609,10 +2490,17 @@ async function viewChat(main, chatId) {
         phase: d.phase,
         startedAt: Date.now() - (d.elapsed_seconds || 0) * 1000,
       });
+      // review R1 (S2): a run started elsewhere (a resume, an approval, a
+      // continuation, a messenger) has no row here yet — the panel shows it
+      if (!runSpans(d.task_id).length && !panelAskedFor.has(d.task_id)) {
+        panelAskedFor.add(d.task_id);
+        refreshContext();
+      }
     });
     source.addEventListener("terminal", (event) => {
       const d = JSON.parse(event.data);
-      untrackRun(d.task_id);
+      untrackRun(d.task_id, d.state);
+      refreshContext(); // W2: the panel moves it from running to its history
       if (notifiedTerminalRuns.has(d.task_id)) return;
       notifiedTerminalRuns.add(d.task_id);
       if (d.state === "completed") flash("ok", `run ${d.task_id.slice(0, 13)}… completed`);
@@ -2626,9 +2514,10 @@ async function viewChat(main, chatId) {
     source.onerror = () => {
       source.close();
       if (window.__skepStatusES === source) window.__skepStatusES = null;
+      settleLiveRuns(); // review R1 (S1)
     };
   };
-  const pane = el("div", { class: "chat-main" }, log, statusLine, composer);
+  const pane = el("div", { class: "chat-main" }, log, composer);
   // H1 (hive-rooms C10): role and model, cards waiting, runs, spend.
   const contextPanel = el("aside", { class: "chat-context", "aria-label": "thread context" });
   const layout = el("div", { class: `chat-layout${contextHidden ? " context-hidden" : ""}` },
@@ -2644,6 +2533,7 @@ async function viewChat(main, chatId) {
   // card just resolved may be the one that changed its role or model.
   const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
     .then(fresh => drawContext(fresh.chat, fresh.actions))
+    .then(drawRunRows) // review R1 (N8): the redrawn panel's live spans, at once
     .catch(() => {});
   const applyContextState = () => {
     layout.classList.toggle("context-hidden", contextHidden);
@@ -2664,20 +2554,27 @@ async function viewChat(main, chatId) {
   // v40-F3: a route change must close any live worker event streams.
   // v92-F1: … and the status stream + loader ticker with them.
   cleanup = () => {
-    closeLiveWorkerSources();
+    viewGone = true;
     clearInterval(runRowsTick);
     if (window.__skepStatusES) { window.__skepStatusES.close(); window.__skepStatusES = null; }
     chatReconcile = null;
   };
-  const maybeMountWorkerActivity = (raw) => {
+  // ``live``: this stream's own dispatch (v92-F1: the timer starts at
+  // dispatch). v134-F6 (N2): never from a replay — the page-wide
+  // chatStreamActive was true whenever ANY stream ran, so opening a chat
+  // mid-stream turned every past dispatch into a live row that never ended.
+  const maybeMountWorkerActivity = (raw, { live = false } = {}) => {
     const result = unwrapToolResult(raw);
     if (result && typeof result === "object" && result.task_id
         && DISPATCHED_RESULT_STATES.has(result.state)) {
-      renderWorkerActivity(log, String(result.task_id), { scroll: scrollBottom });
-      // v92-F1: the loader starts at dispatch, not at the first heartbeat
-      // boundary. Live results only — a replayed dispatch result may be long
-      // terminal; the status stream resyncs any still-active run.
-      if (chatStreamActive) trackRun(String(result.task_id));
+      renderWorkerActivity(log, String(result.task_id), {
+        scroll: scrollBottom,
+        onActive: () => { if (!window.__skepStatusES) watchStatus(); },
+      });
+      if (live) {
+        trackRun(String(result.task_id));
+        refreshContext(); // W2: the new run shows in the panel at once
+      }
     }
   };
   // v133-F19 (G8): the highest stored message id this view has drawn. The
@@ -3372,7 +3269,7 @@ async function viewChat(main, chatId) {
               scroll: scrollBottom,
             });
           }
-          maybeMountWorkerActivity(d.result);
+          maybeMountWorkerActivity(d.result, { live: true });
           showWorking(`Ran ${d.tool} — thinking…`);
         },
         turn_status: (d) => {
@@ -5284,4 +5181,4 @@ schedulePoll(POLL_MIN_MS);
 // only declare at top level). After the boot marker, so tests/web never sees it.
 // Phase 10 10.1: api/el/iconButton now come from js/; re-exported so the
 // modules that import them from here keep working unchanged.
-export { api, buildFilterBar, buildTabBar, casteSelect, chatTitle, confirmTemplateSuggestion, copyText, el, flash, fmtTs, header, iconButton, offersRemember, previewTemplateSuggestion, relativeTime, renderAssistantTab, renderChannelsTab, renderMarkdown, renderProjectList, renderReposTab, renderSuggestionGrant, renderWebhooksTab, renderWorkerModel, renderWorkersTab, repoOptions, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };
+export { LIVE_RUN_STATES, api, buildFilterBar, buildTabBar, casteSelect, chatTitle, confirmTemplateSuggestion, copyText, el, flash, fmtTs, header, iconButton, liveRunStatus, offersRemember, openRunLink, previewTemplateSuggestion, relativeTime, renderAssistantTab, renderChannelsTab, renderMarkdown, renderProjectList, renderReposTab, renderSuggestionGrant, renderWebhooksTab, renderWorkerModel, renderWorkersTab, repoOptions, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };

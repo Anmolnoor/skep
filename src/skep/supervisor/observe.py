@@ -132,7 +132,7 @@ def _harvest_run_terminals(store: RunStore) -> list[str]:
             continue
         summary = (run.summary or run.verification_details or "no summary").splitlines()[0]
         content = (
-            f"observation: run {run.task_id[:8]} on {PurePath(run.repo).name} "
+            f"observation: run {run.task_id[:13]} on {PurePath(run.repo).name} "
             f"{run.state}: {summary}"
         )[:_OBSERVATION_CONTENT_CAP]
         store.add_memory_item(

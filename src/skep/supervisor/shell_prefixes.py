@@ -7,6 +7,7 @@ therefore can never be allowlisted, remembered, or persisted into a policy.
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import shlex
@@ -471,8 +472,6 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
     ``sys.executable`` IS ``<its worktree>/.venv/bin/python``; the old test
     swept every remembered command naming it while the worktree was alive.
     """
-    from pathlib import Path
-
     for token in argv:
         start = token.find(_WORKTREES_MARK)
         while start != -1:
@@ -481,7 +480,9 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
             # pruned root anywhere in it makes the token dead.
             root_end = token.find("/", start + len(_WORKTREES_MARK))
             root = token[:root_end] if root_end != -1 else token
-            if not Path(root).is_dir():
+            # v134-F1: os.path.isdir never raises; Path.is_dir raised
+            # ENAMETOOLONG out of a chat turn on Python 3.12 and 3.13.
+            if not os.path.isdir(root):
                 return True
             start = token.find(_WORKTREES_MARK, start + len(_WORKTREES_MARK))
     return False

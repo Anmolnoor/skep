@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import re
 import threading
 import time
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from ..roles import Role
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
+from ..secret_floor import own_secret_in, own_secret_refusal
 from . import actions
 from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
@@ -924,6 +926,10 @@ TOOL_REPLAY_CAP = 2000  # prior-turn tool results replay truncated to this
 # v58-F6: current-turn tool results stay detailed but bounded — one oversized
 # result must never evict the question it is meant to answer.
 CURRENT_TOOL_REPLAY_CAP = 8000
+# v134-F8 (T1): a prior turn's tool-call argument strings replay cut to this
+# (a dispatch_run brief is ~3.6k; live test: call arguments were 32% of a
+# 279k-token request and never cut). The stored call stays whole.
+TOOL_CALL_ARG_REPLAY_CAP = 500
 SUMMARY_MAX_CHARS = 4000  # rolling digest cap; oldest lines drop first
 RESPONSE_RESERVE_CHARS = 8000  # window headroom left for the model's answer
 MIN_HISTORY_BUDGET_CHARS = 8000  # replay never squeezed below this
@@ -1256,8 +1262,11 @@ def operator_clock_line(now: datetime | None = None) -> str:
     sign = "+" if total_minutes >= 0 else "-"
     hours, minutes = divmod(abs(total_minutes), 60)
     utc = f"UTC{sign}{hours}" + (f":{minutes:02d}" if minutes else "")
+    # v134-F10 (T3): to the hour — the line sits ahead of the whole history,
+    # so a minute stamp changed every request's start and no provider prefix
+    # cache could ever match it.
     return (
-        f"Operator local time: {moment.strftime('%Y-%m-%d %H:%M')} {moment.tzname()} "
+        f"Operator local time: {moment.strftime('%Y-%m-%d %H')}:xx {moment.tzname()} "
         f"({utc}); store timestamps are UTC."
     )
 
@@ -1601,9 +1610,15 @@ def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterat
         yield (event, data)
 
 
+# v134-F2 (S2): a long mixed-case word with digits reads as a credential (a
+# token_urlsafe, an API key); a git SHA or a uuid is lowercase and stays.
+_KEY_SHAPED = re.compile(r"(?=[\w-]*\d)(?=[\w-]*[a-z])(?=[\w-]*[A-Z])[\w-]{24,}")
+
+
 def _title_from(content: str) -> str:
     first_line = content.strip().splitlines()[0] if content.strip() else DEFAULT_TITLE
-    return first_line[:60]
+    title = _KEY_SHAPED.sub("***", redact(first_line))[:60].strip()
+    return title if title.strip("* ") else DEFAULT_TITLE
 
 
 def _message_thinking(message: dict[str, Any]) -> str:
@@ -1860,7 +1875,18 @@ def _malformed_args(call: dict[str, Any]) -> str | None:
         return arguments
 
 
-def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
+def _cut_arguments(arguments: dict[str, Any], cap: int) -> dict[str, Any]:
+    """v134-F8 (T1): each string argument longer than ``cap`` cut to it."""
+    return {
+        key: f"{value[:cap]}… [{len(value) - cap} chars cut for context; the call is whole "
+        "in the transcript]"
+        if isinstance(value, str) and len(value) > cap
+        else value
+        for key, value in arguments.items()
+    }
+
+
+def _replayable_call(call: dict[str, Any], cap: int | None = None) -> dict[str, Any]:
     """ES-F10 (B84): a stored call replays with object arguments — ``{}``
     when they are not a JSON object. Resent verbatim, ES-F8's garbled string
     drew a 400 from ollama.com on both protocols on every later turn: one bad
@@ -1874,6 +1900,8 @@ def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
             arguments = None
     if not isinstance(arguments, dict):
         arguments = {}
+    if cap is not None:
+        arguments = _cut_arguments(arguments, cap)
     return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
 
 
@@ -2264,7 +2292,12 @@ class ChatEngine:
                     {
                         "role": "assistant",
                         "content": record.content,
-                        "tool_calls": [_replayable_call(c) for c in record.tool_calls],
+                        "tool_calls": [
+                            _replayable_call(
+                                c, TOOL_CALL_ARG_REPLAY_CAP if record.id < last_user_id else None
+                            )
+                            for c in record.tool_calls
+                        ],
                     }
                 )
                 open_calls = len(record.tool_calls)
@@ -2300,7 +2333,10 @@ class ChatEngine:
         total = 0
         keep_from = len(messages)
         for index in range(len(messages) - 1, -1, -1):
+            # v134-F8 (T1): the calls' arguments are sent too — count them
+            calls = messages[index].get("tool_calls")
             cost = len(str(messages[index].get("content") or "")) + 64
+            cost += len(json.dumps(calls)) if calls else 0
             if total + cost > budget and keep_from < len(messages):
                 break
             total += cost
@@ -2376,6 +2412,9 @@ class ChatEngine:
             size = len(record.content or "")
             if record.role == "tool":
                 size = min(size, TOOL_REPLAY_CAP + len(_TOOL_TRUNCATION_MARKER))
+            if record.tool_calls:  # v134-F8 (T1): sent too, cut as replay cuts them
+                calls = [_replayable_call(c, TOOL_CALL_ARG_REPLAY_CAP) for c in record.tool_calls]
+                size += len(json.dumps(calls))
             return size + 64
 
         total = sum(replay_cost(record) for record in records)
@@ -2557,6 +2596,21 @@ class ChatEngine:
                     yield self._go_ahead(chat_id, refused)
                     refused = []
                 yield event, data
+        except Exception as exc:
+            # v134-F1 (S3, I8): only provider errors had a path out; anything
+            # else killed the stream with no stored reply and the chat went
+            # silent (live test: ENAMETOOLONG in a policy probe, twice).
+            logging.getLogger("skep.serve").exception("chat turn %s failed", chat_id)
+            yield self._line(
+                chat_id,
+                f"skep hit an internal error and stopped this turn ({type(exc).__name__}: "
+                f"{redact(str(exc))[:300]}). The details are in serve.log; send your "
+                "message again to retry.",
+            )
+            yield (
+                "error",
+                {"detail": f"internal error: {type(exc).__name__}: {redact(str(exc))[:300]}"},
+            )
         finally:
             inner.close()
             marks.discard(chat_id)
@@ -4114,6 +4168,7 @@ def run_scheduled_prompt(
         return ("the bound chat was mid-turn, so this tick was skipped", False)
     parts: list[str] = []
     alarms: list[dict[str, Any]] = []
+    failed: str | None = None
     started = now_stamp()
     try:
         if chained is not None:
@@ -4143,6 +4198,8 @@ def run_scheduled_prompt(
         for event, data in events:
             if event == "alarm":
                 alarms.append(data)
+            if event == "error":  # v134-F11: the turn ended on an error (provider or internal)
+                failed = str(data.get("detail") or "error")
             if event is None and isinstance(data.get("content"), str):
                 parts.append(str(data["content"]))
             if time.monotonic() > deadline:
@@ -4161,6 +4218,8 @@ def run_scheduled_prompt(
             source = schedule.chain if chained is not None else None
             line = alarm_line(schedule.name, source, alarms, chained, started)
             send_alarm(holder, store, home, chat_id, schedule=schedule.name, line=line)
+    if failed is not None:
+        return (f"prompt tick failed mid-turn: {failed}", False)
     reply = "".join(parts).strip()
     if not reply:
         return ("the scheduled turn produced no reply", False)
@@ -4328,6 +4387,7 @@ def run_completion_turn(
         )
     )
     parts: list[str] = []
+    failed: str | None = None
     # ES-F2 (B13): queue behind the turn in flight — this runs on its own
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
@@ -4359,6 +4419,8 @@ def run_completion_turn(
                 read_only=False,  # it may propose — a card is the human's trigger
                 unattended=True,  # store reads only; nobody may be watching
             ):
+                if event == "error":  # review R1 (N1): the turn stored its own line
+                    failed = str(data.get("detail") or "error")
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
@@ -4370,6 +4432,8 @@ def run_completion_turn(
             )  # fmt: skip
             return (f"continuation failed mid-turn: {exc}", False)
     _turn_done(store, task_id, gated=gated)
+    if failed is not None:  # never pushed to a messenger as if it were the reply
+        return (f"continuation failed mid-turn: {failed}", False)
     reply = "".join(parts).strip()
     from .channels.outbound import push_to_chat_channel
     from .run_status import run_terminal_text
@@ -4458,6 +4522,8 @@ def run_analysis_tasks(
                 protocol=protocol,
                 read_only=True,
             ):
+                if event == "error":  # review R1 (N1): F1 turns a raise into this event
+                    error = str(data.get("detail") or "error")
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # one dead analyst must not lose the others
@@ -4663,6 +4729,8 @@ def add_chat_routes(
                 or not (attachments_dir(home, chat_id) / name).is_file()
             ):
                 raise HTTPException(status_code=400, detail=f"unknown attachment {name!r}")
+        if leaked := own_secret_in(body.content, home):  # v134-F2 (S2)
+            raise HTTPException(status_code=400, detail=own_secret_refusal(leaked))
         # ES-F2 (B14): the pending-card check happens under the turn lock —
         # checked outside it, two POSTs both passed and both ran turns.
         lock = take_turn(chat_id)

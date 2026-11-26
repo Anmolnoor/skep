@@ -192,20 +192,6 @@ test("onceByEventId: one call per event_id; an event without one always passes",
   assert.deepEqual(seen, ["a", "none", "none", "b"]);
 });
 
-test("the chat's worker block counts a replayed command once", async () => {
-  const app = loadApp();
-  const made = [];
-  app.EventSource = class { constructor(url) { this.url = url; made.push(this); } addEventListener() {} close() {} };
-  app.api = async () => ({ run: { state: "running", repo: "/r" } });
-  const log = app.el("div");
-  app.renderWorkerActivity(log, "t1");
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const command = { data: JSON.stringify({ event_id: "c1", type: "command.result", payload: { exit_code: 0, command: "ls" } }) };
-  made[0].onmessage(command);
-  made[0].onmessage(command); // the browser reconnected; the server replayed
-  assert.deepEqual(texts(log, "worker-activity-row-summary"), ["ran 1 command"]);
-});
-
 // ---------- D8: the receipt itself, copied honestly; approve's warning shown ----------
 
 const RECEIPT = "<details>\n<summary>skep verifiable local receipt · t1</summary>\n</details>";

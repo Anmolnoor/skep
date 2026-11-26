@@ -984,7 +984,7 @@ def merge_line(pin: dict[str, Any]) -> str:
     branch = pin["base_branch"]
     return (
         f"merges only {pin['repo']}#{pin['number']} at head {pin['head_commit'][:12]} — "
-        f"G10 confirmed that exact tree and V1 found nothing (run {pin['task_id'][:8]}) — "
+        f"G10 confirmed that exact tree and V1 found nothing (run {pin['task_id'][:13]}) — "
         f"onto {branch} {pin['base_commit'][:12]}; a push to the PR or to {branch} after "
         "this card refuses the merge (one landing while GitHub merges is reported)"
     )

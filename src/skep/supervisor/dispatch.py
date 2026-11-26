@@ -2087,7 +2087,10 @@ def sweep_expired_preserved_worktrees(store: RunStore, config: SupervisorConfig)
         keep = _keep_worktree_names(store)
         for repo_path, workspace in expired:
             name = Path(workspace).name
-            if name in keep:
+            # v134-F3 (D1): a tree already gone (a resume reused its parent's
+            # workspace) stays in the query forever; counting it logged
+            # "swept 1" every tick for days.
+            if name in keep or not os.path.exists(workspace):  # never raises
                 continue
             remove_worktree(Path(repo_path), Path(workspace))
             removed += 1

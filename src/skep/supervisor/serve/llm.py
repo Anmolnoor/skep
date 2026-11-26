@@ -487,7 +487,10 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
         "api_key_set": _assistant_key_set(store, home),
         **({"chatgpt_login": chatgpt_login_view()} if codex else {}),
         "vision": store.get_setting(LLM_VISION) is True,
-        "num_ctx": window.replay_cap,
+        # v134-F9: the dial as set when there is one; replay_cap says what
+        # each call resends (they differ once the dial passes the cap)
+        "num_ctx": window.model_window if window.source == "override" else window.replay_cap,
+        "replay_cap": window.replay_cap,
         # v74-F2: which rule set the window, so the UI and doctor can say (I8).
         "num_ctx_source": window.source,
         # Phase 06 (6.1): the model's real limit, even where num_ctx is capped
@@ -545,10 +548,15 @@ def resolve_context_window(
     replay_cap is the window capped at AUTO_NUM_CTX_CAP — or, on a loopback
     ollama, at DEFAULT_NUM_CTX: there num_ctx is pre-allocated KV-cache RAM
     (v82-F1), so the real max shows in model_window and nothing more is
-    requested. The operator's dial is uncapped, loopback or not."""
+    requested. The operator's dial sizes model_window (and the num_ctx sent
+    to ollama) uncapped, loopback or not; v134-F9: replay_cap stays capped."""
     value = store.get_setting(LLM_NUM_CTX)
     if _valid_ctx(value):
-        return ContextWindow(int(value), int(value), "override")
+        # v134-F9 (T2): the dial sizes the model's
+        # window (ollama's num_ctx), never how much history each call resends
+        # — a 996k dial turned compaction off and a chat sent 279k tokens a
+        # call (live test).
+        return ContextWindow(int(value), min(int(value), AUTO_NUM_CTX_CAP), "override")
     from ..provider_presets import MODEL_CONTEXT_WINDOWS
 
     provider_id, base_url, default_model, protocol = _context_identity(store, profile)
@@ -594,8 +602,11 @@ def _is_loopback(base_url: Any) -> bool:
 
 
 def chat_num_ctx(store: RunStore, model: str | None = None) -> int:
-    """The context window requested from ollama (v56-F1); bounded, defaulted."""
-    return resolved_num_ctx(store, model)[0]
+    """The context window requested from ollama (v56-F1); bounded, defaulted.
+    v134-F9: the operator's dial is sent as asked (it is the window, and on a
+    loopback ollama the KV-cache they chose to pay for)."""
+    window = resolve_context_window(store, model=model)
+    return window.model_window if window.source == "override" else window.replay_cap
 
 
 _WINDOW_FIELDS = ("context_length", "max_model_len", "max_context_length")

@@ -1,0 +1,374 @@
+"""v134: the 2.1.0 live-test round (plan: skep-design plans/v134/README.md).
+
+F1 (S3, I8) a turn that raises anything still ends with a stored reply.
+F2 (S2) skep's own secrets never enter a chat; titles never carry a credential.
+F3 (D1) the worktree TTL sweep never counts a tree that is already gone.
+F4 (S1, I2 I8) a landing card never shows a syntax-only G10 pass as clean.
+F5 (N3) short run ids name one run.
+F8 (T1) the replay budget counts tool-call arguments; old ones are cut.
+F9 (T2) the context dial sizes the model's window, not how much history is resent.
+F10 (T3) the start of a request stays byte-identical between calls.
+F11 a scheduled prompt whose turn ended on an error reports the tick failed
+    (pinned by test_injection_alarm's mid-turn raise).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.serve.chat import ChatEngine
+from skep.supervisor.serve.jobs import Dispatcher
+from skep.supervisor.serve.settings import ConfigHolder
+
+from .conftest import serve_client
+from .fake_ollama import FakeOllama
+from .test_serve_chat import sse_events
+
+
+@dataclass
+class Rig:
+    client: TestClient
+    store: RunStore
+    ollama: FakeOllama
+    config: SupervisorConfig
+
+
+@pytest.fixture()
+def rig(config: SupervisorConfig) -> Iterator[Rig]:
+    ollama = FakeOllama(api_key="sk-fake").start()
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+    )
+    store = RunStore(config.db_path)
+    yield Rig(client, store, ollama, config)
+    store.close()
+    ollama.stop()
+
+
+# ---------- F1 (S3): an unexpected error never leaves the chat silent ----------
+
+
+def test_a_turn_that_raises_stores_a_reply_and_ends_with_an_error(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(self: ChatEngine, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
+        raise RuntimeError("policy probe exploded")
+
+    monkeypatch.setattr(ChatEngine, "_system_prompt", boom)
+    chat_id = rig.store.create_chat(title="f1", model=None).chat_id
+
+    response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+
+    assert response.status_code == 200
+    events = sse_events(response.text)
+    assert any(event == "error" for event, _ in events)
+    replies = [m for m in rig.store.chat_messages(chat_id) if m.role == "assistant"]
+    assert replies and "RuntimeError: policy probe exploded" in replies[-1].content
+
+
+def test_an_analyst_whose_turn_raised_reports_an_error_not_an_answer(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1 (N1): F1 turns the exception into an error event — the
+    analyst loop must still report it as a failure."""
+    from skep.supervisor.serve.chat import run_analysis_tasks
+
+    def boom(self: ChatEngine, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
+        raise RuntimeError("policy probe exploded")
+
+    monkeypatch.setattr(ChatEngine, "_system_prompt", boom)
+    holder = ConfigHolder(rig.config, rig.store)
+    result = run_analysis_tasks(
+        rig.store, holder, Dispatcher(store=rig.store, holder=holder), rig.config.home,
+        ["why?"], None,
+    )  # fmt: skip
+    [entry] = result["analyses"]
+    assert "RuntimeError" in entry["error"] and "answer" not in entry
+
+
+def test_a_too_long_worktree_word_is_dead_not_a_crash(tmp_path: Path) -> None:
+    from skep.supervisor.shell_prefixes import references_dead_worktree
+
+    (tmp_path / ".skep" / "worktrees").mkdir(parents=True)
+    word = f"{tmp_path}/.skep/worktrees/{'a' * 300}/f"  # ENAMETOOLONG, not ENOENT
+    assert references_dead_worktree(["cat", word])
+
+
+# ---------- F2 (S2): skep's own secrets never enter a chat ----------
+
+
+def test_a_message_carrying_the_serve_token_is_refused_and_stored_nowhere(rig: Rig) -> None:
+    token = (rig.config.home / "serve-token").read_text(encoding="utf-8").strip()
+    chat_id = rig.store.create_chat(title="New chat", model=None).chat_id
+
+    response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": token})
+
+    assert response.status_code == 400
+    assert "serve-token" in response.json()["detail"]
+    assert rig.store.chat_messages(chat_id) == []
+    chat = rig.store.get_chat(chat_id)
+    assert chat is not None and token not in chat.title
+    assert rig.ollama.chat_bodies() == []
+
+
+def test_a_channel_message_carrying_a_channel_secret_is_refused(rig: Rig) -> None:
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+    secret = "tg-" + "x7Kq" * 10
+    (rig.config.home / "telegram-secret").write_text(secret, encoding="utf-8")
+    engine = ChatEngine(
+        store=rig.store,
+        holder=ConfigHolder(rig.config, rig.store),
+        runner=Dispatcher(store=rig.store, holder=ConfigHolder(rig.config, rig.store)),
+        home=rig.config.home,
+    )
+    message = ChannelMessage(
+        channel="telegram",
+        identity=ChannelIdentity(channel="telegram", identity_id="u1"),
+        text=f"here it is {secret}",
+        session_key="telegram:t1",
+    )
+
+    reply, cards = run_channel_turn(engine, message, web_ui_url="http://x")
+
+    assert "telegram-secret" in reply and cards == []
+    assert all(
+        secret not in m.content
+        for c in rig.store.list_chats()
+        for m in rig.store.chat_messages(c.chat_id)
+    )
+
+
+def test_a_serve_env_value_counts_as_a_skep_secret(tmp_path: Path) -> None:
+    from skep.supervisor.secret_floor import own_secret_in
+
+    home = tmp_path / "supervisor"
+    home.mkdir()
+    (home / "llm-secret").mkdir()  # unreadable as text: skipped, not a crash
+    secret = "c" * 20  # built here: a literal assignment trips the secret scanners
+    (tmp_path / "serve.env").write_text(
+        f"# comment\nexport CLAUDE_CODE_OAUTH_TOKEN='{secret}'\nSHORT=abc\n", encoding="utf-8"
+    )
+    assert own_secret_in(f"use {secret} now", home) == ("serve.env CLAUDE_CODE_OAUTH_TOKEN")
+    assert own_secret_in("abc is not a secret, it is too short", home) is None
+
+
+def test_serve_env_config_values_and_comments_are_not_secrets(tmp_path: Path) -> None:
+    """Review R1 (S3): only credential-named keys count — a URL the operator
+    pastes into a question is not their key."""
+    from skep.supervisor.secret_floor import own_secret_in
+
+    home = tmp_path / "supervisor"
+    home.mkdir()
+    (tmp_path / "serve.env").write_text(
+        "OLLAMA_HOST=http://127.0.0.1:11434\n# docs: see https://example.com/?a=very-long-value\n",
+        encoding="utf-8",
+    )
+    assert own_secret_in("why does http://127.0.0.1:11434 refuse?", home) is None
+    assert own_secret_in("https://example.com/?a=very-long-value", home) is None
+
+
+def test_a_title_never_carries_a_credential_shaped_word() -> None:
+    from skep.supervisor.serve.chat import DEFAULT_TITLE, _title_from
+
+    assert _title_from("Zq9Xr2Lm7Tb4Vw8Nc3Hp6Ks1Dy5Fg0Ju_Ae7Bo4Ci9W") == DEFAULT_TITLE
+    assert _title_from("use key sk-abcdefghijkl1234 please") == "use key *** please"
+    assert _title_from("fix the README typo") == "fix the README typo"
+
+
+# ---------- F3 (D1): the sweep never "removes" a tree that is gone ----------
+
+
+def test_the_ttl_sweep_skips_a_workspace_that_no_longer_exists(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """Live test: a resume reused its parent's workspace, the tree was gone,
+    and the sweep logged "swept 1" every 30 s for days."""
+    import shutil
+
+    from skep.supervisor.dispatch import sweep_expired_preserved_worktrees
+
+    from .test_recover import _strand_run
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        store.transition(task_id, "failed", "agent exited 1")
+        store._conn.execute(
+            "UPDATE runs SET updated_at = '2020-01-01T00:00:00Z' WHERE task_id = ?", (task_id,)
+        )
+        store._conn.commit()
+        shutil.rmtree(workspace)
+
+        assert sweep_expired_preserved_worktrees(store, config) == 0
+    finally:
+        store.close()
+
+
+# ---------- F4 (S1): a syntax-only G10 pass is never shown as clean ----------
+
+
+def _passed_on(store: RunStore, repo: Path, tmp_path: Path, command: str) -> str:
+    from skep.supervisor.contracts_io import mint_task
+
+    task = mint_task(workspace=repo, instructions="land me")
+    store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+    store.transition(task.task_id, "completed")
+    patch = tmp_path / f"{task.task_id}.patch"
+    patch.write_text(
+        "diff --git a/.gitignore b/.gitignore\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/.gitignore\n@@ -0,0 +1 @@\n+node_modules\n",
+        encoding="utf-8",
+    )
+    store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    store.record_reverification(
+        task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+        commands=[command], exit_codes=[0],
+        detail="ok [command from the project's pinned verify_command]",
+    )  # fmt: skip
+    return str(task.task_id)
+
+
+def test_a_syntax_only_pass_on_untouched_files_is_marked_on_the_card(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.serve.actions import reverification_summary
+    from skep.supervisor.serve.console import run_evidence
+
+    store = RunStore(config.db_path)
+    try:
+        weak = _passed_on(store, repo, tmp_path, "node --check farm/index.js")
+        [run] = run_evidence(store, "land_run", {"task_id": weak})
+        assert "syntax-only" in run["g10_weak"]
+        assert "none of the files this patch changes" in run["g10_weak"]
+        assert run["supervisor"].startswith("G10 passed (syntax-only): ")
+        summary = reverification_summary(store.reverification_for(weak)) or {}
+        assert "syntax-only" in summary["syntax_only"]
+
+        real = _passed_on(store, repo, tmp_path, "npm test")
+        [run] = run_evidence(store, "land_run", {"task_id": real})
+        assert run["g10_weak"] is None and run["supervisor"].startswith("G10 passed: ")
+    finally:
+        store.close()
+
+
+# ---------- F5 (N3): short run ids name one run ----------
+
+
+def test_a_pr_title_names_the_run_by_a_prefix_that_does_not_collide() -> None:
+    from skep.supervisor.github import default_pr_title
+
+    a = default_pr_title("bump", "01a211bf-5927-75b4-86ce-63b084010555")
+    b = default_pr_title("bump", "01a211bf-9697-703e-b864-d0aefa52c9eb")
+    assert a != b and a.endswith("(skep 01a211bf-5927)")
+
+
+# ---------- F8 (T1): tool-call arguments count, and old ones are cut ----------
+
+
+def _engine(rig: Rig) -> ChatEngine:
+    holder = ConfigHolder(rig.config, rig.store)
+    return ChatEngine(
+        store=rig.store, holder=holder, runner=Dispatcher(store=rig.store, holder=holder),
+        home=rig.config.home,
+    )  # fmt: skip
+
+
+def _dispatch_turn(rig: Rig, chat_id: str, instructions: str, ask: str) -> None:
+    rig.store.add_chat_message(chat_id, role="user", content=ask)
+    rig.store.add_chat_message(
+        chat_id, role="assistant", content="",
+        tool_calls=[{"function": {"name": "dispatch_run", "arguments": {
+            "repo": "r", "instructions": instructions}}}],
+    )  # fmt: skip
+    rig.store.add_chat_message(chat_id, role="tool", tool_name="dispatch_run", content="{}")
+
+
+def test_old_turns_replay_their_tool_call_arguments_cut_and_the_current_turn_whole(
+    rig: Rig,
+) -> None:
+    chat_id = rig.store.create_chat(title="f8", model=None).chat_id
+    _dispatch_turn(rig, chat_id, "old " * 2000, "first")
+    _dispatch_turn(rig, chat_id, "new " * 2000, "second")
+
+    messages = _engine(rig)._turn_messages(chat_id)
+
+    calls = [m for m in messages if m.get("tool_calls")]
+    old, new = (c["tool_calls"][0]["function"]["arguments"]["instructions"] for c in calls)
+    assert len(old) < 700 and "cut" in old
+    assert new == "new " * 2000
+    stored = next(m for m in rig.store.chat_messages(chat_id) if m.tool_calls)
+    assert stored.tool_calls is not None
+    assert stored.tool_calls[0]["function"]["arguments"]["instructions"] == "old " * 2000
+
+
+def test_the_replay_budget_counts_tool_call_arguments(rig: Rig) -> None:
+    chat_id = rig.store.create_chat(title="f8b", model=None).chat_id
+    for n in range(6):
+        _dispatch_turn(rig, chat_id, f"turn {n} " + "x" * 400, f"ask {n}")
+    engine = _engine(rig)
+    chat = rig.store.get_chat(chat_id)
+
+    kept, dropped = engine._replay(chat_id, chat, budget=2000)
+
+    sent = sum(len(json.dumps(m)) for m in kept)
+    assert dropped > 0 and sent < 4000, (dropped, sent)
+
+
+# ---------- F9 (T2): the context dial never turns compaction off ----------
+
+
+def test_a_huge_context_dial_still_caps_the_resent_history(rig: Rig) -> None:
+    """Live test: llm_num_ctx = 996000 made the replay budget ~4M chars, so
+    compaction never ran and a chat sent 279k tokens a call."""
+    from skep.supervisor.serve.llm import (
+        AUTO_NUM_CTX_CAP,
+        LLM_NUM_CTX,
+        chat_num_ctx,
+        resolve_context_window,
+    )
+
+    rig.store.set_setting(LLM_NUM_CTX, 996_000)
+    window = resolve_context_window(rig.store)
+    assert (window.model_window, window.replay_cap) == (996_000, AUTO_NUM_CTX_CAP)
+    assert chat_num_ctx(rig.store) == 996_000  # ollama still gets the window asked for
+    view = rig.client.get("/api/llm/config").json()
+    assert (view["num_ctx"], view["replay_cap"]) == (996_000, AUTO_NUM_CTX_CAP)
+
+
+# ---------- F10 (T3): the request's start stays the same between calls ----------
+
+
+def test_the_clock_line_is_the_same_all_hour() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from skep.supervisor.serve.chat import operator_clock_line
+
+    zone = timezone(timedelta(hours=-7), "MST")
+    early = operator_clock_line(datetime(2026, 11, 25, 16, 1, tzinfo=zone))
+    late = operator_clock_line(datetime(2026, 11, 25, 16, 59, tzinfo=zone))
+    assert early == late
+    assert "2026-11-25 16:xx MST (UTC-7)" in early
+
+
+def test_activating_a_tool_appends_its_schema_and_never_reorders() -> None:
+    from skep.supervisor.serve.tools import CORE_TOOL_NAMES, TOOL_SPECS, advertised_tool_specs
+
+    names = [
+        t["function"]["name"] for t in TOOL_SPECS if t["function"]["name"] not in CORE_TOOL_NAMES
+    ]
+    first, last = names[0], names[-1]
+    before = advertised_tool_specs([last])
+    after = advertised_tool_specs([last, first])
+    assert after[: len(before)] == before  # the earlier request is a prefix
+    assert after[-1]["function"]["name"] == first

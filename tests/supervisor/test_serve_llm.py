@@ -86,6 +86,7 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
         "api_key_set": False,
         "vision": False,  # v44-F9: off until the operator says the model can see
         "num_ctx": 16384,  # v56-F1: explicit window, defaulted
+        "replay_cap": 16384,  # v134-F9: what each call resends
         "num_ctx_source": "default",  # v74-F2: which rule set the window
         "model_window": 16384,  # Phase 06 (6.1): the model's real limit
         "tool_delivery": "indexed",  # v74-F3: index + core + on-demand schemas
@@ -115,6 +116,7 @@ def test_llm_config_roundtrip_keeps_the_secret_out_of_responses(
         "api_key_set": True,
         "vision": False,
         "num_ctx": 16384,
+        "replay_cap": 16384,
         "num_ctx_source": "default",
         "model_window": 16384,
         "tool_delivery": "indexed",

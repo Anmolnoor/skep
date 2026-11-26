@@ -130,7 +130,8 @@ def test_exact_catalog_id_only(store: RunStore, tmp_path: Path) -> None:
 def test_override_beats_everything(store: RunStore) -> None:
     _profile(store, "openai", "http://127.0.0.1:9", "gpt-5-mini")
     store.set_setting(LLM_NUM_CTX, 131072)
-    assert resolve_context_window(store) == ContextWindow(131072, 131072, "override")
+    # v134-F9 (T2): the dial is the window; what is resent stays capped
+    assert resolve_context_window(store) == ContextWindow(131072, AUTO_NUM_CTX_CAP, "override")
 
 
 def test_refresh_invalidates_a_stale_row_when_the_probe_fails(

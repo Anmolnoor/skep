@@ -5,11 +5,14 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares functions: by the time any of them
    runs, app.js has finished evaluating. */
-import { api, el, relativeTime, shortTaskId, stateChip } from "./app.js";
+import { LIVE_RUN_STATES, api, el, liveRunStatus, openRunLink, relativeTime, shortTaskId, stateChip } from "./app.js";
 
 const section = (label, ...body) =>
   el("section", { class: "context-section" }, el("div", { class: "context-label" }, label), ...body);
 const none = text => el("p", { class: "note" }, text);
+// v134-F7 (N5): who raised a card — "assistant" read like the chat's role.
+const PROPOSERS = { assistant: "proposed by skep", operator: "your command", gate: "a worker's gate" };
+const proposer = source => PROPOSERS[source] || source;
 
 // The panel's sync half draws at once from what the chat view already holds;
 // runs and spend follow from two reads, and a failed read says so (I8).
@@ -32,7 +35,7 @@ export function renderContextPanel(panel, { chat, defaultModel, actions }) {
           title: "show this card in the thread",
           onclick: () => document.querySelector(`.confirm-card[data-action-id="${card.action_id}"]`)
             ?.scrollIntoView({ block: "center" }),
-        }, el("span", {}, card.tool), el("small", {}, `${card.source} · ${relativeTime(card.created_at)}`)))
+        }, el("span", {}, card.tool), el("small", {}, `${proposer(card.source)} · ${relativeTime(card.created_at)}`)))
         : none("Nothing.")),
     section("Runs here", runs),
     section("Spend, this thread", spend));
@@ -44,10 +47,22 @@ export function renderContextPanel(panel, { chat, defaultModel, actions }) {
   const id = encodeURIComponent(chat.chat_id);
   return Promise.all([
     api("GET", `/api/runs?chat_id=${id}&limit=100`).then(({ runs: list }) => {
-      runs.replaceChildren(...(list.length ? list.map(run => el("a", {
-        class: "context-mini context-run", href: `#/runs/${run.task_id}`,
-      }, el("span", { class: "mono" }, shortTaskId(run.task_id)), stateChip(run.state),
-      el("small", {}, relativeTime(run.updated_at)))) : [none("None yet.")]));
+      // v134-F6 (W2, the operator's ask): the runs working now come first,
+      // each with its live status (the chat view's status stream writes the
+      // span) and Open ↗ to its page in a new tab; the history follows.
+      const running = list.filter(run => LIVE_RUN_STATES.has(run.state));
+      const rest = list.filter(run => !LIVE_RUN_STATES.has(run.state));
+      runs.replaceChildren(
+        ...(running.length ? [el("div", { class: "context-running" },
+          el("small", { class: "context-sublabel" }, "Running now"),
+          ...running.map(run => el("div", { class: "context-mini context-run running" },
+            el("span", { class: "mono" }, shortTaskId(run.task_id)),
+            liveRunStatus(run.task_id, run.state), openRunLink(run.task_id))))] : []),
+        ...rest.map(run => el("a", {
+          class: "context-mini context-run", href: `#/runs/${run.task_id}`,
+        }, el("span", { class: "mono" }, shortTaskId(run.task_id)), stateChip(run.state),
+        el("small", {}, relativeTime(run.updated_at)))),
+        ...(list.length ? [] : [none("None yet.")]));
     }).catch(() => runs.replaceChildren(none("Could not load this thread's runs."))),
     api("GET", `/api/llm/usage?chat_id=${id}`).then(usage => {
       const tok = span => span.total_tokens.toLocaleString();
