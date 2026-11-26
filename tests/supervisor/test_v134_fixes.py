@@ -61,7 +61,7 @@ def test_a_turn_that_raises_stores_a_reply_and_ends_with_an_error(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def boom(self: ChatEngine, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
-        raise OSError(36, "File name too long")
+        raise RuntimeError("policy probe exploded")
 
     monkeypatch.setattr(ChatEngine, "_system_prompt", boom)
     chat_id = rig.store.create_chat(title="f1", model=None).chat_id
@@ -72,7 +72,7 @@ def test_a_turn_that_raises_stores_a_reply_and_ends_with_an_error(
     events = sse_events(response.text)
     assert any(event == "error" for event, _ in events)
     replies = [m for m in rig.store.chat_messages(chat_id) if m.role == "assistant"]
-    assert replies and "OSError" in replies[-1].content
+    assert replies and "RuntimeError: policy probe exploded" in replies[-1].content
 
 
 def test_an_analyst_whose_turn_raised_reports_an_error_not_an_answer(
@@ -83,7 +83,7 @@ def test_an_analyst_whose_turn_raised_reports_an_error_not_an_answer(
     from skep.supervisor.serve.chat import run_analysis_tasks
 
     def boom(self: ChatEngine, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
-        raise OSError(36, "File name too long")
+        raise RuntimeError("policy probe exploded")
 
     monkeypatch.setattr(ChatEngine, "_system_prompt", boom)
     holder = ConfigHolder(rig.config, rig.store)
@@ -92,7 +92,7 @@ def test_an_analyst_whose_turn_raised_reports_an_error_not_an_answer(
         ["why?"], None,
     )  # fmt: skip
     [entry] = result["analyses"]
-    assert "OSError" in entry["error"] and "answer" not in entry
+    assert "RuntimeError" in entry["error"] and "answer" not in entry
 
 
 def test_a_too_long_worktree_word_is_dead_not_a_crash(tmp_path: Path) -> None:
