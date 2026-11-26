@@ -101,8 +101,10 @@ class WorkerProvider:
 class ProviderUsageTally:
     """v79-F4: token counts harvested from the provider stream, per attempt.
 
-    ollama's final chunk reports prompt_eval_count/eval_count; the other
-    protocols' normalized chunks carry no counts — absent stays None, never
+    Every wire ends its stream with ollama's final-chunk shape,
+    prompt_eval_count/eval_count: ollama natively, Bedrock in its own
+    adapter, and since v134-F22 openai-compat, Anthropic and Responses via
+    ``usage_chunk``. A count the provider did not report stays None, never
     guessed (I8). One tally per worker attempt, threaded explicitly: no
     module state (an in-process dispatcher may run workers concurrently)."""
 
