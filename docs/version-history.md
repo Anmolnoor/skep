@@ -3663,3 +3663,93 @@ later. Read "Before you upgrade" first: six things behave differently.
 The Claude Code worker fixes, cache-hit numbers per call, a smaller fixed
 prompt, and the same secret check for chat titles given when a chat is
 created, channel `/rename` and attachments are planned for the next round.
+
+## v2.3.0 — Claude Code runs that a stray space or a timeout no longer wastes, verdict buttons that lock once, cache hits you can see (2026-11-27)
+
+One fix round since 2.2.0 (#143), the rest of the fixes from the live test
+machine. Read "Before you upgrade" first: five things behave differently.
+
+### Before you upgrade
+
+- A run on a CLI engine (`claude_code`, `codex`, `aider`) whose own
+  `git diff --check` finds only whitespace problems (trailing whitespace, a
+  space before a tab, a blank line at the end of a file) now completes,
+  carrying the risk flag `diff-check-whitespace`, instead of failing. The
+  built-in auto-landing rules do not land a flagged run, so you land it
+  yourself. A leftover conflict marker, or a check that timed out, still
+  fails the run.
+- Streamed chat calls to an OpenAI-compatible provider now ask for usage
+  counts (`stream_options: {"include_usage": true}`). A server that refuses
+  that field with a 400 or 422 naming it gets the same request once more
+  without it, and skep stops sending it to that server until serve
+  restarts.
+- The "Usage counted by skep" line in Settings now counts OpenAI-compatible
+  and Anthropic chat turns too. They recorded nothing before, so the totals
+  rise.
+- Requests to `api.anthropic.com` carry prompt-caching breakpoints, so the
+  system prompt goes as a list of blocks. Other providers on the Anthropic
+  protocol get the same request as before.
+- The store gains two columns on first start. Rows written before the
+  upgrade read as "not reported" for cached tokens.
+
+### Claude Code and the other CLI engines
+
+- When the adapter's whitespace check fails or warns, the run shows git's
+  `path:line: message` lines, with no file content, masked like other
+  details. Before, it showed only "git diff --check failed", because git
+  writes its findings to stdout and the adapter read stderr.
+- A run killed at its wall clock keeps the agent's partial output. The
+  agent's last words show what it was doing, then "command timed out after
+  Ns". Before, a timed-out agent left no trace.
+- The agent's last words keep about 600 characters, starting at a sentence
+  (or a word), not 200 characters cut mid-word.
+- The agent's output stored in the run's event log is masked like other
+  stored details, whether the run finished or timed out.
+
+### The built-in worker
+
+- A model reply the planner cannot parse, holding a character no encoder
+  accepts (an escaped lone surrogate), can still be sent back to the model
+  for repair. Before, that repair request failed.
+- After an approval pause, the worker is told to keep scratch files in
+  `$TMPDIR`, which is `.toolchain/tmp` inside its worktree: it survives the
+  pause and is never part of the patch. `/tmp` may not survive.
+
+### Cards
+
+- A card's verdict buttons all lock on the first click, and stay locked
+  while that verdict is in flight, also when the card is drawn again: on
+  the Approvals view, the Inbox, the run page, the review page and every
+  chat card. A verdict sent from one of those views locks the same card in
+  the others. If the request fails, the buttons come back.
+
+### Search and channels
+
+- `search_web` no longer calls an empty search a backend failure. When the
+  search returns nothing, the Queen is told that no page matched or the
+  search engines did not answer, and to rephrase or try again. The search
+  library raises the same error for both, so skep does not claim either.
+- A Telegram connection error logs one warning line, with the bot token
+  masked, and waits longer before each retry (doubling up to 60 seconds,
+  never sooner than the normal poll interval). Before, each failed poll
+  logged a full traceback and retried every 2 seconds.
+
+### Tokens
+
+- The usage tally records each provider's cached input tokens where the
+  provider reports them: OpenAI-compatible, DeepSeek, Anthropic (cache
+  reads and writes), the Responses API and Bedrock. ollama reports none,
+  and nothing is recorded for it. The Settings line reads "N in (M of P
+  cached)", where P is the input of the calls that reported a cache figure.
+- The core tools no longer get a line in the tool index (their full
+  descriptions are already in every request), and `dispatch_run`'s
+  description is shorter, with every rule kept. A fresh builder chat's fixed
+  part shrinks from 25,081 to 24,622 characters.
+
+### Not in this release
+
+Keeping a rejected model reply's words out of every stored place (parse
+errors that quote a value the model chose, the react worker's checkpoint, a
+provider error that echoes a repair request), masking the built-in worker's
+stored command output, and live-progress output for Claude Code runs are
+planned for the next round.
