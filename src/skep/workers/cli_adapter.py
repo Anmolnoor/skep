@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -230,7 +231,7 @@ def _run(
     return proc, CommandRecord(command=command, exit_code=proc.returncode, purpose=purpose)
 
 
-def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 200) -> str:
+def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str:
     """v100-F8: the agent's own last words, for the operator-visible details.
 
     stderr first, falling back to stdout — `claude --print` reports API errors on
@@ -240,7 +241,15 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 200) -> str
     Verification.details is rendered in cards and CLI output.
     """
     text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
-    return text[-limit:].strip()
+    if len(text) <= limit:
+        return text
+    # v134-F16: start at a sentence, else a word, when one starts in the first
+    # half — a 200-char hard cut read "ts in the worktree". The one extra char
+    # tells whether the cut already sits on a word boundary.
+    tail = text[-limit - 1 :]
+    head = tail[: limit // 2]
+    start = re.search(r"[.!?]\s+|\n", head) or re.search(r"\s", head)
+    return tail[start.end() if start else 1 :].strip()
 
 
 # v134-F14: what `git diff --check` reports that is whitespace and nothing else.

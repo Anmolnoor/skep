@@ -253,7 +253,7 @@ def test_failure_details_stay_bounded_for_a_chatty_agent(
     )
     details = result.verification.details
     assert "THE LAST WORDS" in details  # the *end*, which is where the error is
-    assert len(details) < 300
+    assert len(details) < 700  # v134-F16: ~600 chars of tail, up from 200
 
 
 def test_all_cli_adapters_share_one_body() -> None:
@@ -591,3 +591,27 @@ def test_v134_f15_a_timed_out_agent_keeps_its_partial_output(tmp_path: Path) -> 
     assert _agent_tail(proc).endswith("npm WARN café\ncommand timed out after 1s")
     result = json.loads((tmp_path / "events.ndjson").read_text().splitlines()[-1])
     assert "installing deps" in result["payload"]["stdout"]
+
+
+def _tail_of(stdout: str) -> str:
+    from skep.workers.cli_adapter import _agent_tail
+
+    return _agent_tail(subprocess.CompletedProcess(["agent"], 0, stdout, ""))
+
+
+def test_v134_f16_the_agent_tail_starts_at_a_sentence() -> None:
+    """v134-F16: the last words were cut to 200 chars mid-word ("ts in the
+    worktree…"). Keep about 600 and start where a sentence starts."""
+    words = "I edited the parser and ran the tests in the worktree. " * 20
+    tail = _tail_of(words + "All tests pass.")
+    assert 400 < len(tail) <= 600
+    assert tail.startswith("I edited the parser")
+    assert tail.endswith("All tests pass.")
+
+
+def test_v134_f16_without_a_sentence_the_tail_starts_at_a_word() -> None:
+    tail = _tail_of(" ".join(f"word{n}" for n in range(400)))
+    assert 400 < len(tail) <= 600
+    first = tail.split()[0]
+    assert first.startswith("word") and first[4:].isdigit()
+    assert tail.endswith("word399")
