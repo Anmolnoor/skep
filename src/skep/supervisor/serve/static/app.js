@@ -5,7 +5,7 @@ import { renderContextPanel } from "./room.js";
 import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
-import { el, iconButton, notFound } from "./js/dom.js";
+import { el, holdButtons, iconButton, notFound } from "./js/dom.js";
 import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
@@ -2711,15 +2711,16 @@ async function viewChat(main, chatId) {
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
     const keep = keepSelect(d.card);
+    const row = el("div", { class: "actions" }, approve, refuse, keep);
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
     const card = el("div", { class: cardClass(d.card), "data-action-id": d.action_id },
       ...cardBody(d),
       whyLine(d),
       keepCovers(d.card),
       cardReplay(d.card),
-      el("div", { class: "actions" }, approve, refuse, keep));
+      row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const release = holdButtons(row); // double-click guard
       try {
         // R5-2 (K2): a confirm names how many items this card rendered — the
         // server refuses (409, nothing ran) a card that now holds another set.
@@ -2736,7 +2737,7 @@ async function viewChat(main, chatId) {
         }
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        release();
         return;
       }
       resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
@@ -2800,12 +2801,13 @@ async function viewChat(main, chatId) {
   const commandCard = (d, notes = []) => {
     const approve = el("button", { class: "primary" }, d.card?.action_label || "Confirm");
     const refuse = el("button", { class: "danger" }, "Cancel");
+    const row = el("div", { class: "actions" }, approve, refuse);
     const card = el("div", { class: "confirm-card command-card", "data-action-id": d.action_id },
       ...cardBody(d),
       notes.map(note => el("p", { class: "note" }, note)),
-      el("div", { class: "actions" }, approve, refuse));
+      row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const release = holdButtons(row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
@@ -2816,7 +2818,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        release();
       }
       setComposerLocked(anyCardPending());
     };
@@ -2861,13 +2863,14 @@ async function viewChat(main, chatId) {
   const gateCard = (d) => {
     const approve = el("button", { class: "primary" }, d.card?.action_label || "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
+    const row = el("div", { class: "actions" }, approve, refuse);
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
       ...cardBody(d),
       whyLine(d),
-      el("div", { class: "actions" }, approve, refuse));
+      row);
     const verdict = (verb) => async () => {
-      approve.disabled = refuse.disabled = true; // double-click guard
+      const release = holdButtons(row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
@@ -2878,7 +2881,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        approve.disabled = refuse.disabled = false;
+        release();
       }
     };
     approve.addEventListener("click", verdict("confirm"));
@@ -3978,14 +3981,14 @@ async function viewRunDetail(main, taskId) {
   const act = (label, cls, fn) => {
     const b = el("button", { class: cls }, label);
     b.addEventListener("click", async () => {
-      b.disabled = true;
+      const release = holdButtons(actions); // v134-F21: one verdict at a time
       const before = location.hash;
       try {
         await fn();
         // If the action navigated, hashchange already re-rendered — a second
         // route() here would interleave with it and duplicate the view.
         if (location.hash === before) route();
-      } catch (e) { flash("bad", e.message); b.disabled = false; }
+      } catch (e) { flash("bad", e.message); release(); }
     });
     return b;
   };
@@ -4279,7 +4282,7 @@ async function viewApprovals(main) {
     const verdict = (label, cls, path, body) => {
       const button = el("button", { class: cls }, label);
       button.addEventListener("click", async () => {
-        button.disabled = true;
+        const release = holdButtons(actions); // v134-F21: one verdict at a time
         const before = location.hash;
         try {
           const result = await api("POST", `/api/approvals/${approval.review_id}/${path}`, body);
@@ -4287,7 +4290,7 @@ async function viewApprovals(main) {
           if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
           if (result.url) flash("ok", `PR: ${result.url}`);
           if (location.hash === before) route();
-        } catch (e) { flash("bad", e.message); button.disabled = false; }
+        } catch (e) { flash("bad", e.message); release(); }
       });
       return button;
     };

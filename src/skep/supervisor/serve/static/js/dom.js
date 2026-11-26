@@ -32,3 +32,13 @@ export function notFound(detail) {
     el("p", {}, detail),
     el("a", { class: "home-link", href: "#/inbox" }, "Back to the Inbox →"));
 }
+
+// v134-F21: a card takes one verdict at a time. The first click disables
+// every button in its row (a browser then drops the next click); call the
+// returned release after a failed request so the operator can retry. A
+// success keeps them held: the card redraws resolved.
+export function holdButtons(row) {
+  const buttons = [...row.querySelectorAll("button")];
+  for (const b of buttons) b.disabled = true;
+  return () => { for (const b of buttons) b.disabled = false; };
+}

@@ -20,7 +20,7 @@
    app.js boots on load, so its helpers come in through the import cycle —
    safe because this module only declares at top level. */
 import { api } from "../api.js";
-import { el } from "../dom.js";
+import { el, holdButtons } from "../dom.js";
 import { streamSse } from "../sse.js";
 import { routeLive } from "./run-detail.js";
 import { getState, setState } from "../store.js";
@@ -204,10 +204,10 @@ function reviewRow(item) {
         if (!reason) return;
         body = { reason };
       }
-      node.disabled = true;
+      const release = holdButtons(node.parentNode); // v134-F21: one verdict at a time
       let outcome;
       try { outcome = await send(path, body, stream, items); }
-      catch (e) { flash("bad", e.message); node.disabled = false; return; }
+      catch (e) { flash("bad", e.message); release(); return; }
       const done = `${verb === "approve" ? "approved" : "denied"} ${face.title}`;
       if (outcome.failed) flash("bad", `${face.title}: ${outcome.failed}`);
       else if (outcome.warning) flash("warn", `${done} — ⚠ ${outcome.warning}`);
