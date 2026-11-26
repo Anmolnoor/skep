@@ -1337,7 +1337,11 @@ def _openai_chat_stream(
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
+    # v134-F22: the usage chunk (and its cached-token count) is opt-in on the
+    # OpenAI wire; DeepSeek sends usage on its last chunk either way.
+    body["stream_options"] = {"include_usage": True}
     pending_calls: dict[int, dict[str, str]] = {}
+    usage: dict[str, Any] | None = None
     try:
         for line in _open_stream_lines(
             f"{openai_style_prefix(base_url)}/chat/completions",
@@ -1360,7 +1364,9 @@ def _openai_chat_stream(
                 # read as complete and an error-only one as a stall (I8).
                 detail = error.get("message") if isinstance(error, dict) else None
                 raise OllamaError(str(detail or error))
-            for choice in payload.get("choices", []):
+            if isinstance(payload.get("usage"), dict):
+                usage = payload["usage"]
+            for choice in payload.get("choices") or []:
                 delta = choice.get("delta") or {}
                 thinking = _openai_delta_thinking(delta)
                 if thinking:
@@ -1395,8 +1401,32 @@ def _openai_chat_stream(
                     "tool_calls": _final_openai_tool_calls(pending_calls),
                 }
             }
+        if usage is not None:
+            details = usage.get("prompt_tokens_details")
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if cached is None:
+                cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek's own name
+            yield usage_chunk(usage.get("prompt_tokens"), usage.get("completion_tokens"), cached)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
+
+
+def usage_chunk(
+    prompt: Any, completion: Any, cached: Any = None, cache_creation: Any = None
+) -> dict[str, Any]:
+    """v134-F22: the terminal chunk, shaped like ollama's — ``done`` plus the
+    counts the provider reported. Absent stays absent, never zero-filled (I8):
+    ``cached_tokens`` is the cache-hit share of ``prompt_eval_count``."""
+    chunk: dict[str, Any] = {"message": {"role": "assistant", "content": ""}, "done": True}
+    for key, value in (
+        ("prompt_eval_count", prompt),
+        ("eval_count", completion),
+        ("cached_tokens", cached),
+        ("cache_creation_tokens", cache_creation),
+    ):
+        if value is not None:
+            chunk[key] = int(value)
+    return chunk
 
 
 # -- anthropic (v72-F1) -------------------------------------------------------
@@ -1460,8 +1490,20 @@ def _anthropic_call_arguments(function: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _anthropic_cache_breakpoints(base_url: str) -> bool:
+    """v134-F22: block-level ``cache_control`` only on Anthropic's own API.
+    The Anthropic-wire presets elsewhere (MiniMax, Kimi) document no
+    block-level breakpoints — Kimi honors only a top-level field and caches
+    by default — so they keep the plain body."""
+    return httpx.URL(base_url).host == "api.anthropic.com"
+
+
 def _anthropic_payload(
-    *, model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    cache_breakpoints: bool = False,
 ) -> dict[str, Any]:
     """Ollama-shaped history → Messages API body.
 
@@ -1561,12 +1603,32 @@ def _anthropic_payload(
         "messages": merged,
         "stream": True,
     }
-    if system_parts:
+    if system_parts and cache_breakpoints:
+        # v134-F22: one block per system row, the breakpoint on the first
+        # (the system prompt), so a later row — a digest, a transient nudge —
+        # never shifts the cached prefix (tools, then system).
+        body["system"] = [{"type": "text", "text": part} for part in system_parts]
+        body["system"][0]["cache_control"] = {"type": "ephemeral"}
+    elif system_parts:
         body["system"] = "\n\n".join(system_parts)
     converted_tools = _anthropic_tools(tools)
     if converted_tools:
+        if cache_breakpoints:
+            # marking the last tool caches every tool definition before it
+            converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
         body["tools"] = converted_tools
     return body
+
+
+def _anthropic_usage_chunk(usage: dict[str, Any]) -> dict[str, Any]:
+    """``input_tokens`` counts only what follows the last cache breakpoint;
+    the prompt total adds the cache reads and writes back, so it reads like
+    every other protocol's prompt count."""
+    fresh = usage.get("input_tokens")
+    read = usage.get("cache_read_input_tokens")
+    write = usage.get("cache_creation_input_tokens")
+    prompt = None if fresh is None else int(fresh) + int(read or 0) + int(write or 0)
+    return usage_chunk(prompt, usage.get("output_tokens"), read, write)
 
 
 def _anthropic_chat_stream(
@@ -1579,10 +1641,18 @@ def _anthropic_chat_stream(
     timeout: float,
     max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    body = _anthropic_payload(model=model, messages=messages, tools=tools)
+    body = _anthropic_payload(
+        model=model,
+        messages=messages,
+        tools=tools,
+        cache_breakpoints=_anthropic_cache_breakpoints(base_url),
+    )
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
     pending_calls: dict[int, dict[str, str]] = {}
+    # v134-F22: message_start carries the input and cache counts,
+    # message_delta the cumulative output count.
+    usage: dict[str, Any] = {}
     try:
         for line in _open_stream_lines(
             f"{base_url.rstrip('/')}/v1/messages",
@@ -1599,6 +1669,10 @@ def _anthropic_chat_stream(
                 continue
             payload = json.loads(data)
             kind = payload.get("type")
+            if kind in ("message_start", "message_delta"):
+                source = payload.get("message") if kind == "message_start" else payload
+                reported = (source or {}).get("usage") or {}
+                usage.update({k: v for k, v in reported.items() if v is not None})
             if kind == "content_block_start":
                 block = payload.get("content_block") or {}
                 if block.get("type") == "tool_use":
@@ -1639,6 +1713,8 @@ def _anthropic_chat_stream(
                     "tool_calls": _final_openai_tool_calls(pending_calls),
                 }
             }
+        if usage:
+            yield _anthropic_usage_chunk(usage)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 
@@ -2593,8 +2669,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             "measured_locally": True,
             "authoritative_meter": "https://ollama.com/settings",
             "note": (
-                "counted from skep's own requests (ollama reports token "
-                "counts per call); other clients on the account are not seen"
+                "counted from skep's own requests (each provider reports token "
+                "counts per call; cached_tokens is null where it reports no cache "
+                "hits); other clients on the account are not seen"
             ),
             "last_5h": run_store.llm_usage_totals(hours=5),
             "last_7d": run_store.llm_usage_totals(hours=24 * 7),
