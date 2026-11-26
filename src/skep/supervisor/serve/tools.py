@@ -1919,33 +1919,31 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "dispatch_run",
-        "Dispatch a coding run (or a sandboxed script) on a repo. On trusted projects this may run "
-        "immediately when project policy explicitly allows auto-dispatch and the "
-        "request matches default policy; otherwise it becomes a confirmation card. "
-        "Omit execution_mode to inherit a trusted project's default when it is clear. "
-        "Check effective_policy FIRST: if the repo has no project binding, offer "
-        "setup_project before dispatching — unbound repos run on raw global defaults. "
-        "A local path the user has not confirmed exists gets a list_repos/repo_state "
-        "check first — dispatching at a missing directory is refused, not carded. "
-        "NOT for retrying a run whose worktree is kept (crashed/timed-out/"
-        "failed): resume_run continues it in place, diagnose_run inspects it "
-        "first — a fresh dispatch redoes the work cold; the result carries a "
-        "'hint' line when this applies. "
-        "If the task needs network hosts, shell commands, or capabilities the "
-        "effective policy denies, say so and propose the policy change first — "
-        "never dispatch into a known gate. "
-        "Runs baseline from the repo's DEFAULT branch: to EXTEND work already landed "
-        "on another branch, check repo_state, pass ref=<that branch>, and land the "
-        "result back onto the same branch with land_run — otherwise the worker will "
-        "not see the earlier work. "
-        "One dispatch carries ONE step a worker can finish and verify on its own — "
-        "never a mega-task — and its instructions state the acceptance check "
-        "('verify by ...'): an improvised verify is where runs die. "
+        # v134-F23: trimmed of repetition only — every rule below was in the
+        # v133 text (the small Queen skims; CLAUDE.md: descriptions are code).
+        "Dispatch a coding run (or sandboxed script) on a repo. A confirmation card, "
+        "unless a trusted project's policy explicitly allows auto-dispatch and the "
+        "request matches default policy: then it runs immediately. "
+        "Check effective_policy FIRST: an unbound repo runs on raw global defaults, so "
+        "offer setup_project before dispatching; if the task needs network hosts, shell "
+        "commands or capabilities the policy denies, say so and propose the policy "
+        "change first — never dispatch into a known gate. A local path the user has not "
+        "confirmed exists gets a list_repos/repo_state check first (a missing directory "
+        "is refused, not carded). "
+        "NOT for retrying a run whose worktree is kept (crashed/timed-out/failed): "
+        "resume_run continues it in place, diagnose_run inspects it first — a fresh "
+        "dispatch redoes the work cold (the result's 'hint' line says when). "
+        "Runs baseline from the repo's DEFAULT branch: to EXTEND work landed on another "
+        "branch, check repo_state, pass ref=<that branch> and land_run the result back "
+        "onto it — otherwise the worker will not see the earlier work. "
+        "One dispatch is ONE step a worker can finish and verify on its own — never a "
+        "mega-task — and its instructions state the acceptance check ('verify by ...'): "
+        "an improvised verify is where runs die. "
         # v101-F12: WHAT each caste is now comes from the registry, on the
         # caste param itself. v127-F12: `document` is advanced and left the
         # enum, so its brief-writing example left too — teaching the small
         # model a caste it cannot pick is a stale description (CLAUDE.md).
-        "For anything that must FETCH sources, use start_research instead. "
+        "Must FETCH sources: use start_research instead. "
         # v133-F30 (F-I4, A10): no option exists, and engine runs need a patch
         "No model or effort option. A read-only ask: run_code or read tools (an "
         "external engine run that changes no file ends failed).",
@@ -1954,8 +1952,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "instructions": {"type": "string"},
             "ref": {
                 "type": "string",
-                "description": "branch or rev to baseline from; REQUIRED when extending "
-                "work that landed on a non-default branch",
+                "description": "branch or rev to baseline from; REQUIRED to extend "
+                "work on a non-default branch",
             },
             "caste": {
                 "type": "string",
@@ -1975,7 +1973,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "execution_mode": {
                 "type": "string",
                 "enum": ["workspace", "sandbox"],
-                "description": "where to run this task; ask the user first if unsure",
+                "description": "omit to inherit a trusted project's default when clear; "
+                "ask the user first if unsure",
             },
             "network": {
                 "type": "array",
@@ -1991,9 +1990,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "enum": ["plan", "react"],
                 "description": (
                     "'react' is REQUIRED when the deliverable depends on data "
-                    "fetched DURING the run (fetch then summarize) — plan-mode "
+                    "fetched DURING the run (fetch then summarize): plan mode "
                     "plans before the data exists and can only fabricate. Omit "
-                    "for ordinary coding tasks."
+                    "for ordinary coding."
                 ),
             },
         },
@@ -2805,12 +2804,12 @@ _TOOL_CATEGORY_BY_NAME = {
 _SPEC_BY_NAME = {t["function"]["name"]: t for t in TOOL_SPECS}
 
 _TOOL_INDEX_HEADER = (
-    "Tool index — every tool you can call, by category, as name(args). "
+    "Tool index — every tool you can call beyond the full schemas in this "
+    "request's tools list, by category, as name(args). "
     "'?'=optional arg, '…'=more args (describe_tools has the rest), "
     "'*'=goes through the confirmation path: it shows the user a card UNLESS "
     "project policy auto-allows it. No gloss after a tool means its name says "
-    "what it does; a tool listed name-only already carries its full schema in "
-    "this request; '(…)'=a rare admin verb: describe it first. Call any tool "
+    "what it does; '(…)'=a rare admin verb: describe it first. Call any tool "
     "directly by name; call "
     f"describe_tools(names=[...]) for up to {DESCRIBE_TOOLS_MAX} full schemas "
     "when an index line is not enough:"
@@ -2897,8 +2896,6 @@ def _index_line(spec: dict[str, Any]) -> str:
     # six tools in that set never said "PROPOSE", so the old index
     # under-reported the confirmation path (I8).
     mark = "*" if name in MUTATING_TOOL_NAMES else ""
-    if name in CORE_TOOL_NAMES:
-        return f"{name}{mark}"  # its full schema is in this same request
     if name in RARE_ADMIN_TOOLS:
         return f"{name}{mark}(…)"
     args = _index_args(spec)
@@ -2908,10 +2905,12 @@ def _index_line(spec: dict[str, Any]) -> str:
 
 @functools.lru_cache(maxsize=32)
 def tool_index_block(hidden: frozenset[str] = frozenset()) -> str:
-    """The index, less the tools this chat's role hides (P3-6)."""
+    """The index, less the tools this chat's role hides (P3-6) and the core
+    tools: every request carries their full schemas (v134-F23), so a line
+    for them was paid twice. Activation-only tools keep theirs."""
     grouped: dict[str, list[str]] = {category: [] for category in TOOL_CATEGORIES}
     for spec in TOOL_SPECS:
-        if spec["function"]["name"] in hidden:
+        if spec["function"]["name"] in hidden | CORE_TOOL_NAMES:
             continue
         category = _TOOL_CATEGORY_BY_NAME.get(spec["function"]["name"], "other")
         grouped.setdefault(category, []).append(_index_line(spec))

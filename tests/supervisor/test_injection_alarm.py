@@ -419,7 +419,9 @@ def test_a_scheduled_turns_index_names_none_of_what_it_refuses(
         ollama.script_reply("one mail from a friend")
         home.tick(CLEAN)
         listed = _index_names(ollama.chat_bodies()[0]["messages"][0]["content"])
-        assert "list_runs" in listed  # the index is there, with the reads
+        # the index is there, with the reads (v134-F23: a core read such as
+        # list_runs rides the tools list instead)
+        assert "list_notes" in listed
         blocked = UNATTENDED_BLOCKED_STORE_WRITES | UNATTENDED_BLOCKED_READ_TOOLS
         assert not listed & (blocked | MUTATING_TOOL_NAMES)
     finally:
