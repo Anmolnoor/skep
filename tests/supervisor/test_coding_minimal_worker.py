@@ -5896,7 +5896,7 @@ def test_v134_f18_a_resumed_react_run_is_told_only_the_worktree_survived(
 
     resumed_with = json.loads(seen[0][-1]["content"])["observation"]
     assert "APPROVED" in resumed_with
-    assert "only your worktree" in resumed_with and "/tmp" in resumed_with
+    assert "$TMPDIR" in resumed_with and ".toolchain/tmp" in resumed_with
 
 
 def test_v134_f18_the_planner_knows_a_pause_keeps_only_the_worktree(tmp_path: Path) -> None:
@@ -5904,3 +5904,22 @@ def test_v134_f18_the_planner_knows_a_pause_keeps_only_the_worktree(tmp_path: Pa
     model again, so the rule rides the approval rules it plans with."""
     system = _plan_messages(workspace=tmp_path, instructions="x")[0]["content"]
     assert "A pause for approval keeps only your worktree" in system
+    # v134-F18 r1: /tmp is fresh only under bubblewrap (Seatbelt and workspace
+    # mode keep it), so the rule points at $TMPDIR — in the worktree, kept
+    # through a pause, never in the patch — not at a /tmp claim and a cleanup.
+    assert "$TMPDIR" in system and "remove them before you finish" not in system
+
+
+def test_v134_f18_the_scratch_dir_the_worker_is_told_is_dispatchs_tmpdir(tmp_path: Path) -> None:
+    """The prompt names `.toolchain/tmp` because shell.run runs argv with no
+    shell — a literal `$TMPDIR/x` would land in the worktree. It must be the
+    very dir dispatch sets TMPDIR to, and one the patch excludes."""
+    from skep.supervisor.dispatch import _toolchain_env
+    from skep.supervisor.engines import resolve_engine
+    from skep.worker_contract import BOOKKEEPING_DIRS
+    from skep.workers.llm_plan import PAUSE_KEEPS_ONLY_THE_WORKTREE
+
+    env = _toolchain_env(tmp_path, resolve_engine(None), tmp_path / "cache")
+    scratch = Path(env["TMPDIR"]).relative_to(tmp_path)
+    assert f"`{scratch.as_posix()}`" in PAUSE_KEEPS_ONLY_THE_WORKTREE
+    assert scratch.parts[0] in BOOKKEEPING_DIRS
