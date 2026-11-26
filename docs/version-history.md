@@ -3575,8 +3575,9 @@ later. Read "Before you upgrade" first: six things behave differently.
   refusal. The refusal says to rotate the secret if it went anywhere else.
 - If you set the context dial (`llm_num_ctx`), it now sizes the model's
   window only: it is what skep sends to ollama as `num_ctx` and what the
-  settings page shows. Each call is sized to fit 65,536 tokens (system
-  prompt, tools and history together, estimated as characters / 4), and
+  settings page shows. Each call is sized to fit the dial or 65,536
+  tokens, whichever is smaller (system prompt, tools and history together,
+  estimated as characters / 4), and
   older turns are summarised past that. In 2.1.0 a large dial turned
   summarising off: on the test machine a 996k dial sent about 279k tokens
   every call.
@@ -3634,7 +3635,8 @@ later. Read "Before you upgrade" first: six things behave differently.
 - Short run ids show 13 characters (the full millisecond of the id's
   timestamp) instead of 8, which only changed about once a minute, so runs
   started close together no longer share a short id. This covers the web
-  UI, the default PR title, the T3 Code (ACP) session title, the run named
+  UI, the default PR title, the chat skep opens for an ACP run's approval
+  card, the run named
   on a merge card (and in `skep pr merge`'s pin line), skill candidates'
   source runs and observation notes.
   Runs started in the same millisecond can still share one.
