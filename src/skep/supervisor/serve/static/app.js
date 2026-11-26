@@ -4695,7 +4695,11 @@ async function renderAssistantTab(panel) {
   const usageLine = el("p", { class: "note" }, "");
   llmCard.append(usageLine);
   api("GET", "/api/llm/usage").then(usage => {
-    const fmt = w => `${w.total_tokens.toLocaleString()} tok / ${w.requests} req`;
+    // v134-F22: the provider's cache hits sit beside the input count; a
+    // provider that reports none (ollama) shows nothing, never a fake 0.
+    const fmt = w => `${w.prompt_tokens.toLocaleString()} in`
+      + (w.cached_tokens == null ? "" : ` (${w.cached_tokens.toLocaleString()} cached)`)
+      + ` + ${w.completion_tokens.toLocaleString()} out tok / ${w.requests} req`;
     usageLine.replaceChildren(
       `Usage counted by skep — last 5h: ${fmt(usage.last_5h)} · last 7d: ${fmt(usage.last_7d)}. `
       + "The account's own 5h/weekly meter (all clients) lives at ",

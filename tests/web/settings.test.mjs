@@ -225,6 +225,7 @@ test("older flag: everything set but not recorded offers Finish, which records i
 
 // ---------- the pages: #/settings/<tab> renders that one; a save stays on it ----------
 
+const ZERO_USAGE = { total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, requests: 0, cached_tokens: null };
 const PROJECT_READS = { projects: [], packs: [], repos: [], templates: [], schedules: [] };
 
 function settingsApp(extra = {}) {
@@ -237,7 +238,7 @@ function settingsApp(extra = {}) {
     "GET /api/onboard": { relock: null, steps: {} },
     "GET /api/onboard/unlocked": { on: false, offer: false, reason: "register a work directory first (step ②)" },
     "GET /api/llm/config": { configured: false, protocol: "ollama", num_ctx: 8192, num_ctx_source: "default" },
-    "GET /api/llm/usage": { last_5h: { total_tokens: 0, requests: 0 }, last_7d: { total_tokens: 0, requests: 0 } },
+    "GET /api/llm/usage": { last_5h: ZERO_USAGE, last_7d: ZERO_USAGE },
     "GET /api/provider-presets": { presets: [] },
     "GET /api/settings": { configured: false },
     "GET /api/workers": { castes: [], engines: [] },
@@ -372,4 +373,21 @@ test("the sidebar's one Settings link is lit for settings, projects (detail too)
   app.setShellActiveRoute("#/policies");
   assert.ok(!settings.classList.contains("active"));
   assert.ok(policies.classList.contains("active"));
+});
+
+test("v134-F22: the usage line puts the cached count beside input, and nothing when unreported", async () => {
+  const { app } = settingsApp({
+    "GET /api/llm/usage": {
+      last_5h: { total_tokens: 905, prompt_tokens: 900, completion_tokens: 5, requests: 1, cached_tokens: 768 },
+      last_7d: { total_tokens: 905, prompt_tokens: 900, completion_tokens: 5, requests: 1, cached_tokens: null },
+    },
+  });
+  const main = app.el("div");
+  await app.viewSettings(main, "models");
+  await settle();
+  const line = texts(main, "note").find(t => t.startsWith("Usage counted by skep"));
+  assert.ok(line, "usage line rendered");
+  assert.match(line, /last 5h: 900 in \(768 cached\) \+ 5 out tok \/ 1 req/);
+  assert.match(line, /last 7d: 900 in \+ 5 out tok \/ 1 req/);
+  assert.doesNotMatch(line, /0 cached/);
 });

@@ -2487,6 +2487,9 @@ class ChatEngine:
                     prompt_tokens=int(chunk.get("prompt_eval_count") or 0),
                     completion_tokens=int(chunk.get("eval_count") or 0),
                     chat_id=chat_id,
+                    # v134-F22: absent when the provider reports no cache field
+                    cached_tokens=chunk.get("cached_tokens"),
+                    cache_creation_tokens=chunk.get("cache_creation_tokens"),
                 )
             yield chunk
 
