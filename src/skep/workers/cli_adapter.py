@@ -231,6 +231,10 @@ def _run(
     return proc, CommandRecord(command=command, exit_code=proc.returncode, purpose=purpose)
 
 
+# v134-F15 r1: the note _run appends to a timed-out command's stderr.
+_TIMEOUT_NOTE = re.compile(r"(?:\A|\n)(command timed out after \d+s)\Z")
+
+
 def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str:
     """v100-F8: the agent's own last words, for the operator-visible details.
 
@@ -242,17 +246,26 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str
     """
     from skep.supervisor.policy_v3 import redact_export
 
+    stderr = proc.stderr or ""
+    # v134-F15 r1: on a timeout _run appends its note to stderr, which hid the
+    # words of an agent that writes to stdout (claude --print, codex): the
+    # tail is the agent's own partial output, then the note.
+    note = _TIMEOUT_NOTE.search(stderr) if proc.returncode == -1 else None
+    if note:
+        stderr = stderr[: note.start()]
     # v134-F14 r1: masked BEFORE the cut, so a cut never leaves half of one.
-    text = redact_export((proc.stderr or "").strip() or (proc.stdout or "").strip())
-    if len(text) <= limit:
-        return text
-    # v134-F16: start at a sentence, else a word, when one starts in the first
-    # half — a 200-char hard cut read "ts in the worktree". The one extra char
-    # tells whether the cut already sits on a word boundary.
-    tail = text[-limit - 1 :]
-    head = tail[: limit // 2]
-    start = re.search(r"[.!?]\s+|\n", head) or re.search(r"\s", head)
-    return tail[start.end() if start else 1 :].strip()
+    text = redact_export(stderr.strip() or (proc.stdout or "").strip())
+    if len(text) > limit:
+        # v134-F16: start at a sentence, else a word, when one starts in the
+        # first half — a 200-char hard cut read "ts in the worktree". The one
+        # extra char tells whether the cut already sits on a word boundary.
+        tail = text[-limit - 1 :]
+        head = tail[: limit // 2]
+        start = re.search(r"[.!?]\s+|\n", head) or re.search(r"\s", head)
+        text = tail[start.end() if start else 1 :].strip()
+    if note:
+        return f"{text}\n{note[1]}" if text else note[1]
+    return text
 
 
 # v134-F14: what `git diff --check` reports that is whitespace and nothing else.
