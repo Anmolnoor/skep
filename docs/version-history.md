@@ -3556,3 +3556,99 @@ differently.
 Honouring a plan step's `cwd`, a no-card tier for read-only probes, a
 server-side message queue and steering, and per-dispatch model options each
 need a design decision first.
+
+## v2.2.0 — one line per worker, skep's own secrets kept out of the chat, fewer tokens a call (2026-11-26)
+
+One fix round since 2.1.0 (#141), from the same live-test machine a day
+later. Read "Before you upgrade" first: four things behave differently.
+
+### Before you upgrade
+
+- A chat message that contains the value of one of skep's own secrets is
+  refused with a 400 and is neither stored nor sent to the model. The
+  secrets are the serve token, the `llm-secret*` and `*-secret` files in
+  the home, and the values in `serve.env` whose key names a credential
+  (`KEY`, `TOKEN`, `SECRET`, `PASS`, `AUTH` or `CREDENTIAL`). Values shorter
+  than 16 characters are not checked. This holds for the web chat,
+  `skep chat` and the messenger channels; the channel replies with the same
+  refusal. The refusal says to rotate the secret if it went anywhere else.
+- If you set the context dial (`llm_num_ctx`), it now sizes the model's
+  window only: it is what skep sends to ollama as `num_ctx` and what the
+  settings page shows. The history each call resends is capped at 65,536
+  tokens (estimated as characters / 4), and older turns are summarised
+  past that, as they are with no dial set. In 2.1.0 a large dial turned
+  summarising off: on the test machine a 996k dial sent about 279k tokens
+  every call.
+- The Queen sees the operator's local time to the hour (`2026-11-26 05:xx`),
+  not to the minute, so the start of each request stays the same between
+  calls and a provider that caches repeated prompts can reuse it. Ask the
+  Queen for the exact time and it will not know the minutes.
+- A scheduled prompt whose chat turn ended on an error is recorded as
+  `prompt_failed` with that error, and its output is not pushed to the
+  channel. In 2.1.0 it was recorded as posted.
+
+### The chat
+
+- A chat turn that hits an unexpected error stores a reply saying skep
+  stopped the turn, with the error's type and a short redacted message, and
+  ends with an error event; the full trace goes to `serve.log`. Before, the
+  turn ended with no reply and the chat looked stuck. Follow-up turns after
+  a run and analyst tasks treat that error as a failure too.
+- A worker in the chat is one line: what it is doing, its live status on
+  the right, and **Open ↗**, which opens the run page in a new tab. The
+  expanding block with the plan, commands and diff is gone from the chat;
+  the run page has it. A run waiting at a gate reads "waiting for your
+  approval", not running.
+- The side panel's "Runs here" lists the runs still going first, under
+  "Running now", each with its live status and Open ↗; the history follows.
+  A run started from another tab or by a background turn shows there too.
+- A live row settles when its run ends, also when the status stream drops
+  or the run ended while the page was away: the page asks the server for
+  the run's state and, for a run still going with no stream, reopens the
+  stream once after 5 seconds.
+- A thread's title hides anything that looks like a key (a run of 24 or
+  more letters and digits that mixes upper case, lower case and digits), on
+  top of the redaction titles already had.
+- "Waiting on you" says who proposed a card: "proposed by skep", "your
+  command" or "a worker's gate", not "assistant".
+
+### Landing cards
+
+- A supervisor re-verification that passed on a syntax-only check (for
+  example `node --check <file>`) is not shown as a clean pass. The landing
+  card, the run page and PR bodies mark it "(syntax-only)", the run card
+  shows a warning instead of "no G10 or V1 warning", and the warning adds
+  "it reads none of the files this patch changes" when the check names
+  none of them. Landing is not refused: this changes what the card says.
+
+### Run ids
+
+- Short run ids show 13 characters (the full millisecond of the id's
+  timestamp) instead of 8, which only changed about once a minute, so runs
+  started close together no longer share a short id. This covers the web
+  UI, the default PR title, the T3 Code (ACP) session title, the run named
+  on a setup card, skill candidates' source runs and observation notes.
+  Runs started in the same millisecond can still share one.
+
+### Fewer tokens a call
+
+- The history budget counts the Queen's past tool calls as well as their
+  results. On the test machine those calls were about a third of each
+  request and were not counted. In turns before the latest message, each
+  tool call's arguments are cut to 500 characters.
+- The tools offered to the model keep a fixed order: the core tools, then
+  the tools activated in this chat, in the order they were activated.
+  Together with the hour-level clock, the start of each request stays the
+  same between calls.
+
+### Housekeeping
+
+- The worktree sweep no longer counts a kept worktree whose directory is
+  already gone. On the test machine it logged "swept 1" every 30 seconds
+  for the same tree.
+
+### Not in this release
+
+The Claude Code worker fixes, cache-hit numbers per call, a smaller fixed
+prompt, and the same secret check for chat titles set by name, channel
+`/rename` and attachments are planned for the next round.
