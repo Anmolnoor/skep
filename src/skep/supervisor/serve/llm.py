@@ -1179,6 +1179,21 @@ def _open_stream_lines(
             return
 
 
+def _one_leading_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """v134-F22 r1: the leading system rows as ONE message, joined the way
+    the anthropic/bedrock/responses wires join them. ollama and openai-compat
+    send rows verbatim, and many chat templates refuse a second system
+    message; the joined text still starts with the stable prompt, which is
+    all their automatic prefix caches need."""
+    lead = 0
+    while lead < len(messages) and messages[lead].get("role") == "system":
+        lead += 1
+    if lead < 2:
+        return messages
+    text = "\n\n".join(str(m.get("content") or "") for m in messages[:lead] if m.get("content"))
+    return [{"role": "system", "content": text}, *messages[lead:]]
+
+
 def _ollama_chat_stream(
     base_url: str,
     api_key: str | None,
@@ -1190,6 +1205,7 @@ def _ollama_chat_stream(
     num_ctx: int | None = None,
     max_tokens: int | None = None,
 ) -> Iterator[dict[str, Any]]:
+    messages = _one_leading_system(messages)
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
@@ -1333,6 +1349,7 @@ def _openai_chat_stream(
     timeout: float,
 ) -> Iterator[dict[str, Any]]:
     unanswered: list[str] = []
+    messages = _one_leading_system(messages)
     messages = [_openai_wire_message(m, i, unanswered) for i, m in enumerate(messages)]
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
