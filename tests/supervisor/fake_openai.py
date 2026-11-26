@@ -42,6 +42,9 @@ class FakeOpenAI:
         self.listing_bad_gzip = False
         # ES-F1 (B43): refuse what the real API refuses (strict_wire).
         self.strict = True
+        # v134-F22 r1: a strict server refuses request fields it does not
+        # know, in OpenAI's own words, with a 400 before any stream data.
+        self.rejected_fields: set[str] = set()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -195,6 +198,9 @@ class FakeOpenAI:
                     self._refuse()
                 elif self.path == "/v1/chat/completions":
                     problem = fake.strict and check("openai", openai_chat_errors(body))
+                    unknown = sorted(fake.rejected_fields & set(body or {}))
+                    if unknown:
+                        problem = f"Unrecognized request argument supplied: {unknown[0]}"
                     if problem:
                         self._send(
                             400,

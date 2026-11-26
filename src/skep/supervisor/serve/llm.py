@@ -1339,17 +1339,12 @@ def _openai_chat_stream(
         body["tools"] = tools
     # v134-F22: the usage chunk (and its cached-token count) is opt-in on the
     # OpenAI wire; DeepSeek sends usage on its last chunk either way.
-    body["stream_options"] = {"include_usage": True}
+    if base_url not in _NO_STREAM_OPTIONS:
+        body["stream_options"] = {"include_usage": True}
     pending_calls: dict[int, dict[str, str]] = {}
     usage: dict[str, Any] | None = None
     try:
-        for line in _open_stream_lines(
-            f"{openai_style_prefix(base_url)}/chat/completions",
-            base_url,
-            headers=_headers(api_key),
-            body=body,
-            timeout=timeout,
-        ):
+        for line in _openai_stream_lines(base_url, api_key, body=body, timeout=timeout):
             stripped = line.strip()
             if not stripped or not stripped.startswith("data:"):
                 continue
@@ -1409,6 +1404,32 @@ def _openai_chat_stream(
             yield usage_chunk(usage.get("prompt_tokens"), usage.get("completion_tokens"), cached)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
+
+
+# v134-F22 r1: base URLs that refused ``stream_options`` (a strict server
+# rejects the unknown field) — remembered for the life of the process.
+_NO_STREAM_OPTIONS: set[str] = set()
+
+
+def _openai_stream_lines(
+    base_url: str, api_key: str | None, *, body: dict[str, Any], timeout: float
+) -> Iterator[str]:
+    """The chat/completions stream; a 4xx that names ``stream_options`` is
+    retried once without it. _open_stream_lines raises OllamaError only
+    before the first line, so the retry never repeats stream data."""
+    url = f"{openai_style_prefix(base_url)}/chat/completions"
+    headers = _headers(api_key)
+    try:
+        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
+    except OllamaError as exc:
+        status = exc.status or 0
+        if "stream_options" not in body or not 400 <= status < 500:
+            raise
+        if "stream_options" not in str(exc):
+            raise
+        _NO_STREAM_OPTIONS.add(base_url)
+        body.pop("stream_options")
+        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
 
 
 def usage_chunk(

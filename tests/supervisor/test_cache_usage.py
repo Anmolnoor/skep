@@ -18,6 +18,7 @@ import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve.llm import (
+    OllamaError,
     _anthropic_cache_breakpoints,
     _anthropic_payload,
     chat_stream,
@@ -116,6 +117,56 @@ def test_openai_without_a_cache_field_reports_none(openai: FakeOpenAI) -> None:
     )
     (done,) = _done(chunks)
     assert "cached_tokens" not in done and done["prompt_eval_count"] == 10
+
+
+def _say(server: FakeOpenAI, text: str) -> str:
+    return "".join(
+        str(c["message"].get("content") or "")
+        for c in chat_stream(
+            server.base_url,
+            "k",
+            model="gpt",
+            messages=[{"role": "user", "content": text}],
+            protocol="openai-compat",
+        )
+    )
+
+
+def test_a_server_that_refuses_stream_options_is_retried_once_without_it(
+    openai: FakeOpenAI,
+) -> None:
+    openai.rejected_fields = {"stream_options"}
+    openai.script_reply("first")
+    openai.script_reply("second")
+    assert _say(openai, "hi") == "first"
+    assert [("stream_options" in b) for b in openai.chat_bodies()] == [True, False]
+    # The endpoint is remembered: the next call goes straight without it.
+    assert _say(openai, "again") == "second"
+    assert [("stream_options" in b) for b in openai.chat_bodies()] == [True, False, False]
+
+
+@pytest.mark.parametrize("refusal", ["other field", "bad key"])
+def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
+    if refusal == "other field":
+        openai.rejected_fields = {"tools"}
+        tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+        key = "k"
+    else:
+        tools = None
+        key = "wrong"
+    openai.script_reply("never")
+    with pytest.raises(OllamaError):
+        list(
+            chat_stream(
+                openai.base_url,
+                key,
+                model="gpt",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
+                protocol="openai-compat",
+            )
+        )
+    assert len(openai.chat_bodies()) == 1
 
 
 def test_openai_without_usage_yields_no_done_chunk(openai: FakeOpenAI) -> None:
