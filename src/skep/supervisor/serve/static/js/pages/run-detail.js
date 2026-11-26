@@ -11,7 +11,7 @@
    app.js boots on load, so its helpers come in through the import cycle —
    safe because this module only declares at top level. */
 import { api } from "../api.js";
-import { el, notFound } from "../dom.js";
+import { el, holdButtons, notFound } from "../dom.js";
 import { renderDiff } from "../diff.js";
 import { reviewQueue } from "./inbox.js";
 import { flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
@@ -243,8 +243,7 @@ export async function viewReview(main, reviewId) {
   const verdict = (label, cls, path, body, done) => el("button", {
     type: "button", class: cls,
     onclick: async () => {
-      const buttons = bar.querySelectorAll("button");
-      for (const b of buttons) b.disabled = true;
+      const release = holdButtons(bar);
       try {
         const result = await api("POST", `/api/approvals/${reviewId}/${path}`, body);
         if (!live()) return; // the verdict stands; the page the operator left does not redraw
@@ -257,7 +256,7 @@ export async function viewReview(main, reviewId) {
         outcome.querySelector("a").focus();
       } catch (e) {
         flash("bad", e.message);
-        for (const b of buttons) b.disabled = false;
+        release();
       }
     },
   }, label);

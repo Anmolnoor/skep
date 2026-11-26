@@ -79,7 +79,7 @@ test("the Inbox renders the one queue in its order, grouped by wall, each row li
 
 test("R4 K1: only a gate and a memory proposal approve inline; every row denies on its existing route", async () => {
   const operatorCard = { ...CARD, id: "a2", source: "operator", tool: "setup_project", headline: "setup_project — app" };
-  const { app, rows, calls, routed } = await render([GATE, CARD, operatorCard, MEMORY, SKILL], {
+  const { app, main, rows, calls, routed } = await render([GATE, CARD, operatorCard, MEMORY, SKILL], {
     "POST /": {},
   });
   assert.deepEqual(rows.map(row => Boolean(button(row, "Approve"))), [true, false, false, true, false]);
@@ -93,9 +93,13 @@ test("R4 K1: only a gate and a memory proposal approve inline; every row denies 
   ]);
   assert.equal(routed(), 2); // the list re-renders after each verdict
   assert.match(app.flashes.at(-1)[1], /approved memory · project_fact/);
+  // v134-F21: an approved row keeps its buttons held until the list redraws.
+  main.replaceChildren();
+  await app.viewInbox(main);
+  const fresh = main.querySelectorAll(".inbox-item");
   calls.length = 0;
   app.prompt = () => "not now";
-  for (const row of rows) await button(row, "Deny").click();
+  for (const row of fresh) await button(row, "Deny").click();
   assert.deepEqual(posts(calls), [
     ["/api/approvals/r1/deny", {}],
     ["/api/chats/c1/actions/a1/deny", {}],

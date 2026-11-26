@@ -82,7 +82,9 @@ class FakeNode {
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.
+  // v134-F21: a disabled control takes no click, as in a browser.
   async click() {
+    if (this.disabled) return;
     await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {} })));
   }
   // ".cls" or "tag", optionally with one [attr="value"] — enough to find a
