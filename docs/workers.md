@@ -135,7 +135,7 @@ rather than shipping.
 
 ## Worker Contract Stability
 
-The launch build ships worker contract 0.3.8. Check the exact package and
+The launch build ships worker contract 0.3.9. Check the exact package and
 contract versions with:
 
 ```sh
@@ -155,6 +155,12 @@ never emit — so the claude adapter's `>=0.1,<0.3` range still holds.
 Contract 0.2.2 (v13) added one optional, additive field — `memory` on the task
 envelope, a list of curated memory items the supervisor injects as *context, not
 authority*. Workers that ignore it behave exactly as before.
+
+Contract 0.3.9 (v134-F17) adds one optional, additive field on the
+`heartbeat` event payload — `raw_reply`: the first ~2 KB of a model reply the
+builtin worker could not parse, passed through skep's redactor, recorded once
+per rejected reply under the phase "provider reply rejected". It is forensics
+only; the supervisor never acts on it, and older workers never emit it.
 
 Contract 0.3.8 (operator decision D6, 2026-11-13) adds one optional, additive
 field on `permissions` — `loopback_ports` (integers): the loopback ports the

@@ -35,6 +35,9 @@ class TaskStartPayload(BaseModel):
 
 class HeartbeatPayload(BaseModel):
     phase: str
+    # v134-F17 (contract 0.3.9, additive): the first ~2 KB of a model reply the
+    # worker could not parse, redacted — forensics, never fed to the supervisor.
+    raw_reply: str | None = None
 
 
 class PlanCreatedPayload(BaseModel):

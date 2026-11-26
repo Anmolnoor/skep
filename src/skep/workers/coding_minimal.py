@@ -457,6 +457,20 @@ def _plan_failure_summary(reason: str) -> str:
     return f"LLM coding plan failed: {flat}" if flat else "LLM coding plan failed."
 
 
+_RAW_REPLY_BYTES = 2048
+
+
+def _record_raw_reply(stream: _EventStream, raw_content: str) -> None:
+    """v134-F17: a reply the planner could not parse, kept for forensics — the
+    first ~2 KB, a credential masked BEFORE the cut."""
+    from skep.supervisor.policy_v3 import redact
+
+    stream.emit(
+        EventType.HEARTBEAT,
+        {"phase": "provider reply rejected", "raw_reply": redact(raw_content)[:_RAW_REPLY_BYTES]},
+    )
+
+
 def _failure_cause(exc: BaseException) -> str:
     """L31: a failed run's cause on one line for its summary (the chat and
     every messenger notice read it): a login or token masked BEFORE the cut,
@@ -1114,6 +1128,7 @@ def _execute_llm_plan(
                     transport_failures += 1
                     continue
             else:
+                _record_raw_reply(stream, raw_content)
                 invalid_replies += 1
                 if invalid_replies <= _PLAN_REPAIR_ROUNDS and budget_left:
                     # Self-repair pass: feed the invalid output and the
@@ -1631,6 +1646,7 @@ def _execute_react(
                     transport_failures += 1
                     continue
             else:
+                _record_raw_reply(stream, exc.raw_content)
                 invalid_replies += 1
                 if invalid_replies <= _PLAN_REPAIR_ROUNDS and budget_left:
                     stream.emit(EventType.HEARTBEAT, {"phase": "replanning after invalid reply"})

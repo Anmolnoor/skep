@@ -5779,3 +5779,83 @@ def test_a_failure_notice_masks_a_credential_in_the_exception_text(
     events = stream.path.read_text(encoding="utf-8")
     for text in (result.summary, result.verification.details, events):
         assert canary not in text
+
+
+def _raw_reply_events(repo: Path, task_id: str) -> list[str]:
+    lines = (repo / ".events" / f"{task_id}.ndjson").read_text(encoding="utf-8").splitlines()
+    return [
+        event["payload"]["raw_reply"]
+        for event in map(json.loads, lines)
+        if event["type"] == "heartbeat" and "raw_reply" in event["payload"]
+    ]
+
+
+def _unparseable_reply() -> str:
+    # built at runtime: a credential-shaped header the redactor must mask
+    return "Authorization: Bearer " + "q" * 24 + "\n" + "not a plan " * 400
+
+
+def test_v134_f17_an_unparseable_plan_reply_is_kept_redacted_in_the_event_log(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F17: a reply the planner could not parse was only fed back to the
+    model, so forensics never saw what the model sent. The first ~2 KB now
+    land in the event log, through skep's redactor."""
+    task = mint_task(
+        workspace=repo,
+        instructions="Write generated.py.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+
+    def fake_request(*args: object, **kwargs: object) -> LlmToolPlan:
+        exc = LlmPlanError("plan is not JSON")
+        exc.raw_content = _unparseable_reply()
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_edit_plan", fake_request)
+    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+
+    replies = _raw_reply_events(repo, task.task_id)
+    assert replies  # every rejected reply, the last one included
+    assert len(replies) == read_result(tmp_path / "out.json").usage.provider_calls  # type: ignore[union-attr]
+    for reply in replies:
+        assert reply.startswith("Authorization: Bearer ***")
+        assert "q" * 24 not in reply
+        assert len(reply) <= 2048
+
+
+def test_v134_f17_an_unparseable_react_reply_is_kept_too(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = mint_task(
+        workspace=repo,
+        instructions="Write generated.py.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+        planning_protocol="react",
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+
+    def fake_next(*args: object, **kwargs: object) -> object:
+        exc = LlmPlanError("reply is not JSON")
+        exc.raw_content = _unparseable_reply()
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_next_action", fake_next)
+    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+
+    replies = _raw_reply_events(repo, task.task_id)
+    assert replies
+    assert all("q" * 24 not in reply and len(reply) <= 2048 for reply in replies)
