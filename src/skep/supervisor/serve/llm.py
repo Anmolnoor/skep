@@ -1443,8 +1443,9 @@ def _openai_stream_lines(
     try:
         yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
     except OllamaError as exc:
-        status = exc.status or 0
-        if "stream_options" not in body or not 400 <= status < 500:
+        # v134-F22 r3: a validation refusal only (400/422) — a 401 or 403 that
+        # lists the request's fields is about the key, not the field
+        if "stream_options" not in body or exc.status not in (400, 422):
             raise
         if "stream_options" not in exc.body:
             raise

@@ -48,6 +48,7 @@ class FakeOpenAI:
         # v134-F22 r2: name a rejected field only in error.param, the way
         # strict servers do, under a generic message (or a long list of them)
         self.rejection_message: str | None = None
+        self.rejection_status = 400
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -211,7 +212,8 @@ class FakeOpenAI:
                         error = {"message": problem, "type": "invalid_request_error"}
                         if param:
                             error["param"] = param
-                        self._send(400, json.dumps({"error": error}).encode())
+                        status = fake.rejection_status if unknown else 400
+                        self._send(status, json.dumps({"error": error}).encode())
                         return
                     if is_probe(body):  # Phase 05: answered, no scripted turn spent
                         fake.script_reply("pong")

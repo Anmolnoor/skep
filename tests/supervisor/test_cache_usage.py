@@ -183,6 +183,18 @@ def test_a_retry_that_fails_too_does_not_mark_the_endpoint(openai: FakeOpenAI) -
     assert "stream_options" in openai.chat_bodies()[-1]
 
 
+def test_a_non_validation_refusal_naming_stream_options_is_not_retried(
+    openai: FakeOpenAI,
+) -> None:
+    """v134-F22 r3 (Sol): a 401 whose body lists the request's fields is an
+    auth refusal, not a rejected field — no retry, nothing remembered."""
+    openai.rejected_fields = {"stream_options"}
+    openai.rejection_status = 401
+    with pytest.raises(OllamaError):
+        _say(openai, "hi")
+    assert len(openai.chat_bodies()) == 1
+
+
 @pytest.mark.parametrize("refusal", ["other field", "bad key"])
 def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
     if refusal == "other field":
