@@ -32,6 +32,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from ...codex_login import QUEEN_LOGIN_NAME
+from ...policy_v3 import redact
 from ...secret_floor import own_secret_in, own_secret_refusal
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
@@ -110,6 +111,9 @@ class StatusOps:
     post: Callable[[str, str, str], str | None]
     edit: Callable[[str, str, str, str], object]
     delete: Callable[[str, str, str], object]
+
+
+_TELEGRAM_BOT_PATH = re.compile(r"/bot[^/\s']+")
 
 
 def _default_fetch(token: str, offset: int) -> list[dict[str, object]]:
@@ -923,11 +927,19 @@ class TelegramPoller(threading.Thread):
                 logger.warning("telegram delivery failed: %s", result.detail)
 
     def run(self) -> None:
-        while not self._stop_event.wait(self._idle):
+        backoff = self._idle
+        while not self._stop_event.wait(backoff):
+            ok = False
             try:
                 self.poll_once()
+                ok = True
+            except httpx.HTTPError as exc:  # v134-F19: network, not a bug — one line
+                # The request URL carries the bot token: mask it before logging.
+                detail = redact(_TELEGRAM_BOT_PATH.sub("/bot***", str(exc)))
+                logger.warning("telegram poll failed: %s: %s", type(exc).__name__, detail)
             except Exception:  # one broken poll must never kill the daemon
                 logger.exception("telegram poll failed")
+            backoff = self._idle if ok else min(max(backoff * 2, self._idle), 60.0)
 
     def stop(self) -> None:
         self._stop_event.set()
