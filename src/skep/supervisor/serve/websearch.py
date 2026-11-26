@@ -403,16 +403,21 @@ def search_web(query: str, *, max_results: int = 5, run: Run = _run_ddgs) -> lis
                 "rate-limiting; try again later"
             ) from None
         except Exception as exc:
-            from ddgs.exceptions import RatelimitException
+            from ddgs.exceptions import DDGSException, RatelimitException
 
-            if isinstance(exc, RatelimitException):
+            # v134-F20: ddgs has no type for "nothing matched" — its bare base
+            # exception with this exact text, raised only when no engine erred.
+            if type(exc) is DDGSException and str(exc) == "No results found.":
+                hits = []
+            elif isinstance(exc, RatelimitException):
                 raise WebSearchError(
                     "the search engine is rate-limiting skep — wait a minute and search "
                     "again, or read_url a page you already know"
                 ) from exc
-            raise WebSearchError(
-                f"search backend failed: {exc} — try again in a minute or rephrase the query"
-            ) from exc
+            else:
+                raise WebSearchError(
+                    f"search backend failed: {exc} — try again in a minute or rephrase the query"
+                ) from exc
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

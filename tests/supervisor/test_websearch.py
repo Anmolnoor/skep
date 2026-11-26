@@ -63,6 +63,25 @@ def test_search_web_zero_hits_is_a_result_but_backend_failure_is_an_error() -> N
         search_web("q", run=lambda query, limit: (_ for _ in ()).throw(RuntimeError("throttled")))
 
 
+def test_ddgs_no_results_is_an_empty_list_not_a_backend_failure() -> None:
+    """v134-F20: ddgs raises its bare DDGSException("No results found.") when
+    every engine answered and none matched (ddgs.py _search_sync); that is a
+    search that found nothing, while an engine error or timeout still fails."""
+    from ddgs.exceptions import DDGSException, TimeoutException
+
+    def raising(exc: Exception) -> Callable[[str, int], list[dict[str, Any]]]:
+        def run(query: str, limit: int) -> list[dict[str, Any]]:
+            raise exc
+
+        return run
+
+    assert search_web("q", run=raising(DDGSException("No results found."))) == []
+    with pytest.raises(WebSearchError, match="backend failed"):
+        search_web("q", run=raising(DDGSException("https://html.duckduckgo.com 403")))
+    with pytest.raises(WebSearchError, match="backend failed"):
+        search_web("q", run=raising(TimeoutException("No results found.")))
+
+
 def test_search_web_times_out_instead_of_hanging_the_queen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
