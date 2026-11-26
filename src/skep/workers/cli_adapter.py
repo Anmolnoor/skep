@@ -240,7 +240,10 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str
     transcript (the full text stays in the COMMAND_RESULT event), because
     Verification.details is rendered in cards and CLI output.
     """
-    text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    from skep.supervisor.policy_v3 import redact_export
+
+    # v134-F14 r1: masked BEFORE the cut, so a cut never leaves half of one.
+    text = redact_export((proc.stderr or "").strip() or (proc.stdout or "").strip())
     if len(text) <= limit:
         return text
     # v134-F16: start at a sentence, else a word, when one starts in the first
@@ -253,25 +256,40 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 600) -> str
 
 
 # v134-F14: what `git diff --check` reports that is whitespace and nothing else.
-_WHITESPACE_FINDINGS = (
-    "trailing whitespace.",
-    "space before tab in indent.",
-    "new blank line at EOF.",
+_WHITESPACE_FINDINGS = frozenset(
+    {"trailing whitespace", "space before tab in indent", "new blank line at EOF"}
 )
+_FINDING = re.compile(r".+:\d+: (?P<message>.+)")
 
 
-def _whitespace_only(findings: str) -> bool:
-    """True when every `git diff --check` finding is a whitespace problem.
+def _diff_check_findings(stdout: str) -> list[str]:
+    """`git diff --check` output without the echoed patch lines.
 
-    Finding lines are ``path:line: message``; the ``+``-prefixed lines under
-    them echo the offending content. A conflict marker, or anything unknown,
-    is not whitespace.
+    git prints ``path:line: message``; a whitespace message ends with "." and
+    the offending line follows it, echoed with a ``+`` (a blank line at EOF
+    and a conflict marker echo nothing). The echo is file content: it can say
+    anything, even look like a finding, so it is skipped by position, never
+    read (v134-F14 r1).
     """
-    lines = [line for line in findings.splitlines() if line and not line.startswith("+")]
-    return (
-        bool(lines)
-        and "leftover conflict marker" not in findings
-        and all(line.endswith(_WHITESPACE_FINDINGS) for line in lines)
+    kept: list[str] = []
+    echo_next = False
+    for line in stdout.split("\n"):
+        if echo_next:
+            echo_next = False
+        elif line:
+            kept.append(line)
+            echo_next = line.endswith(".") and not line.endswith(": new blank line at EOF.")
+    return kept
+
+
+def _whitespace_only(findings: list[str]) -> bool:
+    """True when every finding is a whitespace problem (git joins several on
+    one line with ", "). A conflict marker, or anything unknown, is not."""
+    matches = [_FINDING.fullmatch(line) for line in findings]
+    return bool(findings) and all(
+        match is not None
+        and set(match["message"].removesuffix(".").split(", ")) <= _WHITESPACE_FINDINGS
+        for match in matches
     )
 
 
@@ -391,7 +409,9 @@ def _execute(
     label = spec.worker_version.split("-adapter-")[0]
     agent_tail = _agent_tail(agent_proc)
     # v134-F14: `git diff --check` reports on STDOUT; stderr was all we read.
-    findings = verify_proc.stdout.strip()[:600]
+    # r1: only the `path:line: message` lines — the echo is file content.
+    found = _diff_check_findings(verify_proc.stdout)
+    findings = "\n".join(line for line in found if _FINDING.fullmatch(line))[:600]
     risk_flags: list[str] = []
     if agent_proc.returncode != 0:
         status = TaskState.FAILED
@@ -407,7 +427,8 @@ def _execute(
         if agent_tail:
             details = f"{details}: {agent_tail}"
         summary = f"{label} completed but produced no patch."
-    elif verify_proc.returncode != 0 and _whitespace_only(verify_proc.stdout):
+    elif verify_proc.returncode > 0 and _whitespace_only(found):
+        # r1: a COMPLETED check only — a timeout (-1) leaves partial output.
         # v134-F14: a hygiene check, not the verdict — G10 re-runs the
         # project's pinned verify_command on this patch either way.
         status = TaskState.COMPLETED
@@ -428,6 +449,9 @@ def _execute(
         outcome = VerificationOutcome.PASSED
         details = "git diff --check passed"
         summary = f"{label} produced a verified patch."
+    from skep.supervisor.policy_v3 import redact_export
+
+    details = redact_export(details)  # v134-F14 r1: the agent tail, git's stderr
 
     stream.emit(
         EventType.VERIFY_RESULT,
