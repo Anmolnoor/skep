@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -568,3 +569,25 @@ def test_v134_f14_whitespace_classifier(findings: str, whitespace_only: bool) ->
     from skep.workers.cli_adapter import _whitespace_only
 
     assert _whitespace_only(findings) is whitespace_only
+
+
+def test_v134_f15_a_timed_out_agent_keeps_its_partial_output(tmp_path: Path) -> None:
+    """v134-F15: on POSIX TimeoutExpired carries bytes even under text=True, and
+    the adapter kept only str — a run killed at its wall clock (01a2123b, mid
+    `npm install`) left no trace of what it was doing."""
+    import json
+
+    from skep.workers.cli_adapter import _agent_tail, _EventStream, _run
+
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = "import sys,time; print('installing deps', flush=True); "
+    script += "sys.stderr.write('npm WARN caf\\u00e9\\n'); sys.stderr.flush(); time.sleep(30)"
+    proc, _record = _run(
+        [sys.executable, "-c", script], cwd=tmp_path, timeout=1, stream=stream, purpose="agent"
+    )
+    assert proc.returncode == -1
+    assert "installing deps" in proc.stdout
+    assert "npm WARN café" in proc.stderr
+    assert _agent_tail(proc).endswith("npm WARN café\ncommand timed out after 1s")
+    result = json.loads((tmp_path / "events.ndjson").read_text().splitlines()[-1])
+    assert "installing deps" in result["payload"]["stdout"]

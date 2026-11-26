@@ -203,9 +203,14 @@ def _run(
     except FileNotFoundError as exc:
         proc = subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        proc = subprocess.CompletedProcess(argv, -1, stdout, stderr or "command timed out")
+        # v134-F15: on POSIX the partial output is bytes even under text=True.
+        stdout, stderr = (
+            out.decode("utf-8", errors="replace") if isinstance(out, bytes) else out or ""
+            for out in (exc.stdout, exc.stderr)
+        )
+        note = f"command timed out after {timeout}s"
+        stderr = f"{stderr.rstrip()}\n{note}" if stderr.strip() else note
+        proc = subprocess.CompletedProcess(argv, -1, stdout, stderr)
     finally:
         done.set()
         beater.join()
