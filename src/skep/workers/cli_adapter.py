@@ -216,16 +216,21 @@ def _run(
         done.set()
         beater.join()
     duration_ms = int((time.monotonic() - started) * 1000)
+    from skep.supervisor.policy_v3 import redact_export
+
+    # v134-F15 r4: the stored output is masked, finished or timed out
+    # (proc keeps the raw text the adapter itself reads)
+    stdout, stderr = redact_export(proc.stdout), redact_export(proc.stderr)
     stream.emit(
         EventType.COMMAND_RESULT,
         {
             "command": command,
             "exit_code": proc.returncode,
             "duration_ms": duration_ms,
-            "stdout_tail": proc.stdout[-200:],
-            "stderr_tail": proc.stderr[-200:],
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout_tail": stdout[-200:],
+            "stderr_tail": stderr[-200:],
+            "stdout": stdout,
+            "stderr": stderr,
         },
     )
     return proc, CommandRecord(command=command, exit_code=proc.returncode, purpose=purpose)

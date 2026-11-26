@@ -740,6 +740,35 @@ def test_v134_f15_a_timed_out_agent_that_wrote_only_stdout_keeps_its_words(
     )
 
 
+@pytest.mark.parametrize("timeout", [1, 30])
+def test_v134_f15_a_credential_an_agent_prints_is_masked_in_its_command_event(
+    tmp_path: Path, timeout: int
+) -> None:
+    """v134-F15 r4 (Sol): F15 began keeping a timed-out agent's partial
+    output in the command event; a run that finished already kept its full
+    output. Both are now masked like every other stored detail."""
+    import json
+
+    from skep.workers.cli_adapter import _EventStream, _run
+
+    secret = "q" * 24
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = f"import sys,time; print('see https://{secret}@git.example/x', flush=True); "
+    script += f"sys.stderr.write('Authorization: Bearer {secret}\\n'); sys.stderr.flush(); "
+    script += "time.sleep(5)" if timeout == 1 else "pass"
+    _run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        timeout=timeout,
+        stream=stream,
+        purpose="agent",
+    )
+    payload = json.loads((tmp_path / "events.ndjson").read_text().splitlines()[-1])["payload"]
+    for field in ("stdout", "stderr", "stdout_tail", "stderr_tail"):
+        assert secret not in payload[field], field
+    assert "git.example" in payload["stdout"]
+
+
 def _tail_of(stdout: str) -> str:
     from skep.workers.cli_adapter import _agent_tail
 
