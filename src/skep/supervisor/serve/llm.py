@@ -1362,6 +1362,8 @@ def _openai_chat_stream(
     # OpenAI wire; DeepSeek sends usage on its last chunk either way.
     if base_url not in _NO_STREAM_OPTIONS:
         body["stream_options"] = {"include_usage": True}
+    asked_usage = "stream_options" in body
+    answered = False  # a choice came back: the reply is real, not an empty 200
     pending_calls: dict[int, dict[str, str]] = {}
     usage: dict[str, Any] | None = None
     try:
@@ -1383,6 +1385,7 @@ def _openai_chat_stream(
             if isinstance(payload.get("usage"), dict):
                 usage = payload["usage"]
             for choice in payload.get("choices") or []:
+                answered = True
                 delta = choice.get("delta") or {}
                 thinking = _openai_delta_thinking(delta)
                 if thinking:
@@ -1409,20 +1412,32 @@ def _openai_chat_stream(
                         }
                     }
                     pending_calls = {}
+        final: list[dict[str, Any]] = []
         if pending_calls:
-            yield {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": _final_openai_tool_calls(pending_calls),
+            final.append(
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": _final_openai_tool_calls(pending_calls),
+                    }
                 }
-            }
+            )
         if usage is not None:
             details = usage.get("prompt_tokens_details")
             cached = details.get("cached_tokens") if isinstance(details, dict) else None
             if cached is None:
                 cached = usage.get("prompt_cache_hit_tokens")  # DeepSeek's own name
-            yield usage_chunk(usage.get("prompt_tokens"), usage.get("completion_tokens"), cached)
+            final.append(
+                usage_chunk(usage.get("prompt_tokens"), usage.get("completion_tokens"), cached)
+            )
+        # v134-F22 r5: the endpoint is remembered as refusing stream_options
+        # only after a retry without it came back whole — a choice arrived and
+        # the terminal usage parsed — and before the last yield, which a caller
+        # may stop at
+        if asked_usage and "stream_options" not in body and answered:
+            _NO_STREAM_OPTIONS.add(base_url)
+        yield from final
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 
@@ -1449,15 +1464,9 @@ def _openai_stream_lines(
             raise
         if "stream_options" not in exc.body:
             raise
+        # the parser remembers the endpoint once the retry answered (v134-F22 r5)
         body.pop("stream_options")
-        # v134-F22 r3/r4: remembered only once the retry's stream ends well —
-        # its [DONE] line, or its last line. A 4xx that merely echoed the field
-        # fails again; a stream error the caller's parser raises ends it first.
-        for line in _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout):
-            if line.strip().removeprefix("data:").strip() == "[DONE]":
-                _NO_STREAM_OPTIONS.add(base_url)
-            yield line
-        _NO_STREAM_OPTIONS.add(base_url)
+        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
 
 
 def usage_chunk(

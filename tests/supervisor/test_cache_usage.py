@@ -208,6 +208,31 @@ def test_a_retry_that_streams_an_error_does_not_mark_the_endpoint(openai: FakeOp
     assert "stream_options" in openai.chat_bodies()[-1]
 
 
+@pytest.mark.parametrize("shape", ["empty", "bad usage"])
+def test_a_retry_that_does_not_come_back_whole_does_not_mark_the_endpoint(
+    openai: FakeOpenAI, shape: str
+) -> None:
+    """v134-F22 r5 (Sol, Terra): an empty 200 (only [DONE]), or a reply whose
+    terminal usage does not parse, marked the endpoint for good."""
+    openai.rejected_fields = {"stream_options"}
+    if shape == "empty":
+        openai.chat_scripts.append([])
+        _say(openai, "hi")
+    else:
+        openai.chat_scripts.append(
+            [
+                {"choices": [{"delta": {"content": "half"}}]},
+                {"choices": [], "usage": {"prompt_tokens": "lots", "completion_tokens": 1}},
+            ]
+        )
+        with pytest.raises(OllamaError):
+            _say(openai, "hi")
+    openai.rejected_fields = set()
+    openai.script_reply("ok")
+    assert _say(openai, "hi") == "ok"
+    assert "stream_options" in openai.chat_bodies()[-1]
+
+
 @pytest.mark.parametrize("refusal", ["other field", "bad key"])
 def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
     if refusal == "other field":
