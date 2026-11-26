@@ -518,6 +518,15 @@ def _verify_rules(verify_command: str) -> str:
     )
 
 
+# v134-F18: a resumed run gets a fresh sandbox — /tmp included (01a211bf:
+# mkdir /tmp/nm, pause, the approved cp into it failed). /tmp stays per-launch.
+PAUSE_KEEPS_ONLY_THE_WORKTREE = (
+    "A pause for approval keeps only your worktree: /tmp and everything else outside "
+    "it start fresh when the run resumes, so put scratch files in the worktree (and "
+    "remove them before you finish) or recreate them. "
+)
+
+
 def _shell_approval_rules(shell_allowlist: Sequence[Sequence[str]]) -> str:
     """v127-F1 (I5/I9): the approval rules as the task resolved them, never
     a hard-coded claim — ``ls``/``find`` stopped five scheduled runs because
@@ -527,13 +536,13 @@ def _shell_approval_rules(shell_allowlist: Sequence[Sequence[str]]) -> str:
         return (
             "Approval rules: no shell command runs without approval (other than the "
             "pinned verify above, when there is one); anything else stops the run for "
-            "the operator. "
+            "the operator. " + PAUSE_KEEPS_ONLY_THE_WORKTREE
         )
     listed = ", ".join(f"`{prefix}`" for prefix in prefixes)
     return (
         f"Approval rules: these shell commands run without approval: {listed} "
         "(as argv prefixes, plus the pinned verify above, when there is one); anything "
-        "else stops the run for the operator. "
+        "else stops the run for the operator. " + PAUSE_KEEPS_ONLY_THE_WORKTREE
     )
 
 
