@@ -3396,11 +3396,14 @@ class RunStore:
     ) -> dict[str, int | None]:
         """The tally over the last ``hours``; with ``chat_id``, that chat's share.
         The cache sums are None when no row in the window reported one (SQL
-        SUM over only NULLs) — never a fake 0."""
+        SUM over only NULLs) — never a fake 0. ``cache_reported_prompt_tokens``
+        is the input of only the rows that reported a cache count: the honest
+        base for the cached share when ollama rows (no cache field) mix in."""
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         row = self._conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0),"
-            " COALESCE(SUM(completion_tokens), 0), SUM(cached_tokens), SUM(cache_creation_tokens)"
+            " COALESCE(SUM(completion_tokens), 0), SUM(cached_tokens), SUM(cache_creation_tokens),"
+            " SUM(CASE WHEN cached_tokens IS NOT NULL THEN prompt_tokens END)"
             " FROM llm_usage WHERE created_at >= ? AND (? IS NULL OR chat_id = ?)",
             (cutoff, chat_id, chat_id),
         ).fetchone()
@@ -3411,6 +3414,7 @@ class RunStore:
             "total_tokens": int(row[1]) + int(row[2]),
             "cached_tokens": None if row[3] is None else int(row[3]),
             "cache_creation_tokens": None if row[4] is None else int(row[4]),
+            "cache_reported_prompt_tokens": None if row[5] is None else int(row[5]),
         }
 
     # -- project policies (vx Stage A) ----------------------------------------

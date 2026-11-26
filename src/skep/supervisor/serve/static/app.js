@@ -4705,8 +4705,10 @@ async function renderAssistantTab(panel) {
   api("GET", "/api/llm/usage").then(usage => {
     // v134-F22: the provider's cache hits sit beside the input count; a
     // provider that reports none (ollama) shows nothing, never a fake 0.
+    // r1: measured against the input of the rows that reported a cache count.
     const fmt = w => `${w.prompt_tokens.toLocaleString()} in`
-      + (w.cached_tokens == null ? "" : ` (${w.cached_tokens.toLocaleString()} cached)`)
+      + (w.cached_tokens == null ? "" : ` (${w.cached_tokens.toLocaleString()} of `
+        + `${w.cache_reported_prompt_tokens.toLocaleString()} cached)`)
       + ` + ${w.completion_tokens.toLocaleString()} out tok / ${w.requests} req`;
     usageLine.replaceChildren(
       `Usage counted by skep — last 5h: ${fmt(usage.last_5h)} · last 7d: ${fmt(usage.last_7d)}. `
