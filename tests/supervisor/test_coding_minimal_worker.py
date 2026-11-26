@@ -31,6 +31,7 @@ from skep.worker_contract import (
     AutonomyDecisionPayload,
     Permissions,
     TaskIntent,
+    TaskState,
 )
 from skep.worker_contract.task import ApprovalVerdict
 from skep.workers import coding_minimal as coding_worker
@@ -2218,7 +2219,9 @@ def test_default_coding_worker_fails_after_exhausted_plan_repairs(
     # v70-F7: the summary names the reason — every surface that shows only
     # the summary (run list, chat working line, plan.created) tells the truth.
     assert outcome.record.summary == "LLM coding plan failed: verify must be an object"
-    assert outcome.record.verification_details == "verify must be an object"
+    # v134-F17 r1: the details end with the start of the last rejected reply
+    expected = "verify must be an object; last reply: " + _INVALID_VERIFY_PLAN[:600]
+    assert outcome.record.verification_details == expected
     result = json.loads(
         (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
     )
@@ -2230,9 +2233,7 @@ def test_default_coding_worker_fails_after_exhausted_plan_repairs(
         transitions = store.transitions_for(outcome.record.task_id)
     finally:
         store.close()
-    assert ("failed", "verify must be an object") in [
-        (state, detail) for state, detail, _ts in transitions
-    ]
+    assert ("failed", expected) in [(state, detail) for state, detail, _ts in transitions]
 
 
 def test_default_coding_worker_retries_after_transport_drop(
@@ -5781,26 +5782,15 @@ def test_a_failure_notice_masks_a_credential_in_the_exception_text(
         assert canary not in text
 
 
-def _raw_reply_events(repo: Path, task_id: str) -> list[str]:
-    lines = (repo / ".events" / f"{task_id}.ndjson").read_text(encoding="utf-8").splitlines()
-    return [
-        event["payload"]["raw_reply"]
-        for event in map(json.loads, lines)
-        if event["type"] == "heartbeat" and "raw_reply" in event["payload"]
-    ]
-
-
 def _unparseable_reply() -> str:
-    # built at runtime: a credential-shaped header the redactor must mask
-    return "Authorization: Bearer " + "q" * 24 + "\n" + "not a plan " * 400
+    # built at runtime: URL userinfo the bare redactor misses, and a lone
+    # escaped surrogate (json.loads keeps it) that pydantic cannot serialise
+    return "see https://" + "q" * 24 + "@git.example/x.git \ud800 " + "not a plan " * 400
 
 
-def test_v134_f17_an_unparseable_plan_reply_is_kept_redacted_in_the_event_log(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """v134-F17: a reply the planner could not parse was only fed back to the
-    model, so forensics never saw what the model sent. The first ~2 KB now
-    land in the event log, through skep's redactor."""
+def _run_unparseable(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> tuple[Any, str]:
     task = mint_task(
         workspace=repo,
         instructions="Write generated.py.",
@@ -5808,57 +5798,58 @@ def test_v134_f17_an_unparseable_plan_reply_is_kept_redacted_in_the_event_log(
             read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
         ),
         budget=DEFAULT_BUDGET,
+        planning_protocol=protocol,
     )
     stream = _EventStream(
         repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
     )
 
-    def fake_request(*args: object, **kwargs: object) -> LlmToolPlan:
-        exc = LlmPlanError("plan is not JSON")
-        exc.raw_content = _unparseable_reply()
-        raise exc
-
-    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
-    monkeypatch.setattr(coding_worker, "request_edit_plan", fake_request)
-    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
-
-    replies = _raw_reply_events(repo, task.task_id)
-    assert replies  # every rejected reply, the last one included
-    assert len(replies) == read_result(tmp_path / "out.json").usage.provider_calls  # type: ignore[union-attr]
-    for reply in replies:
-        assert reply.startswith("Authorization: Bearer ***")
-        assert "q" * 24 not in reply
-        assert len(reply) <= 2048
-
-
-def test_v134_f17_an_unparseable_react_reply_is_kept_too(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    task = mint_task(
-        workspace=repo,
-        instructions="Write generated.py.",
-        permissions=Permissions(
-            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
-        ),
-        budget=DEFAULT_BUDGET,
-        planning_protocol="react",
-    )
-    stream = _EventStream(
-        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
-    )
-
-    def fake_next(*args: object, **kwargs: object) -> object:
+    def fake_request(*args: object, **kwargs: object) -> object:
         exc = LlmPlanError("reply is not JSON")
         exc.raw_content = _unparseable_reply()
         raise exc
 
     monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
-    monkeypatch.setattr(coding_worker, "request_next_action", fake_next)
+    monkeypatch.setattr(coding_worker, "request_edit_plan", fake_request)
+    monkeypatch.setattr(coding_worker, "request_next_action", fake_request)
     coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+    return read_result(tmp_path / "out.json"), stream.path.read_text(encoding="utf-8")
 
-    replies = _raw_reply_events(repo, task.task_id)
-    assert replies
-    assert all("q" * 24 not in reply and len(reply) <= 2048 for reply in replies)
+
+@pytest.mark.parametrize("protocol", ["plan", "react"])
+def test_v134_f17_a_run_that_gives_up_on_unparseable_replies_shows_the_last_one(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> None:
+    """v134-F17 r1: the reply the model sent was never visible to forensics.
+    The terminal failure's details now carry a ~600-char excerpt of the LAST
+    unparseable reply — URL userinfo masked, a lone surrogate replaced — and
+    the run still ends with the normal failure, not a serialisation crash."""
+    result, events = _run_unparseable(repo, tmp_path, monkeypatch, protocol)
+
+    assert result.status is TaskState.FAILED
+    details = result.verification.details
+    assert "reply is not JSON" in details
+    assert "https://***@git.example/x.git" in details
+    assert "q" * 24 not in details and "q" * 24 not in events
+    excerpt = details.split("last reply: ", 1)[1]
+    assert 0 < len(excerpt) <= 600
+    # nothing per reply reaches the event stream: only the one terminal verdict
+    carrying = [line for line in events.splitlines() if "not a plan" in line]
+    assert [json.loads(line)["type"] for line in carrying] == ["verify.result"]
+
+
+def test_v134_f17_an_excerpt_that_cannot_be_built_is_left_out() -> None:
+    class Hostile(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            raise RuntimeError("boom")
+
+    assert coding_worker._reply_excerpt(Hostile("x")) == ""
+
+
+def test_v134_f17_the_heartbeat_carries_no_raw_reply() -> None:
+    from skep.worker_contract.events import HeartbeatPayload
+
+    assert set(HeartbeatPayload.model_fields) == {"phase"}
 
 
 def test_v134_f18_a_resumed_react_run_is_told_only_the_worktree_survived(
