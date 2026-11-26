@@ -1435,8 +1435,8 @@ _NO_STREAM_OPTIONS: set[str] = set()
 def _openai_stream_lines(
     base_url: str, api_key: str | None, *, body: dict[str, Any], timeout: float
 ) -> Iterator[str]:
-    """The chat/completions stream; a 4xx that names ``stream_options`` is
-    retried once without it. _open_stream_lines raises OllamaError only
+    """The chat/completions stream; a 400 or 422 that names ``stream_options``
+    is retried once without it. _open_stream_lines raises OllamaError only
     before the first line, so the retry never repeats stream data."""
     url = f"{openai_style_prefix(base_url)}/chat/completions"
     headers = _headers(api_key)
@@ -1450,14 +1450,14 @@ def _openai_stream_lines(
         if "stream_options" not in exc.body:
             raise
         body.pop("stream_options")
-        # v134-F22 r3: remembered only once the retry streams — a 4xx that
-        # merely echoed the field (a server quoting the request) fails again
-        remembered = False
+        # v134-F22 r3/r4: remembered only once the retry's stream ends well —
+        # its [DONE] line, or its last line. A 4xx that merely echoed the field
+        # fails again; a stream error the caller's parser raises ends it first.
         for line in _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout):
-            if not remembered:
+            if line.strip().removeprefix("data:").strip() == "[DONE]":
                 _NO_STREAM_OPTIONS.add(base_url)
-                remembered = True
             yield line
+        _NO_STREAM_OPTIONS.add(base_url)
 
 
 def usage_chunk(
