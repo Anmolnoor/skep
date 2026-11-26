@@ -233,6 +233,21 @@ def test_a_retry_that_does_not_come_back_whole_does_not_mark_the_endpoint(
     assert "stream_options" in openai.chat_bodies()[-1]
 
 
+def test_a_usage_count_that_is_not_a_number_fails_as_a_provider_error(
+    openai: FakeOpenAI,
+) -> None:
+    """v134-F22 r6 (Opus): int() on a dict or list count raised a bare
+    TypeError past the provider-error boundary."""
+    openai.chat_scripts.append(
+        [
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [], "usage": {"prompt_tokens": {}, "completion_tokens": 1}},
+        ]
+    )
+    with pytest.raises(OllamaError):
+        _say(openai, "hi")
+
+
 @pytest.mark.parametrize("refusal", ["other field", "bad key"])
 def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
     if refusal == "other field":

@@ -1433,12 +1433,13 @@ def _openai_chat_stream(
             )
         # v134-F22 r5: the endpoint is remembered as refusing stream_options
         # only after a retry without it came back whole — a choice arrived and
-        # the terminal usage parsed — and before the last yield, which a caller
-        # may stop at
+        # the terminal usage, if any, parsed — and before the last yield, which
+        # a caller may stop at
         if asked_usage and "stream_options" not in body and answered:
             _NO_STREAM_OPTIONS.add(base_url)
         yield from final
-    except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+    # TypeError: a usage count that is a dict or list (v134-F22 r6)
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 
 
