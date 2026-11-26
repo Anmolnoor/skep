@@ -458,29 +458,6 @@ def _plan_failure_summary(reason: str) -> str:
     return f"LLM coding plan failed: {flat}" if flat else "LLM coding plan failed."
 
 
-_REPLY_EXCERPT_CHARS = 600
-
-
-def _reply_excerpt(raw_content: str) -> str:
-    """v134-F17 r1: the start of the last reply the planner could not parse,
-    for the failure details — never per reply on the event stream. URL
-    userinfo masked too (``redact_export``), a credential masked BEFORE the
-    cut, a lone surrogate replaced (pydantic cannot serialise one). Best
-    effort: it never fails the failure path; empty when it cannot be built."""
-    try:
-        from skep.supervisor.policy_v3 import redact_export
-
-        text = raw_content.encode("utf-8", "replace").decode()
-        return redact_export(text)[:_REPLY_EXCERPT_CHARS].strip()
-    except Exception:
-        return ""
-
-
-def _with_reply(details: str, raw_content: str | None) -> str:
-    excerpt = _reply_excerpt(raw_content) if raw_content else ""
-    return f"{details}; last reply: {excerpt}" if excerpt else details
-
-
 def _failure_cause(exc: BaseException) -> str:
     """L31: a failed run's cause on one line for its summary (the chat and
     every messenger notice read it): a login or token masked BEFORE the cut,
@@ -1151,7 +1128,7 @@ def _execute_llm_plan(
                 stream=stream,
                 out_path=out_path,
                 summary=_plan_failure_summary(str(exc)),
-                details=_with_reply(str(exc), raw_content),
+                details=str(exc),
                 usage=_tallied_usage(tokens, provider_calls),
             )
         provider_calls += 1
@@ -1677,7 +1654,7 @@ def _execute_react(
                 out_path=out_path,
                 # L31: the cause, one line — never a bare "react run failed."
                 summary=f"react run failed: {_failure_cause(exc)}",
-                details=_with_reply(str(exc), exc.raw_content),
+                details=str(exc),
                 usage=_tallied_usage(tokens, provider_calls),
             )
         provider_calls += 1

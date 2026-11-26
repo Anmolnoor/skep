@@ -43,6 +43,13 @@ class LlmPlanError(Exception):
     raw_content: str | None = None
 
 
+def _encodable(text: str) -> str:
+    """v134-F17 r2: a reply as it can be sent back. A provider's JSON may
+    carry an escaped lone surrogate, which json.loads keeps and no encoder
+    takes, so the repair request carrying the reply failed (review r2)."""
+    return text.encode("utf-8", "replace").decode()
+
+
 class LlmUpstreamError(LlmPlanError):
     """Phase 05 R2 (F11): resolving the worker's credential needed an upstream
     call that failed — a refused Copilot token exchange. ``status`` is its
@@ -380,7 +387,7 @@ def request_edit_plan(
     try:
         return _parse_plan(content, default_verify=pin_verify_argv(verify_command))
     except LlmPlanError as exc:
-        exc.raw_content = content
+        exc.raw_content = _encodable(content)
         raise
 
 
@@ -1132,7 +1139,7 @@ def request_next_action(
     try:
         return _parse_react_reply(_json_object(content))
     except LlmPlanError as exc:
-        exc.raw_content = content
+        exc.raw_content = _encodable(content)
         raise
 
 

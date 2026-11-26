@@ -6,7 +6,8 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -2219,9 +2220,8 @@ def test_default_coding_worker_fails_after_exhausted_plan_repairs(
     # v70-F7: the summary names the reason — every surface that shows only
     # the summary (run list, chat working line, plan.created) tells the truth.
     assert outcome.record.summary == "LLM coding plan failed: verify must be an object"
-    # v134-F17 r1: the details end with the start of the last rejected reply
-    expected = "verify must be an object; last reply: " + _INVALID_VERIFY_PLAN[:600]
-    assert outcome.record.verification_details == expected
+    # v134-F17 r2: the details name the reason and carry no model text
+    assert outcome.record.verification_details == "verify must be an object"
     result = json.loads(
         (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
     )
@@ -2233,7 +2233,9 @@ def test_default_coding_worker_fails_after_exhausted_plan_repairs(
         transitions = store.transitions_for(outcome.record.task_id)
     finally:
         store.close()
-    assert ("failed", expected) in [(state, detail) for state, detail, _ts in transitions]
+    assert ("failed", "verify must be an object") in [
+        (state, detail) for state, detail, _ts in transitions
+    ]
 
 
 def test_default_coding_worker_retries_after_transport_drop(
@@ -5817,33 +5819,45 @@ def _run_unparseable(
 
 
 @pytest.mark.parametrize("protocol", ["plan", "react"])
-def test_v134_f17_a_run_that_gives_up_on_unparseable_replies_shows_the_last_one(
+def test_v134_f17_a_run_that_gives_up_on_unparseable_replies_stores_none_of_them(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
 ) -> None:
-    """v134-F17 r1: the reply the model sent was never visible to forensics.
-    The terminal failure's details now carry a ~600-char excerpt of the LAST
-    unparseable reply — URL userinfo masked, a lone surrogate replaced — and
-    the run still ends with the normal failure, not a serialisation crash."""
+    """v134-F17 r2: no redactor catches a credential written as prose, so no
+    part of a rejected reply is stored — not per reply, not in the terminal
+    details (review r2: those reach the event stream and the chat). The run
+    still ends with the normal failure, naming the parse error."""
     result, events = _run_unparseable(repo, tmp_path, monkeypatch, protocol)
 
     assert result.status is TaskState.FAILED
-    details = result.verification.details
-    assert "reply is not JSON" in details
-    assert "https://***@git.example/x.git" in details
-    assert "q" * 24 not in details and "q" * 24 not in events
-    excerpt = details.split("last reply: ", 1)[1]
-    assert 0 < len(excerpt) <= 600
-    # nothing per reply reaches the event stream: only the one terminal verdict
-    carrying = [line for line in events.splitlines() if "not a plan" in line]
-    assert [json.loads(line)["type"] for line in carrying] == ["verify.result"]
+    assert result.verification.details == "reply is not JSON"
+    assert "not a plan" not in events and "git.example" not in events
 
 
-def test_v134_f17_an_excerpt_that_cannot_be_built_is_left_out() -> None:
-    class Hostile(str):
-        def encode(self, *args: object, **kwargs: object) -> bytes:
-            raise RuntimeError("boom")
+@pytest.mark.parametrize("request_fn", ["request_edit_plan", "request_next_action"])
+def test_v134_f17_a_reply_with_a_lone_surrogate_can_be_sent_back_for_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request_fn: str
+) -> None:
+    """v134-F17 r2: the repair pass sends the rejected reply back; a lone
+    surrogate (json.loads keeps an escaped one) made that request unencodable."""
+    from skep.workers import llm_plan
 
-    assert coding_worker._reply_excerpt(Hostile("x")) == ""
+    monkeypatch.setattr(llm_plan, "_endpoint", lambda profile: "http://llm.invalid")
+    monkeypatch.setattr(
+        llm_plan,
+        "_provider_chunks",
+        lambda *a, **k: iter(["not json \ud800"]),
+    )
+    provider = cast(Any, SimpleNamespace(profile=None))
+    with pytest.raises(LlmPlanError) as caught:
+        if request_fn == "request_edit_plan":
+            llm_plan.request_edit_plan(
+                provider, workspace=tmp_path, instructions="x", network_allowlist=["*"]
+            )
+        else:
+            llm_plan.request_next_action(provider, conversation=[])
+    raw = caught.value.raw_content
+    assert raw is not None and raw.startswith("not json")
+    raw.encode("utf-8")  # raises on a lone surrogate
 
 
 def test_v134_f17_the_heartbeat_carries_no_raw_reply() -> None:
