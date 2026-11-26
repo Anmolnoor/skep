@@ -5,7 +5,7 @@ import { renderContextPanel } from "./room.js";
 import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
-import { drawVerdictRow, el, holdButtons, holdVerdict, iconButton, notFound } from "./js/dom.js";
+import { drawVerdictRow, el, holdVerdict, iconButton, notFound } from "./js/dom.js";
 import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
@@ -2719,8 +2719,11 @@ async function viewChat(main, chatId) {
       keepCovers(d.card),
       cardReplay(d.card),
       row);
+    // v134-F21 r2: keyed, so a chat redrawn mid-request draws this card held
+    const key = `action:${d.action_id}`;
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      const release = holdButtons(row); // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         // R5-2 (K2): a confirm names how many items this card rendered — the
         // server refuses (409, nothing ran) a card that now holds another set.
@@ -2732,14 +2735,16 @@ async function viewChat(main, chatId) {
       catch (e) {
         if (verb === "confirm" && e.status === 409 && /you were shown/.test(e.message)) {
           flash("bad", "this card changed — review it again; nothing ran");
+          hold.landed();
           route(); // the thread redraws the card as it is now
           return;
         }
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        release();
+        hold.failed();
         return;
       }
+      hold.landed();
       resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
       watchStatus();  // v92-F3: a confirmed card can dispatch or revive a run
     };
@@ -2806,11 +2811,14 @@ async function viewChat(main, chatId) {
       ...cardBody(d),
       notes.map(note => el("p", { class: "note" }, note)),
       row);
+    const key = `action:${d.action_id}`; // v134-F21 r2
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      const release = holdButtons(row); // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
+        hold.landed();
         commandResult(verb === "confirm" ? `${d.tool}: result` : `${d.tool}: canceled`, result, d.tool);
         await followProject(d.tool, result);
         resolveCardUI(card, verb === "confirm" ? "✓ Confirmed" : "✗ Canceled", verb);
@@ -2818,7 +2826,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        release();
+        hold.failed();
       }
       setComposerLocked(anyCardPending());
     };
@@ -2869,11 +2877,15 @@ async function viewChat(main, chatId) {
       ...cardBody(d),
       whyLine(d),
       row);
+    // v134-F21 r2: the gate's own key, shared with the Approvals view and Inbox
+    const key = d.args?.review_id ? `gate:${d.args.review_id}` : `action:${d.action_id}`;
+    drawVerdictRow(key, row);
     const verdict = (verb) => async () => {
-      const release = holdButtons(row); // double-click guard
+      const hold = holdVerdict(key, row); // double-click guard
       try {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
+        hold.landed();
         commandResult(verb === "confirm" ? "approve_review: result" : "deny_review: result", result,
           verb === "confirm" ? "approve_review" : "deny_review");
         resolveCardUI(card, verb === "confirm" ? "✓ Approved" : "✗ Denied", verb);
@@ -2881,7 +2893,7 @@ async function viewChat(main, chatId) {
       } catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);
-        release();
+        hold.failed();
       }
     };
     approve.addEventListener("click", verdict("confirm"));
