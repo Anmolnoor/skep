@@ -4465,7 +4465,7 @@ def execute_read_tool(
                 str(args["query"]), max_results=int(args.get("max_results") or 5)
             )
         except Exception as exc:
-            return {"error": f"web search failed: {exc}", "results": []}
+            return {"error": f"web search: {exc}", "results": []}
         return {"results": results, "decided_by": search_decision.decided_by}
     if name == "list_memory_proposals":
         state = None if args.get("state") is None else str(args["state"])

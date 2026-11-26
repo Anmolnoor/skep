@@ -1189,3 +1189,25 @@ def test_no_address_is_dialled_after_the_deadline(monkeypatch: pytest.MonkeyPatc
         websearch.fetch_url_text("https://two.example/", resolve=two)
     time.sleep(0.6)  # the abandoned reader has had time to try the next address
     assert len(sent) == 1
+
+
+def test_an_empty_search_is_not_called_a_failure_by_the_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """v134-F20 r1: the tool passes the search's own words through — an
+    empty-or-unanswered search does not reach the Queen as "failed"."""
+    from skep.supervisor import RunStore
+
+    def _empty(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        raise WebSearchError("the search returned nothing: no page matched")
+
+    monkeypatch.setattr("skep.supervisor.serve.websearch.search_web", _empty)
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
+    try:
+        result = execute_read_tool(
+            "search_web", {"query": "x"}, store=store, holder=_holder(tmp_path, store)
+        )
+    finally:
+        store.close()
+    assert result["results"] == []
+    assert result["error"] == "web search: the search returned nothing: no page matched"
