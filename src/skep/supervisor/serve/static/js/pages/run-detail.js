@@ -11,7 +11,7 @@
    app.js boots on load, so its helpers come in through the import cycle —
    safe because this module only declares at top level. */
 import { api } from "../api.js";
-import { el, holdButtons, notFound } from "../dom.js";
+import { drawVerdictRow, el, holdVerdict, notFound } from "../dom.js";
 import { renderDiff } from "../diff.js";
 import { reviewQueue } from "./inbox.js";
 import { flash, header, offersRemember, relativeTime, shortTaskId, stateChip } from "../../app.js";
@@ -243,9 +243,10 @@ export async function viewReview(main, reviewId) {
   const verdict = (label, cls, path, body, done) => el("button", {
     type: "button", class: cls,
     onclick: async () => {
-      const release = holdButtons(bar);
+      const held = holdVerdict(`gate:${reviewId}`, bar); // v134-F21 r1: keyed, as everywhere
       try {
         const result = await api("POST", `/api/approvals/${reviewId}/${path}`, body);
+        held.landed();
         if (!live()) return; // the verdict stands; the page the operator left does not redraw
         if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
         outcome.replaceChildren(...[el("p", { class: "flash ok" }, done(result)),
@@ -256,7 +257,7 @@ export async function viewReview(main, reviewId) {
         outcome.querySelector("a").focus();
       } catch (e) {
         flash("bad", e.message);
-        release();
+        held.failed();
       }
     },
   }, label);
@@ -267,6 +268,7 @@ export async function viewReview(main, reviewId) {
     verdict("Deny", "danger", "deny", { note: "denied from UI review" }, () => "Denied."),
     /^(shell\.run|network\.(fetch|read))$/.test(gate.action) && offersRemember(gate)
       ? el("a", { class: "home-link", href: "#/approvals" }, "Allow & remember: on the Approvals page") : null);
+  drawVerdictRow(`gate:${reviewId}`, bar); // r1: a verdict in flight elsewhere holds it
   root.append(diffSection, forensics, bar, outcome, el("p", { class: "note keys" }, REVIEW_KEYS));
 
   const files = diff ? diff.sections : [];
