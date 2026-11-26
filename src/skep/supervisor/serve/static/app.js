@@ -5,7 +5,7 @@ import { renderContextPanel } from "./room.js";
 import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
-import { el, holdButtons, iconButton, notFound } from "./js/dom.js";
+import { drawVerdictRow, el, holdButtons, holdVerdict, iconButton, notFound } from "./js/dom.js";
 import { api, REAUTH, setToken, showLogin, token } from "./js/api.js";
 import { liveSource, onceByEventId, streamSse } from "./js/sse.js";
 import { renderDiff } from "./js/diff.js";
@@ -3978,17 +3978,21 @@ async function viewRunDetail(main, taskId) {
   // Approval actions, right where the operator is looking.
   const actions = el("div", { class: "actions" });
   const pending = detail.approvals.filter(a => a.status === "pending");
+  // v134-F21 r1: the gate's key when one is open, so a verdict in flight
+  // from the Approvals view or the Inbox holds this row too.
+  const verdictKey = pending.length ? `gate:${pending[0].review_id}` : `run:${taskId}`;
   const act = (label, cls, fn) => {
     const b = el("button", { class: cls }, label);
     b.addEventListener("click", async () => {
-      const release = holdButtons(actions); // v134-F21: one verdict at a time
+      const held = holdVerdict(verdictKey, actions); // v134-F21: one verdict at a time
       const before = location.hash;
       try {
         await fn();
+        held.landed();
         // If the action navigated, hashchange already re-rendered — a second
         // route() here would interleave with it and duplicate the view.
         if (location.hash === before) route();
-      } catch (e) { flash("bad", e.message); release(); }
+      } catch (e) { flash("bad", e.message); held.failed(); }
     });
     return b;
   };
@@ -4032,6 +4036,7 @@ async function viewRunDetail(main, taskId) {
       }));
     }
   }
+  drawVerdictRow(verdictKey, actions); // r1: redrawn mid-request, it is drawn held
   if (actions.children.length) main.append(actions);
   for (const approval of detail.approvals) {
     main.append(el("p", { class: "note" },
@@ -4279,18 +4284,20 @@ async function viewApprovals(main) {
       card.append(el("p", { class: "note" }, `${batchCommands.length} commands in this plan:`), list);
     }
     const actions = el("div", { class: "actions" });
+    const key = `gate:${approval.review_id}`;
     const verdict = (label, cls, path, body) => {
       const button = el("button", { class: cls }, label);
       button.addEventListener("click", async () => {
-        const release = holdButtons(actions); // v134-F21: one verdict at a time
+        const held = holdVerdict(key, actions); // v134-F21: one verdict at a time
         const before = location.hash;
         try {
           const result = await api("POST", `/api/approvals/${approval.review_id}/${path}`, body);
+          held.landed();
           if (result.suggestion) flash("ok", result.suggestion);
           if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
           if (result.url) flash("ok", `PR: ${result.url}`);
           if (location.hash === before) route();
-        } catch (e) { flash("bad", e.message); release(); }
+        } catch (e) { flash("bad", e.message); held.failed(); }
       });
       return button;
     };
@@ -4313,6 +4320,7 @@ async function viewApprovals(main) {
       );
     }
     if (run.state === "completed") actions.append(verdict("Open PR", "ghost", "pr", {}));
+    drawVerdictRow(key, actions); // r1: redrawn mid-request, it is drawn held
     card.append(actions);
     return card;
   };

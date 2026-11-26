@@ -52,7 +52,7 @@ const APPROVAL = {
   status: "pending", requested_at: AT, run: { state: "pending_approval", instructions: "go" },
 };
 
-async function approvalsCard(request, posts) {
+async function approvalsView(request, posts) {
   const app = loadApp();
   app.header = () => {};
   app.api = async (method, path) => {
@@ -63,8 +63,10 @@ async function approvalsCard(request, posts) {
   };
   const main = app.el("main");
   await app.viewApprovals(main);
-  return main.querySelector(".actions");
+  return { app, main };
 }
+const approvalsCard = async (request, posts) =>
+  (await approvalsView(request, posts)).main.querySelector(".actions");
 
 test("Approvals: Deny pressed while Approve is in flight sends nothing", async () => {
   const request = inFlight();
@@ -85,9 +87,47 @@ test("Approvals: a failed verdict gives every button back for a retry", async ()
   assert.ok(after.every(b => b === false), after);
 });
 
+// v134-F21 r1 (review): a redraw mid-request — a filter switch, a poll's
+// route() — drew fresh, enabled buttons, and a second verdict went out. The
+// in-flight verdict is kept by its card's key, so a card drawn meanwhile is
+// drawn held; a failure gives the card drawn last its buttons back.
+test("Approvals: a filter switch while Approve is in flight draws the card held", async () => {
+  const request = inFlight();
+  const posts = [];
+  const { main } = await approvalsView(request, posts);
+  const pressed = button(main.querySelector(".actions"), "Approve").click();
+  await tick();
+  await main.querySelectorAll(".filter-tab").find(tab => tab.textContent.startsWith("Other")).click();
+  const fresh = main.querySelector(".actions");
+  assert.ok(fresh.querySelectorAll("button").every(b => b.disabled), "the redrawn card is held");
+  await button(fresh, "Deny").click();
+  assert.deepEqual(posts, ["/api/approvals/r1/approve"]);
+  request.reject(Object.assign(new Error("server unreachable"), { status: 502 }));
+  await pressed;
+  assert.ok(fresh.querySelectorAll("button").every(b => !b.disabled), "a failure frees the card drawn last");
+  await button(fresh, "Deny").click();
+  assert.deepEqual(posts, ["/api/approvals/r1/approve", "/api/approvals/r1/deny"]);
+});
+
+test("Approvals: a route() redraw while a verdict is in flight draws the card held", async () => {
+  const request = inFlight();
+  const posts = [];
+  const { app, main } = await approvalsView(request, posts);
+  const pressed = button(main.querySelector(".actions"), "Approve").click();
+  await tick();
+  main.replaceChildren();
+  await app.viewApprovals(main); // the poll's route(): the pending count moved
+  assert.ok(main.querySelector(".actions").querySelectorAll("button").every(b => b.disabled));
+  request.resolve({});
+  await pressed;
+  main.replaceChildren();
+  await app.viewApprovals(main); // landed: the next draw is not held by it
+  assert.ok(main.querySelector(".actions").querySelectorAll("button").every(b => !b.disabled));
+});
+
 // ---------- the run page ----------
 
-async function runActions(request, posts) {
+async function runView(request, posts) {
   const app = loadApp();
   app.liveSource = () => ({ close() {} });
   app.api = async (method, path) => {
@@ -103,8 +143,10 @@ async function runActions(request, posts) {
   };
   const main = app.el("main");
   await app.viewRunDetail(main, "t1");
-  return main.querySelectorAll(".actions").find(row => button(row, "Approve"));
+  return { app, main };
 }
+const runRow = main => main.querySelectorAll(".actions").find(row => button(row, "Approve"));
+const runActions = async (request, posts) => runRow((await runView(request, posts)).main);
 
 test("run page: Deny pressed while Approve is in flight sends nothing", async () => {
   const request = inFlight();
@@ -124,11 +166,28 @@ test("run page: a failed verdict gives every button back for a retry", async () 
   assert.ok(after.every(b => b === false), after);
 });
 
+test("run page: a redraw while a verdict is in flight draws its buttons held", async () => {
+  const request = inFlight();
+  const posts = [];
+  const { app, main } = await runView(request, posts);
+  const pressed = button(runRow(main), "Approve").click();
+  await tick();
+  main.replaceChildren();
+  await app.viewRunDetail(main, "t1"); // the event stream's done → route()
+  const fresh = runRow(main);
+  assert.ok(fresh.querySelectorAll("button").every(b => b.disabled), "the redrawn row is held");
+  await button(fresh, "Deny").click();
+  request.reject(Object.assign(new Error("server unreachable"), { status: 502 }));
+  await pressed;
+  assert.deepEqual(posts, ["/api/approvals/r1/approve"]);
+  assert.ok(fresh.querySelectorAll("button").every(b => !b.disabled), "a failure frees the row drawn last");
+});
+
 // ---------- the Inbox ----------
 
 const GATE = { kind: "gate", id: "r1", boundary: "network-egress", at: AT, task_id: "abcdef1234567890", action: "network.fetch", reason: "pypi.org", warning: null, tamper: null, stale_base: null, taint: null, mirrored_by: [], inline_approve: true };
 
-async function inboxRow(request, posts) {
+async function inboxView(request, posts) {
   const app = loadApp();
   const nodes = {};
   app.document.getElementById = id => (nodes[id] ||= app.el("div"));
@@ -138,12 +197,18 @@ async function inboxRow(request, posts) {
     if (method === "POST") { posts.push(path); return request.promise; }
     if (path === "/api/review-queue") return { items: [GATE], count: 1 };
     if (path === "/api/chats") return { chats: [] };
+    // the review page of the same gate
+    if (path === "/api/approvals") return { approvals: [{ ...APPROVAL, task_id: GATE.task_id }] };
+    if (path === `/api/runs/${GATE.task_id}`) return { run: { state: "pending_approval", instructions: "go" }, artifacts: [] };
+    if (path === `/api/runs/${GATE.task_id}/forensics`) return { error: "not stubbed" };
     throw new Error(`unstubbed api ${method} ${path}`);
   };
   const main = app.el("main");
   await app.viewInbox(main);
-  return main.querySelector(".inbox-actions");
+  return { app, main };
 }
+const inboxRow = async (request, posts) =>
+  (await inboxView(request, posts)).main.querySelector(".inbox-actions");
 
 test("Inbox: Deny pressed while Approve is in flight sends nothing", async () => {
   const request = inFlight();
@@ -161,6 +226,39 @@ test("Inbox: a failed verdict gives every button back for a retry", async () => 
   const { after } = await doubleClick(row, "Approve", "Deny", request, "fail");
   assert.deepEqual(posts, ["/api/approvals/r1/approve"]);
   assert.ok(after.every(b => b === false), after);
+});
+
+test("Inbox: another row's verdict redrawing the list draws an in-flight row held", async () => {
+  const request = inFlight();
+  const posts = [];
+  const { app, main } = await inboxView(request, posts);
+  const pressed = button(main.querySelector(".inbox-actions"), "Approve").click();
+  await tick();
+  main.replaceChildren();
+  await app.viewInbox(main); // route() after another row settled
+  const fresh = main.querySelector(".inbox-actions");
+  assert.ok(fresh.querySelectorAll("button").every(b => b.disabled), "the redrawn row is held");
+  await button(fresh, "Deny").click();
+  request.reject(Object.assign(new Error("server unreachable"), { status: 502 }));
+  await pressed;
+  assert.deepEqual(posts, ["/api/approvals/r1/approve"]);
+  assert.ok(fresh.querySelectorAll("button").every(b => !b.disabled), "a failure frees the row drawn last");
+});
+
+test("Inbox → review page: the same gate's verdict in flight holds its review buttons", async () => {
+  const request = inFlight();
+  const posts = [];
+  const { app, main } = await inboxView(request, posts);
+  const pressed = button(main.querySelector(".inbox-actions"), "Approve").click();
+  await tick();
+  const review = app.el("main");
+  await app.viewReview(review, "r1");
+  const bar = review.querySelector(".review-verdict");
+  assert.ok(bar.querySelectorAll("button").every(b => b.disabled), "the review page draws the gate held");
+  await button(bar, "Deny").click();
+  request.resolve({});
+  await pressed;
+  assert.deepEqual(posts, ["/api/approvals/r1/approve"]);
 });
 
 // ---------- a chat card ----------
