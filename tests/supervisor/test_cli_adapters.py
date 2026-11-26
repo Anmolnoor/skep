@@ -719,6 +719,27 @@ def test_v134_f15_a_timed_out_agent_keeps_its_partial_output(tmp_path: Path) -> 
     assert "installing deps" in result["payload"]["stdout"]
 
 
+def test_v134_f15_a_timed_out_agent_that_wrote_only_stdout_keeps_its_words(
+    tmp_path: Path,
+) -> None:
+    """v134-F15 r1: the timeout note filled stderr, which the tail reads
+    first, so an agent that writes to stdout (claude --print, codex) and hung
+    was summed up as just "command timed out". Its own words come first."""
+    from skep.workers.cli_adapter import _agent_tail, _EventStream, _run
+
+    stream = _EventStream(tmp_path / "events.ndjson", task_id="t", trace_id="tr")
+    script = "import time; print('I was halfway through editing parser.py', flush=True); "
+    script += "time.sleep(30)"
+    proc, _record = _run(
+        [sys.executable, "-c", script], cwd=tmp_path, timeout=1, stream=stream, purpose="agent"
+    )
+    assert proc.returncode == -1
+    assert proc.stderr == "command timed out after 1s"  # the event still says why
+    assert _agent_tail(proc) == (
+        "I was halfway through editing parser.py\ncommand timed out after 1s"
+    )
+
+
 def _tail_of(stdout: str) -> str:
     from skep.workers.cli_adapter import _agent_tail
 
