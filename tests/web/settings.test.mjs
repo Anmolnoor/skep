@@ -378,7 +378,7 @@ test("the sidebar's one Settings link is lit for settings, projects (detail too)
 test("v134-F22: the usage line puts the cached count beside input, and nothing when unreported", async () => {
   const { app } = settingsApp({
     "GET /api/llm/usage": {
-      last_5h: { total_tokens: 905, prompt_tokens: 900, completion_tokens: 5, requests: 1, cached_tokens: 768 },
+      last_5h: { total_tokens: 905, prompt_tokens: 900, completion_tokens: 5, requests: 1, cached_tokens: 768, cache_reported_prompt_tokens: 900 },
       last_7d: { total_tokens: 905, prompt_tokens: 900, completion_tokens: 5, requests: 1, cached_tokens: null },
     },
   });
@@ -387,7 +387,19 @@ test("v134-F22: the usage line puts the cached count beside input, and nothing w
   await settle();
   const line = texts(main, "note").find(t => t.startsWith("Usage counted by skep"));
   assert.ok(line, "usage line rendered");
-  assert.match(line, /last 5h: 900 in \(768 cached\) \+ 5 out tok \/ 1 req/);
+  assert.match(line, /last 5h: 900 in \(768 of 900 cached\) \+ 5 out tok \/ 1 req/);
   assert.match(line, /last 7d: 900 in \+ 5 out tok \/ 1 req/);
-  assert.doesNotMatch(line, /0 cached/);
+  assert.doesNotMatch(line, /7d: [^·]*cached/); // unreported: no "0 cached"
+});
+
+test("v134-F22 r1: cached input is measured against the input of the rows that reported a cache count", async () => {
+  // 5,000 in, of which only 1,000 came from a provider that reports cache
+  // hits (the rest is ollama): 800 cached is 800 of 1,000, not of 5,000.
+  const mixed = { total_tokens: 5010, prompt_tokens: 5000, completion_tokens: 10, requests: 3, cached_tokens: 800, cache_reported_prompt_tokens: 1000 };
+  const { app } = settingsApp({ "GET /api/llm/usage": { last_5h: mixed, last_7d: mixed } });
+  const main = app.el("div");
+  await app.viewSettings(main, "models");
+  await settle();
+  const line = texts(main, "note").find(t => t.startsWith("Usage counted by skep"));
+  assert.match(line, /last 5h: 5,000 in \(800 of 1,000 cached\) \+ 10 out tok \/ 3 req/);
 });

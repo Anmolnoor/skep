@@ -370,6 +370,7 @@ def test_store_keeps_cached_tokens_and_old_rows_read_as_unknown(config: Supervis
     try:
         store.record_llm_usage(model="m", prompt_tokens=10, completion_tokens=1)
         assert store.llm_usage_totals(hours=5)["cached_tokens"] is None
+        assert store.llm_usage_totals(hours=5)["cache_reported_prompt_tokens"] is None
         assert store.llm_usage_totals(hours=5)["cache_creation_tokens"] is None
         store.record_llm_usage(
             model="m",
@@ -383,6 +384,8 @@ def test_store_keeps_cached_tokens_and_old_rows_read_as_unknown(config: Supervis
         store.close()
     assert totals["cached_tokens"] == 80 and totals["cache_creation_tokens"] == 0
     assert totals["prompt_tokens"] == 110
+    # r1: the cached share is measured against the rows that reported one.
+    assert totals["cache_reported_prompt_tokens"] == 100
 
 
 # The table exactly as 2.2.0 created it, trailing comment included: DROP

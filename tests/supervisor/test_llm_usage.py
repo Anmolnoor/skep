@@ -59,6 +59,7 @@ def test_store_totals_respect_the_rolling_windows(config: SupervisorConfig) -> N
         # v134-F22: ollama reports no cache field — None, never 0
         "cached_tokens": None,
         "cache_creation_tokens": None,
+        "cache_reported_prompt_tokens": None,
     }
     assert week["requests"] == 2 and week["total_tokens"] == 180
 
@@ -93,6 +94,7 @@ def test_a_chat_turn_records_usage_and_the_route_serves_it(
         # v134-F22: ollama reports no cache field — None, never 0
         "cached_tokens": None,
         "cache_creation_tokens": None,
+        "cache_reported_prompt_tokens": None,
     }
     assert usage["last_7d"]["total_tokens"] == 150
 
@@ -150,6 +152,7 @@ def test_usage_is_counted_per_chat(config: SupervisorConfig, ollama: FakeOllama)
         # v134-F22: ollama reports no cache field — None, never 0
         "cached_tokens": None,
         "cache_creation_tokens": None,
+        "cache_reported_prompt_tokens": None,
     }
     assert usage["chat"]["last_7d"]["total_tokens"] == 101
     assert "chat" not in client.get("/api/llm/usage").json()
