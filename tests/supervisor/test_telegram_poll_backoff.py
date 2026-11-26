@@ -33,11 +33,11 @@ class _Stop:
         self.script.clear()
 
 
-def _poller(script: list[Any]) -> tuple[TelegramPoller, _Stop]:
+def _poller(script: list[Any], idle: float = 1.0) -> tuple[TelegramPoller, _Stop]:
     poller = TelegramPoller(
         SimpleNamespace(store=None, home=None),  # type: ignore[arg-type]
         web_ui_url="http://ui.test/",
-        idle_seconds=1.0,
+        idle_seconds=idle,
     )
     stop = _Stop(script)
 
@@ -109,3 +109,11 @@ def test_backoff_is_capped_at_sixty_seconds() -> None:
     poller.run()
     assert max(stop.waits) == 60.0
     assert stop.waits[-3:] == [60.0, 60.0, 60.0]
+
+
+def test_a_failing_poll_never_retries_sooner_than_a_healthy_one() -> None:
+    """v134-F19 r1 (review): with an idle interval above the 60 s cap, the
+    capped backoff must not undercut it — a failure waits at least idle."""
+    poller, stop = _poller([httpx.ConnectError("down"), httpx.ConnectError("down"), 0], idle=90.0)
+    poller.run()
+    assert stop.waits == [90.0, 90.0, 90.0, 90.0]

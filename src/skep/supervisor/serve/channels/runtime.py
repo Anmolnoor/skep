@@ -940,7 +940,8 @@ class TelegramPoller(threading.Thread):
                 logger.warning("telegram poll failed: %s: %s", type(exc).__name__, detail)
             except Exception:  # one broken poll must never kill the daemon
                 logger.exception("telegram poll failed")
-            backoff = self._idle if ok else min(max(backoff * 2, self._idle), 60.0)
+            # r1: capped at 60 s, but never sooner than a healthy poll's idle
+            backoff = self._idle if ok else max(self._idle, min(backoff * 2, 60.0))
 
     def stop(self) -> None:
         self._stop_event.set()
