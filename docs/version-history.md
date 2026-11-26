@@ -3734,8 +3734,8 @@ machine. Read "Before you upgrade" first: five things behave differently.
   search returns nothing, the Queen is told that no page matched or the
   search engines did not answer, and to rephrase or try again. The search
   library raises the same error for both, so skep does not claim either.
-  Every search error the Queen sees now starts "web search:" instead of
-  "web search failed:".
+  A failed search now reaches the Queen as "web search: …" instead of "web
+  search failed: …"; the policy refusals keep their wording.
 - A Telegram connection error logs one warning line, with the bot token
   masked, and waits longer before each retry (doubling up to 60 seconds,
   never sooner than the normal poll interval). Before, each failed poll
