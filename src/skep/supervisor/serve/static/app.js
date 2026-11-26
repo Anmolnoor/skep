@@ -3998,6 +3998,9 @@ async function viewRunDetail(main, taskId) {
   // v134-F21 r1: the gate's key when one is open, so a verdict in flight
   // from the Approvals view or the Inbox holds this row too.
   const verdictKey = pending.length ? `gate:${pending[0].review_id}` : `run:${taskId}`;
+  // v134-F21 r3: a gate the click opens is held under its own key too — a
+  // redraw before the verdict returns keys the row gate:<new id>
+  let openedHold = null;
   const act = (label, cls, fn) => {
     const b = el("button", { class: cls }, label);
     b.addEventListener("click", async () => {
@@ -4006,16 +4009,21 @@ async function viewRunDetail(main, taskId) {
       try {
         await fn();
         held.landed();
+        openedHold?.landed();
         // If the action navigated, hashchange already re-rendered — a second
         // route() here would interleave with it and duplicate the view.
         if (location.hash === before) route();
-      } catch (e) { flash("bad", e.message); held.failed(); }
+      } catch (e) { flash("bad", e.message); held.failed(); openedHold?.failed(); }
+      openedHold = null;
     });
     return b;
   };
-  const ensureReview = async () =>
-    pending.length ? pending[0].review_id
-      : (await api("POST", `/api/runs/${taskId}/approvals`)).review_id;
+  const ensureReview = async () => {
+    if (pending.length) return pending[0].review_id;
+    const id = (await api("POST", `/api/runs/${taskId}/approvals`)).review_id;
+    openedHold = holdVerdict(`gate:${id}`, actions);
+    return id;
+  };
   // v19-F1: one approval can carry a batch of shell commands.
   const batchCommands = pending.length ? approvalCommands(pending[0]) : null;
   const isBatch = batchCommands && batchCommands.length > 1;

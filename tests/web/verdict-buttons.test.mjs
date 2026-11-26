@@ -183,6 +183,45 @@ test("run page: a redraw while a verdict is in flight draws its buttons held", a
   assert.ok(fresh.querySelectorAll("button").every(b => !b.disabled), "a failure frees the row drawn last");
 });
 
+test("run page: a gate the first click opened keeps the row held across a redraw", async () => {
+  // v134-F21 r3 (Sol): with no gate open the row was held as run:<id>; the
+  // click opens gate r9, and a redraw then keyed it gate:r9 — drawn live
+  const request = inFlight();
+  const posts = [];
+  let gateOpen = false;
+  const app = loadApp();
+  app.liveSource = () => ({ close() {} });
+  app.api = async (method, path) => {
+    if (method === "POST" && path === "/api/runs/t1/approvals") {
+      gateOpen = true;
+      return { review_id: "r9" };
+    }
+    if (method === "POST") { posts.push(path); return request.promise; }
+    if (path === "/api/runs/t1") {
+      return {
+        run: { task_id: "t1", instructions: "go", state: "completed", repo: "/r" },
+        transitions: [], artifacts: [], commands: [], policy_blocks: [],
+        approvals: gateOpen ? [{ ...APPROVAL, review_id: "r9", task_id: "t1" }] : [],
+      };
+    }
+    return { events: [] };
+  };
+  const main = app.el("main");
+  await app.viewRunDetail(main, "t1");
+  const pressed = button(runRow(main), "Approve").click();
+  await tick();
+  await tick();
+  main.replaceChildren();
+  await app.viewRunDetail(main, "t1");
+  const fresh = runRow(main);
+  assert.ok(fresh.querySelectorAll("button").every(b => b.disabled), "the redrawn row is held");
+  await button(fresh, "Approve").click();
+  request.reject(Object.assign(new Error("server unreachable"), { status: 502 }));
+  await pressed;
+  assert.deepEqual(posts, ["/api/approvals/r9/approve"]);
+  assert.ok(fresh.querySelectorAll("button").every(b => !b.disabled), "a failure frees the row drawn last");
+});
+
 // ---------- the Inbox ----------
 
 const GATE = { kind: "gate", id: "r1", boundary: "network-egress", at: AT, task_id: "abcdef1234567890", action: "network.fetch", reason: "pypi.org", warning: null, tamper: null, stale_base: null, taint: null, mirrored_by: [], inline_approve: true };
