@@ -24,7 +24,7 @@ from skep.supervisor.serve.llm import (
     chat_stream,
 )
 from skep.supervisor.store import RunStore
-from skep.worker_contract import MemoryContextEntry
+from skep.worker_contract import TOOLCHAIN_DIR, MemoryContextEntry
 from skep.workers.capabilities import (
     builtin_tool_manifest,
     shell_run_unknown_keys,
@@ -518,12 +518,16 @@ def _verify_rules(verify_command: str) -> str:
     )
 
 
-# v134-F18: a resumed run gets a fresh sandbox — /tmp included (01a211bf:
-# mkdir /tmp/nm, pause, the approved cp into it failed). /tmp stays per-launch.
+# v134-F18: a resumed run may get a fresh /tmp (01a211bf: mkdir /tmp/nm, pause,
+# the approved cp into it failed under bubblewrap). r1: /tmp is fresh only
+# there — Seatbelt and workspace mode keep it — so the rule names the scratch
+# dir that always survives: dispatch's $TMPDIR, in the worktree's bookkeeping
+# (never in the patch). Named by path too: shell.run runs argv, no shell.
 PAUSE_KEEPS_ONLY_THE_WORKTREE = (
-    "A pause for approval keeps only your worktree: /tmp and everything else outside "
-    "it start fresh when the run resumes, so put scratch files in the worktree (and "
-    "remove them before you finish) or recreate them. "
+    "A pause for approval keeps only your worktree, so put scratch files in $TMPDIR, "
+    f"which is `{TOOLCHAIN_DIR}/tmp` inside it: it survives the pause and is never "
+    "part of the patch. /tmp and anything else outside the worktree may be gone when "
+    "the run resumes. "
 )
 
 
