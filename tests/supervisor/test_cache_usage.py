@@ -24,6 +24,7 @@ from skep.supervisor.serve.llm import (
     _anthropic_payload,
     chat_stream,
 )
+from skep.supervisor.serve.llm_bedrock import EventFrame, _dispatch_frame
 from skep.supervisor.serve.llm_responses import _final_chunk
 
 from .fake_anthropic import FakeAnthropic
@@ -254,6 +255,35 @@ def test_responses_reads_input_tokens_details() -> None:
     )
     assert chunk["cached_tokens"] == 384 and chunk["prompt_eval_count"] == 500
     assert "cached_tokens" not in _final_chunk({"response": {"usage": {"input_tokens": 1}}})
+
+
+def _bedrock_done(usage: dict[str, Any]) -> list[dict[str, Any]]:
+    frame = EventFrame({":event-type": "metadata"}, json.dumps({"usage": usage}).encode())
+    return list(_dispatch_frame(frame, {}))
+
+
+def test_bedrock_reads_cache_reads_and_writes_into_the_input_total() -> None:
+    # AWS: "inputTokens represents only the non-cached input tokens";
+    # total input = inputTokens + cacheReadInputTokens + cacheWriteInputTokens.
+    (done,) = _bedrock_done(
+        {
+            "inputTokens": 10,
+            "outputTokens": 4,
+            "totalTokens": 14,
+            "cacheReadInputTokens": 200,
+            "cacheWriteInputTokens": 30,
+        }
+    )
+    assert done == {
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        "prompt_eval_count": 240,
+        "eval_count": 4,
+        "cached_tokens": 200,
+        "cache_creation_tokens": 30,
+    }
+    (plain,) = _bedrock_done({"inputTokens": 10, "outputTokens": 4})
+    assert plain["prompt_eval_count"] == 10 and "cached_tokens" not in plain
 
 
 # -- the Anthropic breakpoints ------------------------------------------------

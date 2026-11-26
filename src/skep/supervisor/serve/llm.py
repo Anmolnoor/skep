@@ -1666,14 +1666,21 @@ def _anthropic_payload(
 
 
 def _anthropic_usage_chunk(usage: dict[str, Any]) -> dict[str, Any]:
-    """``input_tokens`` counts only what follows the last cache breakpoint;
-    the prompt total adds the cache reads and writes back, so it reads like
-    every other protocol's prompt count."""
-    fresh = usage.get("input_tokens")
-    read = usage.get("cache_read_input_tokens")
-    write = usage.get("cache_creation_input_tokens")
+    """``input_tokens`` counts only what follows the last cache breakpoint."""
+    return uncached_usage_chunk(
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+        usage.get("cache_read_input_tokens"),
+        usage.get("cache_creation_input_tokens"),
+    )
+
+
+def uncached_usage_chunk(fresh: Any, completion: Any, read: Any, write: Any) -> dict[str, Any]:
+    """For a wire whose input count leaves out the cache reads and writes
+    (Anthropic, Bedrock Converse): the prompt total adds them back, so it
+    reads like every other protocol's prompt count."""
     prompt = None if fresh is None else int(fresh) + int(read or 0) + int(write or 0)
-    return usage_chunk(prompt, usage.get("output_tokens"), read, write)
+    return usage_chunk(prompt, completion, read, write)
 
 
 def _anthropic_chat_stream(

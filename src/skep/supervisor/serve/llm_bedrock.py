@@ -40,6 +40,7 @@ from .llm import (
     _STREAM_ATTEMPTS,
     _TRANSIENT_STATUSES,
     OllamaError,
+    uncached_usage_chunk,
 )
 from .llm import _anthropic_call_arguments as _call_arguments
 from .llm import _final_openai_tool_calls as _final_tool_calls
@@ -390,13 +391,15 @@ def _dispatch_frame(
         yield _tool_call_chunk(pending)
         pending.clear()
     elif event == "metadata":
+        # v134-F22 r1: with prompt caching, AWS's inputTokens is only the
+        # non-cached share; the cache reads and writes are separate counts.
         usage = data.get("usage") or {}
-        yield {
-            "message": {"role": "assistant", "content": ""},
-            "done": True,
-            "prompt_eval_count": usage.get("inputTokens"),
-            "eval_count": usage.get("outputTokens"),
-        }
+        yield uncached_usage_chunk(
+            usage.get("inputTokens"),
+            usage.get("outputTokens"),
+            usage.get("cacheReadInputTokens"),
+            usage.get("cacheWriteInputTokens"),
+        )
 
 
 def _tool_call_chunk(pending: dict[int, dict[str, str]]) -> dict[str, Any]:
