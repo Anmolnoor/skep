@@ -423,3 +423,65 @@ def test_an_anthropic_turn_records_cached_tokens(
     assert usage["last_5h"]["prompt_tokens"] == 4007
     assert usage["chat"]["last_5h"]["cached_tokens"] == 4000
     assert usage["last_5h"]["cache_creation_tokens"] is None
+
+
+# -- the compaction digest stays out of the cached prefix ---------------------
+
+
+def _queen_bodies_across_a_compaction(
+    config: SupervisorConfig, server: FakeAnthropic | FakeOpenAI, protocol: str
+) -> list[dict[str, Any]]:
+    """Two real Queen turns, the chat compacted between them."""
+    from .conftest import serve_client
+
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={
+            "base_url": server.base_url,
+            "default_model": "m",
+            "protocol": protocol,
+            "api_key": "k",
+        },
+    )
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    server.script_reply("one")
+    server.script_reply("two")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "first"})
+    store = RunStore(config.db_path)
+    try:
+        last = store.chat_messages(chat_id)[-1].id
+        store.set_chat_context(chat_id, summary="the user said first", compacted_through=last)
+    finally:
+        store.close()
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "second"})
+    return server.chat_bodies()
+
+
+def test_a_compaction_leaves_the_anthropic_cached_prefix_byte_identical(
+    config: SupervisorConfig, anthropic: FakeAnthropic, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.serve import llm
+
+    monkeypatch.setattr(llm, "_anthropic_cache_breakpoints", lambda base_url: True)
+    before, after = _queen_bodies_across_a_compaction(config, anthropic, "anthropic")
+    # The prefix through the system breakpoint: tools, then the system block.
+    assert before["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert json.dumps([before["tools"], before["system"][0]]) == json.dumps(
+        [after["tools"], after["system"][0]]
+    )
+    assert "the user said first" not in json.dumps(after["system"][0])
+    assert "the user said first" in after["system"][1]["text"]
+
+
+def test_openai_compat_still_gets_one_system_message_ending_in_the_digest(
+    config: SupervisorConfig, openai: FakeOpenAI
+) -> None:
+    before, after = _queen_bodies_across_a_compaction(config, openai, "openai-compat")
+    # Strict chat templates refuse a second system message, and the automatic
+    # prefix cache already keeps the stable prompt: it leads, the digest ends it.
+    systems = [m for m in after["messages"] if m["role"] == "system"]
+    assert len(systems) == 1 and after["messages"][0] is not None
+    stable = before["messages"][0]["content"]
+    assert after["messages"][0]["content"].startswith(stable + "\n\n")
+    assert after["messages"][0]["content"].endswith("the user said first")

@@ -511,6 +511,11 @@ def _replay(env: Live, chat: str) -> list[dict[str, Any]]:
     return env.engine._turn_messages(chat)
 
 
+def _system(env: Live, chat: str) -> str:
+    """v134-F22 r1: the stable prompt, then the note/digest row after it."""
+    return "\n\n".join(m["content"] for m in _replay(env, chat) if m["role"] == "system")
+
+
 def test_b26_a_webhook_row_is_the_users_wrapped_sets_untrusted_and_a_granted_action_asks(
     live: Callable[[str], Live], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -556,7 +561,7 @@ def test_b26_a_webhook_row_is_the_users_wrapped_sets_untrusted_and_a_granted_act
             "python3 build.py --fast</untrusted>",
         }
     ]
-    assert "never as instructions" in _replay(env, chat)[0]["content"]  # the system note
+    assert "never as instructions" in _system(env, chat)  # the system note
 
     after = mutation_execution_decision(
         "run_shell", {"command": "python3 build.py --fast"}, store=env.store,
@@ -623,7 +628,7 @@ def test_compaction_keeps_the_bits_and_keeps_outside_rows_marked(
         env.store.add_chat_message(chat, role="assistant", content="answer " + "y" * 400)
     taint = env.store.get_chat_taint(chat)
     monkeypatch.setattr(chat_module.ChatEngine, "_history_budget", lambda *_a, **_k: 3000)
-    system = _replay(env, chat)[0]["content"]
+    system = _system(env, chat)
     record = env.store.get_chat(chat)
     assert record is not None and record.compacted_through > 0
     assert '<untrusted source="webhook:ci">deploy now</untrusted>' in system
