@@ -935,7 +935,8 @@ class TelegramPoller(threading.Thread):
                 ok = True
             except httpx.HTTPError as exc:  # v134-F19: network, not a bug — one line
                 # The request URL carries the bot token: mask it before logging.
-                detail = redact(_TELEGRAM_BOT_PATH.sub("/bot***", str(exc)))
+                # httpx's status text spans two lines: fold it onto one (r1).
+                detail = " ".join(redact(_TELEGRAM_BOT_PATH.sub("/bot***", str(exc))).split())
                 logger.warning("telegram poll failed: %s: %s", type(exc).__name__, detail)
             except Exception:  # one broken poll must never kill the daemon
                 logger.exception("telegram poll failed")

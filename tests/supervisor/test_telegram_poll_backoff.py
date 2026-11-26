@@ -9,6 +9,7 @@ reset by a good poll); anything else still logs its traceback.
 from __future__ import annotations
 
 import logging
+import socket
 from types import SimpleNamespace
 from typing import Any
 
@@ -51,20 +52,35 @@ def _poller(script: list[Any]) -> tuple[TelegramPoller, _Stop]:
     return poller, stop
 
 
+_TOKEN = "123:" + "b" * 12  # a token-shaped path segment, built at runtime
+
+
 def _status_error() -> httpx.HTTPStatusError:
-    token = "123:" + "b" * 12  # a token-shaped path segment, built at runtime
-    request = httpx.Request("GET", f"https://api.telegram.org/bot{token}/getUpdates")
-    response = httpx.Response(502, request=request)
-    return httpx.HTTPStatusError(
-        f"Server error '502 Bad Gateway' for url '{request.url}'",
-        request=request,
-        response=response,
-    )
+    """A real 502: httpx's own text spans two lines (r1 review)."""
+    request = httpx.Request("GET", f"https://api.telegram.org/bot{_TOKEN}/getUpdates")
+    try:
+        httpx.Response(502, request=request).raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        assert "\n" in str(exc)  # the case the r1 fix is for
+        return exc
+    raise AssertionError("a 502 did not raise")
+
+
+def _connect_error() -> httpx.ConnectError:
+    """A real transport error: a loopback port nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    try:
+        httpx.get(f"http://127.0.0.1:{port}/bot{_TOKEN}/getUpdates", timeout=5.0)
+    except httpx.ConnectError as exc:
+        return exc
+    raise AssertionError("a closed port answered")
 
 
 def test_transport_errors_back_off_and_a_good_poll_resets(caplog: Any) -> None:
     script: list[Any] = [
-        httpx.ConnectError("nodename nor servname provided"),
+        _connect_error(),
         httpx.ConnectError("nodename nor servname provided"),
         httpx.ReadTimeout("timed out"),
         0,
@@ -83,6 +99,7 @@ def test_transport_errors_back_off_and_a_good_poll_resets(caplog: Any) -> None:
     assert "telegram" in transport[0].getMessage()
     assert "HTTPStatusError" in transport[3].getMessage()
     assert all("b" * 12 not in r.getMessage() for r in records)  # token redacted
+    assert all("\n" not in r.getMessage() for r in transport)  # one line each
     (unexpected,) = [r for r in records if r.exc_info is not None]
     assert unexpected.exc_info[0] is ValueError  # a bug keeps its traceback
 
