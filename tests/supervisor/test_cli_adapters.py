@@ -517,3 +517,54 @@ def test_v126_f5_castes_without_memory_in_their_prompt_say_not_delivered() -> No
     for module in (reviewer, audit, script_worker):
         payload = module._task_start_payload(task)
         assert str(payload["memory_delivered"]).startswith("not delivered"), module.__name__
+
+
+def test_v134_f14_whitespace_only_findings_are_a_risk_note_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F14: one trailing space failed a Claude Code run on the live test
+    with a bare "git diff --check failed" — the findings go to stdout, which the
+    details never read. The adapter's check is hygiene; G10 (the pinned
+    verify_command) decides what is verified, so whitespace is a risk note and
+    the run still completes with its patch."""
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\nPath('spaced.py').write_text('x = 1 \\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.COMPLETED
+    assert result.verification.outcome is VerificationOutcome.PASSED
+    assert "spaced.py:1: trailing whitespace." in result.verification.details
+    assert result.risk_flags == ["diff-check-whitespace"]
+    assert any(a.kind == "patch" for a in result.artifacts)
+    assert result.changed_files == ["spaced.py"]
+
+
+def test_v134_f14_a_leftover_conflict_marker_still_fails_and_says_where(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\n"
+        "Path('merged.py').write_text('x = 1 \\n<<<<<<< HEAD\\ny = 2\\n', encoding='utf-8')\n",
+    )
+    assert result.status is TaskState.FAILED
+    assert result.verification.outcome is VerificationOutcome.FAILED
+    assert "merged.py:2: leftover conflict marker" in result.verification.details
+
+
+@pytest.mark.parametrize(
+    ("findings", "whitespace_only"),
+    [
+        ("a.py:1: trailing whitespace.\n+x \n", True),
+        ("a.py:2: space before tab in indent.\n+ \tx\na.py:9: new blank line at EOF.\n", True),
+        ("a.py:1: trailing whitespace.\n+x \na.py:3: leftover conflict marker\n", False),
+        ("a.py:1: something git learns to report later\n", False),
+        ("", False),  # a non-zero exit with nothing said is not "whitespace"
+    ],
+)
+def test_v134_f14_whitespace_classifier(findings: str, whitespace_only: bool) -> None:
+    from skep.workers.cli_adapter import _whitespace_only
+
+    assert _whitespace_only(findings) is whitespace_only

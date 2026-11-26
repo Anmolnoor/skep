@@ -238,6 +238,29 @@ def _agent_tail(proc: subprocess.CompletedProcess[str], limit: int = 200) -> str
     return text[-limit:].strip()
 
 
+# v134-F14: what `git diff --check` reports that is whitespace and nothing else.
+_WHITESPACE_FINDINGS = (
+    "trailing whitespace.",
+    "space before tab in indent.",
+    "new blank line at EOF.",
+)
+
+
+def _whitespace_only(findings: str) -> bool:
+    """True when every `git diff --check` finding is a whitespace problem.
+
+    Finding lines are ``path:line: message``; the ``+``-prefixed lines under
+    them echo the offending content. A conflict marker, or anything unknown,
+    is not whitespace.
+    """
+    lines = [line for line in findings.splitlines() if line and not line.startswith("+")]
+    return (
+        bool(lines)
+        and "leftover conflict marker" not in findings
+        and all(line.endswith(_WHITESPACE_FINDINGS) for line in lines)
+    )
+
+
 def _git(workspace: Path, *args: str, timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(workspace), *args],
@@ -353,6 +376,9 @@ def _execute(
 
     label = spec.worker_version.split("-adapter-")[0]
     agent_tail = _agent_tail(agent_proc)
+    # v134-F14: `git diff --check` reports on STDOUT; stderr was all we read.
+    findings = verify_proc.stdout.strip()[:600]
+    risk_flags: list[str] = []
     if agent_proc.returncode != 0:
         status = TaskState.FAILED
         outcome = VerificationOutcome.NOT_ATTEMPTED
@@ -367,10 +393,21 @@ def _execute(
         if agent_tail:
             details = f"{details}: {agent_tail}"
         summary = f"{label} completed but produced no patch."
+    elif verify_proc.returncode != 0 and _whitespace_only(verify_proc.stdout):
+        # v134-F14: a hygiene check, not the verdict — G10 re-runs the
+        # project's pinned verify_command on this patch either way.
+        status = TaskState.COMPLETED
+        outcome = VerificationOutcome.PASSED
+        details = f"git diff --check found whitespace problems only: {findings}"
+        summary = f"{label} produced a patch with whitespace problems."
+        risk_flags.append("diff-check-whitespace")
     elif verify_proc.returncode != 0:
         status = TaskState.FAILED
         outcome = VerificationOutcome.FAILED
-        details = verify_proc.stderr.strip() or "git diff --check failed"
+        details = "git diff --check failed"
+        reason = findings or verify_proc.stderr.strip()
+        if reason:
+            details = f"{details}: {reason}"
         summary = f"{label} produced a patch but diff verification failed."
     else:
         status = TaskState.COMPLETED
@@ -399,7 +436,7 @@ def _execute(
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,
         usage=Usage(provider_calls=1 if agent_proc.returncode != 127 else 0),
-        risk_flags=[],
+        risk_flags=risk_flags,
     )
     _write_result(out_path, result)
     return EXIT_COMPLETED if status is TaskState.COMPLETED else EXIT_FAILED
