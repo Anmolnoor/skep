@@ -160,6 +160,29 @@ def test_a_refusal_that_names_stream_options_only_in_its_body_is_retried(
     assert [("stream_options" in b) for b in openai.chat_bodies()] == [True, False]
 
 
+def test_a_retry_that_fails_too_does_not_mark_the_endpoint(openai: FakeOpenAI) -> None:
+    """v134-F22 r3 (Opus): a 4xx that only echoes stream_options (a server
+    quoting the request body) gets one retry, which fails the same way; the
+    endpoint must not lose usage counts for the rest of the process."""
+    openai.rejected_fields = {"stream_options", "tools"}
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    with pytest.raises(OllamaError):
+        list(
+            chat_stream(
+                openai.base_url,
+                "k",
+                model="gpt",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
+                protocol="openai-compat",
+            )
+        )
+    openai.rejected_fields = set()
+    openai.script_reply("ok")
+    assert _say(openai, "hi") == "ok"
+    assert "stream_options" in openai.chat_bodies()[-1]
+
+
 @pytest.mark.parametrize("refusal", ["other field", "bad key"])
 def test_any_other_4xx_is_not_retried(openai: FakeOpenAI, refusal: str) -> None:
     if refusal == "other field":

@@ -1448,9 +1448,15 @@ def _openai_stream_lines(
             raise
         if "stream_options" not in exc.body:
             raise
-        _NO_STREAM_OPTIONS.add(base_url)
         body.pop("stream_options")
-        yield from _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout)
+        # v134-F22 r3: remembered only once the retry streams — a 4xx that
+        # merely echoed the field (a server quoting the request) fails again
+        remembered = False
+        for line in _open_stream_lines(url, base_url, headers=headers, body=body, timeout=timeout):
+            if not remembered:
+                _NO_STREAM_OPTIONS.add(base_url)
+                remembered = True
+            yield line
 
 
 def usage_chunk(
