@@ -5859,3 +5859,57 @@ def test_v134_f17_an_unparseable_react_reply_is_kept_too(
     replies = _raw_reply_events(repo, task.task_id)
     assert replies
     assert all("q" * 24 not in reply and len(reply) <= 2048 for reply in replies)
+
+
+def test_v134_f18_a_resumed_react_run_is_told_only_the_worktree_survived(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v134-F18: a run made /tmp/nm, paused for approval, and the approved
+    `cp` into it failed on resume — the resumed sandbox gets a fresh /tmp
+    (01a211bf). /tmp stays per-launch; the resumed worker is told so."""
+    from skep.workers.runtime_plugins import RESUME_CHECKPOINT_PLUGIN
+
+    RESUME_CHECKPOINT_PLUGIN.write_react_checkpoint(
+        repo,
+        conversation=[{"role": "user", "content": "copy the build into /tmp/nm"}],
+        changed_files=[],
+        commands=[],
+        verification=None,
+        provider_calls=1,
+    )
+    worker_state = json.loads((repo / ".artifacts" / "resume-checkpoint.json").read_text())
+    task = mint_task(
+        workspace=repo,
+        instructions="Copy the build into /tmp/nm.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+        planning_protocol="react",
+        worker_state=worker_state,
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+    seen: list[list[dict[str, Any]]] = []
+
+    def fake_next(*args: object, conversation: list[dict[str, Any]], **kwargs: object) -> object:
+        seen.append([dict(message) for message in conversation])
+        exc = LlmPlanError("stop here")
+        exc.raw_content = "x"
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_next_action", fake_next)
+    coding_worker._execute(task, repo, stream, tmp_path / "out.json")
+
+    resumed_with = json.loads(seen[0][-1]["content"])["observation"]
+    assert "APPROVED" in resumed_with
+    assert "only your worktree" in resumed_with and "/tmp" in resumed_with
+
+
+def test_v134_f18_the_planner_knows_a_pause_keeps_only_the_worktree(tmp_path: Path) -> None:
+    """The default plan protocol resumes from its cursor without asking the
+    model again, so the rule rides the approval rules it plans with."""
+    system = _plan_messages(workspace=tmp_path, instructions="x")[0]["content"]
+    assert "A pause for approval keeps only your worktree" in system
