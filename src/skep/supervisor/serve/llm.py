@@ -1635,8 +1635,15 @@ def _anthropic_payload(
     converted_tools = _anthropic_tools(tools)
     if converted_tools:
         if cache_breakpoints:
-            # marking the last tool caches every tool definition before it
-            converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            # marking a tool caches every tool definition before it. r1: the
+            # last CORE tool, not the last one — core leads in registry order
+            # and a describe_tools activation is appended after it, so the
+            # marked block never moves. No core tool: the last tool.
+            from .tools import CORE_TOOL_NAMES  # local: tools imports this module
+
+            core = [i for i, t in enumerate(converted_tools) if t["name"] in CORE_TOOL_NAMES]
+            mark = core[-1] if core else -1
+            converted_tools[mark]["cache_control"] = {"type": "ephemeral"}
         body["tools"] = converted_tools
     return body
 

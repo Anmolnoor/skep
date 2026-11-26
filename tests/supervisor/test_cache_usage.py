@@ -9,6 +9,7 @@ NULL and every surface shows nothing, never a fake 0 (I8).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -278,6 +279,42 @@ def test_breakpoints_mark_the_system_prompt_and_the_last_tool() -> None:
     ]
     assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in body["tools"][0]
+
+
+def _cache_marks(body: dict[str, Any]) -> int:
+    return json.dumps(body).count('"cache_control"')
+
+
+def test_the_tool_breakpoint_holds_still_when_describe_tools_activates_one() -> None:
+    from skep.supervisor.serve.tools import CORE_TOOL_NAMES, advertised_tool_specs
+
+    def tools_of(active: list[str]) -> list[dict[str, Any]]:
+        body = _anthropic_payload(
+            model="m",
+            messages=_MESSAGES,
+            tools=advertised_tool_specs(active),
+            cache_breakpoints=True,
+        )
+        assert _cache_marks(body) <= 4  # Anthropic's ceiling
+        return list(body["tools"])
+
+    before, after = tools_of([]), tools_of(["set_policy"])
+    assert len(after) == len(before) + 1  # the activation is appended
+    marked = [i for i, t in enumerate(after) if "cache_control" in t]
+    # One breakpoint, on the last CORE tool: the fixed boundary.
+    assert len(marked) == 1 and after[marked[0]]["name"] in CORE_TOOL_NAMES
+    assert all(t["name"] not in CORE_TOOL_NAMES for t in after[marked[0] + 1 :])
+    cut = marked[0] + 1
+    assert json.dumps(before[:cut]) == json.dumps(after[:cut])
+
+
+def test_tools_with_no_core_tool_mark_the_last_one() -> None:
+    tools = [
+        {"type": "function", "function": {"name": n, "description": n, "parameters": {}}}
+        for n in ("read_file", "write_file")
+    ]
+    body = _anthropic_payload(model="m", messages=_MESSAGES, tools=tools, cache_breakpoints=True)
+    assert [("cache_control" in t) for t in body["tools"]] == [False, True]
 
 
 def test_without_breakpoints_the_body_is_unchanged() -> None:
