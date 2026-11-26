@@ -283,7 +283,8 @@ def test_an_assistant_chat_is_offered_no_hidden_tool_and_the_list_never_flickers
     assert "dispatch_run" in [t["function"]["name"] for t in bodies[3]["tools"]]
     index = bodies[0]["messages"][0]["content"]
     assert "- dispatch_run" not in index and "- start_research" not in index
-    assert "- dispatch_run" in bodies[3]["messages"][0]["content"]
+    # v134-F23: dispatch_run is core — the builder gets its schema, no index line
+    assert "- start_research" in bodies[3]["messages"][0]["content"]
 
 
 def test_the_prompt_tells_a_chat_what_its_role_hides_and_the_static_text_is_conditional(
