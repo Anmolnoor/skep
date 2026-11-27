@@ -4104,11 +4104,13 @@ def diagnose_run(
         read_allowlist, dirs = diagnose_wall(store, task_id, workspace, Path(record.repo))
         writable: tuple[Path, ...] = ()
         readable: tuple[Path, ...] = ()
+        linked_common: Path | None = None
         if dirs is not None:
             git_dir, common = dirs
             linked = git_dir != common
             writable = (git_dir, common / "objects") if linked else (common / "objects",)
             readable = (common,) if linked else ()
+            linked_common = common if linked else None
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
         try:
             sandbox.write_profile(
@@ -4119,6 +4121,7 @@ def diagnose_run(
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
                 read_allowlist=read_allowlist,
+                git_common=linked_common,  # N2: masks from the checked dir
             )
         except sandbox.SandboxUnavailableError as exc:
             # ES-F1 (B47): the kept tree is the worker's output — never run

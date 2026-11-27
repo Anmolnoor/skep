@@ -551,3 +551,42 @@ def test_diagnose_refuses_at_proposal_what_it_refuses_at_confirm(
     finally:
         store.close()
     assert called == []
+
+
+@pytest.mark.skipif(
+    sandbox.availability().backend != "bubblewrap",
+    reason="the message-file masks are bubblewrap/podman mounts; this proof runs on bwrap",
+)
+def test_diagnose_masks_the_checked_common_dir_even_if_the_tree_flips_after(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2: ``write_profile`` found the masks by asking the kept tree again.
+    A tree that stopped being linked between the check and the profile (a
+    second diagnosis's command can write it) bound the checked common dir
+    with its in-progress messages unmasked. The masks now come from the dir
+    the check held."""
+    common = (repo / ".git").resolve()
+    for name in ("COMMIT_EDITMSG", "MERGE_MSG"):
+        (common / name).write_text("operator's draft\n", encoding="utf-8")
+    real_write = sandbox.write_profile
+    profiles: list[Path] = []
+
+    def flip_then_write(path: Path, **kw: Any) -> Path:
+        kept = kw["workspace"]
+        (kept / ".git").unlink()
+        git(kept, "init", "-q")  # no longer a linked tree
+        profiles.append(real_write(path, **kw))
+        return path
+
+    monkeypatch.setattr(sandbox, "write_profile", flip_then_write)
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile: ["true"])
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    args = json.loads(profiles[0].read_text(encoding="utf-8").partition("\n")[2])
+    assert str(common) in args  # the checked common dir is bound
+    for name in ("COMMIT_EDITMSG", "MERGE_MSG"):
+        assert str(common / name) in args, name

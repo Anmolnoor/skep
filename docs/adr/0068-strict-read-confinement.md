@@ -692,7 +692,10 @@ The two lanes the Phase 07 section left behind:
   denylist-only is diagnosed denylist-only. The git metadata it binds is
   held to the run's recorded repo (`worktree.kept_tree_git_dirs`): the
   kept tree is the worker's output, so a `.git` pointer or `commondir`
-  leading anywhere else refuses the diagnosis.
+  leading anywhere else refuses the diagnosis. Both refusals are asked
+  when the card would be offered and again at confirm, and the profile
+  masks the in-progress message files of the common dir that check held,
+  not of whatever the tree points at by then.
 
 The tests assert, on real bubblewrap and on real Seatbelt (CI's macOS job),
 that each lane reads none of four home canaries

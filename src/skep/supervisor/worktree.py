@@ -180,21 +180,23 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     return () if common is None else (common,)
 
 
-def git_metadata_masked(workspace: Path) -> tuple[Path, ...]:
+def git_metadata_masked(workspace: Path, *, common: Path | None = None) -> tuple[Path, ...]:
     """The main checkout's own state no git in the run reads, masked over
     the common dir ``git_metadata_readable_roots`` binds: its in-progress
-    messages."""
-    common = _linked_common_dir(workspace)
+    messages. ``common``: a linked common dir the caller already checked
+    (N2), used instead of asking the tree again."""
+    common = common or _linked_common_dir(workspace)
     return () if common is None else tuple(common / name for name in _COMMON_DIR_PRIVATE)
 
 
-def git_walk_links(workspace: Path) -> tuple[Path, ...]:
+def git_walk_links(workspace: Path, *, common: Path | None = None) -> tuple[Path, ...]:
     """I2 (3I): the entries git's reachability walk reads that are links out
     of the common dir. Such a link resolves inside the wall, where its
     target is absent, so a ``git prune`` there would walk without those
     pointers — a strict run refuses. (A linked ``worktrees/`` already stops
-    git: the run's gitfile no longer finds its common dir.)"""
-    common = _linked_common_dir(workspace)
+    git: the run's gitfile no longer finds its common dir.) ``common`` as
+    for ``git_metadata_masked``."""
+    common = common or _linked_common_dir(workspace)
     if common is None:
         return ()
     return tuple(
