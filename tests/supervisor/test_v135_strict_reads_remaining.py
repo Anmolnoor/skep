@@ -13,19 +13,23 @@ CI, the macOS job); every canary sits under a FAKE home in ``tmp_path``.
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import sys
 import sysconfig
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import skep
-from skep.supervisor import sandbox
+from skep.supervisor import RunStore, SupervisorConfig, sandbox
+from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
 from skep.supervisor.serve import fastlane
+from skep.supervisor.serve.actions import diagnose_run
 from skep.supervisor.serve.fastlane import run_code_fast
 
 from .conftest import git
@@ -175,3 +179,109 @@ def test_the_fast_lane_asks_for_the_strict_wall_where_the_backend_holds_one(
     monkeypatch.setattr(fastlane, "wrap_command", lambda argv, profile: ["true"])
     run_code_fast("python", "print(1)", skep_home=tmp_path / "skep")
     assert seen["read_allowlist"] == expected
+
+
+# --- diagnose_run ------------------------------------------------------------
+
+
+def _kept_run(store: RunStore, repo: Path, tmp_path: Path, recorded: dict[str, Any] | None) -> str:
+    """A kept worktree of ``repo`` with a dispatched line recording ``recorded``."""
+    worktree = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(worktree))
+    task = mint_task(workspace=worktree, instructions="x", budget=DEFAULT_BUDGET)
+    store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+    if recorded is not None:
+        store.transition(task.task_id, "dispatched", json.dumps(recorded))
+    return task.task_id
+
+
+@needs_strict_wall
+def test_diagnose_reads_no_home_canary_and_still_runs_python_and_pytest(
+    repo: Path, config: SupervisorConfig, canaries: list[Path], tmp_path: Path
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        (tmp_path / "kept" / "test_tiny.py").write_text(_TINY_TEST, encoding="utf-8")
+        probe = tmp_path / "kept" / "probe.py"
+        probe.write_text(_PROBE, encoding="utf-8")
+        python = sys.executable
+        command = (
+            f"{python} probe.py {' '.join(map(str, canaries))} {repo / 'existing.py'} "
+            f"&& {python} -m pytest -q -p no:cacheprovider test_tiny.py"
+        )
+        result = diagnose_run(store, config, task_id, command=command)
+    finally:
+        store.close()
+    assert result["exit_code"] == 0, result
+    probe_line, _, pytest_out = result["stdout"].partition("\n")
+    seen = json.loads(probe_line)
+    # the operator's own checkout, outside the kept tree, is a fifth canary
+    assert len(seen) == 5 and _reads(seen) == [], seen
+    assert "1 passed" in pytest_out
+    assert result["sandboxed"] is True
+
+
+@pytest.mark.parametrize(
+    ("recorded", "expected"),
+    [
+        ({"read_allowlist": []}, ()),
+        ({"read_allowlist": ["/srv/data"]}, (Path("/srv/data"),)),
+        ({"g10_read_allowlist": []}, ()),  # G3: an engine with no wall of its own
+        ({}, None),  # the run read denylist-only, so does its diagnosis
+        (None, None),  # no dispatched line at all
+    ],
+)
+def test_diagnose_takes_the_wall_the_run_recorded(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    recorded: dict[str, Any] | None, expected: Any,
+) -> None:  # fmt: skip
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **kw: seen.update(kw) or path)
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile: ["true"])
+    # /srv/data need not exist here (the package exports a function under
+    # the module's name, so the module comes through importlib)
+    reverify_module = importlib.import_module("skep.supervisor.reverify")
+    monkeypatch.setattr(reverify_module, "_moved_read_roots", lambda paths: [])
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, recorded)
+        diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    assert seen["read_allowlist"] == expected
+
+
+def test_diagnose_refuses_a_recorded_wall_that_moved(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1, as G10 has it: a recorded root that is a link now would read
+    whatever it points at today, past the worker's wall — refuse."""
+    real, link = tmp_path / "data", tmp_path / "data-link"
+    real.mkdir()
+    link.symlink_to(real)
+    called: list[object] = []
+    monkeypatch.setattr(sandbox, "write_profile", lambda *a, **kw: called.append(kw))
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": [str(link)]})
+        with pytest.raises(ValueError, match="recorded read wall"):
+            diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    assert called == []
+
+
+def test_diagnose_refuses_a_strict_wall_the_backend_cannot_hold(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A strict run on a host now on podman: refused, never run with open reads."""
+    podman = sandbox.SandboxAvailability(True, backend="podman")
+    monkeypatch.setattr(sandbox, "require_usable", lambda backend=None: podman)
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        with pytest.raises(ValueError, match="strict read confinement"):
+            diagnose_run(store, replace(config, sandbox=True), task_id, command="true")
+    finally:
+        store.close()

@@ -4070,6 +4070,18 @@ def diagnose_run(
     )
     argv: list[str] = ["/bin/sh", "-c", command]
     if config.sandbox:
+        from ..reverify import _moved_read_roots, _recorded_read_wall
+
+        # v135-F2 (ADR 0068, I2): the wall the run's dispatch recorded, read and
+        # refused the way G10 does — a diagnosis never reads more than the worker.
+        read_allowlist = _recorded_read_wall(store, task_id)
+        if moved := _moved_read_roots(read_allowlist or ()):
+            raise ValueError(
+                "the run's recorded read wall no longer resolves to itself: "
+                + ", ".join(f"{path} now leads to {os.path.realpath(path)}" for path in moved)
+                + " — the command was not run, as it would read past the worker's wall; "
+                "dispatch a fresh run instead"
+            )
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
         try:
             sandbox.write_profile(
@@ -4079,6 +4091,7 @@ def diagnose_run(
                 extra_readable=git_metadata_readable_roots(workspace),
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
+                read_allowlist=read_allowlist,
             )
         except sandbox.SandboxUnavailableError as exc:
             # ES-F1 (B47): the kept tree is the worker's output — never run
