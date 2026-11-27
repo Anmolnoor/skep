@@ -4050,7 +4050,7 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import git_metadata_readable_roots, git_metadata_writable_roots
+    from ..worktree import WorktreeError, kept_tree_git_dirs
 
     record = store.get_run(task_id)
     if record is None:
@@ -4082,13 +4082,29 @@ def diagnose_run(
                 + " — the command was not run, as it would read past the worker's wall; "
                 "dispatch a fresh run instead"
             )
+        # S1 (I2): the binds come from git dirs held to the run's own repo,
+        # never from wherever the kept tree's pointer leads.
+        try:
+            dirs = kept_tree_git_dirs(workspace, Path(record.repo))
+        except WorktreeError as exc:
+            raise ValueError(
+                f"{exc} — the command was not run, as the wall would bind those "
+                "directories; dispatch a fresh run instead"
+            ) from exc
+        writable: tuple[Path, ...] = ()
+        readable: tuple[Path, ...] = ()
+        if dirs is not None:
+            git_dir, common = dirs
+            linked = git_dir != common
+            writable = (git_dir, common / "objects") if linked else (common / "objects",)
+            readable = (common,) if linked else ()
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
         try:
             sandbox.write_profile(
                 profile,
                 workspace=workspace,
-                extra_writable=git_metadata_writable_roots(workspace),
-                extra_readable=git_metadata_readable_roots(workspace),
+                extra_writable=writable,
+                extra_readable=readable,
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
                 read_allowlist=read_allowlist,

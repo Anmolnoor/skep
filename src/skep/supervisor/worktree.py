@@ -216,6 +216,41 @@ def _linked_common_dir(workspace: Path) -> Path | None:
     return None if dirs is None or dirs[0] == dirs[1] else dirs[1]
 
 
+def kept_tree_git_dirs(workspace: Path, repo: Path) -> tuple[Path, Path] | None:
+    """(git dir, common dir) of a kept run tree, held to what the supervisor
+    made (S1, I2): the tree is the worker's output, so its ``.git`` pointer —
+    or a ``commondir`` in its own, writable git dir — may lead anywhere. A
+    linked tree's common dir must be ``repo``'s and its git dir an entry of
+    ``<common>/worktrees/`` that points back at this tree (not a sibling
+    run's); a non-linked tree's git dir must be its own ``.git``. Raises
+    ``WorktreeError`` naming what was found; None outside a checkout."""
+    dirs = _git_dirs(workspace)
+    if dirs is None:
+        return None
+    git_dir, common = dirs
+    own = workspace.resolve() / ".git"
+    if git_dir == common:
+        ok = git_dir == own and not (git_dir / "objects").is_symlink()
+    else:
+        trusted = _git_dirs(repo)
+        try:
+            back = _resolve_git_path(git_dir, (git_dir / "gitdir").read_text().strip())
+        except OSError:
+            back = None
+        ok = (
+            trusted is not None
+            and common == trusted[1]
+            and git_dir.parent == common / "worktrees"
+            and back == own
+        )
+    if not ok:
+        raise WorktreeError(
+            f"the kept tree's git metadata leads outside its run: git dir {git_dir}, "
+            f"common dir {common} (the run's repo is {repo})"
+        )
+    return dirs
+
+
 def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:
     """(git dir, common dir) of ``workspace``, or None outside a git checkout."""
     proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir")

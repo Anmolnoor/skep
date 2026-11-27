@@ -287,6 +287,67 @@ def test_diagnose_refuses_a_strict_wall_the_backend_cannot_hold(
         store.close()
 
 
+def _forge_pointer_to_foreign_repo(kept: Path, foreign: Path, repo: Path) -> None:
+    (kept / ".git").write_text(f"gitdir: {foreign / '.git'}\n", encoding="utf-8")
+
+
+def _forge_commondir(kept: Path, foreign: Path, repo: Path) -> None:
+    # the run's own git dir is writable in its wall: a `commondir` there
+    # moves git's common dir wherever the worker likes
+    git_dir = Path((kept / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+    (git_dir / "commondir").write_text(f"{foreign / '.git'}\n", encoding="utf-8")
+
+
+def _forge_pointer_to_a_sibling_run(kept: Path, foreign: Path, repo: Path) -> None:
+    sibling = kept.parent / "sibling-run"
+    git(repo, "worktree", "add", "-q", "--detach", str(sibling))
+    (kept / ".git").write_text((sibling / ".git").read_text(), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [_forge_pointer_to_foreign_repo, _forge_commondir, _forge_pointer_to_a_sibling_run],
+)
+def test_diagnose_refuses_git_metadata_the_kept_tree_points_elsewhere(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    forge: Any,
+) -> None:  # fmt: skip
+    """S1 (I2): the kept tree is the worker's output. Its ``.git`` pointer (or
+    a ``commondir`` in its own git dir) resolving outside the run's repo would
+    bind that directory readable and its ``objects/`` writable — refuse."""
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    git(foreign, "init", "-q")
+    called: list[dict[str, Any]] = []
+    monkeypatch.setattr(sandbox, "write_profile", lambda *a, **kw: called.append(kw))
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        forge(tmp_path / "kept", foreign, repo)
+        with pytest.raises(ValueError, match="the command was not run"):
+            diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    assert called == [], [(kw["extra_readable"], kw["extra_writable"]) for kw in called]
+
+
+def test_diagnose_binds_the_run_repos_git_metadata(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **kw: seen.update(kw) or path)
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile: ["true"])
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    common = (repo / ".git").resolve()
+    assert tuple(seen["extra_readable"]) == (common,)
+    assert tuple(seen["extra_writable"]) == (common / "worktrees" / "kept", common / "objects")
+
+
 # --- skep doctor says what is true (I8) --------------------------------------
 
 
