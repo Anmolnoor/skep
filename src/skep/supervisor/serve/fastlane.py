@@ -5,7 +5,7 @@ spawn, 120s wall clock. That is the right shape for anything touching a
 repo — and pure overkill for "sum these numbers". The fast lane runs the
 same code supervisor-side INSIDE the same walls (I12): the native sandbox
 backend (bwrap/Seatbelt), a throwaway tmp workspace, deny-all network,
-10s timeout.
+strict allowlist reads on bwrap/Seatbelt (v135-F1, ADR 0068), 10s timeout.
 
 Fail-closed by construction: no usable native sandbox → the fast lane
 does not exist on this host — ``run_code_fast`` returns None and the
@@ -27,6 +27,7 @@ from typing import Any
 
 from ..sandbox import (
     DENY_ALL_NETWORK,
+    STRICT_READ_BACKENDS,
     availability,
     in_wall_tmp_env,
     wrap_command,
@@ -67,6 +68,11 @@ def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any
             workspace=workspace,
             network=DENY_ALL_NETWORK,
             skep_home=skep_home,
+            # v135-F1 (ADR 0068): the strict allowlist — system dirs, the
+            # detected toolchains (serve's own interpreter, even in a venv
+            # under $HOME) and this workspace — wherever the backend holds
+            # one; podman keeps denylist-only reads (it would refuse a wall).
+            read_allowlist=() if probe.backend in STRICT_READ_BACKENDS else None,
         )
         argv = (
             [sys.executable, str(script_path)]
