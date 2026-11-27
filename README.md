@@ -270,10 +270,15 @@ smoke test; coverage, the sandbox smoke and the hygiene scan run on Linux only.
 skep makes agents safer. It is not a silver bullet, and it is worth stating
 exactly where the boundary stops:
 
-- **Reads are not fully confined.** Writes are confined to the run's
-  worktree. Reads outside it are mostly open; a list of credential paths (the
-  secret floor) is hidden, and workers get environment variables by an
-  allowlist of names.
+- **Reads are not confined everywhere.** Writes are confined to the run's
+  worktree. On bubblewrap and Seatbelt, new sandboxed projects, forged tools,
+  script schedules and the `run_code` fast lane read an allowlist (the system
+  dirs, the detected toolchains and the run's own files), and a `diagnose_run`
+  re-run reads only what its run recorded. Projects set up before strict reads
+  (until you move them; `skep doctor` names them), the podman backend and
+  workspace mode still read most of the disk, with only a list of credential
+  paths (the secret floor) hidden. MCP servers you register run on the host,
+  unsandboxed. Workers get environment variables by an allowlist of names.
 - **Workspace mode has no sandbox.** The built-in worker may run there; the
   external engines never do.
 - **Verification is only as strong as the verify command.** If a project's

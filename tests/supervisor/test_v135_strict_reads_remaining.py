@@ -285,3 +285,23 @@ def test_diagnose_refuses_a_strict_wall_the_backend_cannot_hold(
             diagnose_run(store, replace(config, sandbox=True), task_id, command="true")
     finally:
         store.close()
+
+
+# --- skep doctor says what is true (I8) --------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["bubblewrap", "seatbelt"])
+def test_doctor_names_the_fast_lane_and_diagnose_walls_as_they_now_are(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    from skep import status
+
+    monkeypatch.setattr(
+        status, "sandbox_availability", lambda: sandbox.SandboxAvailability(True, backend=backend)
+    )
+    detail = status._sandbox_check(tmp_path)["detail"]
+    assert "denylist-only;" not in detail  # no lane is named denylist-only any more
+    assert "forged tools, script schedules and the fast lane always strict" in detail
+    assert "diagnose re-runs take the wall their run recorded" in detail
+    # Wave 2's job, still true today: never claimed confined
+    assert "MCP servers you register run on the host, unsandboxed" in detail
