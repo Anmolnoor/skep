@@ -17,6 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -288,7 +289,11 @@ def test_the_morning_brief_declares_its_inputs_and_hosts() -> None:
     (network,) = re.findall(r"network=(\[[^\]]*\])", text)
     (command,) = re.findall(r'instructions="([^"]+)"', text)
     imap = re.search(r"SKEP_MAIL_IMAP_HOST=(\S+)", command)
-    assert imap is not None and json.loads(network) == ["api.open-meteo.com", imap.group(1)]
+    assert imap is not None
+    # v135-F5: every host a flag reaches, and no other, is in `network`
+    feeds = [urlsplit(url).hostname for url in re.findall(r"--rss (\S+)", command)]
+    hosts = ["api.open-meteo.com", *(["hn.algolia.com"] if "--hn " in command else [])]
+    assert json.loads(network) == [*hosts, *feeds, imap.group(1)]
     assert "SKEP_MAIL_PASSWORD_FILE=/abs/path/" in command and ".skep" not in command
     real = command.replace(
         "/abs/path/to/examples/skills/morning-ritual/fetch_brief.py",
