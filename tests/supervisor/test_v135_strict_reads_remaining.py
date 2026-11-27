@@ -496,3 +496,58 @@ def test_git_reading_a_fifo_in_the_kept_git_dir_is_refused_promptly(
         pytest.fail(f"kept_tree_git_dirs blocked on a FIFO {name}")
     assert len(outcome) == 1 and isinstance(outcome[0], worktree.WorktreeError), outcome
     assert "could not read" in str(outcome[0])
+
+
+def _move_the_recorded_root(kept: Path, tmp_path: Path, repo: Path) -> None:
+    (tmp_path / "data").rename(tmp_path / "data-real")
+    (tmp_path / "data").symlink_to(tmp_path / "data-real")
+
+
+def _forge_the_kept_pointer(kept: Path, tmp_path: Path, repo: Path) -> None:
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    git(foreign, "init", "-q")
+    _forge_pointer_to_foreign_repo(kept, foreign, repo)
+
+
+@pytest.mark.parametrize(
+    ("forge", "said"),
+    [
+        (_move_the_recorded_root, "recorded read wall"),
+        (_forge_the_kept_pointer, "leads outside its run"),
+    ],
+)
+def test_diagnose_refuses_at_proposal_what_it_refuses_at_confirm(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    forge: Any, said: str,
+) -> None:  # fmt: skip
+    """S3 (F-I7, v133-F25): a moved recorded root or a kept tree whose git
+    metadata leads elsewhere is seen with no side effect, so the card is not
+    offered — and the confirm still checks, as state can change in between."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
+
+    from .conftest import predating_home
+
+    (tmp_path / "data").mkdir()
+    called: list[object] = []
+    monkeypatch.setattr(sandbox, "write_profile", lambda *a, **kw: called.append(kw))
+    store = RunStore(predating_home(config.db_path))
+    holder = ConfigHolder(config, store)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": [str(tmp_path / "data")]})
+        args = {"task_id": task_id, "command": "true"}
+        offered = mutation_execution_decision("diagnose_run", args, store=store, holder=holder)
+        assert offered is None or offered.verdict != "deny"  # a sound run is carded
+        forge(tmp_path / "kept", tmp_path, repo)
+        refused = mutation_execution_decision("diagnose_run", args, store=store, holder=holder)
+        assert refused is not None and refused.verdict == "deny"
+        assert said in str(refused.detail)
+        with pytest.raises(ValueError, match=said):
+            execute_mutation(
+                "diagnose_run", args, store=store, holder=holder, runner=None,  # type: ignore[arg-type]
+                actor="tester",
+            )  # fmt: skip
+    finally:
+        store.close()
+    assert called == []

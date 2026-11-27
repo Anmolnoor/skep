@@ -4032,6 +4032,38 @@ DIAGNOSE_MAX_TIMEOUT_SECONDS = 600.0
 DIAGNOSE_OUTPUT_CAP = 10_000
 
 
+def diagnose_wall(
+    store: RunStore, task_id: str, workspace: Path, repo: Path
+) -> tuple[tuple[Path, ...] | None, tuple[Path, Path] | None]:
+    """The read wall and git dirs a diagnosis of ``task_id`` binds, or a
+    ValueError naming why it cannot run. No side effect, so the proposal
+    asks it too (S3, F-I7); the confirm asks again, as either can change.
+
+    v135-F2 (ADR 0068, I2): the wall the run's dispatch recorded, read and
+    refused the way G10 does — a diagnosis never reads more than the worker.
+    S1 (I2): the git dirs are held to the run's own repo, never wherever the
+    kept tree's pointer leads."""
+    from ..reverify import _moved_read_roots, _recorded_read_wall
+    from ..worktree import WorktreeError, kept_tree_git_dirs
+
+    read_allowlist = _recorded_read_wall(store, task_id)
+    if moved := _moved_read_roots(read_allowlist or ()):
+        raise ValueError(
+            "the run's recorded read wall no longer resolves to itself: "
+            + ", ".join(f"{path} now leads to {os.path.realpath(path)}" for path in moved)
+            + " — the command was not run, as it would read past the worker's wall; "
+            "dispatch a fresh run instead"
+        )
+    try:
+        dirs = kept_tree_git_dirs(workspace, repo)
+    except WorktreeError as exc:
+        raise ValueError(
+            f"{exc} — the command was not run, as the wall would bind those "
+            "directories; dispatch a fresh run instead"
+        ) from exc
+    return read_allowlist, dirs
+
+
 def diagnose_run(
     store: RunStore,
     config: SupervisorConfig,
@@ -4050,7 +4082,6 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import WorktreeError, kept_tree_git_dirs
 
     record = store.get_run(task_id)
     if record is None:
@@ -4070,27 +4101,7 @@ def diagnose_run(
     )
     argv: list[str] = ["/bin/sh", "-c", command]
     if config.sandbox:
-        from ..reverify import _moved_read_roots, _recorded_read_wall
-
-        # v135-F2 (ADR 0068, I2): the wall the run's dispatch recorded, read and
-        # refused the way G10 does — a diagnosis never reads more than the worker.
-        read_allowlist = _recorded_read_wall(store, task_id)
-        if moved := _moved_read_roots(read_allowlist or ()):
-            raise ValueError(
-                "the run's recorded read wall no longer resolves to itself: "
-                + ", ".join(f"{path} now leads to {os.path.realpath(path)}" for path in moved)
-                + " — the command was not run, as it would read past the worker's wall; "
-                "dispatch a fresh run instead"
-            )
-        # S1 (I2): the binds come from git dirs held to the run's own repo,
-        # never from wherever the kept tree's pointer leads.
-        try:
-            dirs = kept_tree_git_dirs(workspace, Path(record.repo))
-        except WorktreeError as exc:
-            raise ValueError(
-                f"{exc} — the command was not run, as the wall would bind those "
-                "directories; dispatch a fresh run instead"
-            ) from exc
+        read_allowlist, dirs = diagnose_wall(store, task_id, workspace, Path(record.repo))
         writable: tuple[Path, ...] = ()
         readable: tuple[Path, ...] = ()
         if dirs is not None:
