@@ -378,3 +378,121 @@ def test_doctor_names_the_fast_lane_and_diagnose_walls_as_they_now_are(
     )
     # Wave 2's job, still true today: never claimed confined
     assert "MCP servers you register run on the host, unsandboxed" in detail
+
+
+def _kept_git_dir(kept: Path) -> Path:
+    return Path((kept / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+
+
+def test_a_fifo_backlink_in_the_kept_git_dir_is_refused_promptly(
+    repo: Path, tmp_path: Path
+) -> None:
+    """N1: the run's git dir is the worker's to write. A FIFO at its
+    ``gitdir`` stalled the supervisor in an open() that waits for a writer,
+    before the diagnose timeout starts — refused now, without blocking."""
+    import os
+    import threading
+
+    from skep.supervisor.worktree import WorktreeError, kept_tree_git_dirs
+
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    backlink = _kept_git_dir(kept) / "gitdir"
+    backlink.unlink()
+    os.mkfifo(backlink)
+    outcome: list[BaseException | object] = []
+
+    def check() -> None:
+        try:
+            outcome.append(kept_tree_git_dirs(kept, repo))
+        except BaseException as exc:  # reported below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    if worker.is_alive():  # unblock the hung open() so the suite moves on
+        os.close(os.open(backlink, os.O_WRONLY))
+        worker.join(timeout=10)
+        pytest.fail("kept_tree_git_dirs blocked on a FIFO backlink")
+    assert len(outcome) == 1 and isinstance(outcome[0], WorktreeError), outcome
+
+
+def test_a_linked_backlink_in_the_kept_git_dir_is_refused(repo: Path, tmp_path: Path) -> None:
+    """N1: a link at ``gitdir`` is never followed, even to a file naming the
+    tree — git writes a regular file there, so a link is the worker's."""
+    from skep.supervisor.worktree import WorktreeError, kept_tree_git_dirs
+
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    backlink = _kept_git_dir(kept) / "gitdir"
+    elsewhere = tmp_path / "backlink-copy"
+    elsewhere.write_text(backlink.read_text(encoding="utf-8"), encoding="utf-8")
+    backlink.unlink()
+    backlink.symlink_to(elsewhere)
+    with pytest.raises(WorktreeError, match="leads outside its run"):
+        kept_tree_git_dirs(kept, repo)
+
+
+def test_a_linked_trees_symlinked_objects_dir_is_refused(repo: Path, tmp_path: Path) -> None:
+    """S1: the linked tree binds ``<common>/objects`` writable — a link there
+    would bind its target, so it refuses as the non-linked branch does."""
+    from skep.supervisor.worktree import WorktreeError, kept_tree_git_dirs
+
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    objects = repo / ".git" / "objects"
+    moved = tmp_path / "objects-elsewhere"
+    objects.rename(moved)
+    objects.symlink_to(moved)
+    with pytest.raises(WorktreeError, match="leads outside its run"):
+        kept_tree_git_dirs(kept, repo)
+
+
+def test_a_backlink_with_a_nul_byte_is_refused_as_leading_outside(
+    repo: Path, tmp_path: Path
+) -> None:
+    from skep.supervisor.worktree import WorktreeError, kept_tree_git_dirs
+
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    (_kept_git_dir(kept) / "gitdir").write_bytes(b"/x\x00y\n")
+    with pytest.raises(WorktreeError, match="leads outside its run"):
+        kept_tree_git_dirs(kept, repo)
+
+
+@pytest.mark.parametrize("name", ["commondir", "HEAD"])
+def test_git_reading_a_fifo_in_the_kept_git_dir_is_refused_promptly(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """N1, git's own reads: ``git rev-parse`` opens ``commondir`` and
+    ``HEAD`` in the worker-written git dir and waits on a FIFO there for a
+    writer that never comes — bounded now, and refused."""
+    import os
+    import threading
+
+    from skep.supervisor import worktree
+
+    monkeypatch.setattr(worktree, "KEPT_TREE_GIT_TIMEOUT_SECONDS", 1.0)
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    fifo = _kept_git_dir(kept) / name
+    fifo.unlink()
+    os.mkfifo(fifo)
+    outcome: list[BaseException | object] = []
+
+    def check() -> None:
+        try:
+            outcome.append(worktree.kept_tree_git_dirs(kept, repo))
+        except BaseException as exc:  # reported below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    if worker.is_alive():  # unblock the hung git so the suite moves on
+        os.close(os.open(fifo, os.O_WRONLY))
+        worker.join(timeout=10)
+        pytest.fail(f"kept_tree_git_dirs blocked on a FIFO {name}")
+    assert len(outcome) == 1 and isinstance(outcome[0], worktree.WorktreeError), outcome
+    assert "could not read" in str(outcome[0])
