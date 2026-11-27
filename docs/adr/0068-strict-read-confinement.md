@@ -672,12 +672,13 @@ and cannot write the operator's directories.
 The two lanes the Phase 07 section left behind:
 
 - **The fast lane** (`run_code(fast=True)`, `serve/fastlane.py`) passes
-  `read_allowlist=()` wherever the backend is in `STRICT_READ_BACKENDS`: the
-  system dirs, the detected toolchains and its throwaway workspace. Serve's
-  own interpreter is a detected toolchain, so a skep installed in a venv
-  under `$HOME` (uv tool, pipx) still starts; the home itself is never
-  bound. On podman the lane keeps denylist-only reads, since
-  `write_profile` refuses a strict wall there.
+  `read_allowlist=()`: the system dirs, the detected toolchains and its
+  throwaway workspace. It runs only on the native backend (bubblewrap or
+  Seatbelt), and both hold the wall. Serve's own interpreter is a detected
+  toolchain, so a skep installed in a venv under `$HOME` (uv tool, pipx)
+  still starts; the home itself is never bound. On bubblewrap a venv
+  reached through a linked parent directory does not start in the wall
+  (the link is not recreated), and the wall is not widened for it.
 - **`diagnose_run`** (`serve/actions.py`) takes the wall the run's
   `dispatched` line recorded, through `reverify._recorded_read_wall`, the
   reader G10 uses, and refuses as G10 does: a recorded root that is a link

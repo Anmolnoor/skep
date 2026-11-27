@@ -27,7 +27,6 @@ from typing import Any
 
 from ..sandbox import (
     DENY_ALL_NETWORK,
-    STRICT_READ_BACKENDS,
     availability,
     in_wall_tmp_env,
     wrap_command,
@@ -70,9 +69,9 @@ def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any
             skep_home=skep_home,
             # v135-F1 (ADR 0068): the strict allowlist — system dirs, the
             # detected toolchains (serve's own interpreter, even in a venv
-            # under $HOME) and this workspace — wherever the backend holds
-            # one; podman keeps denylist-only reads (it would refuse a wall).
-            read_allowlist=() if probe.backend in STRICT_READ_BACKENDS else None,
+            # under $HOME) and this workspace. availability() probes only the
+            # native backend, and both native backends hold the wall.
+            read_allowlist=(),
         )
         argv = (
             [sys.executable, str(script_path)]

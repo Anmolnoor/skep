@@ -28,7 +28,6 @@ import pytest
 import skep
 from skep.supervisor import RunStore, SupervisorConfig, sandbox
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
-from skep.supervisor.serve import fastlane
 from skep.supervisor.serve.actions import diagnose_run
 from skep.supervisor.serve.fastlane import run_code_fast
 
@@ -107,6 +106,28 @@ def _reads(seen: dict[str, str]) -> list[str]:
     return [path for path, verdict in seen.items() if verdict == "read"]
 
 
+def _ordinary_canaries_open_without_the_wall(canaries: list[Path], tmp_path: Path) -> None:
+    """S5, the control: under a denylist-only profile (``read_allowlist=None``)
+    the ordinary-file canaries ARE readable where they sit, so an unread one
+    under the strict wall is the wall's doing — not bwrap's tmpfs over /tmp
+    or the secret floor (which masks ``.ssh`` either way). Skips, saying why,
+    where the location is hidden anyway."""
+    ordinary = [str(path) for path in canaries if ".ssh" not in path.parts]
+    work = tmp_path / "control"
+    work.mkdir()
+    profile = sandbox.write_profile(
+        work / "sandbox.profile",
+        workspace=work,
+        network=sandbox.DENY_ALL_NETWORK,
+        skep_home=tmp_path / "skep",
+        read_allowlist=None,
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", _PROBE, *ordinary], profile)
+    proc = subprocess.run(argv, cwd=work, capture_output=True, text=True, check=True)
+    if _reads(json.loads(proc.stdout)) != ordinary:
+        pytest.skip(f"canaries under {tmp_path} are hidden even without the strict wall")
+
+
 # --- the fast lane -----------------------------------------------------------
 
 
@@ -116,6 +137,7 @@ def _probe_script(paths: list[Path]) -> str:
 
 @needs_strict_wall
 def test_the_fast_lane_reads_no_home_canary(canaries: list[Path], tmp_path: Path) -> None:
+    _ordinary_canaries_open_without_the_wall(canaries, tmp_path)
     result = run_code_fast("python", _probe_script(canaries), skep_home=tmp_path / "skep")
     assert result is not None and result["exit_code"] == 0, result
     seen = json.loads(result["output"])
@@ -142,8 +164,12 @@ def test_the_fast_lane_starts_an_interpreter_that_lives_in_a_venv_under_home(
     canaries: list[Path], fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A `uv tool install` or pipx skep: its python is a venv under $HOME.
-    The wall binds that venv (never the home) and the script still runs."""
-    venv = fake_home / ".local" / "share" / "uv" / "tools" / "skep"
+    The wall binds that venv (never the home) and the script still runs. The
+    venv sits where no other rule allowlists it (S7), so only venv detection
+    can bind it. (Reached through a linked parent dir, bwrap cannot start it:
+    ADR 0068 states that limit.)"""
+    _ordinary_canaries_open_without_the_wall(canaries, tmp_path)
+    venv = fake_home / "venvs" / "skep"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
     # skep importable from it, as installed (the wall's Landlock step runs
     # `python -m skep.landlock`): this checkout's packages, chained by a .pth
@@ -161,24 +187,6 @@ def test_the_fast_lane_starts_an_interpreter_that_lives_in_a_venv_under_home(
     prefix, probe = result["output"].splitlines()
     assert Path(prefix).resolve() == venv.resolve()
     assert _reads(json.loads(probe)) == []
-
-
-@pytest.mark.parametrize(
-    ("backend", "expected"), [("bubblewrap", ()), ("seatbelt", ()), ("podman", None)]
-)
-def test_the_fast_lane_asks_for_the_strict_wall_where_the_backend_holds_one(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str, expected: Any
-) -> None:
-    """podman cannot confine reads to an allowlist: it keeps denylist-only
-    reads rather than lose the fast lane (``write_profile`` would refuse)."""
-    seen: dict[str, Any] = {}
-    monkeypatch.setattr(
-        fastlane, "availability", lambda: sandbox.SandboxAvailability(True, backend=backend)
-    )
-    monkeypatch.setattr(fastlane, "write_profile", lambda path, **kw: seen.update(kw) or path)
-    monkeypatch.setattr(fastlane, "wrap_command", lambda argv, profile: ["true"])
-    run_code_fast("python", "print(1)", skep_home=tmp_path / "skep")
-    assert seen["read_allowlist"] == expected
 
 
 # --- diagnose_run ------------------------------------------------------------
@@ -199,6 +207,7 @@ def _kept_run(store: RunStore, repo: Path, tmp_path: Path, recorded: dict[str, A
 def test_diagnose_reads_no_home_canary_and_still_runs_python_and_pytest(
     repo: Path, config: SupervisorConfig, canaries: list[Path], tmp_path: Path
 ) -> None:
+    _ordinary_canaries_open_without_the_wall(canaries, tmp_path)
     store = RunStore(config.db_path)
     try:
         task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
