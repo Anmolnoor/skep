@@ -372,6 +372,9 @@ def test_doctor_names_the_fast_lane_and_diagnose_walls_as_they_now_are(
     detail = status._sandbox_check(tmp_path)["detail"]
     assert "denylist-only;" not in detail  # no lane is named denylist-only any more
     assert "forged tools, script schedules and the fast lane always strict" in detail
-    assert "diagnose re-runs take the wall their run recorded" in detail
+    assert (
+        "diagnose re-runs take their run's recorded strict setting and extra read paths, "
+        "plus today's system and toolchain dirs" in detail
+    )
     # Wave 2's job, still true today: never claimed confined
     assert "MCP servers you register run on the host, unsandboxed" in detail

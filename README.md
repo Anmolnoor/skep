@@ -273,11 +273,12 @@ exactly where the boundary stops:
 - **Reads are not confined everywhere.** Writes are confined to the run's
   worktree. On bubblewrap and Seatbelt, new sandboxed projects, forged tools,
   script schedules and the `run_code` fast lane read an allowlist (the system
-  dirs, the detected toolchains and the run's own files), and a `diagnose_run`
-  re-run reads only what its run recorded. Projects set up before strict reads
-  (until you move them; `skep doctor` names them), the podman backend and
-  workspace mode still read most of the disk, with only a list of credential
-  paths (the secret floor) hidden. MCP servers you register run on the host,
+  dirs, the detected toolchains and the run's own files). A `diagnose_run`
+  re-run takes its run's recorded strict setting and extra read paths, plus
+  the system and toolchain dirs detected when it runs. Projects set up before
+  strict reads (until you move them; `skep doctor` names them) and the podman
+  backend still read most of the disk, with only a list of credential paths
+  (the secret floor) hidden. MCP servers you register run on the host,
   unsandboxed. Workers get environment variables by an allowlist of names.
 - **Workspace mode has no sandbox.** The built-in worker may run there; the
   external engines never do.

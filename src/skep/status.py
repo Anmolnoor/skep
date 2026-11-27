@@ -1424,8 +1424,9 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
         n_strict = sum(projects.values())
         effect = (
             f" available; {n_strict} of {len(projects)} sandboxed projects strict; forged tools, "
-            "script schedules and the fast lane always strict; diagnose re-runs take the wall "
-            "their run recorded; MCP servers you register run on the host, unsandboxed"
+            "script schedules and the fast lane always strict; diagnose re-runs take their run's "
+            "recorded strict setting and extra read paths, plus today's system and toolchain "
+            "dirs; MCP servers you register run on the host, unsandboxed"
             if strict
             else " (reads stay open but the secret floor)"
         )

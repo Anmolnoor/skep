@@ -140,8 +140,9 @@ readable. A denylist cannot keep up with every place a person keeps files.
 5. **The doctor says which wall is up, and where.** On bubblewrap and
    Seatbelt the sandbox line reads `read confinement: strict-allowlist
    available; N of M sandboxed projects strict; forged tools, script
-   schedules and the fast lane always strict; diagnose re-runs take the
-   wall their run recorded; MCP servers you register run on the host,
+   schedules and the fast lane always strict; diagnose re-runs take their
+   run's recorded strict setting and extra read paths, plus today's system
+   and toolchain dirs; MCP servers you register run on the host,
    unsandboxed` (v135 wording; see "The fast lane and diagnose re-runs join
    the wall")
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
@@ -679,13 +680,19 @@ The two lanes the Phase 07 section left behind:
   still starts; the home itself is never bound. On bubblewrap a venv
   reached through a linked parent directory does not start in the wall
   (the link is not recreated), and the wall is not widened for it.
-- **`diagnose_run`** (`serve/actions.py`) takes the wall the run's
-  `dispatched` line recorded, through `reverify._recorded_read_wall`, the
-  reader G10 uses, and refuses as G10 does: a recorded root that is a link
-  now (`_moved_read_roots`) refuses before any profile is written, and a
-  strict wall the backend cannot hold refuses through `write_profile`. A
-  run that read denylist-only is diagnosed denylist-only: a diagnosis never
-  reads more than the worker could.
+- **`diagnose_run`** (`serve/actions.py`) takes the strict setting and the
+  resolved extra read paths the run's `dispatched` line recorded, through
+  `reverify._recorded_read_wall`, the reader G10 uses; the system and
+  toolchain dirs are detected again when the diagnosis runs, as they are
+  for G10, so after a serve restart on another interpreter or toolchain
+  setup that part of the wall can differ from the worker's. It refuses as
+  G10 does: a recorded root that is a link now (`_moved_read_roots`)
+  refuses before any profile is written, and a strict wall the backend
+  cannot hold refuses through `write_profile`. A run that read
+  denylist-only is diagnosed denylist-only. The git metadata it binds is
+  held to the run's recorded repo (`worktree.kept_tree_git_dirs`): the
+  kept tree is the worker's output, so a `.git` pointer or `commondir`
+  leading anywhere else refuses the diagnosis.
 
 The tests assert, on real bubblewrap and on real Seatbelt (CI's macOS job),
 that each lane reads none of four home canaries
