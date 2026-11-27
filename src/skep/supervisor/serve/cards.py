@@ -767,7 +767,10 @@ def schedule_facts(
     try:
         start = None if args.get("start_at") is None else str(args["start_at"])
         facts["next"] = next_fire_times(
-            start, parse_interval(facts["every"]), once=bool(args.get("once"))
+            start,
+            parse_interval(facts["every"]),
+            once=bool(args.get("once")),
+            timezone=str(args["timezone"]) if args.get("timezone") else None,  # v135-F7
         )
     except ValueError as exc:
         facts["error"] = str(exc)  # the confirm refuses the same way

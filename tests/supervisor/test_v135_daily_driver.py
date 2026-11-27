@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
-from skep.supervisor.scheduler import make_schedule, run_due
+from skep.supervisor.scheduler import make_schedule, next_run_after, run_due
 from skep.supervisor.seed_skills import load_seed_skills
 from skep.supervisor.serve.chat import ChatEngine
 from skep.supervisor.serve.jobs import Dispatcher
@@ -26,7 +26,7 @@ from skep.supervisor.store import ScheduleRecord
 from .conftest import serve_client
 from .fake_ollama import FakeOllama
 
-NEW_SCHEDULE_COLUMNS = ("resume_slot",)
+NEW_SCHEDULE_COLUMNS = ("resume_slot", "timezone", "wall_time")
 
 
 @pytest.fixture()
@@ -290,7 +290,7 @@ def _note(name: str, *, start_at: str, timezone: str | None = None) -> ScheduleR
         interval_seconds=86400,
         worker_kind="note",
         start_at=start_at,
-        **({"timezone": timezone} if timezone else {}),
+        timezone=timezone,
     )
 
 
@@ -418,3 +418,230 @@ def test_a_database_from_before_v135_migrates(config: SupervisorConfig) -> None:
         assert marked is not None and marked.resume_slot == TOMORROW_7AM
     finally:
         reopened.close()
+
+
+# -- F7: wall-clock daily schedules ---------------------------------------------
+# America/Vancouver's last transitions: fall back Sun 2 Nov 2025 02:00 PDT ->
+# 01:00 PST; spring forward Sun 8 Mar 2026 02:00 PST -> 03:00 PDT. (tzdata
+# 2026f keeps British Columbia on daylight time from then on, so later dates
+# have no transition; these two are in every tzdata release.)
+
+VAN = "America/Vancouver"
+DAY = 86400
+
+
+def test_a_7am_schedule_keeps_7am_across_spring_forward_and_fall_back() -> None:
+    # 07:00 PST (15:00Z) -> 07:00 PDT (14:00Z); a fixed 24 h would say 08:00
+    assert next_run_after("2026-03-07T15:00:00Z", DAY, timezone=VAN) == "2026-03-08T14:00:00Z"
+    assert next_run_after("2026-03-07T15:00:00Z", DAY) == "2026-03-08T15:00:00Z"
+    # 07:00 PDT (14:00Z) -> 07:00 PST (15:00Z)
+    assert next_run_after("2025-11-01T14:00:00Z", DAY, timezone=VAN) == "2025-11-02T15:00:00Z"
+
+
+def test_a_0230_schedule_fires_at_the_first_instant_after_the_gap_then_returns() -> None:
+    """02:30 does not exist on 8 Mar: it fires at 03:00 PDT (10:00Z), the
+    first valid instant, and the next day is 02:30 again — no drift."""
+    gap_day = next_run_after("2026-03-07T10:30:00Z", DAY, timezone=VAN, wall_time="02:30:00")
+    assert gap_day == "2026-03-08T10:00:00Z"
+    after = next_run_after(gap_day, DAY, timezone=VAN, wall_time="02:30:00")
+    assert after == "2026-03-09T09:30:00Z"  # 02:30 PDT
+
+
+def test_a_0130_schedule_fires_once_on_the_fall_back_day_at_its_first_occurrence() -> None:
+    first = next_run_after("2025-11-01T08:30:00Z", DAY, timezone=VAN, wall_time="01:30:00")
+    assert first == "2025-11-02T08:30:00Z"  # 01:30 PDT, the first of the two
+    # the tick that ran it moves on to the next day, never the 01:30 PST repeat
+    after = next_run_after(
+        first, DAY, timezone=VAN, wall_time="01:30:00", now="2025-11-02T08:30:05Z"
+    )
+    assert after == "2025-11-03T09:30:00Z"
+
+
+def test_missed_wall_clock_slots_fire_once_and_keep_the_wall_time() -> None:
+    """v122-F5 in wall-clock mode: down from 4 Mar to 10 Mar 08:00 PDT."""
+    late = next_run_after("2026-03-04T15:00:00Z", DAY, timezone=VAN, now="2026-03-10T15:00:00Z")
+    assert late == "2026-03-11T14:00:00Z"  # 07:00 PDT, once
+    exact = next_run_after("2026-03-04T15:00:00Z", DAY, timezone=VAN, now="2026-03-10T14:00:00Z")
+    assert exact == "2026-03-11T14:00:00Z"  # a slot equal to now has passed
+
+
+def test_a_weekly_wall_clock_schedule_moves_by_calendar_weeks() -> None:
+    assert next_run_after("2026-03-02T15:00:00Z", 7 * DAY, timezone=VAN) == "2026-03-09T14:00:00Z"
+
+
+def test_no_timezone_is_byte_for_byte_the_fixed_interval() -> None:
+    old = schedule_time_free_next_run_after
+    for reference, interval, now in (
+        ("2026-03-07T15:00:00Z", DAY, None),
+        ("2026-03-07T10:30:00Z", DAY, "2026-03-14T00:00:00Z"),
+        ("2025-11-01T08:30:00Z", 3600, "2025-11-02T08:30:00Z"),
+        ("2026-01-01T00:00:00Z", 7 * DAY, "2026-01-01T00:00:00Z"),
+    ):
+        assert next_run_after(reference, interval, now=now) == old(reference, interval, now=now)
+        assert next_run_after(reference, interval, now=now, timezone=None) == old(
+            reference, interval, now=now
+        )
+    plain = _note("plain", start_at=TOMORROW_7AM)
+    assert plain.timezone is None and plain.wall_time is None
+
+
+def schedule_time_free_next_run_after(reference: str, interval: int, *, now: str | None) -> str:
+    """next_run_after as it was before v135, verbatim."""
+    from datetime import UTC, datetime, timedelta
+
+    def parse(ts: str) -> datetime:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+
+    step = timedelta(seconds=interval)
+    slot = parse(reference) + step
+    if now is not None:
+        late = parse(now) - slot
+        if late >= timedelta(0):
+            slot += step * (late // step + 1)
+    return slot.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_wall_clock_schedule_records_its_wall_time_from_the_first_slot() -> None:
+    schedule = _note("brief", start_at="2026-03-07T02:30:00-08:00", timezone=VAN)
+    assert schedule.timezone == VAN and schedule.wall_time == "02:30:00"
+    assert schedule.next_run_at == "2026-03-07T10:30:00Z"
+
+
+@pytest.mark.parametrize("bad", ["Mars/Olympus", "", "../etc/passwd", "PST8PDT/../x"])
+def test_an_invalid_timezone_is_refused_with_a_valid_example(bad: str) -> None:
+    with pytest.raises(ValueError, match="America/Vancouver"):
+        _note("brief", start_at=TOMORROW_7AM, timezone=bad)
+
+
+def test_a_timezone_needs_a_whole_day_interval() -> None:
+    with pytest.raises(ValueError, match="whole number of days"):
+        make_schedule(
+            name="x", repo="", instructions="t", interval_seconds=6 * 3600,
+            worker_kind="note", timezone=VAN,
+        )  # fmt: skip
+
+
+def test_the_tick_keeps_a_0230_schedule_on_its_wall_time_across_the_gap(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    store.add_schedule(_note("night", start_at="2026-03-07T02:30:00-08:00", timezone=VAN))
+    slots = []
+    moment = "2026-03-07T10:30:00Z"
+    for _ in range(3):
+        run_due(store=store, config=config, now=moment)
+        ran = store.get_schedule("night")
+        assert ran is not None
+        slots.append(moment := ran.next_run_at)
+    assert slots == ["2026-03-08T10:00:00Z", "2026-03-09T09:30:00Z", "2026-03-10T09:30:00Z"]
+
+
+def test_run_now_on_a_wall_clock_schedule_keeps_its_slot(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    store.add_schedule(_note("ritual", start_at="2026-03-08T07:00:00-07:00", timezone=VAN))
+    store.mark_schedule_due("ritual", due_at="2026-03-07T22:00:00Z")
+    run_due(store=store, config=config, now="2026-03-07T22:00:30Z")
+    ran = store.get_schedule("ritual")
+    assert ran is not None and ran.next_run_at == "2026-03-08T14:00:00Z"
+    run_due(store=store, config=config, now="2026-03-08T14:00:00Z")
+    ran = store.get_schedule("ritual")
+    assert ran is not None and ran.next_run_at == "2026-03-09T14:00:00Z"
+
+
+# faces (ADR 0050): propose_schedule, POST/PATCH /api/schedules, skep schedule add
+
+
+def test_propose_schedule_takes_a_timezone(config: SupervisorConfig, ollama: FakeOllama) -> None:
+    from skep.supervisor.serve.tools import TOOL_SPECS
+
+    from .test_serve_chat_tools import chat_client
+
+    (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "propose_schedule"]
+    described = spec["function"]["parameters"]["properties"]["timezone"]["description"]
+    assert "America/Vancouver" in described and "omit" in described.lower()
+
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call(
+        "propose_schedule",
+        {
+            "name": "brief", "caste": "note", "every": "1d", "instructions": "good morning",
+            "start_at": "2027-03-13T07:00:00+01:00", "timezone": "Europe/Berlin",
+        },
+    )  # fmt: skip
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "every morning at 7"})
+    action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
+    ollama.script_reply("done")
+    client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
+    (row,) = client.get("/api/schedules").json()["schedules"]
+    assert row["timezone"] == "Europe/Berlin" and row["wall_time"] == "07:00:00"
+
+
+def test_rest_create_and_patch_take_a_timezone(config: SupervisorConfig) -> None:
+    client = serve_client(config)
+    body = {"name": "brief", "caste": "note", "every": "1d", "instructions": "hi"}
+    created = client.post("/api/schedules", json={**body, "timezone": VAN})
+    assert created.status_code == 201, created.text
+    assert created.json()["timezone"] == VAN
+
+    refused = client.post("/api/schedules", json={**body, "name": "b2", "timezone": "Nope/No"})
+    assert refused.status_code == 400 and "America/Vancouver" in refused.json()["detail"]
+
+    plain = client.post("/api/schedules", json={**body, "name": "plain"}).json()
+    assert plain["timezone"] is None
+    patched = client.patch("/api/schedules/plain", json={"timezone": "Europe/Berlin"})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["timezone"] == "Europe/Berlin"
+    assert patched.json()["enabled"] is True  # untouched
+    cleared = client.patch("/api/schedules/plain", json={"timezone": None}).json()
+    assert cleared["timezone"] is None and cleared["wall_time"] is None
+    bad = client.patch("/api/schedules/plain", json={"timezone": "Nope/No"})
+    assert bad.status_code == 400 and "America/Vancouver" in bad.json()["detail"]
+    toggled = client.patch("/api/schedules/plain", json={"enabled": False}).json()
+    assert toggled["enabled"] is False and toggled["timezone"] is None
+    assert client.patch("/api/schedules/plain", json={}).status_code == 400
+    assert client.patch("/api/schedules/ghost", json={"timezone": VAN}).status_code == 404
+
+
+def test_cli_schedule_add_takes_a_timezone(
+    config: SupervisorConfig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+
+    home = ["--home", str(config.home)]
+    code = main(
+        [*home, "schedule", "add", "brief", "good morning", "--caste", "note", "--every", "1d",
+         "--start-at", "2027-03-13T07:00:00+01:00", "--timezone", "Europe/Berlin"]
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "07:00:00 Europe/Berlin" in out
+    assert main([*home, "schedule", "list"]) == 0
+    assert "Europe/Berlin" in capsys.readouterr().out
+
+    code = main(
+        [*home, "schedule", "add", "bad", "x", "--caste", "note", "--every", "1d",
+         "--timezone", "Nope/No"]
+    )  # fmt: skip
+    captured = capsys.readouterr()
+    assert code != 0 and "America/Vancouver" in captured.out + captured.err
+
+
+def test_the_card_preview_shows_wall_clock_fire_times() -> None:
+    """The confirm card's next three fire times (cards.schedule_facts)
+    follow the same rule. Berlin springs forward on 28 Mar 2027."""
+    from skep.supervisor.scheduler import next_fire_times
+
+    times = next_fire_times("2027-03-27T07:00:00+01:00", DAY, timezone="Europe/Berlin")
+    assert times == ["2027-03-27T06:00:00Z", "2027-03-28T05:00:00Z", "2027-03-29T05:00:00Z"]
+    assert next_fire_times("2027-03-27T07:00:00+01:00", DAY)[1] == "2027-03-28T06:00:00Z"
+    with pytest.raises(ValueError, match="America/Vancouver"):
+        next_fire_times(None, DAY, timezone="Nope/No")
+
+
+def test_a_proposed_schedule_card_with_a_bad_timezone_says_why() -> None:
+    from skep.supervisor.serve.cards import schedule_facts
+
+    facts = schedule_facts(
+        {"name": "b", "caste": "script", "every": "1d", "instructions": "x", "timezone": "No/Pe"}
+    )
+    assert facts is not None and "America/Vancouver" in facts["error"]

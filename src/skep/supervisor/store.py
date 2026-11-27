@@ -283,8 +283,10 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_output TEXT,
     -- v123-F1: a worker schedule's role, held to as a delegator; NULL = none.
     role TEXT,
-    -- v135-F6: the future slot "run now" stepped over; the tick restores it.
-    resume_slot TEXT
+    -- v135-F6/F7: see ScheduleRecord.
+    resume_slot TEXT,
+    timezone TEXT,
+    wall_time TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS schedule_health (
@@ -988,6 +990,10 @@ class ScheduleRecord:
     # v135-F6: the future slot a "run now" stepped over; the tick that runs
     # the schedule restores it as next_run_at (None: nothing to restore).
     resume_slot: str | None = None
+    # v135-F7: whole-day slots keep the wall-clock ``wall_time`` (HH:MM:SS)
+    # in this IANA zone (schedule_time.py); None is a fixed interval.
+    timezone: str | None = None
+    wall_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1265,7 +1271,9 @@ class RunStore:
         if "role" not in schedule_columns:
             # v123-F1: a worker schedule's role; old rows read NULL (no role).
             self._conn.execute("ALTER TABLE schedules ADD COLUMN role TEXT")
-        self._add_columns_locked("schedules", {"resume_slot": "TEXT"})  # v135-F6
+        self._add_columns_locked(  # v135-F6, F7
+            "schedules", {"resume_slot": "TEXT", "timezone": "TEXT", "wall_time": "TEXT"}
+        )
         channel_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_configs)")
         }
@@ -2791,13 +2799,15 @@ class RunStore:
             last_output=None if row[19] is None else str(row[19]),
             role=None if row[20] is None else str(row[20]),
             resume_slot=None if row[21] is None else str(row[21]),
+            timezone=None if row[22] is None else str(row[22]),
+            wall_time=None if row[23] is None else str(row[23]),
         )
 
     _SCHEDULE_COLS = (
         "name, repo, ref, worker_kind, instructions, network_json, env_allow_json,"
         " interval_seconds, enabled, created_at, last_run_at, next_run_at, last_task_id,"
         " last_state, template_name, params_json, chat_id, once, chain, last_output, role,"
-        " resume_slot"
+        " resume_slot, timezone, wall_time"
     )
 
     @_locked
@@ -2805,7 +2815,7 @@ class RunStore:
         """Insert or replace a schedule by name."""
         self._conn.execute(
             f"INSERT OR REPLACE INTO schedules ({self._SCHEDULE_COLS})"
-            f" VALUES ({', '.join('?' * 22)})",
+            f" VALUES ({', '.join('?' * 24)})",
             (
                 schedule.name,
                 schedule.repo,
@@ -2829,6 +2839,8 @@ class RunStore:
                 schedule.last_output,
                 schedule.role,
                 schedule.resume_slot,
+                schedule.timezone,
+                schedule.wall_time,
             ),
         )
         self._conn.commit()
@@ -2910,6 +2922,16 @@ class RunStore:
             "UPDATE schedules SET resume_slot = CASE WHEN next_run_at > ?"
             " THEN next_run_at ELSE resume_slot END, next_run_at = ? WHERE name = ?",
             (due_at, due_at, name),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    @_locked
+    def set_schedule_timezone(self, name: str, timezone: str | None, wall_time: str | None) -> bool:
+        """v135-F7: PATCH /api/schedules — the slot stays, later ones keep wall time."""
+        cursor = self._conn.execute(
+            "UPDATE schedules SET timezone = ?, wall_time = ? WHERE name = ?",
+            (timezone, wall_time, name),
         )
         self._conn.commit()
         return cursor.rowcount > 0

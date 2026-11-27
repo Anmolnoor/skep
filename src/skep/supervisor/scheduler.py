@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from skep.worker_contract import Budget, Permissions
 
+from . import schedule_time
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
 from .castes import CASTES, RETIRED_CASTES
 from .codex_login import run_auth_source
@@ -385,13 +386,24 @@ def _start_slot(start_at: str | None) -> str | None:
 MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
 
 
-def next_run_after(reference: str, interval_seconds: int, *, now: str | None = None) -> str:
+def next_run_after(
+    reference: str,
+    interval_seconds: int,
+    *,
+    now: str | None = None,
+    timezone: str | None = None,
+    wall_time: str | None = None,
+) -> str:
     """Next fire time = reference + interval. v122-F5: with ``now``, the slot
     is advanced in whole intervals until it is after ``now`` — a late or
     missed tick keeps the schedule's time of day and fires once, no catch-up
-    storm."""
+    storm. v135-F7: with ``timezone`` and whole days, the same wall-clock
+    time (``wall_time``, default the reference's) N calendar days later."""
     if interval_seconds <= 0:  # parse_interval never makes one; a hand-edited row can
         raise ValueError(f"interval must be positive, got {interval_seconds}s")
+    if timezone is not None and interval_seconds % schedule_time.DAY_SECONDS == 0:
+        days = interval_seconds // schedule_time.DAY_SECONDS
+        return schedule_time.next_wall_slot(reference, days, timezone, wall_time=wall_time, now=now)
     step = timedelta(seconds=interval_seconds)
     slot = _parse_ts(reference) + step
     if now is not None:
@@ -409,11 +421,22 @@ def next_slot(schedule: ScheduleRecord, now: str) -> str:
     if schedule.resume_slot is not None and schedule.resume_slot > now:
         return schedule.resume_slot
     reference = schedule.resume_slot or schedule.next_run_at
-    return next_run_after(reference, schedule.interval_seconds, now=now)
+    return next_run_after(
+        reference,
+        schedule.interval_seconds,
+        now=now,
+        timezone=schedule.timezone,
+        wall_time=schedule.wall_time,
+    )
 
 
 def next_fire_times(
-    start_at: str | None, interval_seconds: int, *, once: bool = False, count: int = 3
+    start_at: str | None,
+    interval_seconds: int,
+    *,
+    once: bool = False,
+    count: int = 3,
+    timezone: str | None = None,
 ) -> list[str]:
     """The next ``count`` fire times of a schedule created now, by the
     scheduler's own rules: the first is ``start_at`` (normalised) or the next
@@ -425,10 +448,23 @@ def next_fire_times(
     start = _start_slot(start_at)
     slot = start if start is not None else now
     times = [max(slot, now)]
+    wall = wall_clock(timezone, interval_seconds, slot)  # v135-F7: the card's wall-clock slots
     while not once and len(times) < count:
-        slot = next_run_after(slot, interval_seconds, now=times[-1])
+        slot = next_run_after(
+            slot, interval_seconds, now=times[-1], timezone=timezone, wall_time=wall
+        )
         times.append(slot)
     return times
+
+
+def wall_clock(timezone: str | None, interval_seconds: int, slot: str) -> str | None:
+    """v135-F7: the wall time of a new schedule's first slot in its (checked)
+    ``timezone`` — the anchor every later slot keeps; None without one."""
+    if timezone is None:
+        return None
+    return schedule_time.wall_time_of(
+        slot, schedule_time.check_timezone(timezone, interval_seconds)
+    )
 
 
 def script_network_problem(network: Sequence[str]) -> str | None:
@@ -459,6 +495,7 @@ def make_schedule(
     chain: str | None = None,
     role: str | None = None,
     skep_home: Path | None = None,
+    timezone: str | None = None,
 ) -> ScheduleRecord:
     """``skep_home`` (the top-level home) lets a script's inputs be checked
     at creation (R3, N2); every face that creates one passes it."""
@@ -474,6 +511,7 @@ def make_schedule(
         raise ValueError(problem)  # R3 (N2)
     created = now_ts()
     start = _start_slot(start_at)
+    wall = wall_clock(timezone, interval_seconds, start or created)
     return ScheduleRecord(
         name=name,
         repo=str(repo),
@@ -493,6 +531,8 @@ def make_schedule(
         once=once,
         chain=chain,
         role=role,
+        timezone=timezone,
+        wall_time=wall,
     )
 
 
@@ -510,6 +550,7 @@ def make_template_schedule(
     role: str | None = None,
     once: bool = False,
     chat_id: str | None = None,
+    timezone: str | None = None,
 ) -> ScheduleRecord:
     """A schedule bound to a template (v3.5): "run template X with these params".
 
@@ -522,6 +563,7 @@ def make_template_schedule(
     instance = instantiate(template, params, repo=str(repo), ref=ref)
     created = now_ts()
     start = _start_slot(start_at)
+    wall = wall_clock(timezone, interval_seconds, start or created)
     return ScheduleRecord(
         name=name,
         repo=instance.repo,
@@ -543,6 +585,8 @@ def make_template_schedule(
         role=role,
         once=once,  # v126-F11
         chat_id=chat_id,
+        timezone=timezone,
+        wall_time=wall,
     )
 
 

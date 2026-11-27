@@ -266,6 +266,11 @@ skep tick [--worker-cmd COMMAND]
 - `schedule health` reports how each schedule has been doing.
 - `--start-at 2026-11-19T08:00:00Z` sets the first run (a naive time is UTC);
   later runs keep that time of day. `--once` fires once, then disables.
+- `--timezone ZONE` (an IANA name such as `America/Vancouver`) keeps a
+  `1d` or `7d` schedule at the same local time across daylight-saving
+  changes. Without it the interval is fixed. An unknown zone, or a zone on
+  an interval that is not whole days, is refused. `PATCH /api/schedules/NAME`
+  with `{"timezone": ...}` sets it on an existing schedule (`null` clears it).
 - `tick` dispatches all due schedules and is intended for cron or another
   scheduler. A running `skep serve` dispatches due schedules itself.
 

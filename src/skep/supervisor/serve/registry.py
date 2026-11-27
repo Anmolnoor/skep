@@ -53,6 +53,7 @@ from ..scheduler import (
     now_ts,
     parse_interval,
     validate_chain,
+    wall_clock,
 )
 from ..skill_cmds import SkillError, approve, propose, reject, run_candidate_test
 from ..store import RunStore
@@ -90,10 +91,13 @@ class ScheduleRequest(BaseModel):
     chain: str | None = None
     # v123-F2: a worker schedule's role, set at creation (re-create to change).
     role: str | None = None
+    # v135-F7: an IANA zone; whole-day slots keep their wall-clock time.
+    timezone: str | None = None
 
 
 class ScheduleToggle(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    timezone: str | None = None  # v135-F7: set, or null to clear
 
 
 class RepoRequest(BaseModel):
@@ -1980,6 +1984,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     chain=body.chain,
                     role=body.role,
                     skep_home=holder.current.home.parent,  # R3 (N2): a script's inputs
+                    timezone=body.timezone,
                 )
                 actions.check_schedule_role(holder, run_store, schedule)
             except ValueError as exc:
@@ -2011,6 +2016,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     role=body.role,
                     once=body.once,  # v126-F11: accepted, no longer thrown away
                     start_at=body.start_at,
+                    timezone=body.timezone,
                 )
             else:
                 if body.instructions is None:
@@ -2031,6 +2037,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     chain=body.chain,
                     role=body.role,
                     skep_home=holder.current.home.parent,
+                    timezone=body.timezone,
                 )
             actions.check_schedule_role(holder, run_store, schedule)
         except (TemplateError, ValueError) as exc:
@@ -2040,8 +2047,20 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.patch("/api/schedules/{name}")
     def toggle_schedule(name: str, body: ScheduleToggle) -> dict[str, Any]:
-        if not run_store.set_schedule_enabled(name, enabled=body.enabled):
+        schedule = run_store.get_schedule(name)
+        if schedule is None:
             raise HTTPException(status_code=404, detail=f"no schedule named {name!r}")
+        if "timezone" in body.model_fields_set:  # v135-F7: later slots keep wall time
+            slot = schedule.resume_slot or schedule.next_run_at
+            try:
+                wall = wall_clock(body.timezone, schedule.interval_seconds, slot)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            run_store.set_schedule_timezone(name, body.timezone, wall)
+        elif body.enabled is None:
+            raise HTTPException(status_code=400, detail="send enabled and/or timezone")
+        if body.enabled is not None:
+            run_store.set_schedule_enabled(name, enabled=body.enabled)
         schedule = run_store.get_schedule(name)
         assert schedule is not None
         return _schedule_view(run_store, schedule)

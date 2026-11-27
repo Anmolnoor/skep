@@ -71,3 +71,4 @@ touches.
 | [0066](0066-sandbox-by-default.md) | New projects run sandboxed when the host can sandbox; stored modes are carried forward (v127-F8) |
 | [0067](0067-channel-admin.md) | A channel admin named at the desk confirms every card from the messenger, HIGH ones included (v130-F5) |
 | [0068](0068-strict-read-confinement.md) | Strict read confinement: a sandboxed run and its G10 re-run read an allowlist (Phase 03; bubblewrap, Seatbelt pending) |
+| [0070](0070-channel-media-and-wall-clock-schedules.md) | Channel skill hints, schedules that keep their slot and their wall-clock time (Part 1, v135); inbound media (Part 2, proposed) |

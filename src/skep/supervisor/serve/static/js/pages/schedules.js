@@ -84,7 +84,9 @@ export async function viewSchedules(main) {
           el("td", {}, project),
           el("td", {}, `${s.interval_seconds}s`),
           el("td", {}, s.enabled ? "yes" : "no"),
-          el("td", { title: fmtTs(s.next_run_at) }, nextRun),
+          // v135-F7: a wall-clock schedule shows the local time it keeps
+          el("td", { title: fmtTs(s.next_run_at) },
+            s.timezone ? `${nextRun} · ${s.wall_time} ${s.timezone}` : nextRun),
           el("td", {}, fmtTs(s.last_run_at)),
           el("td", {}, s.last_state || "-"),
           el("td", {}, s.template_name ? `template ${s.template_name}` : "inline"),

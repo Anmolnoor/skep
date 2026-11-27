@@ -114,9 +114,14 @@ The card goes to the web, because a chained schedule is HIGH. Confirm it
 there. Give an explicit UTC offset (`-08:00` here). A bare time is read as
 UTC. The pull runs five minutes earlier because the chain reads mail-pull's
 **last** output. A schedule keeps its time of day. "Run now" keeps it too:
-running a 07:00 schedule at 14:00 leaves the next 07:00 run where it was. A daily schedule is a fixed 24 h interval, so
-its local time shifts by an hour at daylight-saving changes: re-create it
-then, or accept the shift.
+running a 07:00 schedule at 14:00 leaves the next 07:00 run where it was.
+Without a timezone a daily schedule is a fixed 24 h interval, so its local
+time shifts by an hour at a daylight-saving change. Add your zone (say
+"timezone America/Vancouver" in the sentence, `--timezone` on the CLI) and
+a daily or weekly schedule keeps its local time instead. A time that
+happens twice when the clocks go back fires once, the first time; a time
+the clocks skip fires as they jump (02:30 runs at 03:00 that day, and at
+02:30 again the next).
 
 ## 8. Keep the research chat clean
 

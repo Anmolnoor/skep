@@ -1462,6 +1462,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "script"
    },
    {
@@ -1494,6 +1496,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "digest"
    },
    {
@@ -1528,6 +1532,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "coding"
    },
    {
@@ -1560,6 +1566,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "note"
    },
    {
@@ -1592,6 +1600,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "prompt"
    },
    {
@@ -1625,6 +1635,8 @@
     "role": "builder",
     "role_note": "the role narrows shell prefixes, network hosts and workspace writes, not env_allowlist, execution mode, auto-apply, the budget, allow_git_mutation, loopback_ports, allowed_tools or allowed_plugin_risks; what lies beyond the role is dropped from its grants: a host beyond it is denied, a command beyond it stops at a gate for you",
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "coding"
    },
    {
@@ -1649,6 +1661,8 @@
     "resume_slot": null,
     "role": null,
     "template_name": null,
+    "timezone": null,
+    "wall_time": null,
     "worker_kind": "coding"
    }
   ]
