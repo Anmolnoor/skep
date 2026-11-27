@@ -282,7 +282,9 @@ CREATE TABLE IF NOT EXISTS schedules (
     chain TEXT,
     last_output TEXT,
     -- v123-F1: a worker schedule's role, held to as a delegator; NULL = none.
-    role TEXT
+    role TEXT,
+    -- v135-F6: the future slot "run now" stepped over; the tick restores it.
+    resume_slot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS schedule_health (
@@ -983,6 +985,9 @@ class ScheduleRecord:
     # v123-F1: a worker schedule's role — its workers are held to it as to a
     # delegator (``schedule:<name>@<role>``); None runs as before.
     role: str | None = None
+    # v135-F6: the future slot a "run now" stepped over; the tick that runs
+    # the schedule restores it as next_run_at (None: nothing to restore).
+    resume_slot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1265,7 @@ class RunStore:
         if "role" not in schedule_columns:
             # v123-F1: a worker schedule's role; old rows read NULL (no role).
             self._conn.execute("ALTER TABLE schedules ADD COLUMN role TEXT")
+        self._add_columns_locked("schedules", {"resume_slot": "TEXT"})  # v135-F6
         channel_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_configs)")
         }
@@ -2784,12 +2790,14 @@ class RunStore:
             chain=None if row[18] is None else str(row[18]),
             last_output=None if row[19] is None else str(row[19]),
             role=None if row[20] is None else str(row[20]),
+            resume_slot=None if row[21] is None else str(row[21]),
         )
 
     _SCHEDULE_COLS = (
         "name, repo, ref, worker_kind, instructions, network_json, env_allow_json,"
         " interval_seconds, enabled, created_at, last_run_at, next_run_at, last_task_id,"
-        " last_state, template_name, params_json, chat_id, once, chain, last_output, role"
+        " last_state, template_name, params_json, chat_id, once, chain, last_output, role,"
+        " resume_slot"
     )
 
     @_locked
@@ -2797,7 +2805,7 @@ class RunStore:
         """Insert or replace a schedule by name."""
         self._conn.execute(
             f"INSERT OR REPLACE INTO schedules ({self._SCHEDULE_COLS})"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f" VALUES ({', '.join('?' * 22)})",
             (
                 schedule.name,
                 schedule.repo,
@@ -2820,6 +2828,7 @@ class RunStore:
                 schedule.chain,
                 schedule.last_output,
                 schedule.role,
+                schedule.resume_slot,
             ),
         )
         self._conn.commit()
@@ -2895,9 +2904,12 @@ class RunStore:
     @_locked
     def mark_schedule_due(self, name: str, *, due_at: str) -> bool:
         """v70-F5: run-now moves WHEN, never HOW — the ticker stays the only
-        dispatcher; this just makes the schedule due on its next tick."""
+        dispatcher; this just makes the schedule due on its next tick.
+        v135-F6: a future slot it steps over is kept in ``resume_slot``."""
         cursor = self._conn.execute(
-            "UPDATE schedules SET next_run_at = ? WHERE name = ?", (due_at, name)
+            "UPDATE schedules SET resume_slot = CASE WHEN next_run_at > ?"
+            " THEN next_run_at ELSE resume_slot END, next_run_at = ? WHERE name = ?",
+            (due_at, due_at, name),
         )
         self._conn.commit()
         return cursor.rowcount > 0
@@ -2908,7 +2920,7 @@ class RunStore:
     ) -> None:
         self._conn.execute(
             "UPDATE schedules SET last_run_at = ?, next_run_at = ?, "
-            "last_task_id = ?, last_state = ?"
+            "last_task_id = ?, last_state = ?, resume_slot = NULL"
             " WHERE name = ?",
             (ran_at, next_run_at, task_id, state, name),
         )

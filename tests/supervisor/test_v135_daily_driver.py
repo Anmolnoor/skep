@@ -11,17 +11,30 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.scheduler import make_schedule, run_due
 from skep.supervisor.seed_skills import load_seed_skills
 from skep.supervisor.serve.chat import ChatEngine
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.store import ScheduleRecord
 
 from .conftest import serve_client
 from .fake_ollama import FakeOllama
+
+NEW_SCHEDULE_COLUMNS = ("resume_slot",)
+
+
+@pytest.fixture()
+def ollama() -> Iterator[FakeOllama]:
+    server = FakeOllama(api_key="sk-fake").start()
+    yield server
+    server.stop()
+
 
 # -- F4: skill hints on channel turns ------------------------------------------
 
@@ -261,3 +274,147 @@ def test_fetch_brief_caps_the_feed_read_and_refuses_non_web_urls(
         module.feed("https://big.example/rss", ())  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="http"):
         module.feed("file:///etc/passwd", ())  # type: ignore[attr-defined]
+
+
+# -- F6: "run now" keeps the slot ----------------------------------------------
+
+TOMORROW_7AM = "2026-11-28T15:00:00Z"  # 07:00 in Vancouver (PST)
+TODAY_2PM = "2026-11-27T22:00:00Z"  # 14:00 in Vancouver
+
+
+def _note(name: str, *, start_at: str, timezone: str | None = None) -> ScheduleRecord:
+    return make_schedule(
+        name=name,
+        repo="",
+        instructions="brief",
+        interval_seconds=86400,
+        worker_kind="note",
+        start_at=start_at,
+        **({"timezone": timezone} if timezone else {}),
+    )
+
+
+@pytest.fixture()
+def store(config: SupervisorConfig) -> Iterator[RunStore]:
+    config.home.mkdir(parents=True, exist_ok=True)
+    opened = RunStore(config.db_path)
+    yield opened
+    opened.close()
+
+
+def test_run_now_at_2pm_leaves_tomorrows_7am_slot_untouched(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    store.add_schedule(_note("ritual", start_at=TOMORROW_7AM))
+
+    assert store.mark_schedule_due("ritual", due_at=TODAY_2PM)
+    marked = store.get_schedule("ritual")
+    assert marked is not None
+    assert marked.next_run_at == TODAY_2PM and marked.resume_slot == TOMORROW_7AM
+
+    # the ticker is still the one dispatcher: run_due fires it, nothing else did
+    results = run_due(store=store, config=config, now="2026-11-27T22:00:30Z")
+
+    assert [(r.name, r.state) for r in results] == [("ritual", "note_posted")]
+    ran = store.get_schedule("ritual")
+    assert ran is not None
+    assert ran.last_run_at == "2026-11-27T22:00:30Z"
+    assert ran.next_run_at == TOMORROW_7AM  # not 14:00 tomorrow
+    assert ran.resume_slot is None
+    assert run_due(store=store, config=config, now="2026-11-27T22:01:00Z") == []
+
+
+def test_run_now_twice_before_the_tick_keeps_the_first_saved_slot(store: RunStore) -> None:
+    store.add_schedule(_note("ritual", start_at=TOMORROW_7AM))
+    store.mark_schedule_due("ritual", due_at=TODAY_2PM)
+    store.mark_schedule_due("ritual", due_at="2026-11-27T22:00:05Z")
+    marked = store.get_schedule("ritual")
+    assert marked is not None and marked.resume_slot == TOMORROW_7AM
+
+
+def test_a_saved_slot_that_passed_before_the_tick_keeps_its_time_of_day(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """The serve was down from 14:00 until 08:00 the next day: the 07:00 slot
+    has passed, so v122-F5's rule fires once and keeps 07:00, not 08:00."""
+    store.add_schedule(_note("ritual", start_at=TOMORROW_7AM))
+    store.mark_schedule_due("ritual", due_at=TODAY_2PM)
+
+    run_due(store=store, config=config, now="2026-11-28T16:00:00Z")
+
+    ran = store.get_schedule("ritual")
+    assert ran is not None
+    assert ran.next_run_at == "2026-11-29T15:00:00Z" and ran.resume_slot is None
+
+
+def test_an_overdue_schedule_marked_due_saves_no_slot(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """ADR 0070 §3 saves a FUTURE slot only. An overdue one (the serve was
+    down at 07:00) has no future slot to keep, so it behaves as before v135."""
+    store.add_schedule(_note("ritual", start_at="2026-11-27T15:00:00Z"))  # 07:00 today, missed
+    store.mark_schedule_due("ritual", due_at=TODAY_2PM)
+    marked = store.get_schedule("ritual")
+    assert marked is not None and marked.resume_slot is None
+
+    run_due(store=store, config=config, now="2026-11-27T22:00:30Z")
+
+    ran = store.get_schedule("ritual")
+    assert ran is not None and ran.next_run_at == "2026-11-28T22:00:00Z"
+
+
+def test_run_schedule_now_from_chat_keeps_the_slot(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    from .test_serve_chat_tools import chat_client
+
+    client, chat_id = chat_client(config, ollama)
+    seed = RunStore(config.db_path)
+    try:
+        seed.add_schedule(_note("ritual", start_at="2099-01-01T15:00:00Z"))
+    finally:
+        seed.close()
+    ollama.script_tool_call("run_schedule_now", {"name": "ritual"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "run my ritual now"})
+    action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
+    ollama.script_reply("queued")
+    client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
+
+    (row,) = client.get("/api/schedules").json()["schedules"]
+    assert row["resume_slot"] == "2099-01-01T15:00:00Z"
+    reader = RunStore(config.db_path)
+    try:
+        run_due(store=reader, config=config)
+        ran = reader.get_schedule("ritual")
+    finally:
+        reader.close()
+    assert ran is not None and ran.next_run_at == "2099-01-01T15:00:00Z"
+
+
+def _drop_columns(path: Path, columns: tuple[str, ...]) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    for column in columns:
+        conn.execute(f"ALTER TABLE schedules DROP COLUMN {column}")
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_from_before_v135_migrates(config: SupervisorConfig) -> None:
+    config.home.mkdir(parents=True, exist_ok=True)
+    first = RunStore(config.db_path)
+    first.add_schedule(_note("ritual", start_at=TOMORROW_7AM))
+    first.close()
+    _drop_columns(config.db_path, NEW_SCHEDULE_COLUMNS)
+
+    reopened = RunStore(config.db_path)
+    try:
+        old = reopened.get_schedule("ritual")
+        assert old is not None and old.next_run_at == TOMORROW_7AM
+        assert old.resume_slot is None
+        assert reopened.mark_schedule_due("ritual", due_at=TODAY_2PM)
+        marked = reopened.get_schedule("ritual")
+        assert marked is not None and marked.resume_slot == TOMORROW_7AM
+    finally:
+        reopened.close()

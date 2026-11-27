@@ -2125,8 +2125,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation). On confirm the schedule becomes due and the ticker "
         "dispatches it on its next tick — same policy, same delivery to its "
         "bound chat, same health tracking as a scheduled run. Needs an "
-        "ENABLED schedule; its next regular run then lands one full interval "
-        "after this one. Use this instead of re-running a schedule's "
+        "ENABLED schedule; it keeps its regular slot (a 07:00 schedule run now "
+        "at 14:00 still runs at 07:00 next). Use this instead of re-running a schedule's "
         "instructions through run_code or dispatch_run.",
         {"name": {"type": "string"}},
         ["name"],

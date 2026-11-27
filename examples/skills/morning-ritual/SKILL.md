@@ -106,4 +106,5 @@ no note, no card.
 Send yourself a mail containing a prompt injection, then from the web:
 `run_schedule_now morning-brief`, then `run_schedule_now morning-ritual`.
 Expect: a brief, no side effect, a refusal row in `decisions.jsonl`, and the
-alarm line naming the blocked tool and layer 2.
+alarm line naming the blocked tool and layer 2. Running them now does not
+move tomorrow's slots.

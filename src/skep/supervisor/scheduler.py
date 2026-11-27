@@ -401,6 +401,17 @@ def next_run_after(reference: str, interval_seconds: int, *, now: str | None = N
     return _fmt_ts(slot)
 
 
+def next_slot(schedule: ScheduleRecord, now: str) -> str:
+    """The slot after the tick at ``now`` that runs ``schedule``. v135-F6: a
+    run-now kept the future slot it stepped over in ``resume_slot`` — that
+    slot comes back; one that has passed meanwhile follows v122-F5 from it,
+    so the time of day is the slot's, not the run-now's."""
+    if schedule.resume_slot is not None and schedule.resume_slot > now:
+        return schedule.resume_slot
+    reference = schedule.resume_slot or schedule.next_run_at
+    return next_run_after(reference, schedule.interval_seconds, now=now)
+
+
 def next_fire_times(
     start_at: str | None, interval_seconds: int, *, once: bool = False, count: int = 3
 ) -> list[str]:
@@ -1344,7 +1355,7 @@ def run_due(
             # whose interval no clock can hold (stored before the cap) raised
             # here after its note had posted, outside the try, and killed the
             # whole tick every second.
-            next_at = next_run_after(schedule.next_run_at, schedule.interval_seconds, now=moment)
+            next_at = next_slot(schedule, moment)
         except (OverflowError, ValueError) as exc:
             state = f"dispatch_error: interval {schedule.interval_seconds}s is unusable ({exc})"
             store.set_schedule_enabled(schedule.name, enabled=False)

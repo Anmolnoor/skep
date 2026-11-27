@@ -1459,6 +1459,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "script"
@@ -1490,6 +1491,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "digest"
@@ -1523,6 +1525,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "coding"
@@ -1554,6 +1557,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "note"
@@ -1585,6 +1589,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "prompt"
@@ -1616,6 +1621,7 @@
     },
     "ref": null,
     "repo": "/fixture/app",
+    "resume_slot": null,
     "role": "builder",
     "role_note": "the role narrows shell prefixes, network hosts and workspace writes, not env_allowlist, execution mode, auto-apply, the budget, allow_git_mutation, loopback_ports, allowed_tools or allowed_plugin_risks; what lies beyond the role is dropped from its grants: a host beyond it is denied, a command beyond it stops at a gate for you",
     "template_name": null,
@@ -1640,6 +1646,7 @@
     "params": {},
     "ref": null,
     "repo": "/fixture/stray",
+    "resume_slot": null,
     "role": null,
     "template_name": null,
     "worker_kind": "coding"
