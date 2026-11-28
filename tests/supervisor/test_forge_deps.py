@@ -1195,3 +1195,40 @@ def test_replacing_a_dangling_venv_link_leaves_no_backup_behind(tmp_path: Path) 
     forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
     assert forge.seal_venv(home) == seal
     assert sorted(p.name for p in home.parent.iterdir()) == [home.name]
+
+
+def test_a_publication_holds_the_registry_gate_across_source_registration_and_record(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0069 review S13: no call can see the new incarnation and still
+    run the old plugin binding — a reader waits out the whole publication."""
+    import threading
+
+    from skep.supervisor.mcp_sandbox import REGISTRY_GATE
+
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        entered: list[bool] = []
+        real = forge.save_plugin
+
+        def save_plugin(store_: RunStore, record: Any) -> None:
+            if record.state == "active" and not entered:  # the registration is saved by now
+
+                def read() -> None:
+                    with REGISTRY_GATE.reading():
+                        pass
+
+                reader = threading.Thread(target=read, daemon=True)
+                reader.start()
+                reader.join(0.5)
+                entered.append(not reader.is_alive())
+            real(store_, record)
+
+        monkeypatch.setattr(forge, "save_plugin", save_plugin)
+        assert _promote(config, store, _card(store))["state"] == "active"
+        assert entered == [False]  # the reader waited until the record matched
+    finally:
+        store.close()

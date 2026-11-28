@@ -5737,8 +5737,15 @@ def _execute_mutation(
                 elif server_id in load_mcp_servers(store):
                     remove_mcp_server(store, server_id)
 
+            from ..mcp_sandbox import REGISTRY_GATE
+
             try:
-                forge.publish_source(holder.current, plugin_id, source, commit, unregister)
+                # ADR 0069 review S13: one publication under the registry gate —
+                # the source, the registration, the plugin record and any
+                # rollback — so no call sees the new incarnation with the old
+                # binding (or the reverse)
+                with REGISTRY_GATE.writing():
+                    forge.publish_source(holder.current, plugin_id, source, commit, unregister)
             except MCPError as exc:
                 raise ValueError(f"{exc} — {kept}") from exc
         record = published

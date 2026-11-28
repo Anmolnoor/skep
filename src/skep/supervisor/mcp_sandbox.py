@@ -87,15 +87,24 @@ def new_incarnation() -> str:
 class _RegistryGate:
     """Many calls at once, or one registration change alone (1.4): a call
     checks its card's incarnation and runs under ``reading``; a save or a
-    remove waits for every running call under ``writing``."""
+    remove waits for every running call under ``writing``. The writing
+    thread may nest either (review S13: forge holds ``writing`` across its
+    source, registration and plugin record, whose saves take it again)."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._readers = 0
         self._writing = False
+        self._writer: int | None = None
+
+    def _owned(self) -> bool:
+        return self._writer == threading.get_ident()
 
     @contextlib.contextmanager
     def reading(self) -> Iterator[None]:
+        if self._owned():
+            yield
+            return
         with self._cond:
             while self._writing:
                 self._cond.wait()
@@ -109,15 +118,20 @@ class _RegistryGate:
 
     @contextlib.contextmanager
     def writing(self) -> Iterator[None]:
+        if self._owned():
+            yield
+            return
         with self._cond:
             while self._writing or self._readers:
                 self._cond.wait()
             self._writing = True
+            self._writer = threading.get_ident()
         try:
             yield
         finally:
             with self._cond:
                 self._writing = False
+                self._writer = None
                 self._cond.notify_all()
 
 

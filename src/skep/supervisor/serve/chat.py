@@ -3198,6 +3198,10 @@ class ChatEngine:
                             args=args,
                             result=payload,
                             decided_by=decision.decided_by or decision.reason,
+                            # ADR 0069 1.7 (review S14): an MCP call's typed outcome
+                            status=(
+                                executed_status(payload) if name == "call_mcp_tool" else "confirmed"
+                            ),
                         )
                         row_id = self.store.add_chat_message(
                             chat_id,

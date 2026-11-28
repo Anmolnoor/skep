@@ -284,3 +284,56 @@ def test_a_confirm_checks_its_binding_before_any_lookup_that_could_launch(
     action = _confirm(env, chat, card)
     assert action.result["outcome"] == "not_run"
     assert launched == []
+
+
+def _granted(env: Live, chat: str) -> None:
+    from skep.supervisor.serve.tools import execute_mutation
+
+    execute_mutation(
+        "allow_mcp_tool", {"server_id": "kb", "tool": "get_doc"}, store=env.store,
+        holder=env.holder, runner=None, actor="operator", chat_id=chat,  # type: ignore[arg-type]
+    )  # fmt: skip
+
+
+def _in_turn_row(env: Live, chat: str) -> Any:
+    rows = [a for a in env.store.chat_actions(chat) if a.tool == "call_mcp_tool"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_a_standing_policy_call_whose_outcome_is_unknown_is_not_recorded_confirmed(
+    live: Callable[[str], Live],
+) -> None:
+    """S14: the in-turn ledger row carries the typed outcome too."""
+    env = live("builder")
+    chat = env.chat()
+    _granted(env, chat)
+
+    def runner(config: MCPServerConfig, **_: Any) -> Any:
+        def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            if method == "tools/list":
+                return {"tools": [{"name": "get_doc", "annotations": {"readOnlyHint": True}}]}
+            raise MCPOutcomeUnknown("the server exited after the request was sent")
+
+        return run
+
+    env.ollama.script_tool_calls(("call_mcp_tool", {"server_id": "kb", "tool": "get_doc"}))
+    env.ollama.script_reply("ok")
+    with mock.patch.object(mcp_client, "runner_for_config", runner):
+        env.turn(chat, "read the doc")
+    row = _in_turn_row(env, chat)
+    assert row.status == "interrupted" and row.result["outcome"] == "unknown"
+
+
+def test_a_removed_registration_or_a_final_deny_is_recorded_not_run(
+    live: Callable[[str], Live], calls: list[tuple[str, str]]
+) -> None:
+    """S14: never a generic bad-arguments result."""
+    env = live("builder")
+    chat = env.chat()
+    card = _propose(env, chat)
+    remove_mcp_server(env.store, "plain")
+    action = _confirm(env, chat, card)
+    assert action.status == "failed" and action.result["outcome"] == "not_run"
+    assert "is registered now" in action.result["error"]
+    assert calls == []

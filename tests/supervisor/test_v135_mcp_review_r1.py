@@ -316,3 +316,31 @@ def test_a_write_to_a_server_that_stops_reading_is_bounded(
 ) -> None:
     result = _bounded(tmp_path, monkeypatch, "deaf", blob="x" * (4 << 20))
     assert not result.ok and result.outcome == "unknown", result
+
+
+# -- S14: a forged call that times out after sending -------------------------------
+
+
+@pytest.mark.skipif(
+    not __import__("skep.supervisor.sandbox", fromlist=["x"]).availability().usable,
+    reason="the forged lane needs a usable sandbox backend",
+)
+def test_a_forged_call_that_times_out_after_sending_is_outcome_unknown(
+    skep_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.forge import ECHO_SERVER_SOURCE
+
+    real = subprocess.run
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("input"):  # the exchange: its payload went in, then the clock ran out
+            raise subprocess.TimeoutExpired(args[0], 30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    runner = mcp_client.forged_runner(
+        ECHO_SERVER_SOURCE, sys.executable, skep_home=skep_home, hosts=()
+    )
+    config = MCPServerConfig("forge-echo", "stdio", command=(sys.executable,))
+    result = mcp_client.MCPClient(config, runner=runner).call_tool("echo", {"text": "x"})
+    assert result.outcome == "unknown", result

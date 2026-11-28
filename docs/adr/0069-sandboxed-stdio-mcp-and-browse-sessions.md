@@ -176,10 +176,19 @@ left open:
 - **Outcome unknown is recorded as the card status `interrupted`** (the
   existing status for "it may have run"), with the payload's `outcome`
   saying `unknown`; not run is `failed` with `outcome: not_run`. The card
-  statuses did not grow.
+  statuses did not grow. Every ledger writer carries it (review S14): a card
+  confirm, an operator command, and a call standing policy ran in-turn
+  (whose row used to be born `confirmed` whatever happened). A removed
+  registration or a final deny is a typed not run, never a bad-arguments
+  result; a forged call that passes its deadline after its request was fed
+  in, or answers nothing, is outcome unknown.
 - **A forge rollback restores the previous registration with its
   incarnation** (`restore_mcp_server`): it puts back the registration that
-  was in force, so approvals proposed for it stay valid.
+  was in force, so approvals proposed for it stay valid. The whole
+  publication — the source, the registration, the plugin record and any
+  rollback — runs under one hold of the registry gate (review S13; the gate
+  lets its writing thread nest), so no call sees the new incarnation with
+  the old binding.
 - **No browser path in 2a** (review S7): the run-time wall passes only
   `UV_PYTHON_INSTALL_DIR`; `PLAYWRIGHT_BROWSERS_PATH` is not bound for any
   strict server. Wave 2b must bind a validated browser path only for the

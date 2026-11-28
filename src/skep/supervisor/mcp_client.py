@@ -707,7 +707,11 @@ def _stdio_reply(
             message = scrub(message)
         if isinstance(message, dict) and message.get("id") == 2:
             return _jsonrpc_result(message)
-    raise MCPError("no JSON-RPC response for the tool request")
+    # review S14: every caller has fed the request in by now (a forged tool
+    # reads it with the rest of its stdin), so the server may have acted
+    raise MCPOutcomeUnknown(
+        "no JSON-RPC response for the tool request: whether the server acted is unknown"
+    )
 
 
 def _stdio_exchange(
@@ -979,7 +983,9 @@ def forged_lane(
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MCPError(f"the forged tool passed its {timeout:g}s deadline") from exc
+            # ADR 0069 1.7 (review S14): its request was already fed in
+            kind = MCPError if payload is None else MCPOutcomeUnknown
+            raise kind(f"the forged tool passed its {timeout:g}s deadline") from exc
 
 
 # ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
