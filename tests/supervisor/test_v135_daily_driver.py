@@ -888,6 +888,97 @@ def _never(*_a: object, **_k: object) -> NoReturn:
     raise AssertionError("a no-dispatch exit dispatched")
 
 
+# review r3: a claim needs an enabled schedule and the definition the tick read
+
+
+def _texts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from skep.supervisor import scheduler
+
+    posted: list[str] = []
+
+    def deliver(_store: object, _schedule: object, text: str, *_a: object, **_k: object) -> None:
+        posted.append(text)
+
+    monkeypatch.setattr(scheduler, "_deliver_tick_text", deliver)
+    return posted
+
+
+def test_a_schedule_disabled_after_the_read_does_not_fire(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.add_schedule(_note("ritual", start_at=TODAY_7AM))
+    posted = _texts(monkeypatch)
+    _race(store, monkeypatch, lambda: store.set_schedule_enabled("ritual", enabled=False))
+
+    assert run_due(store=store, config=config, now=TICK) == []
+
+    row = store.get_schedule("ritual")
+    assert row is not None and not row.enabled and row.next_run_at == TODAY_7AM
+    health = store.schedule_health("ritual")
+    assert row.last_run_at is None and health is not None and health.window_size == 0
+    assert posted == []
+
+
+def test_a_failed_claim_on_the_no_dispatch_path_records_nothing(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-shot prompt tick with no chat engine runs nothing; moved to a
+    later slot meanwhile, it belongs to whoever moved it — not failed, not
+    disabled by the stale tick."""
+    store.add_schedule(
+        make_schedule(
+            name="ritual", repo="", instructions="brief me", interval_seconds=DAY,
+            worker_kind="prompt", start_at=TODAY_7AM, once=True,
+        )
+    )  # fmt: skip
+    _race(store, monkeypatch, lambda: store.mark_schedule_due("ritual", due_at=TOMORROW_7AM))
+
+    assert run_due(store=store, config=config, now=TICK) == []
+
+    row = store.get_schedule("ritual")
+    assert row is not None and row.enabled and row.next_run_at == TOMORROW_7AM
+    health = store.schedule_health("ritual")
+    assert row.last_state is None and health is not None and health.window_size == 0
+
+
+def test_a_schedule_replaced_after_the_read_runs_its_new_definition(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    store.add_schedule(_note("ritual", start_at=TODAY_7AM))  # overdue
+    posted = _texts(monkeypatch)
+    replaced = dataclasses.replace(
+        _note("ritual", start_at="2026-11-27T15:04:00Z"), instructions="the new brief"
+    )
+    _race(store, monkeypatch, lambda: store.add_schedule(replaced))
+
+    assert run_due(store=store, config=config, now=OVERDUE_TICK) == []  # left for the next tick
+    assert posted == []
+    row = store.get_schedule("ritual")
+    assert row is not None and row.next_run_at == "2026-11-27T15:04:00Z"
+
+    monkeypatch.undo()
+    posted = _texts(monkeypatch)
+    run_due(store=store, config=config, now=OVERDUE_TICK)
+    assert posted == ["the new brief"]
+
+
+def test_a_timezone_edited_after_the_read_leaves_the_slot_for_the_next_tick(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.scheduler import wall_clock
+
+    store.add_schedule(_note("ritual", start_at=TODAY_7AM))
+    posted = _texts(monkeypatch)
+    _race(store, monkeypatch, lambda: store.set_schedule_timezone("ritual", VAN, wall_clock))
+
+    assert run_due(store=store, config=config, now=TICK) == []
+    assert posted == []
+    row = store.get_schedule("ritual")
+    assert row is not None and row.next_run_at == TODAY_7AM and row.timezone == VAN
+
+
 # -- F7: wall-clock daily schedules ---------------------------------------------
 # America/Vancouver's last transitions: fall back Sun 2 Nov 2025 02:00 PDT ->
 # 01:00 PST; spring forward Sun 8 Mar 2026 02:00 PST -> 03:00 PDT. (tzdata

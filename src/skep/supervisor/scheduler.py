@@ -436,12 +436,19 @@ def _claim(store: RunStore, schedule: ScheduleRecord, moment: str) -> bool:
     while the row holds the slot this tick read. A row moved meanwhile (a
     run-now confirmed after the read) is re-read and decided again, so the
     run counts as that run-now and the slot comes from fresh state; one no
-    longer due raises _SlotMoved and nothing runs. True: claimed."""
-    while not store.claim_schedule_slot(schedule, next_run_at=next_slot(schedule, moment)):
+    longer due raises _SlotMoved and nothing runs. True: claimed.
+
+    Review r3: the retry is for a timing-only change (a run-now). The tick
+    runs the definition it read, so the claim carries that definition with
+    the fresh slot; a definition changed since (the store refuses it at the
+    same slot) raises _SlotMoved and the next tick reads it fresh."""
+    attempt = schedule
+    while not store.claim_schedule_slot(attempt, next_run_at=next_slot(attempt, moment)):
         fresh = store.get_schedule(schedule.name)
-        if fresh is None or not fresh.enabled or fresh.next_run_at > moment:
+        slot = None if fresh is None else (fresh.next_run_at, fresh.resume_slot)
+        if slot is None or slot[0] > moment or slot == (attempt.next_run_at, attempt.resume_slot):
             raise _SlotMoved
-        schedule = fresh
+        attempt = replace(schedule, next_run_at=slot[0], resume_slot=slot[1])
     return True
 
 
@@ -1796,12 +1803,13 @@ def run_due(
         # ES B110: the bookkeeping stays inside this schedule's own try too —
         # one schedule's failure must never end the tick for the rest.
         try:
-            if not claimed:
+            if not claimed and not store.claim_schedule_slot(schedule, next_run_at=next_at):
                 # v135-F6 review r2: a tick that deliberately ran nothing
                 # (refused, skipped, failed before its side effect) advances
-                # with its outcome, as before v135 — unless the slot moved
-                # since the read (a run-now made meanwhile stands).
-                store.claim_schedule_slot(schedule, next_run_at=next_at)
+                # with its outcome, as before v135. Review r3: unless the row
+                # changed since the read — then the schedule is whoever
+                # changed it's, and the stale tick records nothing.
+                continue
             store.mark_schedule_ran(schedule.name, ran_at=moment, task_id=task_id, state=state)
             # v14: record the tick outcome for schedule health (success rate,
             # consecutive failures, last failure reason).

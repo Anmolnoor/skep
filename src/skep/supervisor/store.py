@@ -2962,14 +2962,28 @@ class RunStore:
         and consumes ``resume_slot``, so a run-now confirmed while the run is
         going is saved against the new slot and nothing after rewrites it.
         Review r2: only while the row still holds the slot the tick ``seen``
-        — False if a run-now (or anything else) moved it since the read."""
-        cursor = self._conn.execute(
-            "UPDATE schedules SET next_run_at = ?, resume_slot = NULL"
-            " WHERE name = ? AND next_run_at = ? AND resume_slot IS ?",
-            (next_run_at, seen.name, seen.next_run_at, seen.resume_slot),
+        — False if a run-now (or anything else) moved it since the read.
+        Review r3: and only while it is enabled and otherwise the row ``seen``
+        — every column but the last run's outcome, so a disable, a replace or
+        a timezone edit since the read is not run on the stale definition."""
+        outcome: dict[str, Any] = dict.fromkeys(
+            ("last_run_at", "last_task_id", "last_state", "last_output")
         )
-        self._conn.commit()
-        return cursor.rowcount > 0
+        with self._conn:  # commit, or roll back on a raise
+            self._begin_immediate()
+            row = self._conn.execute(
+                f"SELECT {self._SCHEDULE_COLS} FROM schedules WHERE name = ?", (seen.name,)
+            ).fetchone()
+            if row is None:
+                return False
+            current = self._row_to_schedule(row)
+            if not current.enabled or replace(current, **outcome) != replace(seen, **outcome):
+                return False
+            self._conn.execute(
+                "UPDATE schedules SET next_run_at = ?, resume_slot = NULL WHERE name = ?",
+                (next_run_at, seen.name),
+            )
+        return True
 
     @_locked
     def mark_schedule_ran(self, name: str, *, ran_at: str, task_id: str | None, state: str) -> None:
