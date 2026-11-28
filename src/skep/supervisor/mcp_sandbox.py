@@ -1364,8 +1364,8 @@ def _bundled_in_registry_parent(
     return False
 
 
-_NPM_NAME = re.compile(r"(?:@[A-Za-z0-9][\w.~-]*/)?[A-Za-z0-9][\w.~-]*")
-_NPM_VERSION = re.compile(r"[0-9A-Za-z.+-]+")
+_LOCK_NAME = re.compile(r"(?:@[A-Za-z0-9][\w.~-]*/)?[A-Za-z0-9][\w.~-]*")
+_LOCK_VERSION = re.compile(r"[0-9A-Za-z.+-]+")
 _SRI_BYTES = {"sha512": 64, "sha384": 48, "sha256": 32}
 
 
@@ -1380,7 +1380,7 @@ def registry_tarball(path: str, entry: Mapping[str, Any], registry: str) -> bool
 
     name = str(entry.get("name") or path.rsplit("node_modules/", 1)[-1])
     version = str(entry.get("version") or "")
-    if not (_NPM_NAME.fullmatch(name) and _NPM_VERSION.fullmatch(version)):
+    if not (_LOCK_NAME.fullmatch(name) and _LOCK_VERSION.fullmatch(version)):
         return False
     base = name.rsplit("/", 1)[-1]
     if entry.get("resolved") != f"{registry}{name}/-/{base}-{version}.tgz":
