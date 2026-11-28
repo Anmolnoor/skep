@@ -26,6 +26,10 @@ def walled(
     read_allowlist: tuple[Path, ...] = (),
     read_files: tuple[Path, ...] = (),
     domain_patterns: bool = False,
+    profile_dir: Path | None = None,
+    home: Path | None = None,
+    trusted_read_roots: tuple[Path, ...] = (),
+    skep_home_roots: bool = True,
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """``argv`` wrapped in the wall, and the env it runs with, for the life
     of the block. Reads: the ADR 0068 strict allowlist (system dirs,
@@ -40,7 +44,13 @@ def walled(
     host (``*``, ``*.example.com``) refuses; ``domain_patterns`` (the forged
     lane only, R3) admits ``*.example.com``. No backend, or a wall that
     cannot be built, raises ``sandbox.SandboxUnavailableError`` (fail
-    closed, I12)."""
+    closed, I12).
+
+    ADR 0069 2.1 (the MCP strict lane; every other caller passes none):
+    ``profile_dir`` holds the profile instead of the workspace, and must lie
+    outside every root the child writes; ``home`` is HOME and TMPDIR,
+    writable, apart from the workspace; ``trusted_read_roots`` and
+    ``skep_home_roots`` go to ``sandbox.write_profile``."""
     from . import sandbox
     from .netproxy import (
         FilteringProxy,
@@ -59,6 +69,13 @@ def walled(
     probe = sandbox.availability()
     if not probe.usable:
         raise sandbox.SandboxUnavailableError(f"no usable sandbox backend ({probe.reason})")
+    writable = (*writable, *([home] if home is not None else []))
+    if profile_dir is not None and any(
+        profile_dir.resolve().is_relative_to(root.resolve()) for root in (workspace, *writable)
+    ):
+        raise sandbox.SandboxUnavailableError(
+            f"the profile dir {profile_dir} lies inside a root the child can write"
+        )
     with contextlib.ExitStack() as stack:
         proxy = None
         if hosts:
@@ -77,7 +94,7 @@ def walled(
             stack.callback(proxy.stop)
         try:
             profile = sandbox.write_profile(
-                workspace / "sandbox.profile",
+                (profile_dir or workspace) / "sandbox.profile",
                 workspace=workspace,
                 extra_writable=writable,
                 network=(
@@ -88,12 +105,15 @@ def walled(
                 skep_home=skep_home,
                 read_allowlist=read_allowlist,
                 read_files=read_files,
+                trusted_read_roots=trusted_read_roots,
+                skep_home_roots=skep_home_roots,
             )
             wrapped = sandbox.wrap_command(argv, profile)
         except sandbox.SandboxAllowlistUnsupported as exc:
             raise sandbox.SandboxUnavailableError(str(exc)) from exc
         env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
-        env.update(HOME=str(workspace), **sandbox.in_wall_tmp_env(workspace))
+        scratch = workspace if home is None else home
+        env.update(HOME=str(scratch), **sandbox.in_wall_tmp_env(scratch))
         if proxy is not None:
             env.update(proxy_env(proxy.port))
         yield wrapped, env
