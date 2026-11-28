@@ -41,6 +41,7 @@ from ..chat import (
     blocking_cards,
     chat_turn_lock,
     save_chat_attachment,
+    skill_hint,
 )
 from . import (
     ChannelConfig,
@@ -563,11 +564,13 @@ def _channel_turn(
             attachment_names.append(save_chat_attachment(engine.home, chat.chat_id, blob))
         except ValueError:
             continue
+    hint = skill_hint(store, message.text)  # v135-F4: as the web route stores it
     store.add_chat_message(
         chat.chat_id,
         role="user",
-        content=message.text,
+        content=f"{message.text}\n\n{hint}" if hint else message.text,
         attachments=attachment_names or None,
+        skill_hint=hint or None,
     )
     parts: list[str] = []
     actions: list[dict[str, object]] = []

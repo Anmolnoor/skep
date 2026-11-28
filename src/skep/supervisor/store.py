@@ -282,7 +282,11 @@ CREATE TABLE IF NOT EXISTS schedules (
     chain TEXT,
     last_output TEXT,
     -- v123-F1: a worker schedule's role, held to as a delegator; NULL = none.
-    role TEXT
+    role TEXT,
+    -- v135-F6/F7: see ScheduleRecord.
+    resume_slot TEXT,
+    timezone TEXT,
+    wall_time TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS schedule_health (
@@ -983,6 +987,13 @@ class ScheduleRecord:
     # v123-F1: a worker schedule's role — its workers are held to it as to a
     # delegator (``schedule:<name>@<role>``); None runs as before.
     role: str | None = None
+    # v135-F6: the future slot a "run now" stepped over; the tick that runs
+    # the schedule restores it as next_run_at (None: nothing to restore).
+    resume_slot: str | None = None
+    # v135-F7: whole-day slots keep the wall-clock ``wall_time`` (HH:MM:SS)
+    # in this IANA zone (schedule_time.py); None is a fixed interval.
+    timezone: str | None = None
+    wall_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1271,9 @@ class RunStore:
         if "role" not in schedule_columns:
             # v123-F1: a worker schedule's role; old rows read NULL (no role).
             self._conn.execute("ALTER TABLE schedules ADD COLUMN role TEXT")
+        self._add_columns_locked(  # v135-F6, F7
+            "schedules", {"resume_slot": "TEXT", "timezone": "TEXT", "wall_time": "TEXT"}
+        )
         channel_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_configs)")
         }
@@ -2784,12 +2798,16 @@ class RunStore:
             chain=None if row[18] is None else str(row[18]),
             last_output=None if row[19] is None else str(row[19]),
             role=None if row[20] is None else str(row[20]),
+            resume_slot=None if row[21] is None else str(row[21]),
+            timezone=None if row[22] is None else str(row[22]),
+            wall_time=None if row[23] is None else str(row[23]),
         )
 
     _SCHEDULE_COLS = (
         "name, repo, ref, worker_kind, instructions, network_json, env_allow_json,"
         " interval_seconds, enabled, created_at, last_run_at, next_run_at, last_task_id,"
-        " last_state, template_name, params_json, chat_id, once, chain, last_output, role"
+        " last_state, template_name, params_json, chat_id, once, chain, last_output, role,"
+        " resume_slot, timezone, wall_time"
     )
 
     @_locked
@@ -2797,7 +2815,7 @@ class RunStore:
         """Insert or replace a schedule by name."""
         self._conn.execute(
             f"INSERT OR REPLACE INTO schedules ({self._SCHEDULE_COLS})"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f" VALUES ({', '.join('?' * 24)})",
             (
                 schedule.name,
                 schedule.repo,
@@ -2820,6 +2838,9 @@ class RunStore:
                 schedule.chain,
                 schedule.last_output,
                 schedule.role,
+                schedule.resume_slot,
+                schedule.timezone,
+                schedule.wall_time,
             ),
         )
         self._conn.commit()
@@ -2895,22 +2916,81 @@ class RunStore:
     @_locked
     def mark_schedule_due(self, name: str, *, due_at: str) -> bool:
         """v70-F5: run-now moves WHEN, never HOW — the ticker stays the only
-        dispatcher; this just makes the schedule due on its next tick."""
+        dispatcher; this just makes the schedule due on its next tick.
+        v135-F6: a future slot it steps over is kept in ``resume_slot``."""
         cursor = self._conn.execute(
-            "UPDATE schedules SET next_run_at = ? WHERE name = ?", (due_at, name)
+            "UPDATE schedules SET resume_slot = CASE WHEN next_run_at > ?"
+            " THEN next_run_at ELSE resume_slot END, next_run_at = ? WHERE name = ?",
+            (due_at, due_at, name),
         )
         self._conn.commit()
         return cursor.rowcount > 0
 
     @_locked
-    def mark_schedule_ran(
-        self, name: str, *, ran_at: str, next_run_at: str, task_id: str | None, state: str
-    ) -> None:
+    def set_schedule_timezone(
+        self,
+        name: str,
+        timezone: str | None,
+        wall_clock: Callable[[str | None, int, str], str | None],
+    ) -> bool:
+        """v135-F7: PATCH /api/schedules — the slot stays, later ones keep wall
+        time. ``wall_clock`` (scheduler.wall_clock) checks ``timezone`` against
+        THIS row and gives its anchor, in the transaction that writes it; the
+        timezone the row already has keeps its anchor (a 02:30 schedule
+        waiting at its 03:00 spring-forward fallback stays 02:30)."""
+        with self._conn:  # commit, or roll back on a raise
+            self._begin_immediate()
+            row = self._conn.execute(
+                "SELECT interval_seconds, COALESCE(resume_slot, next_run_at), timezone,"
+                " wall_time FROM schedules WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if row is None:
+                return False
+            interval, slot, current, wall = row
+            if timezone != current:
+                wall = wall_clock(timezone, int(interval), str(slot))
+            self._conn.execute(
+                "UPDATE schedules SET timezone = ?, wall_time = ? WHERE name = ?",
+                (timezone, wall, name),
+            )
+        return True
+
+    @_locked
+    def claim_schedule_slot(self, seen: ScheduleRecord, *, next_run_at: str) -> bool:
+        """v135-F6 review: the tick advances the slot BEFORE its side effect
+        and consumes ``resume_slot``, so a run-now confirmed while the run is
+        going is saved against the new slot and nothing after rewrites it.
+        Review r2: only while the row still holds the slot the tick ``seen``
+        — False if a run-now (or anything else) moved it since the read.
+        Review r3: and only while it is enabled and otherwise the row ``seen``
+        — every column but the last run's outcome, so a disable, a replace or
+        a timezone edit since the read is not run on the stale definition."""
+        outcome: dict[str, Any] = dict.fromkeys(
+            ("last_run_at", "last_task_id", "last_state", "last_output")
+        )
+        with self._conn:  # commit, or roll back on a raise
+            self._begin_immediate()
+            row = self._conn.execute(
+                f"SELECT {self._SCHEDULE_COLS} FROM schedules WHERE name = ?", (seen.name,)
+            ).fetchone()
+            if row is None:
+                return False
+            current = self._row_to_schedule(row)
+            if not current.enabled or replace(current, **outcome) != replace(seen, **outcome):
+                return False
+            self._conn.execute(
+                "UPDATE schedules SET next_run_at = ?, resume_slot = NULL WHERE name = ?",
+                (next_run_at, seen.name),
+            )
+        return True
+
+    @_locked
+    def mark_schedule_ran(self, name: str, *, ran_at: str, task_id: str | None, state: str) -> None:
+        """The outcome only: the slot was claimed (claim_schedule_slot)."""
         self._conn.execute(
-            "UPDATE schedules SET last_run_at = ?, next_run_at = ?, "
-            "last_task_id = ?, last_state = ?"
-            " WHERE name = ?",
-            (ran_at, next_run_at, task_id, state, name),
+            "UPDATE schedules SET last_run_at = ?, last_task_id = ?, last_state = ? WHERE name = ?",
+            (ran_at, task_id, state, name),
         )
         self._conn.commit()
 

@@ -72,3 +72,4 @@ touches.
 | [0067](0067-channel-admin.md) | A channel admin named at the desk confirms every card from the messenger, HIGH ones included (v130-F5) |
 | [0068](0068-strict-read-confinement.md) | Strict read confinement: a sandboxed run and its G10 re-run read an allowlist (Phase 03; bubblewrap, Seatbelt pending) |
 | [0069](0069-sandboxed-stdio-mcp-and-browse-sessions.md) | Sandboxed stdio MCP servers (strict by default, a carded install, per-server secrets, approvals bound to the registration); browse sessions proposed (v135) |
+| [0070](0070-channel-media-and-wall-clock-schedules.md) | Channel skill hints, schedules that keep their slot and their wall-clock time (Part 1, v135); inbound media (Part 2, proposed) |

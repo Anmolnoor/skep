@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from skep.worker_contract import Budget, Permissions
 
+from . import schedule_time
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
 from .castes import CASTES, RETIRED_CASTES
 from .codex_login import run_auth_source
@@ -318,11 +319,7 @@ def reconcile_interrupted_scripts(store: RunStore) -> list[str]:
             continue
         state = "script_interrupted: serve stopped mid-script; next run at its next slot"
         store.mark_schedule_ran(
-            schedule.name,
-            ran_at=schedule.last_run_at or now_ts(),
-            next_run_at=schedule.next_run_at,
-            task_id=None,
-            state=state,
+            schedule.name, ran_at=schedule.last_run_at or now_ts(), task_id=None, state=state
         )
         store.record_schedule_outcome(schedule.name, task_id=None, state=state)
         interrupted.append(schedule.name)
@@ -385,13 +382,24 @@ def _start_slot(start_at: str | None) -> str | None:
 MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
 
 
-def next_run_after(reference: str, interval_seconds: int, *, now: str | None = None) -> str:
+def next_run_after(
+    reference: str,
+    interval_seconds: int,
+    *,
+    now: str | None = None,
+    timezone: str | None = None,
+    wall_time: str | None = None,
+) -> str:
     """Next fire time = reference + interval. v122-F5: with ``now``, the slot
     is advanced in whole intervals until it is after ``now`` — a late or
     missed tick keeps the schedule's time of day and fires once, no catch-up
-    storm."""
+    storm. v135-F7: with ``timezone`` and whole days, the same wall-clock
+    time (``wall_time``, default the reference's) N calendar days later."""
     if interval_seconds <= 0:  # parse_interval never makes one; a hand-edited row can
         raise ValueError(f"interval must be positive, got {interval_seconds}s")
+    if timezone is not None and interval_seconds % schedule_time.DAY_SECONDS == 0:
+        days = interval_seconds // schedule_time.DAY_SECONDS
+        return schedule_time.next_wall_slot(reference, days, timezone, wall_time=wall_time, now=now)
     step = timedelta(seconds=interval_seconds)
     slot = _parse_ts(reference) + step
     if now is not None:
@@ -401,8 +409,56 @@ def next_run_after(reference: str, interval_seconds: int, *, now: str | None = N
     return _fmt_ts(slot)
 
 
+def next_slot(schedule: ScheduleRecord, now: str) -> str:
+    """The slot after the tick at ``now`` that runs ``schedule``. v135-F6: a
+    run-now kept the future slot it stepped over in ``resume_slot`` — that
+    slot comes back; one that has passed meanwhile follows v122-F5 from it,
+    so the time of day is the slot's, not the run-now's."""
+    if schedule.resume_slot is not None and schedule.resume_slot > now:
+        return schedule.resume_slot
+    reference = schedule.resume_slot or schedule.next_run_at
+    return next_run_after(
+        reference,
+        schedule.interval_seconds,
+        now=now,
+        timezone=schedule.timezone,
+        wall_time=schedule.wall_time,
+    )
+
+
+class _SlotMoved(Exception):
+    """v135-F6 review r2: between the tick's read and its claim the schedule
+    stopped being due (removed, disabled, or moved to a later slot)."""
+
+
+def _claim(store: RunStore, schedule: ScheduleRecord, moment: str) -> bool:
+    """v135-F6 review r2: claim the slot right before the side effect, only
+    while the row holds the slot this tick read. A row moved meanwhile (a
+    run-now confirmed after the read) is re-read and decided again, so the
+    run counts as that run-now and the slot comes from fresh state; one no
+    longer due raises _SlotMoved and nothing runs. True: claimed.
+
+    Review r3: the retry is for a timing-only change (a run-now). The tick
+    runs the definition it read, so the claim carries that definition with
+    the fresh slot; a definition changed since (the store refuses it at the
+    same slot) raises _SlotMoved and the next tick reads it fresh."""
+    attempt = schedule
+    while not store.claim_schedule_slot(attempt, next_run_at=next_slot(attempt, moment)):
+        fresh = store.get_schedule(schedule.name)
+        slot = None if fresh is None else (fresh.next_run_at, fresh.resume_slot)
+        if slot is None or slot[0] > moment or slot == (attempt.next_run_at, attempt.resume_slot):
+            raise _SlotMoved
+        attempt = replace(schedule, next_run_at=slot[0], resume_slot=slot[1])
+    return True
+
+
 def next_fire_times(
-    start_at: str | None, interval_seconds: int, *, once: bool = False, count: int = 3
+    start_at: str | None,
+    interval_seconds: int,
+    *,
+    once: bool = False,
+    count: int = 3,
+    timezone: str | None = None,
 ) -> list[str]:
     """The next ``count`` fire times of a schedule created now, by the
     scheduler's own rules: the first is ``start_at`` (normalised) or the next
@@ -414,10 +470,23 @@ def next_fire_times(
     start = _start_slot(start_at)
     slot = start if start is not None else now
     times = [max(slot, now)]
+    wall = wall_clock(timezone, interval_seconds, slot)  # v135-F7: the card's wall-clock slots
     while not once and len(times) < count:
-        slot = next_run_after(slot, interval_seconds, now=times[-1])
+        slot = next_run_after(
+            slot, interval_seconds, now=times[-1], timezone=timezone, wall_time=wall
+        )
         times.append(slot)
     return times
+
+
+def wall_clock(timezone: str | None, interval_seconds: int, slot: str) -> str | None:
+    """v135-F7: the wall time of a new schedule's first slot in its (checked)
+    ``timezone`` — the anchor every later slot keeps; None without one."""
+    if timezone is None:
+        return None
+    return schedule_time.wall_time_of(
+        slot, schedule_time.check_timezone(timezone, interval_seconds)
+    )
 
 
 def script_network_problem(network: Sequence[str]) -> str | None:
@@ -448,6 +517,7 @@ def make_schedule(
     chain: str | None = None,
     role: str | None = None,
     skep_home: Path | None = None,
+    timezone: str | None = None,
 ) -> ScheduleRecord:
     """``skep_home`` (the top-level home) lets a script's inputs be checked
     at creation (R3, N2); every face that creates one passes it."""
@@ -463,6 +533,7 @@ def make_schedule(
         raise ValueError(problem)  # R3 (N2)
     created = now_ts()
     start = _start_slot(start_at)
+    wall = wall_clock(timezone, interval_seconds, start or created)
     return ScheduleRecord(
         name=name,
         repo=str(repo),
@@ -482,6 +553,8 @@ def make_schedule(
         once=once,
         chain=chain,
         role=role,
+        timezone=timezone,
+        wall_time=wall,
     )
 
 
@@ -499,6 +572,7 @@ def make_template_schedule(
     role: str | None = None,
     once: bool = False,
     chat_id: str | None = None,
+    timezone: str | None = None,
 ) -> ScheduleRecord:
     """A schedule bound to a template (v3.5): "run template X with these params".
 
@@ -511,6 +585,7 @@ def make_template_schedule(
     instance = instantiate(template, params, repo=str(repo), ref=ref)
     created = now_ts()
     start = _start_slot(start_at)
+    wall = wall_clock(timezone, interval_seconds, start or created)
     return ScheduleRecord(
         name=name,
         repo=instance.repo,
@@ -532,6 +607,8 @@ def make_template_schedule(
         role=role,
         once=once,  # v126-F11
         chat_id=chat_id,
+        timezone=timezone,
+        wall_time=wall,
     )
 
 
@@ -1344,7 +1421,7 @@ def run_due(
             # whose interval no clock can hold (stored before the cap) raised
             # here after its note had posted, outside the try, and killed the
             # whole tick every second.
-            next_at = next_run_after(schedule.next_run_at, schedule.interval_seconds, now=moment)
+            next_at = next_slot(schedule, moment)
         except (OverflowError, ValueError) as exc:
             state = f"dispatch_error: interval {schedule.interval_seconds}s is unusable ({exc})"
             store.set_schedule_enabled(schedule.name, enabled=False)
@@ -1352,6 +1429,7 @@ def run_due(
             store.record_schedule_outcome(schedule.name, task_id=None, state=state)
             results.append(TickResult(name=schedule.name, task_id=None, state=state))
             continue
+        claimed = False  # v135-F6 review r2: set where the side effect starts
         try:
             blocked_state: str | None = None
             # v132-F5 (I2, I8): a bound run is the project's run — its engine
@@ -1392,6 +1470,7 @@ def run_due(
                 # otherwise as an inert note (the twin of chat add_note). No
                 # repo, no worker, no policy surface; "note_posted" rides the
                 # blocked_state no-dispatch tail and counts as a health success.
+                claimed = _claim(store, schedule, moment)
                 _deliver_tick_text(store, schedule, schedule.instructions, notify, context=chained)
                 store.record_schedule_output(schedule.name, schedule.instructions)
                 blocked_state = "note_posted"
@@ -1405,16 +1484,16 @@ def run_due(
                 # failure, so a persistently broken script auto-disables.
                 # ponytail: scripts run sequentially inside the tick (120s cap
                 # each); parallelize if a slow monitor ever starves the tick.
-                # ES B120: claim the slot BEFORE the side effect — a serve that
-                # dies mid-script must not re-run it at once on restart
-                # (at-most-once; reconcile_interrupted_scripts records it).
+                # ES B120: the slot is claimed BEFORE the side effect —
+                # a serve that dies mid-script must not re-run it at once on
+                # restart (at-most-once; reconcile_interrupted_scripts records
+                # it), nor fire a one-shot again at its next slot.
+                claimed = _claim(store, schedule, moment)
                 store.mark_schedule_ran(
-                    schedule.name,
-                    ran_at=moment,
-                    next_run_at=next_at,
-                    task_id=None,
-                    state=SCRIPT_RUNNING_STATE,
+                    schedule.name, ran_at=moment, task_id=None, state=SCRIPT_RUNNING_STATE
                 )
+                if schedule.once:
+                    store.set_schedule_enabled(schedule.name, enabled=False)
                 output, script_ok = run_schedule_script(
                     schedule.instructions,
                     skep_home=config.home.parent,
@@ -1445,6 +1524,7 @@ def run_due(
                         "daemon (the CLI tick has no chat engine)"
                     )
                 else:
+                    claimed = _claim(store, schedule, moment)
                     output, prompt_ok = prompt_turn(schedule, chained)
                     store.record_schedule_output(schedule.name, output)
                     if prompt_ok:
@@ -1465,6 +1545,7 @@ def run_due(
                 # at tick time and delivered exactly like a note tick. No repo,
                 # no worker, read-only over the store.
                 digest_text = compose_digest(store)
+                claimed = _claim(store, schedule, moment)
                 store.record_schedule_output(schedule.name, digest_text)
                 _deliver_tick_text(store, schedule, digest_text, notify, context=chained)
                 blocked_state = "digest_posted"
@@ -1562,6 +1643,7 @@ def run_due(
                     )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(taint, dispatch_decision)
+                    claimed = _claim(store, schedule, moment)
                     outcome = dispatch(
                         repo,
                         instance.instructions
@@ -1675,6 +1757,7 @@ def run_due(
                     )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(taint, dispatch_decision)
+                    claimed = _claim(store, schedule, moment)
                     outcome = dispatch(
                         repo,
                         schedule.instructions
@@ -1713,18 +1796,21 @@ def run_due(
                     held = dict(dispatch_decision.delegation), repo
             else:
                 task_id, state = None, blocked_state
+        except _SlotMoved:
+            continue  # not due any more: it is someone else's slot now
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
             task_id, state = None, f"dispatch_error: {exc}"
         # ES B110: the bookkeeping stays inside this schedule's own try too —
         # one schedule's failure must never end the tick for the rest.
         try:
-            store.mark_schedule_ran(
-                schedule.name,
-                ran_at=moment,
-                next_run_at=next_at,
-                task_id=task_id,
-                state=state,
-            )
+            if not claimed and not store.claim_schedule_slot(schedule, next_run_at=next_at):
+                # v135-F6 review r2: a tick that deliberately ran nothing
+                # (refused, skipped, failed before its side effect) advances
+                # with its outcome, as before v135. Review r3: unless the row
+                # changed since the read — then the schedule is whoever
+                # changed it's, and the stale tick records nothing.
+                continue
+            store.mark_schedule_ran(schedule.name, ran_at=moment, task_id=task_id, state=state)
             # v14: record the tick outcome for schedule health (success rate,
             # consecutive failures, last failure reason).
             store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)

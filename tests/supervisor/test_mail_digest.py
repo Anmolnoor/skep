@@ -66,6 +66,7 @@ class FakeIMAP:
 def imap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> type[FakeIMAP]:
     FakeIMAP.messages, FakeIMAP.calls = [], []
     monkeypatch.setattr(imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(mail, "_DirectIMAP4_SSL", FakeIMAP)  # the digest's direct class
     monkeypatch.setenv("SKEP_MAIL_IMAP_HOST", "imap.example.test")
     monkeypatch.setenv("SKEP_MAIL_USER", "op@example.test")
     monkeypatch.setenv("SKEP_MAIL_PASSWORD", "pw")

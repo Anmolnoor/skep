@@ -2730,6 +2730,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     role=args.role,
                     start_at=args.start_at,  # v126-F11
                     once=args.once,
+                    timezone=args.timezone,
                 )
             except (TemplateError, ValueError) as exc:
                 return _err(str(exc), next_command=f"skep template show {args.template}")
@@ -2762,6 +2763,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     once=args.once,
                     role=args.role,
                     skep_home=config.home.parent,  # R3 (N2): a script's inputs
+                    timezone=args.timezone,
                 )
             except ValueError as exc:  # v127-F11: a retired caste
                 return _err(str(exc), next_command="skep schedule add ... --caste coding")
@@ -2773,6 +2775,7 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
+    _print_wall_clock(schedule)
     return 0
 
 
@@ -2793,6 +2796,7 @@ def _schedule_add_repo_less(args: argparse.Namespace) -> int:
             once=args.once,
             role=args.role,
             skep_home=config.home.parent,  # R3 (N2): a script's inputs
+            timezone=args.timezone,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2806,7 +2810,13 @@ def _schedule_add_repo_less(args: argparse.Namespace) -> int:
         store.close()
     print(f"scheduled {args.name!r}: {args.caste} every {args.every}")
     print(f"  next run: {schedule.next_run_at}  (dispatch due work with: skep tick)")
+    _print_wall_clock(schedule)
     return 0
+
+
+def _print_wall_clock(schedule: Any) -> None:
+    if schedule.timezone:  # v135-F7
+        print(f"  runs at {schedule.wall_time} {schedule.timezone}, across daylight-saving changes")
 
 
 def cmd_schedule_list(args: argparse.Namespace) -> int:
@@ -2830,6 +2840,7 @@ def cmd_schedule_list(args: argparse.Namespace) -> int:
     for s in schedules:
         source = f"template {s.template_name}" if s.template_name else "inline"
         source += f" · role {s.role}" if s.role else ""
+        source += f" · at {s.wall_time} {s.timezone}" if s.timezone else ""  # v135-F7
         last_state = s.last_state or "-"
         print(
             f"{s.name[:15]:<16} {s.worker_kind:<8} {_humanize_interval(s.interval_seconds):<7} "
@@ -4566,6 +4577,13 @@ def register_supervisor_commands(
         "later runs keep this time of day (default: the next tick)",
     )
     sched_add.add_argument("--once", action="store_true", help="fire once, then disable")
+    sched_add.add_argument(
+        "--timezone",
+        default=None,
+        metavar="ZONE",
+        help="IANA zone, e.g. America/Vancouver: a 1d/7d schedule keeps its local "
+        "time across daylight-saving changes (default: a fixed interval)",
+    )
     sched_add.set_defaults(func=cmd_schedule_add)
 
     sched_list = schedule_sub.add_parser("list", help="list schedules")
