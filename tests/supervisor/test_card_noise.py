@@ -210,7 +210,12 @@ def _transcript(env: Live) -> dict[str, Any]:
         "add my bank server",
         (
             "register_mcp_server",
-            {"server_id": "ledger", "transport": "stdio", "command": ["python3", "mcp_bank.py"]},
+            {
+                "server_id": "ledger",
+                "transport": "stdio",
+                "command": ["python3", "mcp_bank.py"],
+                "sandbox": "host",
+            },  # v135: strict unless told; this fixture is a host script
         ),
         reply=False,
     )

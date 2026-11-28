@@ -352,7 +352,9 @@ def high_tier(
             return None
         return "an MCP tool that acts (not a read), and you have not allowed it by name"
     if tool == "register_mcp_server" or tool == "setup_browser":
-        return "it adds an MCP server whose tools can act as you"
+        from ..mcp_sandbox import HOST_HIGH, registration_high  # ADR 0069 1.5
+
+        return HOST_HIGH if tool == "setup_browser" else registration_high(safe)
     if tool == "promote_tool":
         return "it installs a forged tool: its code runs on this host"
     if tool == "promote_skill_pack":
@@ -873,6 +875,10 @@ def recorded_card(
             record["schedule"] = facts
     if tool == "promote_tool":
         record["forge"] = promotion_card(store, args)
+    if tool in ("register_mcp_server", "setup_browser"):  # ADR 0069 1.3, built with no launch
+        from ..mcp_sandbox import card_grant
+
+        record["mcp_grant"] = card_grant(tool, args, store)
     if tool == "capture_skill":
         record["capture"] = capture_card(store, args)
     if tool == "merge_pr":  # R3 (S6): the pin the proposal already validated
@@ -1190,6 +1196,16 @@ def card_summary(
         if banner is not None:
             summary["tamper"] = banner
             danger = banner if danger is None else f"{banner} — {danger}"
+    grant = (recorded or {}).get("mcp_grant")
+    if grant is None and store is not None and live_tier:
+        from ..mcp_sandbox import card_grant
+
+        grant = card_grant(tool, safe_args, store)
+    if isinstance(grant, dict):  # ADR 0069 1.3: the effective grant leads the risk line
+        from ..mcp_sandbox import grant_line
+
+        summary["mcp_grant"] = grant
+        danger = grant_line(grant)
     forged = (recorded or {}).get("forge")
     if tool == "promote_tool" and isinstance(forged, dict):
         # Phase 07 (7.2): the bound triple leads the risk line; the block

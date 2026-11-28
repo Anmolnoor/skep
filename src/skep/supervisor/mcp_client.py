@@ -48,6 +48,17 @@ class MCPServerConfig:
     command: tuple[str, ...] = ()  # stdio: argv
     url: str | None = None  # http/sse: endpoint
     scope: str = "mcp"  # v41-F3: the policy scope this server's tools decide under
+    # v135 (ADR 0069 1.1): the confinement fields (mcp_sandbox). The dataclass
+    # default is what a stored registration from before 2.4.0 loads as —
+    # ``host``; a NEW registration without the field is ``strict``
+    # (``mcp_sandbox.registration_from_args``).
+    sandbox: str = "host"
+    egress: str = "none"
+    allowed_hosts: tuple[str, ...] = ()
+    read_paths: tuple[str, ...] = ()
+    secret_names: tuple[str, ...] = ()
+    install: tuple[str, ...] = ()  # (kind, pinned spec): ("npm", "pkg@1.2.3")
+    incarnation: str = ""  # supervisor-issued, new on every save
 
     def validate(self) -> None:
         if self.transport not in MCP_TRANSPORTS:
@@ -62,6 +73,10 @@ class MCPServerConfig:
             raise MCPError(
                 f"scope must be one of {sorted(MCP_SERVER_SCOPES)!r}, got {self.scope!r}"
             )
+        from .mcp_sandbox import confinement_problem
+
+        if (problem := confinement_problem(self)) is not None:
+            raise MCPError(problem)
 
 
 @dataclass(frozen=True)
@@ -352,6 +367,14 @@ def load_mcp_servers(store: RunStore) -> dict[str, MCPServerConfig]:
                 command=tuple(str(part) for part in entry.get("command") or ()),
                 url=None if entry.get("url") is None else str(entry.get("url")),
                 scope=str(entry.get("scope") or "mcp"),
+                # ADR 0069 1.2: no field = registered before 2.4.0 = host
+                sandbox=str(entry.get("sandbox") or "host"),
+                egress=str(entry.get("egress") or "none"),
+                allowed_hosts=tuple(str(h) for h in entry.get("allowed_hosts") or ()),
+                read_paths=tuple(str(p) for p in entry.get("read_paths") or ()),
+                secret_names=tuple(str(n) for n in entry.get("secret_names") or ()),
+                install=tuple(str(part) for part in entry.get("install") or ()),
+                incarnation=str(entry.get("incarnation") or ""),
             )
             if config.server_id:
                 servers[config.server_id] = config
@@ -371,6 +394,13 @@ def _store_servers(store: RunStore, servers: dict[str, MCPServerConfig]) -> None
                     "command": list(entry.command),
                     "url": entry.url,
                     "scope": entry.scope,
+                    "sandbox": entry.sandbox,
+                    "egress": entry.egress,
+                    "allowed_hosts": list(entry.allowed_hosts),
+                    "read_paths": list(entry.read_paths),
+                    "secret_names": list(entry.secret_names),
+                    "install": list(entry.install),
+                    "incarnation": entry.incarnation,
                 }
                 for entry in servers.values()
             ],
@@ -379,23 +409,47 @@ def _store_servers(store: RunStore, servers: dict[str, MCPServerConfig]) -> None
     )
 
 
-def save_mcp_server(store: RunStore, config: MCPServerConfig) -> None:
+def save_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    """Validate and save ``config`` under a NEW incarnation (ADR 0069 1.1:
+    every save, a remove and re-register with identical settings included),
+    serialized against every running call (1.4). Returns what was saved."""
+    from .mcp_sandbox import new_incarnation
+
     config.validate()
-    servers = load_mcp_servers(store)
-    servers[config.server_id] = config
-    _store_servers(store, servers)
-    _LISTED.pop((str(store.db_path), config.server_id), None)
+    return _write_mcp_server(store, replace(config, incarnation=new_incarnation()))
+
+
+def restore_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    """A rollback puts back the registration that was in force, incarnation
+    and all: the approvals proposed for it are still for it (forge publish)."""
+    return _write_mcp_server(store, config)
+
+
+def _write_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    from .mcp_sandbox import REGISTRY_GATE, retire_trees
+
+    with REGISTRY_GATE.writing():
+        servers = load_mcp_servers(store)
+        servers[config.server_id] = config
+        _store_servers(store, servers)
+        _LISTED.pop((str(store.db_path), config.server_id), None)
+        retire_trees(store.db_path.parent.parent, config.server_id, keep=config.incarnation)
+    return config
 
 
 def remove_mcp_server(store: RunStore, server_id: str) -> None:
     """v47-F2: the unregister half of save_mcp_server. Learned allow rules for
     the server's scope are left in place (re-registering the id reuses them)."""
-    servers = load_mcp_servers(store)
-    if server_id not in servers:
-        raise MCPError(f"no MCP server registered as {server_id!r}")
-    del servers[server_id]
-    _store_servers(store, servers)
-    _LISTED.pop((str(store.db_path), server_id), None)
+    from .mcp_sandbox import REGISTRY_GATE, retire_trees
+
+    with REGISTRY_GATE.writing():
+        servers = load_mcp_servers(store)
+        if server_id not in servers:
+            raise MCPError(f"no MCP server registered as {server_id!r}")
+        del servers[server_id]
+        _store_servers(store, servers)
+        _LISTED.pop((str(store.db_path), server_id), None)
+        retire_trees(store.db_path.parent.parent, server_id, keep=None)
 
 
 def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
@@ -802,7 +856,9 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
     """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
     spawns a server (the prompt's MCP index reads this every turn)."""
     hit = _LISTED.get((str(store.db_path), config.server_id))
-    if hit is None or hit[0] != config or hit[1] != _binding(store, config):
+    # a save drops the entry (a new incarnation): the rest of the settings match
+    same = hit is not None and replace(hit[0], incarnation="") == replace(config, incarnation="")
+    if hit is None or not same or hit[1] != _binding(store, config):
         return None  # L11: never a listing from another binding
     return hit[2]
 

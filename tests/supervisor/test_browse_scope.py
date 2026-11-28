@@ -221,6 +221,7 @@ def test_register_mcp_server_accepts_scope_browse(config: SupervisorConfig) -> N
                 "transport": "stdio",
                 "command": ["npx", "@playwright/mcp@latest"],
                 "scope": "browse",
+                "sandbox": "host",  # v135: a new registration is strict unless told
             },
             store=store,
             holder=holder,

@@ -811,19 +811,22 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
 MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "register_mcp_server",
-        "PROPOSE registering an MCP server (requires user confirmation). "
-        "stdio servers need a command argv; http servers need a url (an MCP "
-        "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
-        "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
-        "email/read, everything else as email/send (cards every time). "
-        "scope='browse' binds a browser server (e.g. command "
-        "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
-        "screenshot/console are browse/read; navigation, clicks, typing, and JS "
-        "card until the user allows them (allow_mcp_tool). Reads flow unless "
-        "the policy asks for them.",
+        "PROPOSE registering an MCP server (requires user confirmation; nothing "
+        "starts before). http servers need a url (an MCP Streamable HTTP endpoint, "
+        "usually ending in /mcp; legacy /sse-style servers are not supported). "
+        "A stdio server is sandboxed by default (sandbox='strict'): it reads only "
+        "system and toolchain dirs plus read_paths, reaches no network unless "
+        "allowed_hosts lists hosts, and gets only its secret_names. Give it "
+        "install='npm:<pkg>@<x.y.z>' or 'pypi:<pkg>==<v>' (exact version; @latest "
+        "is refused) with command=[<entry point name>, args...], or command=[<absolute "
+        "path>, args...]; npx/uvx are refused. Use sandbox='host' only when the user "
+        "asks for it: it runs unsandboxed as the user (HIGH card). "
+        "scope='email' binds a mail server (reads email/read, the rest email/send, "
+        "cards every time); scope='browse' binds a browser (prefer setup_browser): "
+        "page-state reads are browse/read, navigation/clicks/typing card until "
+        "allow_mcp_tool.",
         {
-            "server_id": {"type": "string"},
+            "server_id": {"type": "string", "description": "lowercase slug, e.g. 'weather'"},
             "transport": {"type": "string", "description": "stdio or http"},
             "command": {"type": "array", "items": {"type": "string"}},
             "url": {"type": "string"},
@@ -831,6 +834,32 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "enum": ["mcp", "email", "browse"],
                 "description": "policy scope for this server's tools (default mcp)",
+            },
+            "sandbox": {
+                "type": "string",
+                "enum": ["strict", "host"],
+                "description": "stdio only; default strict. host = unsandboxed, only if asked",
+            },
+            "install": {
+                "type": "string",
+                "description": "strict only: pinned package, 'npm:<pkg>@<x.y.z>' or "
+                "'pypi:<pkg>==<v>'; installed once after approval, no package scripts",
+            },
+            "allowed_hosts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: concrete hosts it may reach (none if omitted)",
+            },
+            "read_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: absolute dirs it may read, only if it needs them",
+            },
+            "secret_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: env names of its keys; the user sets each with "
+                "`skep mcp secret set <server_id> <NAME>` (never in chat)",
             },
         },
         ["server_id", "transport"],
@@ -893,8 +922,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "setup_browser",
         "PROPOSE registering the built-in browser (requires user "
-        "confirmation, once): the Playwright MCP server "
-        "(npx @playwright/mcp@latest) under the 'browse' policy scope. "
+        "confirmation, once — a HIGH card; nothing starts before): the Playwright "
+        "MCP server (npx @playwright/mcp@latest) under the 'browse' policy scope, "
+        "unsandboxed (sandbox='host') until a sandboxed browser can browse. "
         "After setup, page-STATE reads (snapshot, console, images) flow "
         "free unless the policy asks (the builder and operator baselines "
         "do); every ACTING tool (navigate, click, type, press, JS) cards "
@@ -4930,33 +4960,10 @@ def _execute_mutation(
     if name in TAINT_ASKED_STORE_WRITES:
         # W21: a store write an untrusted chat had to ask for, now confirmed
         return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
-    if name == "register_mcp_server":
-        from ..mcp_client import FORGED_SERVER_PREFIX, MCPError, MCPServerConfig, save_mcp_server
+    if name == "register_mcp_server":  # v135: the strict lane (ADR 0069, mcp_sandbox)
+        from ..mcp_sandbox import register
 
-        if str(args["server_id"]).startswith(FORGED_SERVER_PREFIX):
-            raise ValueError(
-                f"server ids starting {FORGED_SERVER_PREFIX!r} are reserved for forged tools, "
-                "which run only from their bound record inside the sandbox — pick another id; "
-                "promote_tool registers a forged tool itself"
-            )
-        config = MCPServerConfig(
-            server_id=str(args["server_id"]),
-            transport=str(args["transport"]),
-            command=tuple(str(part) for part in args.get("command") or ()),
-            url=None if args.get("url") is None else str(args["url"]),
-            scope=str(args.get("scope") or "mcp"),
-        )
-        try:
-            save_mcp_server(store, config)
-        except MCPError as exc:
-            raise ValueError(str(exc)) from exc
-        return {
-            "registered": config.server_id,
-            "transport": config.transport,
-            "command": list(config.command),
-            "url": config.url,
-            "scope": config.scope,
-        }
+        return register(store, args, chat_id=chat_id)
     if name == "read_url":
         # v47-F4: Queen search ≠ Queen fetch — the fetch happens HERE, strictly
         # after the card confirm; a failed read degrades to a clean tool error.
@@ -5082,22 +5089,11 @@ def _execute_mutation(
         # only registers the documented server. Handshake is best-effort —
         # a missing npx reports honestly instead of leaving a dead entry
         # silently registered (I8).
-        from ..mcp_client import (
-            MCPError,
-            MCPServerConfig,
-            refresh_listed_tools,
-            save_mcp_server,
-        )
+        from ..mcp_client import MCPError, refresh_listed_tools, save_mcp_server
+        from ..mcp_sandbox import browser_config as host_browser
 
-        browser_config = MCPServerConfig(
-            server_id="browser",
-            transport="stdio",
-            command=("npx", "@playwright/mcp@latest"),
-            url=None,
-            scope="browse",
-        )
-        try:
-            save_mcp_server(store, browser_config)
+        try:  # v135 (ADR 0069 2.8): host, a HIGH card; started only after it
+            browser_config = save_mcp_server(store, host_browser())
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
         result_view: dict[str, Any] = {
@@ -5556,6 +5552,7 @@ def _execute_mutation(
             load_mcp_servers,
             refresh_listed_tools,
             remove_mcp_server,
+            restore_mcp_server,
             save_mcp_server,
         )
         from ..plugin_lifecycle import require_transition
@@ -5734,7 +5731,7 @@ def _execute_mutation(
 
             def unregister() -> None:  # registered ⟺ active, also on failure
                 if previous is not None:
-                    save_mcp_server(store, previous)
+                    restore_mcp_server(store, previous)
                 elif server_id in load_mcp_servers(store):
                     remove_mcp_server(store, server_id)
 
