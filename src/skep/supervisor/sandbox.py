@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from .. import landlock
@@ -1498,6 +1498,7 @@ def write_profile(
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
     read_files: Iterable[Path] = (),
+    git_common: Path | Literal[False] | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1538,6 +1539,11 @@ def write_profile(
     ``masked_input_problem``. Both backends grant the live file, read-only,
     at its own path (R4, SD-1): bubblewrap ``--ro-bind``s it in place,
     Seatbelt grants its ``(literal …)`` path. The masks still land last.
+
+    ``git_common`` (v135 N2): a linked common dir the caller checked and
+    binds; its masks and walk links come from it, not from asking the
+    workspace again. False (M1): the caller checked and the tree has
+    none, so nothing is asked. None keeps asking the workspace.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
@@ -1563,7 +1569,7 @@ def write_profile(
         )
     from .worktree import git_metadata_masked, git_walk_links
 
-    if read_allowlist is not None and (links := git_walk_links(workspace)):
+    if read_allowlist is not None and (links := git_walk_links(workspace, common=git_common)):
         shown = ", ".join(f"{link} (a link to {os.path.realpath(link)})" for link in links)
         raise SandboxUnavailableError(
             f"strict reads (ADR 0068): {shown} in the repo's shared git dir. git's "
@@ -1584,7 +1590,8 @@ def write_profile(
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
-    git_masked = git_metadata_masked(workspace)  # inside the common dir bound whole (3I)
+    # inside the common dir bound whole (3I)
+    git_masked = git_metadata_masked(workspace, common=git_common)
     for path in read_files:  # R3 (N2): before anything is granted
         masked = masked_input_problem(path, skep_home=skep_home, denied=[*read_denied, *git_masked])
         if masked:

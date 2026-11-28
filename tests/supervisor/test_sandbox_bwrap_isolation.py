@@ -160,7 +160,7 @@ def test_bwrap_keeps_die_with_parent_and_its_parent_is_the_keeper_only_while_rea
     monkeypatch.setattr(sandbox, "_bubblewrap_binary", lambda: "/usr/bin/bwrap")
     monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
     monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
-    monkeypatch.setattr(worktree, "git_metadata_masked", lambda _ws: ())  # write_profile's
+    monkeypatch.setattr(worktree, "git_metadata_masked", lambda _ws, **_kw: ())  # write_profile's
     captured: list[list[str]] = []
 
     def _popen(argv: list[str], **_kw: object) -> object:

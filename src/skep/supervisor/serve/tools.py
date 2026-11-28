@@ -6795,6 +6795,10 @@ def _diagnose_refusal(store: RunStore, config: Any, task_id: str) -> str | None:
             "unconfirmed runs) live 24h before the sweep; dispatch a fresh run, "
             "or read the audit trail via get_run instead"
         )
+    try:  # v135 S3: the wall's own refusals, asked as the confirm asks them
+        actions.diagnose_wall(store, task_id, workspace, Path(record.repo))
+    except ValueError as exc:
+        return str(exc)
     return None
 
 

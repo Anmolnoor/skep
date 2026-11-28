@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import threading
 from collections.abc import Iterable, MutableMapping
 from pathlib import Path
+from typing import Literal
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
 # the same directory tree, and locking each step is not enough. A sweeper's
@@ -72,12 +74,13 @@ class WorktreeError(Exception):
     """A worktree operation failed; the message carries the git output."""
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _git(repo: Path, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
     )
 
 
@@ -178,22 +181,31 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     return () if common is None else (common,)
 
 
-def git_metadata_masked(workspace: Path) -> tuple[Path, ...]:
+def git_metadata_masked(
+    workspace: Path, *, common: Path | Literal[False] | None = None
+) -> tuple[Path, ...]:
     """The main checkout's own state no git in the run reads, masked over
     the common dir ``git_metadata_readable_roots`` binds: its in-progress
-    messages."""
-    common = _linked_common_dir(workspace)
-    return () if common is None else tuple(common / name for name in _COMMON_DIR_PRIVATE)
+    messages. ``common``: a linked common dir the caller already checked
+    (N2), used instead of asking the tree again; False (M1) for a tree it
+    checked that has none."""
+    if common is None:
+        common = _linked_common_dir(workspace) or False
+    return () if not common else tuple(common / name for name in _COMMON_DIR_PRIVATE)
 
 
-def git_walk_links(workspace: Path) -> tuple[Path, ...]:
+def git_walk_links(
+    workspace: Path, *, common: Path | Literal[False] | None = None
+) -> tuple[Path, ...]:
     """I2 (3I): the entries git's reachability walk reads that are links out
     of the common dir. Such a link resolves inside the wall, where its
     target is absent, so a ``git prune`` there would walk without those
     pointers — a strict run refuses. (A linked ``worktrees/`` already stops
-    git: the run's gitfile no longer finds its common dir.)"""
-    common = _linked_common_dir(workspace)
+    git: the run's gitfile no longer finds its common dir.) ``common`` as
+    for ``git_metadata_masked``."""
     if common is None:
+        common = _linked_common_dir(workspace) or False
+    if not common:
         return ()
     return tuple(
         entry
@@ -216,9 +228,72 @@ def _linked_common_dir(workspace: Path) -> Path | None:
     return None if dirs is None or dirs[0] == dirs[1] else dirs[1]
 
 
-def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:
+KEPT_TREE_GIT_TIMEOUT_SECONDS = 10.0
+
+
+def kept_tree_git_dirs(workspace: Path, repo: Path) -> tuple[Path, Path] | None:
+    """(git dir, common dir) of a kept run tree, held to what the supervisor
+    made (S1, I2): the tree is the worker's output, so its ``.git`` pointer —
+    or a ``commondir`` in its own, writable git dir — may lead anywhere. A
+    linked tree's common dir must be ``repo``'s and its git dir an entry of
+    ``<common>/worktrees/`` that points back at this tree (not a sibling
+    run's); a non-linked tree's git dir must be its own ``.git``. Raises
+    ``WorktreeError`` naming what was found; None outside a checkout."""
+    try:  # N1: git waits on a FIFO the worker left in its git dir
+        dirs = _git_dirs(workspace, timeout=KEPT_TREE_GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise WorktreeError(
+            f"git could not read the kept tree's metadata in {exc.timeout:g}s — "
+            "something in its git dir blocks a read (a FIFO?)"
+        ) from exc
+    if dirs is None:
+        return None
+    git_dir, common = dirs
+    own = workspace.resolve() / ".git"
+    if git_dir == common:
+        ok = git_dir == own and not (git_dir / "objects").is_symlink()
+    else:
+        trusted = _git_dirs(repo)
+        # N1: the directories first, then the worker-written backlink (S1:
+        # an ``objects`` link would bind its target writable)
+        ok = (
+            trusted is not None
+            and common == trusted[1]
+            and git_dir.parent == common / "worktrees"
+            and not (common / "objects").is_symlink()
+            and _backlink(git_dir) == own
+        )
+    if not ok:
+        raise WorktreeError(
+            f"the kept tree's git metadata leads outside its run: git dir {git_dir}, "
+            f"common dir {common} (the run's repo is {repo})"
+        )
+    return dirs
+
+
+def _backlink(git_dir: Path) -> Path | None:
+    """N1: the tree a linked git dir's ``gitdir`` names, or None — read
+    without following a link or waiting on a FIFO, a regular file only,
+    bounded (the worker writes it)."""
+    try:
+        fd = os.open(git_dir / "gitdir", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    text = os.fsdecode(raw).strip()
+    if len(raw) > 4096 or "\0" in text:  # M2: past the bound is not git's one line
+        return None
+    return _resolve_git_path(git_dir, text)
+
+
+def _git_dirs(workspace: Path, timeout: float | None = None) -> tuple[Path, Path] | None:
     """(git dir, common dir) of ``workspace``, or None outside a git checkout."""
-    proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir")
+    proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir", timeout=timeout)
     if proc.returncode != 0:
         return None
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]

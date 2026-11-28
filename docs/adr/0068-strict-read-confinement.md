@@ -6,7 +6,8 @@ added on 2026-11-23 (see "The Seatbelt half"). The git metadata a strict run
 reads was widened again the same day, so git in the wall cannot prune other
 checkouts' objects (see "Data safety over hidden pointers"), and is now the
 common dir itself, bound live (see "Live git metadata, the worker's own
-wall", review round 3, 3I).
+wall", review round 3, 3I). The fast lane and `diagnose` re-runs joined the wall in
+v135 Wave 1 (see "The fast lane and diagnose re-runs join the wall").
 **Related:** ADR 0066 (new projects sandboxed by default; this ADR copies its
 rollout rule), ADR 0047 (external engines: the sandbox is their only wall),
 ADR 0062 (provider-key relay). Invariants touched: I4, I5, I8, I9, I11, I12.
@@ -138,11 +139,12 @@ readable. A denylist cannot keep up with every place a person keeps files.
    absolute, never `/`.
 5. **The doctor says which wall is up, and where.** On bubblewrap and
    Seatbelt the sandbox line reads `read confinement: strict-allowlist
-   available; N of M sandboxed projects strict; forged tools and script
-   schedules always strict; the fast lane and diagnose re-runs stay
-   denylist-only; MCP servers you
-   register run on the host, unsandboxed` (Phase 07 wording; see "Forged
-   tools join the wall")
+   available; N of M sandboxed projects strict; forged tools, script
+   schedules and the fast lane always strict; diagnose re-runs take their
+   run's recorded strict setting and extra read paths, plus today's system
+   and toolchain dirs; MCP servers you register run on the host,
+   unsandboxed` (v135 wording; see "The fast lane and diagnose re-runs join
+   the wall")
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
    that cannot enforce it, `read confinement: denylist-only (reads stay
    open but the secret floor)`.
@@ -352,12 +354,10 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   not `unavailable`, as it does for a secret-floor file deleted in that
   window.
 
-- The fast lane (`serve/fastlane.py`) and the `diagnose` re-run
-  (`serve/actions.py`) still get denylist-only profiles. Neither is a
-  project run with a policy to read; each needs its own call on what it
-  must read. Forged tools moved to the strict wall in Phase 07 (below).
-  MCP servers the operator registers were never in a sandbox at all: they
+- MCP servers the operator registers were never in a sandbox at all: they
   run on the host as the operator, by design (I5 decides their calls).
+  Forged tools moved to the strict wall in Phase 07, the fast lane and the
+  `diagnose` re-run in v135 Wave 1 (both below).
 - The worker's prompt teaches the write and network walls, not the read
   wall. A read outside the wall fails as "No such file or directory", which
   the worker sees as a plain missing file (an I12 follow-up).
@@ -667,3 +667,39 @@ follows a link put there after the check). Both need code already running
 as the operator outside any wall, which can read those files directly; a
 walled worker, script or forged tool cannot see a masked file to link it
 and cannot write the operator's directories.
+
+## The fast lane and diagnose re-runs join the wall (v135 Wave 1, 2026-11-27)
+
+The two lanes the Phase 07 section left behind:
+
+- **The fast lane** (`run_code(fast=True)`, `serve/fastlane.py`) passes
+  `read_allowlist=()`: the system dirs, the detected toolchains and its
+  throwaway workspace. It runs only on the native backend (bubblewrap or
+  Seatbelt), and both hold the wall. Serve's own interpreter is a detected
+  toolchain, so a skep installed in a venv under `$HOME` (uv tool, pipx)
+  still starts; the home itself is never bound. On bubblewrap a venv
+  reached through a linked parent directory does not start in the wall
+  (the link is not recreated), and the wall is not widened for it.
+- **`diagnose_run`** (`serve/actions.py`) takes the strict setting and the
+  resolved extra read paths the run's `dispatched` line recorded, through
+  `reverify._recorded_read_wall`, the reader G10 uses; the system and
+  toolchain dirs are detected again when the diagnosis runs, as they are
+  for G10, so after a serve restart on another interpreter or toolchain
+  setup that part of the wall can differ from the worker's. It refuses as
+  G10 does: a recorded root that is a link now (`_moved_read_roots`)
+  refuses before any profile is written, and a strict wall the backend
+  cannot hold refuses through `write_profile`. A run that read
+  denylist-only is diagnosed denylist-only. The git metadata it binds is
+  held to the run's recorded repo (`worktree.kept_tree_git_dirs`): the
+  kept tree is the worker's output, so a `.git` pointer or `commondir`
+  leading anywhere else refuses the diagnosis. Both refusals are asked
+  when the card would be offered and again at confirm, and the profile
+  masks the in-progress message files of the common dir that check held,
+  not of whatever the tree points at by then.
+
+The tests assert, on real bubblewrap and on real Seatbelt (CI's macOS job),
+that each lane reads none of four home canaries
+(`~/Downloads`, `~/Documents`, `~/.ssh`, a sibling repo) while a Python
+script and a `pytest` run still pass
+(`tests/supervisor/test_v135_strict_reads_remaining.py`). Operator-registered
+MCP servers are still unconfined; ADR 0069 is that change.

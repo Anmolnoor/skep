@@ -4032,6 +4032,38 @@ DIAGNOSE_MAX_TIMEOUT_SECONDS = 600.0
 DIAGNOSE_OUTPUT_CAP = 10_000
 
 
+def diagnose_wall(
+    store: RunStore, task_id: str, workspace: Path, repo: Path
+) -> tuple[tuple[Path, ...] | None, tuple[Path, Path] | None]:
+    """The read wall and git dirs a diagnosis of ``task_id`` binds, or a
+    ValueError naming why it cannot run. No side effect, so the proposal
+    asks it too (S3, F-I7); the confirm asks again, as either can change.
+
+    v135-F2 (ADR 0068, I2): the wall the run's dispatch recorded, read and
+    refused the way G10 does — a diagnosis never reads more than the worker.
+    S1 (I2): the git dirs are held to the run's own repo, never wherever the
+    kept tree's pointer leads."""
+    from ..reverify import _moved_read_roots, _recorded_read_wall
+    from ..worktree import WorktreeError, kept_tree_git_dirs
+
+    read_allowlist = _recorded_read_wall(store, task_id)
+    if moved := _moved_read_roots(read_allowlist or ()):
+        raise ValueError(
+            "the run's recorded read wall no longer resolves to itself: "
+            + ", ".join(f"{path} now leads to {os.path.realpath(path)}" for path in moved)
+            + " — the command was not run, as it would read past the worker's wall; "
+            "dispatch a fresh run instead"
+        )
+    try:
+        dirs = kept_tree_git_dirs(workspace, repo)
+    except WorktreeError as exc:
+        raise ValueError(
+            f"{exc} — the command was not run, as the wall would bind those "
+            "directories; dispatch a fresh run instead"
+        ) from exc
+    return read_allowlist, dirs
+
+
 def diagnose_run(
     store: RunStore,
     config: SupervisorConfig,
@@ -4050,7 +4082,6 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
     record = store.get_run(task_id)
     if record is None:
@@ -4070,15 +4101,27 @@ def diagnose_run(
     )
     argv: list[str] = ["/bin/sh", "-c", command]
     if config.sandbox:
+        read_allowlist, dirs = diagnose_wall(store, task_id, workspace, Path(record.repo))
+        writable: tuple[Path, ...] = ()
+        readable: tuple[Path, ...] = ()
+        linked_common: Path | Literal[False] = False  # M1: checked — never asked again
+        if dirs is not None:
+            git_dir, common = dirs
+            linked = git_dir != common
+            writable = (git_dir, common / "objects") if linked else (common / "objects",)
+            readable = (common,) if linked else ()
+            linked_common = common if linked else False
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
         try:
             sandbox.write_profile(
                 profile,
                 workspace=workspace,
-                extra_writable=git_metadata_writable_roots(workspace),
-                extra_readable=git_metadata_readable_roots(workspace),
+                extra_writable=writable,
+                extra_readable=readable,
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
+                read_allowlist=read_allowlist,
+                git_common=linked_common,  # N2: masks from the checked dir
             )
         except sandbox.SandboxUnavailableError as exc:
             # ES-F1 (B47): the kept tree is the worker's output — never run
