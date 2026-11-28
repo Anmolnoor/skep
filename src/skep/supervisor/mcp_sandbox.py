@@ -151,7 +151,8 @@ class _RegistryGate:
 
 REGISTRY_GATE = _RegistryGate()
 # Review S4: (skep home, server id, incarnation) of every install writing its
-# tree now; ``retire_trees`` leaves those trees to their installer.
+# tree now; ``retire_trees`` leaves those trees to their installer. Changed
+# and read only under REGISTRY_GATE (review r2 N5).
 _IN_FLIGHT: set[tuple[str, str, str]] = set()
 
 
@@ -586,6 +587,11 @@ def browser_config() -> MCPServerConfig:
         scope="browse",
         sandbox="host",
     )
+
+
+# Review r2 N6: "not read yet" — never an incarnation ("" is a real one: a
+# server registered before 2.4.0), so a captured "" is never read again.
+UNCAPTURED: Any = object()
 
 
 def card_incarnation(store: RunStore, args: Mapping[str, Any]) -> str | None:
@@ -1316,11 +1322,14 @@ def install_server(
             staged.write_text(json.dumps({"entry": str(entry)}), encoding="utf-8")
             os.replace(staged, marker)
             _LISTED[(str(store.db_path), config.server_id)] = (config, (), tuple(tools))
+            # review r2 N5: in the same hold, so no replacement can come
+            # between publication and the end of the flight and skip this tree
+            _IN_FLIGHT.discard(flight)
     except BaseException:
         shutil.rmtree(tree, ignore_errors=True)
+        with REGISTRY_GATE.reading():  # review r2 N5: never while retire_trees reads it
+            _IN_FLIGHT.discard(flight)
         raise
-    finally:
-        _IN_FLIGHT.discard(flight)
     return tuple(tool.name for tool in tools)
 
 

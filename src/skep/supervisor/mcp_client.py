@@ -555,13 +555,12 @@ def runner_for_config(
     session pool is the upgrade path if call volume matters.
     """
     inner = _transport_runner(config, skep_home=skep_home, store=store)
-    # http starts no process here; a forged tool re-derives what it runs from
-    # its bound plugin record on every launch (``forge.runtime_launch``)
-    if (
-        store is None
-        or config.transport == "http"
-        or config.server_id.startswith(FORGED_SERVER_PREFIX)
-    ):
+    # http starts no process here. A forged tool re-derives what it runs from
+    # its bound plugin record on every launch (``forge.runtime_launch``) —
+    # under the same read hold as this check (review r2 N13), so a
+    # publication in progress is never half seen: the new registration with
+    # the old record's hosts, or the reverse.
+    if store is None or config.transport == "http":
         return inner
 
     def launch(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
@@ -1046,19 +1045,48 @@ def forged_lane(
         except sandbox.SandboxUnavailableError as exc:
             raise MCPError(f"the forged-tool lane could not build its wall: {exc}") from exc
         try:
-            return subprocess.run(
-                wrapped,
-                input=payload,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workspace,
-                env=env,
-            )
+            return _bounded_run(wrapped, payload=payload, timeout=timeout, cwd=workspace, env=env)
         except subprocess.TimeoutExpired as exc:
             # ADR 0069 1.7 (review S14): its request was already fed in
             kind = MCPError if payload is None else MCPOutcomeUnknown
             raise kind(f"the forged tool passed its {timeout:g}s deadline") from exc
+
+
+def _bounded_run(
+    argv: list[str], *, payload: str | None, timeout: float, cwd: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with every wait bounded (review r2 N4, N13: a call
+    or a listing holds the registry gate across it): the child leads its own
+    process group; past ``timeout`` the whole group is killed and waited on
+    for at most 5 s more, then left to a background reaper. Raises
+    ``subprocess.TimeoutExpired``."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import threading
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=None if payload is None else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=dict(env),
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # unkillable for now: reaped when it goes
+            threading.Thread(target=proc.wait, daemon=True).start()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 # ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
@@ -1107,10 +1135,14 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
 
 def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
     """List ``config``'s tools now and keep them (list_mcp_tools, the startup
-    warm). A failed listing raises and keeps nothing."""
-    binding = _binding(store, config)
+    warm). A failed listing raises and keeps nothing. The binding and the
+    listing are read under one hold of the registry gate (review r2 N13)."""
+    from .mcp_sandbox import REGISTRY_GATE
+
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent, store=store)
-    tools = tuple(MCPClient(config, runner=runner).list_tools())
+    with REGISTRY_GATE.reading():
+        binding = _binding(store, config)
+        tools = tuple(MCPClient(config, runner=runner).list_tools())
     if _binding(store, config) != binding:
         # L11: a promotion (or suspend) published mid-listing — this answer
         # describes a tool that no longer runs; the refresh after it wins.

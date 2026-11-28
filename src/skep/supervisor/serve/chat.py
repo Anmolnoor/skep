@@ -50,7 +50,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..mcp_sandbox import card_incarnation
+from ..mcp_sandbox import UNCAPTURED, card_incarnation
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from ..secret_floor import own_secret_in, own_secret_refusal
@@ -419,21 +419,21 @@ def pending_duplicate_action(
     args: dict[str, Any],
     *,
     merge: dict[str, Any] | None = None,
-    incarnation: str | None = "",
+    incarnation: Any = UNCAPTURED,
 ) -> tuple[ChatActionRecord, bool] | None:
     """The pending card already asking this question, with whether its args
     are byte-identical. Only 'proposed' rows count — a denied card is a
     verdict, and re-proposing after one is a new question for the human.
     ``merge`` is a merge_pr proposal's pin, already read (R3 S6).
     ``incarnation``: an MCP card's registration as its proposal read it
-    (review S5: one read for the decision, this check and the card); ""
-    reads it now."""
+    (review S5: one read for the decision, this check and the card);
+    ``UNCAPTURED`` reads it now (review r2 N6: "" is a legacy registration's)."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
     # ADR 0069 1.6: an MCP card is also its registration — one for a replaced server is stale
     bound = None
     if tool == "call_mcp_tool":
-        bound = card_incarnation(store, args) if incarnation == "" else incarnation
+        bound = card_incarnation(store, args) if incarnation is UNCAPTURED else incarnation
     proposed = None
     if tool == "merge_pr":
         proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
@@ -3330,12 +3330,12 @@ class ChatEngine:
                                     if name == "propose_schedule"
                                     else None,
                                     merge=pin,
+                                    # review S5, r2 N6: the snapshot the decision used
+                                    incarnation=bound,
                                 )
                                 or {}
                             ),
                             **({"decision": asdict(decision)} if decision is not None else {}),
-                            # review S5: the snapshot the decision used, not a re-read
-                            **({"incarnation": bound} if name == "call_mcp_tool" else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),
                             # L30: the remote and branch an open-PR card pushes to

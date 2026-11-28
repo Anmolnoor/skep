@@ -112,11 +112,22 @@ left open:
   is keyed by the exact incarnation. A queued install checks before it
   starts and its discovery handshake runs with the check held; a tree an
   installer is writing is left to it by `retire_trees`, and a stale install
-  deletes its own tree. Forged tools are exempt: they re-derive what runs
-  from their bound record on every launch.
+  deletes its own tree. The set of installs in flight is changed and read
+  only under the gate, and a successful install leaves it inside its
+  publication's own hold (review r2 N5), so a replacement can never land
+  between publication and that end and skip a tree no one will remove.
+  Forged tools take the same check (review r2 N13): each re-derives what
+  runs from its bound record on every launch, and that record, the
+  registration and a listing's binding are read under the same read hold,
+  so a publication in progress (it holds the write side) is never half seen
+  — never the new registration with the old record's hosts. A forged
+  exchange's waits are bounded as a stdio one's are.
 - **One registration snapshot per call decision** (review S5): the chat
   reads the incarnation once, before the decision classifies the call; the
-  in-turn dispatch, the de-duplication and the card all bind to that value.
+  in-turn dispatch, the de-duplication and the card all bind to that value,
+  passed to each, never read again (review r2 N6: "not read yet" is a value
+  of its own, so a server registered before 2.4.0, whose incarnation is
+  empty, is a captured value like any other).
   In-turn, the final `decide()` must still allow (an ask is not run, "ask
   again"); on a confirm the card's binding is checked before any policy
   lookup that could list the server.

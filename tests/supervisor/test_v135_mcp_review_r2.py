@@ -334,3 +334,148 @@ def test_a_server_that_omits_optional_fields_is_not_refused(
     ran = _host_call(store, skep_home, _server(tmp_path, _INIT_OK, error))
     assert not ran.ok and ran.outcome == "ran" and "bad args" in str(ran.error)
 
+
+# -- N5: an install's flight ends inside its publication hold ------------------------
+
+
+def _pypi(store: RunStore) -> MCPServerConfig:
+    return save_mcp_server(store, MCPServerConfig(
+        "fxpy", "stdio", command=("fx-mcp",), sandbox="strict", install=("pypi", "fxmcp==1.0.0"),
+    ))  # fmt: skip
+
+
+@pytest.fixture()
+def offline_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    def installed(config: MCPServerConfig, tree: Path, home: Path, timeout: float) -> None:
+        (tree / "bin").mkdir()
+        (tree / "bin" / "fx-mcp").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mcp_sandbox, "sandbox_refusal", lambda server_id: None)
+    monkeypatch.setattr(mcp_sandbox, "_run_installer", installed)
+    monkeypatch.setattr(mcp_sandbox, "entry_point_problem", lambda tree, config: None)
+    monkeypatch.setattr(mcp_sandbox, "redacted_call", lambda *a, **k: {"tools": []})
+
+
+def test_a_replacement_just_after_publication_retires_the_finished_tree(
+    store: RunStore, skep_home: Path, monkeypatch: pytest.MonkeyPatch, offline_install: None
+) -> None:
+    import contextlib
+
+    real = mcp_sandbox.REGISTRY_GATE
+    fired: list[bool] = []
+
+    class Gate:
+        def reading(self) -> Any:
+            return real.reading()
+
+        @contextlib.contextmanager
+        def writing(self) -> Iterator[None]:
+            with real.writing():
+                yield
+            if not fired:  # the publication's hold just ended: a replacement lands
+                fired.append(True)
+                _pypi(store)
+
+    old = _pypi(store)
+    monkeypatch.setattr(mcp_sandbox, "REGISTRY_GATE", Gate())
+    mcp_sandbox.install_server(store, old)
+    assert fired
+    assert not mcp_sandbox.install_tree(skep_home, old).exists()
+    assert set() == mcp_sandbox._IN_FLIGHT
+
+
+def test_an_install_ends_its_flight_only_under_the_registry_gate(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch, offline_install: None
+) -> None:
+    """``retire_trees`` reads ``_IN_FLIGHT`` under the gate; every change to it
+    is made under the gate too, on success and on failure."""
+    gate = mcp_sandbox.REGISTRY_GATE
+
+    class Guarded(set[tuple[str, str, str]]):
+        def discard(self, item: tuple[str, str, str]) -> None:
+            assert gate._readers or gate._writing, "changed outside the registry gate"
+            super().discard(item)
+
+    monkeypatch.setattr(mcp_sandbox, "_IN_FLIGHT", Guarded())
+    mcp_sandbox.install_server(store, _pypi(store))
+
+    def broken(config: MCPServerConfig, tree: Path, home: Path, timeout: float) -> None:
+        raise mcp_client.MCPError("the installer failed")
+
+    monkeypatch.setattr(mcp_sandbox, "_run_installer", broken)
+    with pytest.raises(mcp_client.MCPError, match="the installer failed"):
+        mcp_sandbox.install_server(store, _pypi(store))
+    assert set() == mcp_sandbox._IN_FLIGHT
+
+
+# -- N6: "not captured" is not the legacy incarnation --------------------------------
+
+
+def test_a_captured_legacy_incarnation_is_never_read_again(store: RunStore, server: Path) -> None:
+    from skep.supervisor.serve.cards import recorded_card
+    from skep.supervisor.serve.chat import pending_duplicate_action
+
+    command = [sys.executable, str(server / "server.py")]
+    store.set_setting(
+        mcp_client.MCP_SERVERS_SETTINGS_KEY,
+        json.dumps(
+            [
+                {"server_id": "legacy", "transport": "stdio", "command": command, "scope": "mcp"},
+            ]
+        ),
+    )  # fmt: skip — written before 2.4.0: incarnation ""
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    args = {"server_id": "legacy", "tool": "t", "arguments": {}}
+    store.add_chat_action(chat_id, tool="call_mcp_tool", args=args, card={"incarnation": ""})
+    captured = mcp_sandbox.card_incarnation(store, args)
+    assert captured == ""
+    # replaced between the capture and the card: a new incarnation
+    save_mcp_server(store, MCPServerConfig("legacy", "stdio", command=tuple(command)))
+    _record, identical = pending_duplicate_action(
+        store, chat_id, "call_mcp_tool", args, incarnation=captured
+    ) or (None, None)
+    assert identical is True  # the check used the captured value, as the card does
+    card = recorded_card("call_mcp_tool", args, None, store, incarnation=captured)
+    assert card is not None and card["incarnation"] == ""
+
+
+# -- N13: a forged registration and its plugin binding, read together ----------------
+
+
+def test_a_forged_listing_waits_for_a_publication_in_progress(
+    store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import threading
+
+    reply = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+    ran: list[str] = []
+
+    def forged(config: Any, payload: str, home: Any, st: Any) -> Any:
+        ran.append(config.server_id)
+        return subprocess.CompletedProcess([], 0, stdout=reply + "\n", stderr="")
+
+    monkeypatch.setattr(mcp_client, "_run_forged_sandboxed", forged)
+    config = save_mcp_server(store, MCPServerConfig(
+        "forge-x", "stdio", command=(sys.executable, "tool.py")))  # fmt: skip
+    holding, release = threading.Event(), threading.Event()
+
+    def publication() -> None:
+        with mcp_sandbox.REGISTRY_GATE.writing():
+            holding.set()
+            release.wait(10)
+
+    writer = threading.Thread(target=publication, daemon=True)
+    writer.start()
+    assert holding.wait(5)
+    lister = threading.Thread(
+        target=lambda: mcp_client.refresh_listed_tools(store, config), daemon=True
+    )
+    lister.start()
+    lister.join(0.5)
+    started_during_publication = list(ran)
+    release.set()
+    writer.join(5)
+    lister.join(5)
+    assert started_during_publication == []
+    assert ran == ["forge-x"]

@@ -151,8 +151,7 @@ def _activate(
     config = MCPServerConfig(
         f"forge-{plugin_id}", "stdio", command=(sys.executable, str(installed))
     )
-    save_mcp_server(store, config)
-    return config
+    return save_mcp_server(store, config)  # with its incarnation: the one in force
 
 
 def _call(store: RunStore, home: Path, server_id: str, **arguments: Any) -> dict[str, str]:
@@ -243,10 +242,14 @@ def _capture_lane(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen["profile"] = kwargs
         return path
 
-    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen["argv"], seen["env"] = argv, kwargs["env"]
-        out = '{"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}\n'
-        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+    class FakePopen:  # forged_lane's bounded run (review r2 N13)
+        pid, returncode = 0, 0
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            seen["argv"], seen["env"] = argv, kwargs["env"]
+
+        def communicate(self, payload: Any = None, timeout: Any = None) -> tuple[str, str]:
+            return '{"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}\n', ""
 
     monkeypatch.setattr(
         sandbox,
@@ -255,7 +258,7 @@ def _capture_lane(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     monkeypatch.setattr(sandbox, "write_profile", fake_profile)
     monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile, backend=None: argv)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
     return seen
 
 
@@ -326,7 +329,9 @@ def test_the_runtime_refuses_anything_its_card_did_not_approve(
         with pytest.raises(MCPError, match="not active"):
             run("tools/list", {})
         # A forge-* id with no plugin record behind it never runs at all.
-        stray = MCPServerConfig("forge-stray", "stdio", command=(sys.executable, "x.py"))
+        stray = save_mcp_server(
+            store, MCPServerConfig("forge-stray", "stdio", command=(sys.executable, "x.py"))
+        )
         with pytest.raises(MCPError, match="no forged plugin"):
             runner_for_config(stray, skep_home=home, store=store)("tools/list", {})
         with pytest.raises(MCPError, match="store"):
