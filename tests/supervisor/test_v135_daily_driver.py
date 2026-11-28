@@ -10,6 +10,7 @@ time across daylight-saving changes.
 from __future__ import annotations
 
 import http.server
+import socket
 import threading
 import time
 from collections.abc import Iterator
@@ -383,6 +384,59 @@ def test_fetch_brief_a_trickling_source_costs_only_its_share(
     assert "(unavailable: TimeShareSpent: the source did not finish in its time share" in out
     assert "- Python 3.15 released" in out  # time was left for the next source
     assert spent < 2.5  # the first source's half of 1 s, not the trickle's 10 s
+
+
+def _slow_imap(listener: socket.socket, logout_delay: float) -> None:
+    """Loopback only: greets, answers CAPABILITY and LOGIN, never answers
+    EXAMINE, and answers LOGOUT only after ``logout_delay``."""
+    conn, _ = listener.accept()
+    with conn, conn.makefile("rb") as lines:
+        conn.sendall(b"* OK ready\r\n")
+        for line in lines:
+            tag, command = line.split()[:2]
+            if command == b"CAPABILITY":
+                conn.sendall(b"* CAPABILITY IMAP4rev1\r\n" + tag + b" OK done\r\n")
+            elif command == b"LOGIN":
+                conn.sendall(tag + b" OK logged in\r\n")
+            elif command == b"LOGOUT":
+                time.sleep(logout_delay)
+                conn.sendall(b"* BYE\r\n" + tag + b" OK bye\r\n")
+                return
+
+
+def test_fetch_brief_a_mail_source_that_times_out_closes_without_logout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review r3 (C): the alarm fires inside an IMAP command; the one-shot
+    alarm is spent, so a LOGOUT round trip would wait on the server."""
+    import imaplib
+
+    from skep.mcp_servers import mail
+
+    logout_exit = imaplib.IMAP4.__exit__
+    listener = socket.create_server(("127.0.0.1", 0))
+    server = threading.Thread(target=_slow_imap, args=(listener, 2.0), daemon=True)
+    server.start()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port))
+    monkeypatch.setattr(mail, "resolve_password", lambda: "pw")
+    for name in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKEP_MAIL_IMAP_HOST", "127.0.0.1")
+    monkeypatch.setenv("SKEP_MAIL_IMAP_PORT", str(listener.getsockname()[1]))
+    monkeypatch.setenv("SKEP_MAIL_USER", "me")
+    try:
+        module = _brief_module()
+        monkeypatch.setattr(module, "TIME_BUDGET", 0.3)
+        began = time.monotonic()
+        code = module.main(["--mail", "3"])  # type: ignore[attr-defined]
+        spent = time.monotonic() - began
+    finally:
+        listener.close()
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "## Mail\n(unavailable: TimeShareSpent" in out
+    assert spent < 1.5  # its 0.3 s share, not the 2 s LOGOUT reply
+    assert imaplib.IMAP4.__exit__ is logout_exit  # put back for every other caller
 
 
 def test_fetch_brief_a_long_bad_url_costs_one_line(

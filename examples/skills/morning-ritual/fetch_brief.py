@@ -38,7 +38,9 @@ section is flushed as it finishes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import imaplib
 import json
 import math
 import signal
@@ -47,6 +49,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from typing import Any
 from xml.parsers import expat
 
 WEATHER_URL = (
@@ -208,7 +211,22 @@ def calendar(days: int) -> str:
 def mail(count: int) -> str:
     from skep.mcp_servers import mail as imap
 
-    return imap.digest(count)
+    # The alarm is one-shot: spent inside an IMAP command, the ``with``
+    # block's LOGOUT would wait on the server. Shut the socket instead.
+    logout_exit = imaplib.IMAP4.__exit__
+
+    def exit_(self: imaplib.IMAP4, *exc: Any) -> None:
+        if exc[0] is not TimeShareSpent:
+            return logout_exit(self, *exc)
+        with contextlib.suppress(OSError):
+            self.shutdown()
+        return None
+
+    imaplib.IMAP4.__exit__ = exit_  # type: ignore[method-assign]
+    try:
+        return imap.digest(count)
+    finally:
+        imaplib.IMAP4.__exit__ = logout_exit  # type: ignore[method-assign]
 
 
 def _feed_label(url: str) -> str:
