@@ -335,10 +335,10 @@ def test_serve_start_reconciles_interrupted_scripts(
     from skep.supervisor.serve.ticker import Ticker
 
     store.add_schedule(_note("backup"))
+    store.claim_schedule_slot("backup", next_run_at="2030-01-01T00:00:00Z")
     store.mark_schedule_ran(
         "backup",
         ran_at="2026-06-11T09:00:00Z",
-        next_run_at="2030-01-01T00:00:00Z",
         task_id=None,
         state=SCRIPT_RUNNING_STATE,
     )

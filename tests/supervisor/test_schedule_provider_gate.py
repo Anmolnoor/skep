@@ -187,10 +187,10 @@ def test_doctor_names_the_provider_skipped_schedules(tmp_path: Path) -> None:
     store = RunStore(home / "supervisor" / "supervisor.sqlite3")
     try:
         _add(store, tmp_path, "nightly")
+        store.claim_schedule_slot("nightly", next_run_at="2026-06-12T09:00:00Z")
         store.mark_schedule_ran(
             "nightly",
             ran_at=NOW,
-            next_run_at="2026-06-12T09:00:00Z",
             task_id=None,
             state="provider_blocked: worker provider probe failed",
         )

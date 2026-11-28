@@ -319,11 +319,7 @@ def reconcile_interrupted_scripts(store: RunStore) -> list[str]:
             continue
         state = "script_interrupted: serve stopped mid-script; next run at its next slot"
         store.mark_schedule_ran(
-            schedule.name,
-            ran_at=schedule.last_run_at or now_ts(),
-            next_run_at=schedule.next_run_at,
-            task_id=None,
-            state=state,
+            schedule.name, ran_at=schedule.last_run_at or now_ts(), task_id=None, state=state
         )
         store.record_schedule_outcome(schedule.name, task_id=None, state=state)
         interrupted.append(schedule.name)
@@ -1408,6 +1404,7 @@ def run_due(
             results.append(TickResult(name=schedule.name, task_id=None, state=state))
             continue
         try:
+            store.claim_schedule_slot(schedule.name, next_run_at=next_at)  # v135-F6 review
             blocked_state: str | None = None
             # v132-F5 (I2, I8): a bound run is the project's run — its engine
             # and verify pins reach dispatch (empty = run_task's builtin).
@@ -1460,16 +1457,15 @@ def run_due(
                 # failure, so a persistently broken script auto-disables.
                 # ponytail: scripts run sequentially inside the tick (120s cap
                 # each); parallelize if a slow monitor ever starves the tick.
-                # ES B120: claim the slot BEFORE the side effect — a serve that
-                # dies mid-script must not re-run it at once on restart
-                # (at-most-once; reconcile_interrupted_scripts records it).
+                # ES B120: the slot is claimed (above) BEFORE the side effect —
+                # a serve that dies mid-script must not re-run it at once on
+                # restart (at-most-once; reconcile_interrupted_scripts records
+                # it), nor fire a one-shot again at its next slot.
                 store.mark_schedule_ran(
-                    schedule.name,
-                    ran_at=moment,
-                    next_run_at=next_at,
-                    task_id=None,
-                    state=SCRIPT_RUNNING_STATE,
+                    schedule.name, ran_at=moment, task_id=None, state=SCRIPT_RUNNING_STATE
                 )
+                if schedule.once:
+                    store.set_schedule_enabled(schedule.name, enabled=False)
                 output, script_ok = run_schedule_script(
                     schedule.instructions,
                     skep_home=config.home.parent,
@@ -1773,13 +1769,7 @@ def run_due(
         # ES B110: the bookkeeping stays inside this schedule's own try too —
         # one schedule's failure must never end the tick for the rest.
         try:
-            store.mark_schedule_ran(
-                schedule.name,
-                ran_at=moment,
-                next_run_at=next_at,
-                task_id=task_id,
-                state=state,
-            )
+            store.mark_schedule_ran(schedule.name, ran_at=moment, task_id=task_id, state=state)
             # v14: record the tick outcome for schedule health (success rate,
             # consecutive failures, last failure reason).
             store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)

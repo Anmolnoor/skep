@@ -2937,14 +2937,22 @@ class RunStore:
         return cursor.rowcount > 0
 
     @_locked
-    def mark_schedule_ran(
-        self, name: str, *, ran_at: str, next_run_at: str, task_id: str | None, state: str
-    ) -> None:
+    def claim_schedule_slot(self, name: str, *, next_run_at: str) -> None:
+        """v135-F6 review: the tick advances the slot BEFORE its side effect
+        and consumes ``resume_slot``, so a run-now confirmed while the run is
+        going is saved against the new slot and nothing after rewrites it."""
         self._conn.execute(
-            "UPDATE schedules SET last_run_at = ?, next_run_at = ?, "
-            "last_task_id = ?, last_state = ?, resume_slot = NULL"
-            " WHERE name = ?",
-            (ran_at, next_run_at, task_id, state, name),
+            "UPDATE schedules SET next_run_at = ?, resume_slot = NULL WHERE name = ?",
+            (next_run_at, name),
+        )
+        self._conn.commit()
+
+    @_locked
+    def mark_schedule_ran(self, name: str, *, ran_at: str, task_id: str | None, state: str) -> None:
+        """The outcome only: the slot was claimed (claim_schedule_slot)."""
+        self._conn.execute(
+            "UPDATE schedules SET last_run_at = ?, last_task_id = ?, last_state = ? WHERE name = ?",
+            (ran_at, task_id, state, name),
         )
         self._conn.commit()
 

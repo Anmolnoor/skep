@@ -420,6 +420,124 @@ def test_a_database_from_before_v135_migrates(config: SupervisorConfig) -> None:
         reopened.close()
 
 
+# review: a slot claimed before the side effect is never rewritten after it
+
+TODAY_7AM = "2026-11-27T15:00:00Z"
+TICK = "2026-11-27T15:00:00Z"
+RUN_NOW = "2026-11-27T15:00:10Z"  # confirmed while the 07:00 run is still going
+
+
+def _script(name: str = "ritual", *, once: bool = False) -> ScheduleRecord:
+    return make_schedule(
+        name=name, repo="", instructions="fetch-brief", interval_seconds=DAY,
+        worker_kind="script", start_at=TODAY_7AM, once=once,
+    )  # fmt: skip
+
+
+def test_a_run_now_made_while_a_script_runs_fires_once_and_keeps_the_slot(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import scheduler
+
+    store.add_schedule(_script())
+    calls: list[str] = []
+
+    def _script_run(command: str, **_kwargs: object) -> tuple[str, bool]:
+        calls.append(command)
+        if len(calls) == 1:
+            assert store.mark_schedule_due("ritual", due_at=RUN_NOW)
+        return ("", True)
+
+    monkeypatch.setattr(scheduler, "run_schedule_script", _script_run)
+    run_due(store=store, config=config, now=TICK)
+    row = store.get_schedule("ritual")
+    assert row is not None
+    assert (row.next_run_at, row.resume_slot) == (RUN_NOW, TOMORROW_7AM)
+    assert row.last_state == "script_ran"
+
+    assert [r.name for r in run_due(store=store, config=config, now="2026-11-27T15:00:20Z")] == [
+        "ritual"
+    ]
+    row = store.get_schedule("ritual")
+    assert row is not None and (row.next_run_at, row.resume_slot) == (TOMORROW_7AM, None)
+    assert run_due(store=store, config=config, now="2026-11-27T15:00:30Z") == []
+    assert len(calls) == 2
+
+
+def test_a_crash_after_a_run_now_keeps_the_saved_regular_slot(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import scheduler
+    from skep.supervisor.scheduler import reconcile_interrupted_scripts
+
+    store.add_schedule(_script())
+
+    class _ServeDied(BaseException):
+        pass
+
+    def _dies(command: str, **_kwargs: object) -> tuple[str, bool]:
+        assert store.mark_schedule_due("ritual", due_at=RUN_NOW)
+        raise _ServeDied
+
+    monkeypatch.setattr(scheduler, "run_schedule_script", _dies)
+    with pytest.raises(_ServeDied):
+        run_due(store=store, config=config, now=TICK)
+    assert reconcile_interrupted_scripts(store) == ["ritual"]
+    row = store.get_schedule("ritual")
+    assert row is not None and (row.next_run_at, row.resume_slot) == (RUN_NOW, TOMORROW_7AM)
+
+    monkeypatch.setattr(scheduler, "run_schedule_script", lambda *_a, **_k: ("", True))
+    run_due(store=store, config=config, now="2026-11-27T15:00:20Z")
+    row = store.get_schedule("ritual")
+    assert row is not None and row.next_run_at == TOMORROW_7AM  # not 07:00:10 tomorrow
+
+
+def test_an_interrupted_one_shot_script_does_not_fire_again(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import scheduler
+    from skep.supervisor.scheduler import reconcile_interrupted_scripts
+
+    store.add_schedule(_script(once=True))
+
+    class _ServeDied(BaseException):
+        pass
+
+    def _dies(command: str, **_kwargs: object) -> tuple[str, bool]:
+        raise _ServeDied
+
+    monkeypatch.setattr(scheduler, "run_schedule_script", _dies)
+    with pytest.raises(_ServeDied):
+        run_due(store=store, config=config, now=TICK)
+    reconcile_interrupted_scripts(store)
+    row = store.get_schedule("ritual")
+    assert row is not None and row.enabled is False
+    assert run_due(store=store, config=config, now="2026-11-29T15:00:00Z") == []
+
+
+def test_a_run_now_made_during_a_long_tick_survives_in_every_lane(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """The worker/prompt lanes write their bookkeeping after the side effect
+    too: the slot is claimed first there as well, so a run-now made meanwhile
+    is not erased by the tick's final write."""
+    store.add_schedule(
+        make_schedule(
+            name="ritual", repo="", instructions="brief me", interval_seconds=DAY,
+            worker_kind="prompt", start_at=TODAY_7AM,
+        )
+    )  # fmt: skip
+
+    def _turn(schedule: object, chained: str | None) -> tuple[str, bool]:
+        assert store.mark_schedule_due("ritual", due_at=RUN_NOW)
+        return ("ok", True)
+
+    run_due(store=store, config=config, now=TICK, prompt_turn=_turn)
+    row = store.get_schedule("ritual")
+    assert row is not None
+    assert (row.next_run_at, row.resume_slot) == (RUN_NOW, TOMORROW_7AM)
+
+
 # -- F7: wall-clock daily schedules ---------------------------------------------
 # America/Vancouver's last transitions: fall back Sun 2 Nov 2025 02:00 PDT ->
 # 01:00 PST; spring forward Sun 8 Mar 2026 02:00 PST -> 03:00 PDT. (tzdata
