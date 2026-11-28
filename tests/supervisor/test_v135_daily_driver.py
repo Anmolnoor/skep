@@ -417,7 +417,9 @@ def test_fetch_brief_a_mail_source_that_times_out_closes_without_logout(
     listener = socket.create_server(("127.0.0.1", 0))
     server = threading.Thread(target=_slow_imap, args=(listener, 2.0), daemon=True)
     server.start()
-    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port))
+    monkeypatch.setattr(
+        mail, "_DirectIMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port)
+    )
     monkeypatch.setattr(mail, "resolve_password", lambda: "pw")
     for name in ("HTTPS_PROXY", "https_proxy"):
         monkeypatch.delenv(name, raising=False)
@@ -478,7 +480,9 @@ def test_fetch_brief_a_time_share_spent_while_parsing_mail_is_not_swallowed(
 
     listener = socket.create_server(("127.0.0.1", 0))
     threading.Thread(target=_imap_one_message, args=(listener, 2.0), daemon=True).start()
-    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port))
+    monkeypatch.setattr(
+        mail, "_DirectIMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port)
+    )
     monkeypatch.setattr(mail, "resolve_password", lambda: "pw")
     for name in ("HTTPS_PROXY", "https_proxy"):
         monkeypatch.delenv(name, raising=False)
@@ -501,6 +505,45 @@ def test_fetch_brief_a_time_share_spent_while_parsing_mail_is_not_swallowed(
     assert code == 1
     assert "## Mail\n(unavailable: TimeShareSpent" in out
     assert spent < 1.5  # not the 2 s LOGOUT reply
+
+
+def test_fetch_brief_a_time_share_spent_while_mail_connects_closes_the_socket(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review r5 (R1): cancelled while it waits for the server's greeting,
+    the stdlib IMAP constructor cleans up on Exception only, so the socket
+    stayed open until the collector found it (a ResourceWarning)."""
+    import gc
+    import imaplib
+    import warnings
+
+    from skep.mcp_servers import mail
+
+    listener = socket.create_server(("127.0.0.1", 0))  # accepts, never greets
+
+    class Plain(mail._ClosesOnCancel, imaplib.IMAP4):
+        def __init__(self, host: str, port: int, **_k: object) -> None:
+            imaplib.IMAP4.__init__(self, host, port)
+
+    monkeypatch.setattr(mail, "_DirectIMAP4_SSL", Plain)
+    monkeypatch.setattr(mail, "resolve_password", lambda: "pw")
+    for name in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKEP_MAIL_IMAP_HOST", "127.0.0.1")
+    monkeypatch.setenv("SKEP_MAIL_IMAP_PORT", str(listener.getsockname()[1]))
+    monkeypatch.setenv("SKEP_MAIL_USER", "me")
+    module = _brief_module()
+    monkeypatch.setattr(module, "TIME_BUDGET", 0.3)
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            code = module.main(["--mail", "1"])  # type: ignore[attr-defined]
+            gc.collect()
+    finally:
+        listener.close()
+    assert code == 1
+    assert "(unavailable: TimeShareSpent" in capsys.readouterr().out
+    assert [str(w.message) for w in seen if issubclass(w.category, ResourceWarning)] == []
 
 
 def test_fetch_brief_a_long_bad_url_costs_one_line(
