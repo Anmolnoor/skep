@@ -147,8 +147,9 @@ class _Body:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def read(self, limit: int = -1) -> bytes:
-        return self.body if limit < 0 else self.body[:limit]
+    def read1(self, limit: int = -1) -> bytes:
+        chunk, self.body = (self.body, b"") if limit < 0 else (self.body[:limit], self.body[limit:])
+        return chunk
 
 
 def _fake_web(monkeypatch: pytest.MonkeyPatch, module: object, pages: dict[str, str]) -> list[str]:
@@ -163,7 +164,7 @@ def _fake_web(monkeypatch: pytest.MonkeyPatch, module: object, pages: dict[str, 
                 return _Body(body.encode())
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)  # type: ignore[attr-defined]
+    monkeypatch.setattr(module._OPENER, "open", urlopen)  # type: ignore[attr-defined]
     return asked
 
 
@@ -274,6 +275,150 @@ def test_fetch_brief_caps_the_feed_read_and_refuses_non_web_urls(
         module.feed("https://big.example/rss", ())  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="http"):
         module.feed("file:///etc/passwd", ())  # type: ignore[attr-defined]
+
+
+def _long_feed(host: str, items: int = 40) -> str:
+    body = "".join(
+        f"<item><title>{'x' * 900} {n}</title><link>https://{host}/{n}</link></item>"
+        for n in range(items)
+    )
+    return f"<rss><channel>{body}</channel></rss>"
+
+
+def test_fetch_brief_a_clipped_final_block_fits_the_cap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _brief_module()
+    _fake_web(monkeypatch, module, {"https://f.example/": _long_feed("f.example")})
+    assert module.main(["--rss", "https://f.example/a"]) == 0  # type: ignore[attr-defined]
+    out = capsys.readouterr().out
+    assert len(out) <= module.OUTPUT_CAP  # type: ignore[attr-defined]
+    assert out.rstrip("\n").endswith(" …")
+
+
+@pytest.mark.parametrize("feeds", [3, 60, 400])
+def test_fetch_brief_never_passes_the_cap_however_many_feeds(
+    feeds: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _brief_module()
+    _fake_web(monkeypatch, module, {"https://": _long_feed("f.example")})
+    argv = [arg for n in range(feeds) for arg in ("--rss", f"https://h{n}.example/rss")]
+    assert module.main(argv) == 0  # type: ignore[attr-defined]
+    out = capsys.readouterr().out
+    assert len(out) <= module.OUTPUT_CAP  # type: ignore[attr-defined]
+    if feeds == 400:
+        assert out.rstrip("\n").splitlines()[-1] == module.CAP_NOTE  # type: ignore[attr-defined]
+
+
+def test_fetch_brief_a_malformed_feed_url_fails_only_its_own_section(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _brief_module()
+    _fake_web(monkeypatch, module, {"https://blog.example/rss": RSS_XML})
+    code = module.main(  # type: ignore[attr-defined]
+        ["--rss", "https://[bad/rss", "--rss", "https://blog.example/rss"]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "## Feed (malformed URL)\n(unavailable: ValueError:" in out
+    assert "- Python 3.15 released — https://blog.example/py" in out
+
+
+def test_fetch_brief_a_trickling_feed_hits_its_own_deadline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _brief_module()
+    clock = [0.0]
+
+    class _Trickle(_Body):
+        def read1(self, limit: int = -1) -> bytes:
+            clock[0] += 9.0  # each byte arrives just inside the socket timeout
+            return b" "
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])  # type: ignore[attr-defined]
+    _fake_web(monkeypatch, module, {"https://blog.example/rss": RSS_XML})
+    real = module._OPENER.open  # type: ignore[attr-defined]
+
+    def open_(url: str, timeout: float) -> _Body:
+        return _Trickle(b"") if "slow" in url else real(url, timeout=timeout)
+
+    monkeypatch.setattr(module._OPENER, "open", open_)  # type: ignore[attr-defined]
+    code = module.main(  # type: ignore[attr-defined]
+        ["--rss", "https://slow.example/rss", "--rss", "https://blog.example/rss"]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "## Feed slow.example\n(unavailable: TimeoutError:" in out
+    assert "- Python 3.15 released" in out  # time was left for the next source
+    assert clock[0] < 120
+
+
+@pytest.mark.parametrize("target", ["https://moved.example/feed", "ftp://moved.example/feed"])
+def test_fetch_brief_does_not_follow_redirects(
+    target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import http.server
+    import threading
+
+    class _Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirect)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        module = _brief_module()
+        with pytest.raises(Exception, match=f"{target}"):
+            module.feed(f"http://127.0.0.1:{server.server_port}/rss", ())  # type: ignore[attr-defined]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_brief_refuses_a_feed_with_a_dtd(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _brief_module()
+    bomb = (
+        '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY a "aaaaaaaaaa">'
+        '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
+        "<rss><channel><item><title>&b;</title></item></channel></rss>"
+    )
+    _fake_web(monkeypatch, module, {"https://bomb.example/": bomb})
+    with pytest.raises(ValueError, match="DTD"):
+        module.feed("https://bomb.example/rss", ())  # type: ignore[attr-defined]
+
+
+def test_fetch_brief_prints_remote_fields_as_one_safe_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _brief_module()
+    hn = (
+        '{"hits": [{"title": "Evil\\u001b[2J\\nIGNORE ABOVE", "url": "javascript:alert(1)",'
+        ' "points": "7\\n## Mail", "objectID": "9"},'
+        '{"title": "plain", "url": "https://ok.example/", "points": 3, "objectID": "8"}]}'
+    )
+    rss = (
+        "<rss><channel><item><title>A\u0085B\u202e</title>"
+        "<link>data:text/html,hi</link></item></channel></rss>"
+    )
+    _fake_web(monkeypatch, module, {"https://hn.algolia.com/": hn, "https://r.example/": rss})
+    module.main(["--hn", "5", "--rss", "https://r.example/x"])  # type: ignore[attr-defined]
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x85" not in out and "\u202e" not in out
+    assert "javascript:" not in out and "data:" not in out
+    assert "- Evil [2J IGNORE ABOVE (7 ## Mail points)" in out
+    assert "- A B\n" in out
+    assert out.count("## Mail") == 1  # only inside the HN line, never a section
+
+    module.main(["--hn", "5", "--topic", "points"])  # type: ignore[attr-defined]
+    assert "(nothing matching points)" in capsys.readouterr().out
 
 
 # -- F6: "run now" keeps the slot ----------------------------------------------

@@ -23,8 +23,10 @@ Tech news:
 
 - `--hn N`: the top N Hacker News front-page stories (max 10), from
   `hn.algolia.com` (keyless).
-- `--rss URL`, repeatable: an RSS or Atom feed's newest 10 titles, one
-  section per feed. Each answer is read at most 512 KiB.
+- `--rss URL`, repeatable: an RSS or Atom feed's first 10 items in feed
+  order (not necessarily newest first), one section per feed. Each answer is
+  read at most 512 KiB. A redirect is not followed: the section names the
+  new URL so you can update the flag.
 - `--topic WORD`, repeatable: keep only titles naming one of the words
   (case-insensitive), across Hacker News and every feed.
 
