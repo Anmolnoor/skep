@@ -331,14 +331,14 @@ def test_a_forged_call_that_times_out_after_sending_is_outcome_unknown(
 ) -> None:
     from skep.supervisor.forge import ECHO_SERVER_SOURCE
 
-    real = subprocess.run
+    real = mcp_client._bounded_run  # forged_lane's run (review r2 N13)
 
-    def run(*args: Any, **kwargs: Any) -> Any:
-        if kwargs.get("input"):  # the exchange: its payload went in, then the clock ran out
-            raise subprocess.TimeoutExpired(args[0], 30)
-        return real(*args, **kwargs)
+    def run(argv: list[str], **kwargs: Any) -> Any:
+        if kwargs.get("payload"):  # the exchange: its payload went in, then the clock ran out
+            raise subprocess.TimeoutExpired(argv, 30)
+        return real(argv, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(mcp_client, "_bounded_run", run)
     runner = mcp_client.forged_runner(
         ECHO_SERVER_SOURCE, sys.executable, skep_home=skep_home, hosts=()
     )
