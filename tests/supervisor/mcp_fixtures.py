@@ -220,7 +220,7 @@ def build_npm_package(
     its preinstall, install and postinstall scripts each write that file."""
     manifest: dict[str, object] = {"name": name, "version": version, "bin": {"fx-mcp": "server.js"}}
     if marker is not None:
-        script = f"node -e \"require('fs').writeFileSync({json.dumps(str(marker))}, 'ran')\""
+        script = f"node -e \"require('fs').writeFileSync('{marker}', 'ran')\""
         manifest["scripts"] = {"preinstall": script, "install": script, "postinstall": script}
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w:gz") as archive:
@@ -278,7 +278,10 @@ def registry() -> Iterator[Registry]:
     holder: list[Registry] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
+        def do_HEAD(self) -> None:
+            self.do_GET(head=True)
+
+        def do_GET(self, head: bool = False) -> None:
             reg = holder[0]
             reg.hits.append(self.path)
             path = self.path.split("?")[0].replace("%2f", "/").replace("%2F", "/")
@@ -293,7 +296,8 @@ def registry() -> Iterator[Registry]:
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not head:
+                self.wfile.write(body)
 
         def log_message(self, *args: object) -> None:
             pass

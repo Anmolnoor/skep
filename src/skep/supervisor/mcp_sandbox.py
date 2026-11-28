@@ -19,6 +19,7 @@ import re
 import secrets
 import threading
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -530,6 +531,12 @@ def register(store: RunStore, args: Mapping[str, Any], *, chat_id: str | None) -
     }
     if config.transport == "stdio" and config.sandbox == "strict":
         result |= {"egress": config.egress, "allowed_hosts": list(config.allowed_hosts)}
+    if config.install and config.sandbox == "strict":
+        start_install(store, config, chat_id=chat_id)
+        result["install"] = (
+            f"{config.install[0]}:{config.install[1]} is installing off this request; its "
+            "result is reported in this chat, and calls are refused until it succeeds"
+        )
     return result
 
 
@@ -731,3 +738,257 @@ def strict_runner(config: MCPServerConfig, *, skep_home: Path | None) -> MCPRunn
         return dict(redact(reply, values))
 
     return run
+
+
+# -- the install lane (2.2) --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InstallSource:
+    """Where one package manager installs from: the registry hosts its wall
+    may reach (nothing else) and the installer flags that name them."""
+
+    hosts: tuple[str, ...]
+    args: tuple[str, ...]
+
+
+# uv needs the index AND the file host; npm one registry.
+INSTALL_SOURCES: dict[str, InstallSource] = {
+    "npm": InstallSource(("registry.npmjs.org",), ("--registry", "https://registry.npmjs.org/")),
+    "pypi": InstallSource(
+        ("pypi.org", "files.pythonhosted.org"), ("--index-url", "https://pypi.org/simple")
+    ),
+}
+INSTALL_TIMEOUT_SECONDS = 300.0
+INSTALL_LIMITS = (
+    "This lane installs with no package scripts, from wheels only (no source builds), and "
+    "from the registry only (a dependency given as a git or tarball URL cannot be fetched). "
+    "A package that needs one of those does not install here: register it with "
+    "sandbox='host' (unsandboxed, a HIGH card), or install it yourself and register its "
+    "absolute entry point (command=['/abs/path/to/server', ...])"
+)
+_INSTALLS: dict[tuple[str, str], threading.Thread] = {}
+
+
+def _private_dir(parent: Path, name: str, *, fresh: bool = False) -> Path:
+    """``parent/name`` as a real directory of its own: made without following
+    a link, and checked to resolve inside ``parent`` (1.1)."""
+    import os
+    import stat
+
+    path = parent / name
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        if fresh:
+            raise MCPError(f"{path} already exists; register the server again") from None
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or path.resolve().parent != parent.resolve():
+        raise MCPError(f"{path} is not a plain directory inside {parent}; remove it")
+    return path
+
+
+def _installer_steps(config: MCPServerConfig, tree: Path) -> list[list[str]]:
+    """The argv the install wall runs, in order (2.2): the installer, never
+    the package — npm with --ignore-scripts, uv wheels only."""
+    import shutil
+    import sys
+
+    kind, spec = config.install
+    source = INSTALL_SOURCES[kind]
+    if kind == "npm":
+        npm = shutil.which("npm")
+        if npm is None:
+            raise MCPError("npm is not on PATH here; install Node.js (it brings npm)")
+        return [[npm, "install", "--ignore-scripts", "--no-audit", "--no-fund",
+                 "--prefix", str(tree), *source.args, spec]]  # fmt: skip
+    uv = shutil.which("uv")
+    if uv is None:
+        raise MCPError("uv is not on PATH here; install uv (https://docs.astral.sh/uv/)")
+    python = tree / "bin" / "python"
+    return [
+        [uv, "venv", "--allow-existing", "--python", sys.executable, str(tree)],
+        [uv, "pip", "install", "--python", str(python), "--only-binary", ":all:",
+         *source.args, spec],
+    ]  # fmt: skip
+
+
+def _installer_env(scratch: Path, wall_env: Mapping[str, str]) -> dict[str, str]:
+    proxy = wall_env.get("HTTPS_PROXY", "")
+    tool_env, _ = hidden_toolchains()
+    return {
+        **wall_env,
+        **tool_env,
+        "npm_config_cache": str(scratch / "npm-cache"),
+        "npm_config_userconfig": str(scratch / "npmrc"),
+        "npm_config_ignore_scripts": "true",
+        "npm_config_update_notifier": "false",
+        "npm_config_proxy": proxy,
+        "npm_config_https_proxy": proxy,
+        "UV_CACHE_DIR": str(scratch / "uv-cache"),
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_LINK_MODE": "copy",
+        "UV_NO_CONFIG": "1",
+    }
+
+
+def _run_installer(config: MCPServerConfig, tree: Path, skep_home: Path, timeout: float) -> None:
+    """Each installer step inside its own strict wall: scrubbed env,
+    toolchain reads only, private scratch as HOME, only ``tree`` writable,
+    the registry hosts only, no read_paths and no secrets (2.2)."""
+    import subprocess
+    import tempfile
+    import time
+
+    from . import sandbox
+    from .wall import walled
+
+    kind, spec = config.install
+    deadline = time.monotonic() + timeout
+    with (
+        tempfile.TemporaryDirectory(prefix="skep-mcp-install-") as scratch,
+        tempfile.TemporaryDirectory(prefix="skep-mcp-profile-") as profiles,
+    ):
+        for argv in _installer_steps(config, tree):
+            try:
+                with walled(
+                    argv,
+                    skep_home=skep_home,
+                    hosts=INSTALL_SOURCES[kind].hosts,
+                    workspace=tree,
+                    home=Path(scratch),
+                    profile_dir=Path(profiles),
+                    read_allowlist=(),
+                    skep_home_roots=False,
+                ) as (wrapped, wall_env):
+                    proc = subprocess.run(
+                        wrapped,
+                        cwd=tree,
+                        env=_installer_env(Path(scratch), wall_env),
+                        capture_output=True,
+                        text=True,
+                        timeout=max(1.0, deadline - time.monotonic()),
+                    )
+            except sandbox.SandboxUnavailableError as exc:
+                raise MCPError(f"the install wall could not be built: {exc}") from exc
+            except subprocess.TimeoutExpired:
+                raise MCPError(
+                    f"the {kind} install of {spec} passed its {timeout:g}s limit"
+                ) from None
+            if proc.returncode != 0:
+                said = (proc.stderr or proc.stdout).strip()[-1200:]
+                raise MCPError(
+                    f"the {kind} install of {spec} failed (exit {proc.returncode}): {said}. "
+                    f"{INSTALL_LIMITS}"
+                )
+
+
+def _require_current(store: RunStore, config: MCPServerConfig) -> None:
+    from .mcp_client import load_mcp_servers
+
+    current = load_mcp_servers(store).get(config.server_id)
+    if current is None or current.incarnation != config.incarnation:
+        raise MCPError("it was registered again or removed while it installed")
+
+
+def install_server(
+    store: RunStore, config: MCPServerConfig, *, timeout: float = INSTALL_TIMEOUT_SECONDS
+) -> tuple[str, ...]:
+    """Install ``config``'s pinned package straight into its incarnation's
+    tree, run the discovery handshake there, then publish by writing the
+    marker beside the tree (2.2; nothing is renamed, so a Python install's
+    absolute shebangs stay true). Any failure deletes the tree: nothing is
+    published. Returns the tool names the handshake listed."""
+    import json
+    import os
+    import shutil
+
+    from .mcp_client import _LISTED, MCPClient, MCPTool, _stdio_payload, _stdio_reply
+
+    skep_home = store.db_path.parent.parent
+    if (refusal := sandbox_refusal(config.server_id)) is not None:
+        raise MCPError(refusal.removeprefix("not run: "))
+    if unset := secret_names_unset(skep_home, config):
+        steps = "; ".join(f"`skep mcp secret set {config.server_id} {n}`" for n in unset)
+        raise MCPError(
+            f"secret(s) {', '.join(unset)} have no value, so the handshake could not pass and "
+            f"nothing was downloaded. Set them on this machine ({steps}), then ask to "
+            "register the server again"
+        )
+    root = _private_dir(_private_dir(skep_home, MCP_TREE_DIR), config.server_id)
+    tree = _private_dir(root, config.incarnation, fresh=True)
+    try:
+        _run_installer(config, tree, skep_home, timeout)
+        _require_current(store, config)
+        entry = entry_point(tree, config)
+        if not entry.exists():
+            bins = entry.parent
+            offered = sorted(p.name for p in bins.iterdir()) if bins.is_dir() else []
+            raise MCPError(
+                f"the package installed, but has no entry point named {config.command[0]!r} "
+                f"(it offers: {', '.join(offered) or 'none'}); register it again with "
+                "command[0] set to one of those"
+            )
+        values = load_secrets(skep_home, config.server_id)
+
+        def handshake(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            lines = strict_exchange(
+                config, _stdio_payload(method, params), skep_home=skep_home,
+                secret_values=values, require_published=False,
+            )  # fmt: skip
+            return dict(redact(_stdio_reply(lines), values))
+
+        tools: list[MCPTool] = MCPClient(config, runner=handshake).list_tools()
+        with REGISTRY_GATE.writing():
+            _require_current(store, config)
+            marker = published_marker(skep_home, config.server_id, config.incarnation)
+            staged = marker.with_suffix(".tmp")
+            staged.write_text(json.dumps({"entry": str(entry)}), encoding="utf-8")
+            os.replace(staged, marker)
+            _LISTED[(str(store.db_path), config.server_id)] = (config, (), tuple(tools))
+    except BaseException:
+        shutil.rmtree(tree, ignore_errors=True)
+        raise
+    return tuple(tool.name for tool in tools)
+
+
+def start_install(store: RunStore, config: MCPServerConfig, *, chat_id: str | None) -> None:
+    """Off the request path (2.2): the install runs on its own thread and its
+    result lands in ``chat_id`` as an outside line (installer output is not
+    the Queen's words)."""
+    import logging
+
+    spec = f"{config.install[0]}:{config.install[1]}"
+
+    def job() -> None:
+        try:
+            names = install_server(store, config)
+            text = (
+                f"MCP server {config.server_id!r} installed ({spec}) and answered its handshake "
+                f"inside the strict wall: {len(names)} tool(s): {', '.join(names) or 'none'}."
+            )
+        except Exception as exc:  # reported, never raised into a dead thread
+            text = (
+                f"MCP server {config.server_id!r} was NOT installed ({spec}): {exc}. Nothing "
+                "was published; its calls are refused until a fresh registration installs."
+            )
+        try:
+            if chat_id is not None and store.get_chat(chat_id) is not None:
+                store.add_chat_message(
+                    chat_id, role="user", content=text, provenance=f"mcp-install:{config.server_id}"
+                )
+            else:
+                logging.getLogger("skep.serve").warning("%s", text)
+        except Exception:  # the store closed under us (serve shutting down)
+            logging.getLogger("skep.serve").warning("%s", text)
+
+    thread = threading.Thread(target=job, name=f"skep-mcp-install-{config.server_id}", daemon=True)
+    _INSTALLS[(str(store.db_path), config.server_id)] = thread
+    thread.start()
+
+
+def wait_for_install(store: RunStore, server_id: str, timeout: float | None = None) -> None:
+    """Join the install thread of ``server_id`` (tests and the CLI)."""
+    thread = _INSTALLS.get((str(store.db_path), server_id))
+    if thread is not None:
+        thread.join(timeout)
