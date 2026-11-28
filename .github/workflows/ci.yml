@@ -45,6 +45,16 @@ jobs:
       - name: Install ripgrep (macOS)
         if: runner.os == 'macOS'
         run: brew install ripgrep
+      # v135 Wave 2a: the sandboxed MCP install lane needs npm >= 11.10.0
+      # (`--allow-git`). The runner's default npm is older, and the install
+      # tests skip on an old npm, so without this the lane would go untested.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: npm new enough for the MCP install lane
+        run: |
+          npm install -g "npm@>=11.10.0"
+          npm --version
       - name: Sync
         run: uv sync --frozen
       - name: Lint
