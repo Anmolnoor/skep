@@ -66,7 +66,7 @@ def test_an_old_registration_loads_as_host_still_starts_and_is_flagged(
 
 
 def test_strict_servers_show_what_is_enforced_here(
-    home: Path, monkeypatch: pytest.MonkeyPatch
+    linux_backend: None, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _store(home)
     try:

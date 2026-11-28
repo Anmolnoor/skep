@@ -29,6 +29,11 @@ needs_strict_wall = pytest.mark.skipif(
     sandbox.availability().backend not in sandbox.STRICT_READ_BACKENDS,
     reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
 )
+needs_bwrap = pytest.mark.skipif(
+    sandbox.availability().backend != "bubblewrap",
+    reason="injects secrets through a real wall: strict-server secrets are Linux-only in this "
+    "release (review r2 N1; Seatbelt refuses them, tested apart)",
+)
 NPM, NODE, UV = shutil.which("npm"), shutil.which("node"), shutil.which("uv")
 needs_npm = pytest.mark.skipif(
     NPM is None or NODE is None or (mcp_sandbox.npm_version(NPM) or (0,)) < mcp_sandbox.MIN_NPM,
@@ -233,7 +238,7 @@ def test_a_wrong_entry_point_name_lists_what_the_package_offers(
 
 
 def test_an_unset_secret_refuses_the_install_before_any_download(
-    skep_home: Path, monkeypatch: pytest.MonkeyPatch
+    linux_backend: None, skep_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mcp_sandbox, "sandbox_refusal", lambda server_id: None)
     monkeypatch.setattr(mcp_sandbox, "_run_installer", lambda *a: pytest.fail("downloaded"))
@@ -280,7 +285,7 @@ def test_a_replaced_registration_never_publishes_the_old_install(
 VALUE = "install-report-secret-value-77"
 
 
-@needs_strict_wall
+@needs_bwrap
 @needs_uv
 def test_install_discovery_redacts_a_reply_error_and_its_stderr(
     skep_home: Path, reg: Registry, tmp_path: Path

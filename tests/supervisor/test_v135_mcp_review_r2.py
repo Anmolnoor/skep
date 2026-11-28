@@ -30,6 +30,11 @@ needs_strict_wall = pytest.mark.skipif(
     sandbox.availability().backend not in sandbox.STRICT_READ_BACKENDS,
     reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
 )
+needs_bwrap = pytest.mark.skipif(
+    sandbox.availability().backend != "bubblewrap",
+    reason="injects secrets through a real wall: strict-server secrets are Linux-only in this "
+    "release (review r2 N1; Seatbelt refuses them, tested apart)",
+)
 VALUE = "plain-test-value-for-redaction-42"
 
 
@@ -140,7 +145,7 @@ def test_linux_keeps_strict_secrets(
 # -- N2: one immutable per-launch snapshot, the listed names only ------------------
 
 
-@needs_strict_wall
+@needs_bwrap
 def test_a_value_set_during_a_launch_is_never_one_the_scrubber_misses(
     store: RunStore, skep_home: Path, server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -162,7 +167,7 @@ def test_a_value_set_during_a_launch_is_never_one_the_scrubber_misses(
     assert json.loads(got.content[0]["text"]) == {"WEATHER_KEY": "[redacted]"}
 
 
-@needs_strict_wall
+@needs_bwrap
 def test_the_server_reads_no_value_it_does_not_list(
     store: RunStore, skep_home: Path, server: Path
 ) -> None:

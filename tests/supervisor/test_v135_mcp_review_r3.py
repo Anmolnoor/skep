@@ -238,3 +238,22 @@ def test_a_registry_tarball_with_npms_sri_is_accepted(tmp_path: Path) -> None:
 def test_the_product_registry_is_https() -> None:
     args = mcp_sandbox.INSTALL_SOURCES["npm"].args
     assert args[args.index("--registry") + 1].startswith("https://")
+
+
+# -- M3: on a real Seatbelt host, secrets are refused, never injected ---------------
+
+
+@pytest.mark.skipif(
+    sandbox.availability().backend != "seatbelt", reason="a real Seatbelt host (macOS)"
+)
+def test_on_seatbelt_a_strict_server_with_secrets_is_refused_not_injected(
+    store: RunStore, skep_home: Path, tmp_path: Path
+) -> None:
+    mcp_sandbox.set_secret(skep_home, "weather", "WEATHER_KEY", "a-seatbelt-value-1234")
+    config = mcp_client.save_mcp_server(store, MCPServerConfig(
+        "weather", "stdio", command=(sys.executable, "-c", "pass"), sandbox="strict",
+        secret_names=("WEATHER_KEY",),
+    ))  # fmt: skip
+    assert "not available on macOS" in str(mcp_sandbox.registration_problem(config, skep_home))
+    with pytest.raises(mcp_client.MCPNotRun, match="not available on macOS"):
+        mcp_sandbox.strict_exchange(config, "", skep_home=skep_home, secret_values={})

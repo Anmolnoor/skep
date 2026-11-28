@@ -32,6 +32,11 @@ needs_strict_wall = pytest.mark.skipif(
     sandbox.availability().backend not in sandbox.STRICT_READ_BACKENDS,
     reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
 )
+needs_bwrap = pytest.mark.skipif(
+    sandbox.availability().backend != "bubblewrap",
+    reason="injects secrets through a real wall: strict-server secrets are Linux-only in this "
+    "release (review r2 N1; Seatbelt refuses them, tested apart)",
+)
 VALUE = "plain-test-value-for-redaction-42"
 
 
@@ -139,7 +144,7 @@ def test_the_secrets_file_is_on_the_secret_floor(skep_home: Path) -> None:
     assert path.parent.resolve() in masked
 
 
-@needs_strict_wall
+@needs_bwrap
 def test_a_secret_reaches_only_its_server_and_no_other_sandbox(
     store: RunStore, skep_home: Path, server: Path, tmp_path: Path
 ) -> None:
@@ -169,7 +174,7 @@ def test_a_secret_reaches_only_its_server_and_no_other_sandbox(
     assert VALUE in path.read_text()  # the control: on the host it is there
 
 
-@needs_strict_wall
+@needs_bwrap
 def test_a_secret_is_redacted_from_tool_errors_and_diagnostics(
     store: RunStore, skep_home: Path, server: Path
 ) -> None:
@@ -183,7 +188,11 @@ def test_a_secret_is_redacted_from_tool_errors_and_diagnostics(
 
 
 def test_an_unset_secret_is_a_teaching_error_at_the_handshake(
-    store: RunStore, skep_home: Path, server: Path, monkeypatch: pytest.MonkeyPatch
+    linux_backend: None,
+    store: RunStore,
+    skep_home: Path,
+    server: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mcp_sandbox, "sandbox_refusal", lambda server_id: None)
     _strict(store, "weather", server, "WEATHER_KEY")
@@ -202,7 +211,7 @@ def test_redaction_reaches_nested_results() -> None:
 # -- review round 1 (S1, S2, S3, S17) ---------------------------------------------
 
 
-@needs_strict_wall
+@needs_bwrap
 @pytest.mark.parametrize("hosts", [(), ("api.example.test",)])
 def test_the_launcher_never_holds_a_secret_and_the_server_still_gets_it(
     store: RunStore, skep_home: Path, server: Path, monkeypatch: pytest.MonkeyPatch,
@@ -243,7 +252,7 @@ def test_a_value_too_short_to_redact_is_refused_at_set(skep_home: Path) -> None:
     assert mcp_sandbox.redact("x-abcdefgh-y", {"K": "abcdefgh"}) == "x-[redacted]-y"
 
 
-@needs_strict_wall
+@needs_bwrap
 def test_stderr_is_masked_before_it_is_cropped(
     store: RunStore, skep_home: Path, server: Path
 ) -> None:

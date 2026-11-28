@@ -190,7 +190,7 @@ def test_a_save_waits_for_a_running_call(store: RunStore) -> None:
 
 
 def test_the_registration_card_shows_the_grant_and_starts_nothing(
-    store: RunStore, no_launch: list[Any]
+    linux_backend: None, store: RunStore, no_launch: list[Any]
 ) -> None:
     args = {
         "server_id": "weather",

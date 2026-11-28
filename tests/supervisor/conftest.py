@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, sandbox
 from skep.supervisor.serve import create_app
 from skep.supervisor.serve.app import TERMINAL_STATES
 from skep.supervisor.serve.auth import TOKEN_FILE
@@ -170,3 +170,16 @@ def config(tmp_path: Path) -> SupervisorConfig:
         heartbeat_seconds=2.0,
         poll_seconds=0.01,
     )
+
+
+@pytest.fixture()
+def linux_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r3 M3: the backend name alone, for checks that start no wall —
+    on Seatbelt a strict server's secrets are refused before them (r2 N1)."""
+    probe = sandbox.SandboxAvailability(True, backend="bubblewrap")
+
+    def linux(backend: str | None = None) -> sandbox.SandboxAvailability:
+        return probe
+
+    linux.cache_clear = lambda: None  # type: ignore[attr-defined]  # teardowns call it
+    monkeypatch.setattr(sandbox, "availability", linux)
