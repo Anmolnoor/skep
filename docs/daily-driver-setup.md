@@ -115,9 +115,11 @@ there. Give an explicit UTC offset (`-08:00` here). A bare time is read as
 UTC. The pull runs five minutes earlier because the chain reads mail-pull's
 **last** output. A schedule keeps its time of day. "Run now" keeps it too
 when the next slot is still in the future: running a 07:00 schedule at 14:00
-leaves the next 07:00 run where it was. An overdue schedule (the serve was
-down at 07:00) has no future slot to keep, so its next run is one interval
-after the run-now.
+leaves the next 07:00 run where it was. An overdue fixed-interval schedule
+(the serve was down at 07:00) has no future slot to keep, so its next run is
+one interval after the run-now. An overdue schedule with a timezone (below)
+keeps its wall-clock time instead: run at 14:00, it still runs at 07:00 the
+next day.
 Without a timezone a daily schedule is a fixed 24 h interval, so its local
 time shifts by an hour at a daylight-saving change. Add your zone (say
 "timezone America/Vancouver" in the sentence, `--timezone` on the CLI) and
