@@ -13,6 +13,7 @@ module only discovers and calls; authorization lives in the capability engine.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -1140,7 +1141,10 @@ def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPT
     from .mcp_sandbox import REGISTRY_GATE
 
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent, store=store)
-    with REGISTRY_GATE.reading():
+    # review r3 M2: a forged listing only — a stdio launch takes its own
+    # bounded hold, and an http listing (no total deadline) holds none
+    forged = config.server_id.startswith(FORGED_SERVER_PREFIX)
+    with REGISTRY_GATE.reading() if forged else contextlib.nullcontext():
         binding = _binding(store, config)
         tools = tuple(MCPClient(config, runner=runner).list_tools())
     if _binding(store, config) != binding:

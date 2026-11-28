@@ -28,6 +28,7 @@ import shlex
 import urllib.parse
 from typing import Any
 
+from ..mcp_sandbox import UNCAPTURED
 from ..shell_prefixes import (
     escalates,
     is_ops_mutating_command,
@@ -853,7 +854,7 @@ def recorded_card(
     schedule_role_name: str | None = None,
     *,
     merge: dict[str, Any] | None = None,
-    incarnation: Any = None,
+    incarnation: Any = UNCAPTURED,
 ) -> dict[str, Any] | None:
     """What the server records on a card when it is proposed (P4-2): its
     HIGH tier, a dispatch's manifest, and for a schedule the facts the card
@@ -880,12 +881,12 @@ def recorded_card(
     if tool == "promote_tool":
         record["forge"] = promotion_card(store, args)
     if tool == "call_mcp_tool":  # ADR 0069 1.6: the supervisor's, never the model's
-        from ..mcp_sandbox import UNCAPTURED, card_incarnation
+        from ..mcp_sandbox import card_incarnation
 
-        # review r2 N6: the value the proposal captured, read again only if none was
-        captured = UNCAPTURED if incarnation is None else incarnation
+        # review r2 N6, r3 M1: the value the proposal captured (None: there was
+        # no registration), read again only if nothing was captured
         record["incarnation"] = (
-            card_incarnation(store, args) if captured is UNCAPTURED else captured
+            card_incarnation(store, args) if incarnation is UNCAPTURED else incarnation
         )
     if tool in ("register_mcp_server", "setup_browser"):  # ADR 0069 1.3, built with no launch
         from ..mcp_sandbox import card_grant
