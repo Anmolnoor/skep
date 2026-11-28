@@ -24,6 +24,7 @@ Run: python -m skep.mcp_servers.mail
 from __future__ import annotations
 
 import argparse
+import contextlib
 import email
 import email.message
 import email.policy
@@ -35,6 +36,7 @@ import socket
 import ssl
 import sys
 import urllib.parse
+from collections.abc import Iterator
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -313,7 +315,39 @@ def proxy_tunnel(proxy: str, host: str, port: int, timeout: float | None) -> soc
     return sock
 
 
-class _ProxiedIMAP4_SSL(imaplib.IMAP4_SSL):
+class _ClosesOnCancel:
+    """Mixin for the digest's IMAP connection: closed if it is cancelled
+    while it connects. The stdlib constructor cleans up on Exception only; a
+    caller's timer (a BaseException, the morning brief's time share) left
+    the socket open."""
+
+    def _tls(self, sock: socket.socket) -> socket.socket:
+        imap: Any = self
+        try:
+            wrapped: socket.socket = imap.ssl_context.wrap_socket(sock, server_hostname=imap.host)
+        except BaseException:
+            sock.close()
+            raise
+        return wrapped
+
+    def _connect(self) -> None:  # the wait for the server's greeting
+        imap: Any = self
+        try:
+            super()._connect()  # type: ignore[misc]
+        except Exception:
+            raise  # the stdlib constructor shuts down on these itself
+        except BaseException:
+            with contextlib.suppress(OSError):
+                imap.shutdown()
+            raise
+
+
+class _DirectIMAP4_SSL(_ClosesOnCancel, imaplib.IMAP4_SSL):
+    def _create_socket(self, timeout: float | None = None) -> socket.socket:
+        return self._tls(imaplib.IMAP4._create_socket(self, timeout))  # type: ignore[attr-defined]
+
+
+class _ProxiedIMAP4_SSL(_ClosesOnCancel, imaplib.IMAP4_SSL):
     """IMAP4_SSL over ``proxy_tunnel``; TLS still runs end to end with the host."""
 
     def __init__(self, host: str, port: int, *, proxy: str) -> None:
@@ -321,9 +355,24 @@ class _ProxiedIMAP4_SSL(imaplib.IMAP4_SSL):
         super().__init__(host, port, ssl_context=ssl.create_default_context())
 
     def _create_socket(self, timeout: float | None = None) -> socket.socket:
-        sock = proxy_tunnel(self._proxy, self.host, self.port, timeout)
-        wrapped: socket.socket = self.ssl_context.wrap_socket(sock, server_hostname=self.host)
-        return wrapped
+        return self._tls(proxy_tunnel(self._proxy, self.host, self.port, timeout))
+
+
+@contextlib.contextmanager
+def _session(imap: imaplib.IMAP4) -> Iterator[imaplib.IMAP4]:
+    """``with imap`` for the digest, except when it is cancelled: a caller's
+    timer (a BaseException, e.g. the morning brief's time share) closes the
+    socket without the LOGOUT round trip, which would wait on the server."""
+    try:
+        yield imap
+    except Exception:
+        imap.__exit__(None, None, None)
+        raise
+    except BaseException:
+        with contextlib.suppress(OSError):
+            imap.shutdown()
+        raise
+    imap.__exit__(None, None, None)
 
 
 def digest(count: int, mailbox: str = "INBOX") -> str:
@@ -344,11 +393,11 @@ def digest(count: int, mailbox: str = "INBOX") -> str:
     )
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     connect = (
-        imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context())
+        _DirectIMAP4_SSL(host, port, ssl_context=ssl.create_default_context())
         if not proxy
         else _ProxiedIMAP4_SSL(host, port, proxy=proxy)
     )
-    with connect as imap:
+    with _session(connect) as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
         imap.select(mailbox, readonly=True)
         _status, data = imap.uid("search", "ALL")

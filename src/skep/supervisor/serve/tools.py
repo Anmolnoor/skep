@@ -2095,6 +2095,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": "don't fire before this UTC time, e.g. 2026-07-16T09:00:00Z",
             },
+            "timezone": {
+                "type": "string",
+                "description": "the user's IANA timezone, e.g. America/Vancouver. Set it "
+                "only for a daily or weekly schedule (every=1d, 7d) the user wants at a "
+                "local clock time ('every morning at 7'): it then stays at that local "
+                "time when daylight-saving time changes. Omit it for minute or hour "
+                "intervals and when no local time was asked for",
+            },
             "chain": {
                 "type": "string",
                 "description": "run with the named schedule's LAST OUTPUT injected "
@@ -2125,8 +2133,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation). On confirm the schedule becomes due and the ticker "
         "dispatches it on its next tick — same policy, same delivery to its "
         "bound chat, same health tracking as a scheduled run. Needs an "
-        "ENABLED schedule; its next regular run then lands one full interval "
-        "after this one. Use this instead of re-running a schedule's "
+        "ENABLED schedule; when its next slot is still in the future it keeps that "
+        "slot (a 07:00 schedule run now at 14:00 still runs at 07:00 next). Use this "
+        "instead of re-running a schedule's "
         "instructions through run_code or dispatch_run.",
         {"name": {"type": "string"}},
         ["name"],
@@ -2994,6 +3003,7 @@ def _schedule_summary(schedule: Any) -> dict[str, Any]:
         "last_task_id": schedule.last_task_id,
         "last_state": schedule.last_state,
         "next_run_at": schedule.next_run_at,
+        "timezone": schedule.timezone,  # v135-F7: None = a fixed interval
         "chat_bound": schedule.chat_id is not None,
     }
 
@@ -6336,6 +6346,7 @@ def _execute_mutation(
         )
 
         interval = parse_interval(str(args["every"]))
+        schedule_tz = str(args["timezone"]) if args.get("timezone") else None  # v135-F7
         schedule_chain = None if args.get("chain") is None else str(args["chain"])
         validate_chain(store, name=str(args["name"]), chain=schedule_chain)
         if args.get("caste") in ("note", "script", "digest", "prompt"):
@@ -6378,6 +6389,7 @@ def _execute_mutation(
                 # Phase 09 R1: a script's only egress inside its wall (wall.py)
                 network=[str(h) for h in args.get("network") or []] if caste == "script" else (),
                 skep_home=holder.current.home.parent,  # R3 (N2): a script's inputs
+                timezone=schedule_tz,
             )
             actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
@@ -6405,6 +6417,7 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chat_id=chat_id,
+                timezone=schedule_tz,
             )
         else:
             if args.get("instructions") is None:
@@ -6423,6 +6436,7 @@ def _execute_mutation(
                 network=[str(host) for host in args.get("network") or []],
                 chat_id=chat_id,
                 skep_home=holder.current.home.parent,
+                timezone=schedule_tz,
             )
         actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)
