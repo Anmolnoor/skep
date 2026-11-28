@@ -770,6 +770,13 @@ def test_a_wall_clock_schedule_records_its_wall_time_from_the_first_slot() -> No
     assert schedule.next_run_at == "2026-03-07T10:30:00Z"
 
 
+def test_an_explicit_start_at_in_the_gap_anchors_at_its_actual_local_time() -> None:
+    """The documented rule: start_at is an absolute instant; 02:30-08:00 on
+    the spring-forward day is 03:30 PDT, and that is the anchor."""
+    made = _note("gap", start_at="2026-03-08T02:30:00-08:00", timezone=VAN)
+    assert (made.next_run_at, made.wall_time) == ("2026-03-08T10:30:00Z", "03:30:00")
+
+
 @pytest.mark.parametrize("bad", ["Mars/Olympus", "", "../etc/passwd", "PST8PDT/../x"])
 def test_an_invalid_timezone_is_refused_with_a_valid_example(bad: str) -> None:
     with pytest.raises(ValueError, match="America/Vancouver"):
@@ -863,6 +870,58 @@ def test_rest_create_and_patch_take_a_timezone(config: SupervisorConfig) -> None
     assert toggled["enabled"] is False and toggled["timezone"] is None
     assert client.patch("/api/schedules/plain", json={}).status_code == 400
     assert client.patch("/api/schedules/ghost", json={"timezone": VAN}).status_code == 404
+
+
+def test_patch_with_the_same_timezone_keeps_the_wall_time_anchor(config: SupervisorConfig) -> None:
+    """A 02:30 schedule waiting at its spring-forward fallback (03:00 PDT):
+    re-sending its own timezone must not re-anchor it at 03:00."""
+    client = serve_client(config)
+    body = {"name": "night", "caste": "note", "every": "1d", "instructions": "hi"}
+    made = client.post(
+        "/api/schedules", json={**body, "start_at": "2026-03-07T02:30:00-08:00", "timezone": VAN}
+    )
+    assert made.status_code == 201, made.text
+    store = RunStore(config.db_path)
+    try:
+        run_due(store=store, config=config, now="2026-03-07T10:30:00Z")
+        waiting = store.get_schedule("night")
+    finally:
+        store.close()
+    assert waiting is not None and waiting.next_run_at == "2026-03-08T10:00:00Z"  # 03:00 PDT
+
+    patched = client.patch("/api/schedules/night", json={"timezone": VAN})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["wall_time"] == "02:30:00"
+
+
+def test_patch_validates_the_timezone_against_the_row_it_writes(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-name replacement between the route's read and its write gets
+    no timezone checked against the old row's interval."""
+    client = serve_client(config)
+    body = {"name": "brief", "caste": "note", "every": "1d", "instructions": "hi"}
+    assert client.post("/api/schedules", json=body).status_code == 201
+    real_get = RunStore.get_schedule
+
+    def get_then_replace(self: RunStore, name: str) -> ScheduleRecord | None:
+        seen = real_get(self, name)
+        monkeypatch.setattr(RunStore, "get_schedule", real_get)
+        hourly = make_schedule(
+            name=name, repo="", instructions="hi", interval_seconds=3600, worker_kind="note"
+        )
+        self.add_schedule(hourly)
+        return seen
+
+    monkeypatch.setattr(RunStore, "get_schedule", get_then_replace)
+    refused = client.patch("/api/schedules/brief", json={"timezone": VAN})
+    assert refused.status_code == 400 and "whole number of days" in refused.json()["detail"]
+    store = RunStore(config.db_path)
+    try:
+        row = store.get_schedule("brief")
+    finally:
+        store.close()
+    assert row is not None and row.interval_seconds == 3600 and row.timezone is None
 
 
 def test_cli_schedule_add_takes_a_timezone(

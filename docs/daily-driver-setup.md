@@ -113,15 +113,21 @@ mention the bot):
 The card goes to the web, because a chained schedule is HIGH. Confirm it
 there. Give an explicit UTC offset (`-08:00` here). A bare time is read as
 UTC. The pull runs five minutes earlier because the chain reads mail-pull's
-**last** output. A schedule keeps its time of day. "Run now" keeps it too:
-running a 07:00 schedule at 14:00 leaves the next 07:00 run where it was.
+**last** output. A schedule keeps its time of day. "Run now" keeps it too
+when the next slot is still in the future: running a 07:00 schedule at 14:00
+leaves the next 07:00 run where it was. An overdue schedule (the serve was
+down at 07:00) has no future slot to keep, so its next run is one interval
+after the run-now.
 Without a timezone a daily schedule is a fixed 24 h interval, so its local
 time shifts by an hour at a daylight-saving change. Add your zone (say
 "timezone America/Vancouver" in the sentence, `--timezone` on the CLI) and
 a daily or weekly schedule keeps its local time instead. A time that
 happens twice when the clocks go back fires once, the first time; a time
 the clocks skip fires as they jump (02:30 runs at 03:00 that day, and at
-02:30 again the next).
+02:30 again the next). These two rules apply to the slots skep works out.
+An explicit `start_at` is an exact instant, and its actual local time
+becomes the schedule's time of day: `02:30-08:00` on a Vancouver
+spring-forward day is 03:30 local, so that schedule runs at 03:30.
 
 ## 8. Keep the research chat clean
 

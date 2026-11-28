@@ -2051,12 +2051,10 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"no schedule named {name!r}")
         if "timezone" in body.model_fields_set:  # v135-F7: later slots keep wall time
-            slot = schedule.resume_slot or schedule.next_run_at
-            try:
-                wall = wall_clock(body.timezone, schedule.interval_seconds, slot)
+            try:  # checked against the row it writes, in one transaction
+                run_store.set_schedule_timezone(name, body.timezone, wall_clock)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            run_store.set_schedule_timezone(name, body.timezone, wall)
         elif body.enabled is None:
             raise HTTPException(status_code=400, detail="send enabled and/or timezone")
         if body.enabled is not None:

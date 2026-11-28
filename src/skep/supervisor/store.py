@@ -2927,14 +2927,34 @@ class RunStore:
         return cursor.rowcount > 0
 
     @_locked
-    def set_schedule_timezone(self, name: str, timezone: str | None, wall_time: str | None) -> bool:
-        """v135-F7: PATCH /api/schedules — the slot stays, later ones keep wall time."""
-        cursor = self._conn.execute(
-            "UPDATE schedules SET timezone = ?, wall_time = ? WHERE name = ?",
-            (timezone, wall_time, name),
-        )
-        self._conn.commit()
-        return cursor.rowcount > 0
+    def set_schedule_timezone(
+        self,
+        name: str,
+        timezone: str | None,
+        wall_clock: Callable[[str | None, int, str], str | None],
+    ) -> bool:
+        """v135-F7: PATCH /api/schedules — the slot stays, later ones keep wall
+        time. ``wall_clock`` (scheduler.wall_clock) checks ``timezone`` against
+        THIS row and gives its anchor, in the transaction that writes it; the
+        timezone the row already has keeps its anchor (a 02:30 schedule
+        waiting at its 03:00 spring-forward fallback stays 02:30)."""
+        with self._conn:  # commit, or roll back on a raise
+            self._begin_immediate()
+            row = self._conn.execute(
+                "SELECT interval_seconds, COALESCE(resume_slot, next_run_at), timezone,"
+                " wall_time FROM schedules WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if row is None:
+                return False
+            interval, slot, current, wall = row
+            if timezone != current:
+                wall = wall_clock(timezone, int(interval), str(slot))
+            self._conn.execute(
+                "UPDATE schedules SET timezone = ?, wall_time = ? WHERE name = ?",
+                (timezone, wall, name),
+            )
+        return True
 
     @_locked
     def claim_schedule_slot(self, name: str, *, next_run_at: str) -> None:
