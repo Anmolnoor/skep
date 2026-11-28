@@ -428,6 +428,7 @@ def entry_point_problem(tree: Path, config: MCPServerConfig) -> str | None:
     every launch."""
     import json
     import os
+    import stat
 
     name, (kind, spec) = config.command[0], config.install
     entry = entry_point(tree, config)
@@ -456,6 +457,8 @@ def entry_point_problem(tree: Path, config: MCPServerConfig) -> str | None:
             )
         if outside is not None:
             return outside
+        if not real.is_relative_to(Path(os.path.realpath(own))):  # review r2 N10
+            return f"{name!r} resolves outside {package}'s own directory (to {real})"
         if real != Path(os.path.realpath(own / bins[name])):
             return f"{name!r} does not lead to {package}'s own {bins[name]}"
         return None
@@ -481,9 +484,15 @@ def entry_point_problem(tree: Path, config: MCPServerConfig) -> str | None:
         )
     if outside is not None:
         return outside
-    listed = {Path(os.path.realpath(str(dist.locate_file(f)))) for f in dist.files or ()}
-    if real not in listed:
+    # review r2 N10: the exact path RECORD lists, never one a link resolves to
+    listed = {os.path.normpath(str(dist.locate_file(f))) for f in dist.files or ()}
+    if os.path.normpath(entry) not in listed:
         return f"{name!r} is not a file {project}'s RECORD lists"
+    if not stat.S_ISREG(os.lstat(entry).st_mode):
+        return (
+            f"{name!r} is not a regular file: a link or something else stands where "
+            f"{project}'s RECORD lists its launcher"
+        )
     return None
 
 
@@ -1182,28 +1191,94 @@ def npm_version(npm: str) -> tuple[int, ...] | None:
     return None if found is None or data.get("name") != "npm" else tuple(map(int, found.groups()))
 
 
-def npm_tree_problem(tree: Path) -> str | None:
-    """Review S9: every package npm installed came from the registry the
-    install named — a tarball under it with an integrity hash, or bundled in
-    one — never a git, file, directory, link or other-host source."""
+def npm_tree_problem(tree: Path, spec: str) -> str | None:
+    """Review S9, r2 N9: npm's lock proves where every installed package came
+    from, or the install is refused. The lock is v2/v3 with a ``packages``
+    map whose root asks for exactly the pinned package, installed at the
+    pinned version. Every other entry lives under ``node_modules/``, is no
+    link, and either names a source — a tarball under the registry the
+    install named, with an integrity hash, bundled or not — or is bundled
+    with no source of its own: then it must have been unpacked from its
+    parent's archive (see ``_bundled_in_registry_parent``)."""
     import json
 
     args = INSTALL_SOURCES["npm"].args
     registry = args[args.index("--registry") + 1].rstrip("/") + "/"
+    name, version = NPM_PINNED.fullmatch(spec).groups()  # type: ignore[union-attr]
     try:
         lock = json.loads((tree / "package-lock.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "npm wrote no readable package-lock.json, so where each package came from is unknown"
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    if (
+        lock.get("lockfileVersion") not in (2, 3)
+        or not isinstance(packages, dict)
+        or not all(isinstance(entry, dict) for entry in packages.values())
+    ):
+        return (
+            "npm's package-lock.json has no lockfileVersion 2 or 3 'packages' map, so where "
+            "each package came from is unknown"
+        )
+    root, top = packages.get(""), packages.get(f"node_modules/{name}")
+    if (
+        root is None
+        or set(root.get("dependencies") or {}) != {name}
+        or top is None
+        or top.get("version") != version
+        or top.get("name", name) != name
+        or top.get("inBundle")
+    ):
+        return f"npm's package-lock.json does not record {name}@{version} as what was installed"
     bad = []
-    for path, entry in (lock.get("packages") or {}).items():
-        if not path or not isinstance(entry, dict) or entry.get("inBundle"):
+    for path, entry in packages.items():
+        if not path:
             continue
-        resolved = str(entry.get("resolved") or "")
-        if entry.get("link") or not resolved.startswith(registry) or not entry.get("integrity"):
-            bad.append(f"{path.removeprefix('node_modules/')} ({resolved or 'no source'})")
+        shown = path.removeprefix("node_modules/")
+        resolved = entry.get("resolved")
+        if not path.startswith("node_modules/") or ".." in path.split("/") or entry.get("link"):
+            bad.append(f"{path} (a link, or outside node_modules)")
+        elif resolved is not None or not entry.get("inBundle"):
+            if not str(resolved or "").startswith(registry) or not entry.get("integrity"):
+                bad.append(f"{shown} ({resolved or 'no source'})")
+        elif entry.get("integrity") or not _bundled_in_registry_parent(
+            tree, path, packages, registry
+        ):
+            bad.append(f"{shown} (bundled, with no proof it came from its parent's archive)")
     if not bad:
         return None
     return f"package(s) not from the registry {registry}: {', '.join(sorted(bad)[:5])}"
+
+
+def _bundled_in_registry_parent(
+    tree: Path, path: str, packages: Mapping[str, Any], registry: str
+) -> bool:
+    """Review r2 N9, from npm 11's arborist (4.29.0, as installed with npm
+    11.12.1): the lock writes ``inBundle`` from the tree's shape alone
+    (shrinkwrap.js:108-110 nodeMetaKeys, node.js:517-562 getBundler), and a
+    bundled child missing from its parent's tarball is fetched on its own
+    (reify.js:1005 bundleMissing, :1161 unpack) — by its ``resolved``, or by
+    ``name@version`` from the configured registry when it has none
+    (reify.js:703-711). One unpacked from the tarball carries only what its
+    own package.json says (node.js:151-172, ``_resolved``/``_integrity``),
+    usually nothing. So a source-less bundled entry is accepted only when its
+    nearest non-bundled ancestor is a registry tarball with an integrity hash
+    that declares ``bundleDependencies`` (shrinkwrap.js:92 records it), and
+    its directory exists under that ancestor's ``node_modules``."""
+    if not (tree / path / "package.json").is_file():
+        return False
+    parts = path.split("/node_modules/")
+    for depth in range(len(parts) - 1, 0, -1):
+        parent = packages.get("/node_modules/".join(parts[:depth]))
+        if parent is None:
+            return False
+        if parent.get("inBundle"):
+            continue  # bundled itself: its bundler is further up
+        return (
+            bool(parent.get("bundleDependencies"))
+            and str(parent.get("resolved") or "").startswith(registry)
+            and bool(parent.get("integrity"))
+        )
+    return False
 
 
 def _installer_env(scratch: Path, wall_env: Mapping[str, str]) -> dict[str, str]:
@@ -1329,7 +1404,7 @@ def install_server(
                 f"the package installed, but {problem}; register it again with command[0] set "
                 "to one of the package's own entry points"
             )
-        if config.install[0] == "npm" and (problem := npm_tree_problem(tree)) is not None:
+        if config.install[0] == "npm" and (problem := npm_tree_problem(tree, config.install[1])):
             raise MCPError(f"{problem}. {INSTALL_LIMITS}")  # review S9: the whole tree
 
         def handshake(method: str, params: Mapping[str, object]) -> Mapping[str, object]:

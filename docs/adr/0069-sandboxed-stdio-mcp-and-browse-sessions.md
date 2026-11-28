@@ -157,14 +157,32 @@ left open:
   that release added `--allow-git` (GitHub changelog, 2026-02-18), and the
   install passes `--allow-git=none`, so no git dependency is fetched or
   packed (with its prepare script) anywhere in the tree; an older npm is a
-  teaching error. After the install every `package-lock.json` entry must be
-  a tarball under the named registry with an integrity hash, or bundled in
-  one; a link, file, directory, git or other-host source refuses the whole
-  install.
+  teaching error. After the install npm's `package-lock.json` must prove
+  every source (review r2 N9), or the whole install is refused: it is
+  lockfile version 2 or 3 with a `packages` map; its root asks for exactly
+  the pinned package, which is installed at the pinned version; every other
+  entry lies under `node_modules/` and is no link; an entry that names a
+  source (`resolved`), bundled or not, names a tarball under the named
+  registry with an integrity hash; and a bundled entry with no source of its
+  own must have no integrity of its own, its directory must exist, and its
+  nearest non-bundled ancestor must be such a registry tarball that declares
+  `bundleDependencies` — so it was unpacked from that verified archive. This
+  follows npm 11's arborist: the lock marks `inBundle` from the tree's shape
+  alone, and a bundled child missing from its parent's tarball is fetched on
+  its own, by its `resolved` or else by `name@version` from the configured
+  registry (`reify.js` `#extractOrLink`), which this lane's wall limits to
+  the registry hosts. What it refuses: a lock without that structure, a
+  root other than the pin, any non-registry or integrity-less source
+  (bundled entries included), a link or a path outside `node_modules`, and
+  a bundled entry its parent does not declare, has not unpacked, or that
+  sits under an unverified parent.
 - **The entry point is the pinned package's own** (review S10): npm, a
-  `bin` the package's own `package.json` declares, linked to that file;
-  Python, a console script its own distribution declares whose launcher its
-  `RECORD` lists. It must resolve inside the install tree. Checked at
+  `bin` the package's own `package.json` declares, linked to that file,
+  which must resolve inside the package's own directory (review r2 N10: a
+  `bin` of `../other/x.js` is refused); Python, a console script its own
+  distribution declares whose launcher is exactly a path its `RECORD` lists
+  and a regular file (r2 N10: never a link that resolves to a listed file).
+  It must resolve inside the install tree. Checked at
   publication and again before every launch, so a dependency's bin or the
   venv's own `python` is refused.
 - **The install is not staged and renamed** (a Python install's launchers

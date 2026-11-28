@@ -393,7 +393,7 @@ def test_an_install_ends_its_flight_only_under_the_registry_gate(
     gate = mcp_sandbox.REGISTRY_GATE
 
     class Guarded(set[tuple[str, str, str]]):
-        def discard(self, item: tuple[str, str, str]) -> None:
+        def discard(self, item: object) -> None:
             assert gate._readers or gate._writing, "changed outside the registry gate"
             super().discard(item)
 
@@ -594,3 +594,169 @@ def test_an_http_registration_naming_any_sandbox_field_is_refused(
     with pytest.raises(ValueError, match="http server"):
         mcp_sandbox.register(store, args, chat_id=None)
     assert mcp_sandbox.http_fields_problem({k: v for k, v in args.items() if k != field}) is None
+
+
+# -- N9: the lock's structure, its root, and every source, bundled ones included ----
+
+_REG = "https://registry.npmjs.org/"
+_TOP = {"version": "1.0.0", "resolved": f"{_REG}fx-mcp/-/fx-mcp-1.0.0.tgz", "integrity": "sha512-a"}
+
+
+def _lock(tree: Path, packages: dict[str, Any] | None, version: int = 3) -> Path:
+    tree.mkdir(parents=True, exist_ok=True)
+    lock: dict[str, Any] = {"name": "t", "lockfileVersion": version, "requires": True}
+    if packages is not None:
+        lock["packages"] = packages
+    (tree / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    for path in packages or {}:
+        if path:
+            (tree / path).mkdir(parents=True, exist_ok=True)
+            (tree / path / "package.json").write_text("{}", encoding="utf-8")
+    return tree
+
+
+def _packages(**extra: Any) -> dict[str, Any]:
+    return {"": {"dependencies": {"fx-mcp": "^1.0.0"}}, "node_modules/fx-mcp": dict(_TOP), **extra}
+
+
+_BUNDLER = {**_TOP, "bundleDependencies": ["inner"]}
+_NESTED = "node_modules/fx-mcp/node_modules/inner"
+
+
+@pytest.mark.parametrize(
+    "packages,version,why",
+    [
+        (None, 3, "packages"),
+        (_packages(), 1, "packages"),
+        (
+            {
+                "": {"dependencies": {"fx-mcp": "^1.0.0"}},
+                "node_modules/fx-mcp": {**_TOP, "version": "1.0.1"},
+            },
+            3,
+            "fx-mcp@1.0.0",
+        ),
+        (
+            {"": {"dependencies": {"other": "1"}}, "node_modules/fx-mcp": dict(_TOP)},
+            3,
+            "fx-mcp@1.0.0",
+        ),
+        (
+            _packages(
+                **{
+                    "node_modules/x": {
+                        "version": "1.0.0",
+                        "inBundle": True,
+                        "resolved": "git+https://example.test/x.git",
+                    }
+                }
+            ),
+            3,
+            "git+https",
+        ),
+        (_packages(**{"node_modules/x": {"version": "1.0.0", "inBundle": True}}), 3, "bundled"),
+        (
+            {
+                **_packages(),
+                "node_modules/fx-mcp": {**_TOP},
+                _NESTED: {"version": "1.0.0", "inBundle": True},
+            },
+            3,
+            "bundled",
+        ),  # its parent bundles nothing
+        (
+            {
+                **_packages(),
+                "node_modules/fx-mcp": _BUNDLER,
+                _NESTED: {"version": "1.0.0", "inBundle": True, "integrity": "sha512-b"},
+            },
+            3,
+            "bundled",
+        ),
+        (
+            _packages(
+                **{
+                    "../outside": {
+                        "version": "1.0.0",
+                        "resolved": f"{_REG}o.tgz",
+                        "integrity": "sha512-c",
+                    }
+                }
+            ),
+            3,
+            "outside",
+        ),
+    ],
+)
+def test_a_lock_that_does_not_prove_every_source_refuses_the_install(
+    tmp_path: Path, packages: dict[str, Any] | None, version: int, why: str
+) -> None:
+    tree = _lock(tmp_path / "tree", packages, version)
+    problem = mcp_sandbox.npm_tree_problem(tree, "fx-mcp@1.0.0")
+    assert problem is not None and why in problem, problem
+
+
+def test_a_dependency_bundled_in_its_registry_parent_is_accepted(tmp_path: Path) -> None:
+    packages = {**_packages(), "node_modules/fx-mcp": _BUNDLER,
+                _NESTED: {"version": "1.0.0", "inBundle": True},
+                f"{_NESTED}/node_modules/deep": {"version": "2.0.0", "inBundle": True}}  # fmt: skip
+    tree = _lock(tmp_path / "tree", packages)
+    assert mcp_sandbox.npm_tree_problem(tree, "fx-mcp@1.0.0") is None
+    (tree / _NESTED / "package.json").unlink()  # nothing unpacked there: no evidence
+    assert "bundled" in str(mcp_sandbox.npm_tree_problem(tree, "fx-mcp@1.0.0"))
+
+
+# -- N10: the entry point inside the package's own directory, the exact launcher ---
+
+
+def _npm_config(command: str = "fx-mcp") -> MCPServerConfig:
+    return MCPServerConfig(
+        "fx", "stdio", command=(command,), sandbox="strict", install=("npm", "fx-mcp@1.0.0")
+    )
+
+
+def test_an_npm_bin_that_leaves_its_own_package_is_refused(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    own, other = tree / "node_modules" / "fx-mcp", tree / "node_modules" / "evil"
+    own.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (other / "x.js").write_text("", encoding="utf-8")
+    (own / "package.json").write_text(json.dumps({"bin": {"fx-mcp": "../evil/x.js"}}))
+    (tree / "node_modules" / ".bin").mkdir()
+    (tree / "node_modules" / ".bin" / "fx-mcp").symlink_to("../evil/x.js")
+    problem = mcp_sandbox.entry_point_problem(tree, _npm_config())
+    assert problem is not None and "own directory" in problem, problem
+
+
+def _wheel_tree(tree: Path, record: list[str]) -> Path:
+    site = tree / "lib" / "python3.12" / "site-packages"
+    info = site / "fxmcp-1.0.0.dist-info"
+    (site / "fxmcp").mkdir(parents=True)
+    info.mkdir()
+    (site / "fxmcp" / "__init__.py").write_text("def main(): pass\n", encoding="utf-8")
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: fxmcp\nVersion: 1.0.0\n")
+    (info / "entry_points.txt").write_text("[console_scripts]\nfx-mcp = fxmcp:main\n")
+    (info / "RECORD").write_text("".join(f"{line},,\n" for line in record), encoding="utf-8")
+    (tree / "bin").mkdir()
+    return site
+
+
+def test_a_python_launcher_must_be_the_exact_regular_file_record_lists(tmp_path: Path) -> None:
+    config = MCPServerConfig(
+        "fxpy", "stdio", command=("fx-mcp",), sandbox="strict", install=("pypi", "fxmcp==1.0.0")
+    )
+    # a link to a file RECORD lists, standing where RECORD lists no launcher
+    tree = tmp_path / "a"
+    site = _wheel_tree(tree, ["fxmcp/__init__.py"])
+    (tree / "bin" / "fx-mcp").symlink_to(site / "fxmcp" / "__init__.py")
+    assert "RECORD lists" in str(mcp_sandbox.entry_point_problem(tree, config))
+    # RECORD lists the launcher, but a link stands there
+    tree = tmp_path / "b"
+    site = _wheel_tree(tree, ["fxmcp/__init__.py", "../../../bin/fx-mcp"])
+    (tree / "bin" / "fx-mcp").symlink_to(site / "fxmcp" / "__init__.py")
+    assert "regular file" in str(mcp_sandbox.entry_point_problem(tree, config))
+    # the control: the launcher itself, a regular file
+    tree = tmp_path / "c"
+    _wheel_tree(tree, ["fxmcp/__init__.py", "../../../bin/fx-mcp"])
+    (tree / "bin" / "fx-mcp").write_text("#!/bin/sh\n", encoding="utf-8")
+    assert mcp_sandbox.entry_point_problem(tree, config) is None
