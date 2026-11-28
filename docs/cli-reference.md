@@ -755,6 +755,28 @@ trail. `memory add` is the operator's own one-step write (v126-F10): your typed
 fact becomes a durable item at once, recorded as actor `operator`; no model
 tool, channel or webhook reaches it.
 
+## MCP Server Secrets
+
+```sh
+skep mcp secret set   SERVER_ID NAME   # reads the value from a prompt, or from stdin
+skep mcp secret list  SERVER_ID        # the names, set or not; never the values
+skep mcp secret unset SERVER_ID NAME
+```
+
+A strict MCP server (ADR 0069; `register_mcp_server` in chat, `sandbox`
+defaults to `strict`) gets nothing from serve's environment. The keys it
+lists in `secret_names` come from its own file,
+`~/.skep/supervisor/mcp-secret/<server_id>-secret` (mode 0600), which only
+this command writes: the value never passes through an argument, a chat or a
+card. The file is on the secret floor, so no other sandbox and no chat file
+read can open it, and the server's own values are redacted from its results,
+errors and diagnostics. A server you give a secret can still send it to any
+host it may reach; the registration card says so. Names the wall sets itself
+(`HOME`, `PATH`, `TMPDIR`, `npm_config_*`, `UV_*`, proxy variables) and
+loader controls (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `NODE_PATH`,
+`PYTHONPATH`, `PYTHONSTARTUP`) are refused. Pipe a value in with
+`printf %s "$KEY" | skep mcp secret set weather WEATHER_KEY`.
+
 ## Channels and Providers
 
 ```sh

@@ -992,3 +992,47 @@ def wait_for_install(store: RunStore, server_id: str, timeout: float | None = No
     thread = _INSTALLS.get((str(store.db_path), server_id))
     if thread is not None:
         thread.join(timeout)
+
+
+def _write_secrets(skep_home: Path, server_id: str, values: Mapping[str, str]) -> Path:
+    import json
+    import os
+
+    folder = _private_dir(skep_home / "supervisor", SECRETS_DIR)
+    os.chmod(folder, 0o700)
+    path = secrets_file(skep_home, server_id)
+    staged = folder / f".{server_id}-{secrets.token_hex(4)}.tmp"
+    fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(dict(values), handle)
+    os.replace(staged, path)
+    return path
+
+
+def _secret_target(server_id: str, name: str) -> None:
+    if SERVER_SLUG.fullmatch(server_id) is None:
+        raise MCPError(
+            f"server id {server_id!r} is not a strict server's id (lowercase letters, digits, "
+            "'-' or '_'); only a strict server reads secrets from this file"
+        )
+    if (problem := secret_name_problem(name)) is not None:
+        raise MCPError(problem)
+
+
+def set_secret(skep_home: Path, server_id: str, name: str, value: str) -> Path:
+    """``skep mcp secret set``: the value comes from a prompt or stdin, never
+    from an argument, a chat or a card (2.5). File mode 0600, folder 0700."""
+    _secret_target(server_id, name)
+    if not value:
+        raise MCPError(f"no value given for {name}; nothing was stored")
+    return _write_secrets(skep_home, server_id, {**load_secrets(skep_home, server_id), name: value})
+
+
+def unset_secret(skep_home: Path, server_id: str, name: str) -> bool:
+    _secret_target(server_id, name)
+    held = load_secrets(skep_home, server_id)
+    if name not in held:
+        return False
+    del held[name]
+    _write_secrets(skep_home, server_id, held)
+    return True
