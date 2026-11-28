@@ -426,6 +426,25 @@ def next_slot(schedule: ScheduleRecord, now: str) -> str:
     )
 
 
+class _SlotMoved(Exception):
+    """v135-F6 review r2: between the tick's read and its claim the schedule
+    stopped being due (removed, disabled, or moved to a later slot)."""
+
+
+def _claim(store: RunStore, schedule: ScheduleRecord, moment: str) -> bool:
+    """v135-F6 review r2: claim the slot right before the side effect, only
+    while the row holds the slot this tick read. A row moved meanwhile (a
+    run-now confirmed after the read) is re-read and decided again, so the
+    run counts as that run-now and the slot comes from fresh state; one no
+    longer due raises _SlotMoved and nothing runs. True: claimed."""
+    while not store.claim_schedule_slot(schedule, next_run_at=next_slot(schedule, moment)):
+        fresh = store.get_schedule(schedule.name)
+        if fresh is None or not fresh.enabled or fresh.next_run_at > moment:
+            raise _SlotMoved
+        schedule = fresh
+    return True
+
+
 def next_fire_times(
     start_at: str | None,
     interval_seconds: int,
@@ -1403,8 +1422,8 @@ def run_due(
             store.record_schedule_outcome(schedule.name, task_id=None, state=state)
             results.append(TickResult(name=schedule.name, task_id=None, state=state))
             continue
+        claimed = False  # v135-F6 review r2: set where the side effect starts
         try:
-            store.claim_schedule_slot(schedule.name, next_run_at=next_at)  # v135-F6 review
             blocked_state: str | None = None
             # v132-F5 (I2, I8): a bound run is the project's run — its engine
             # and verify pins reach dispatch (empty = run_task's builtin).
@@ -1444,6 +1463,7 @@ def run_due(
                 # otherwise as an inert note (the twin of chat add_note). No
                 # repo, no worker, no policy surface; "note_posted" rides the
                 # blocked_state no-dispatch tail and counts as a health success.
+                claimed = _claim(store, schedule, moment)
                 _deliver_tick_text(store, schedule, schedule.instructions, notify, context=chained)
                 store.record_schedule_output(schedule.name, schedule.instructions)
                 blocked_state = "note_posted"
@@ -1457,10 +1477,11 @@ def run_due(
                 # failure, so a persistently broken script auto-disables.
                 # ponytail: scripts run sequentially inside the tick (120s cap
                 # each); parallelize if a slow monitor ever starves the tick.
-                # ES B120: the slot is claimed (above) BEFORE the side effect —
+                # ES B120: the slot is claimed BEFORE the side effect —
                 # a serve that dies mid-script must not re-run it at once on
                 # restart (at-most-once; reconcile_interrupted_scripts records
                 # it), nor fire a one-shot again at its next slot.
+                claimed = _claim(store, schedule, moment)
                 store.mark_schedule_ran(
                     schedule.name, ran_at=moment, task_id=None, state=SCRIPT_RUNNING_STATE
                 )
@@ -1496,6 +1517,7 @@ def run_due(
                         "daemon (the CLI tick has no chat engine)"
                     )
                 else:
+                    claimed = _claim(store, schedule, moment)
                     output, prompt_ok = prompt_turn(schedule, chained)
                     store.record_schedule_output(schedule.name, output)
                     if prompt_ok:
@@ -1516,6 +1538,7 @@ def run_due(
                 # at tick time and delivered exactly like a note tick. No repo,
                 # no worker, read-only over the store.
                 digest_text = compose_digest(store)
+                claimed = _claim(store, schedule, moment)
                 store.record_schedule_output(schedule.name, digest_text)
                 _deliver_tick_text(store, schedule, digest_text, notify, context=chained)
                 blocked_state = "digest_posted"
@@ -1613,6 +1636,7 @@ def run_due(
                     )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(taint, dispatch_decision)
+                    claimed = _claim(store, schedule, moment)
                     outcome = dispatch(
                         repo,
                         instance.instructions
@@ -1726,6 +1750,7 @@ def run_due(
                     )  # fmt: skip
                 if blocked_state is None:
                     dispatch_decision = _with_chat_taint(taint, dispatch_decision)
+                    claimed = _claim(store, schedule, moment)
                     outcome = dispatch(
                         repo,
                         schedule.instructions
@@ -1764,11 +1789,19 @@ def run_due(
                     held = dict(dispatch_decision.delegation), repo
             else:
                 task_id, state = None, blocked_state
+        except _SlotMoved:
+            continue  # not due any more: it is someone else's slot now
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
             task_id, state = None, f"dispatch_error: {exc}"
         # ES B110: the bookkeeping stays inside this schedule's own try too —
         # one schedule's failure must never end the tick for the rest.
         try:
+            if not claimed:
+                # v135-F6 review r2: a tick that deliberately ran nothing
+                # (refused, skipped, failed before its side effect) advances
+                # with its outcome, as before v135 — unless the slot moved
+                # since the read (a run-now made meanwhile stands).
+                store.claim_schedule_slot(schedule, next_run_at=next_at)
             store.mark_schedule_ran(schedule.name, ran_at=moment, task_id=task_id, state=state)
             # v14: record the tick outcome for schedule health (success rate,
             # consecutive failures, last failure reason).

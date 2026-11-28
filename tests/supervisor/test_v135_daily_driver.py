@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -681,6 +682,164 @@ def test_a_run_now_made_during_a_long_tick_survives_in_every_lane(
     row = store.get_schedule("ritual")
     assert row is not None
     assert (row.next_run_at, row.resume_slot) == (RUN_NOW, TOMORROW_7AM)
+
+
+# review r2 (A): the claim is conditional on the slot the tick read
+
+OVERDUE_TICK = "2026-11-27T15:05:00Z"  # the 15:00 slot was missed by five minutes
+
+
+def _race(store: RunStore, monkeypatch: pytest.MonkeyPatch, change: object) -> None:
+    """``change`` lands after the tick's due-list read, before its claim."""
+    read = store.due_schedules
+
+    def due(now: str) -> list[ScheduleRecord]:
+        stale = read(now)
+        change()  # type: ignore[operator]
+        return stale
+
+    monkeypatch.setattr(store, "due_schedules", due)
+
+
+def _posts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from skep.supervisor import scheduler
+
+    posted: list[str] = []
+
+    def deliver(_store: object, schedule: ScheduleRecord, *_a: object, **_k: object) -> None:
+        posted.append(schedule.name)
+
+    monkeypatch.setattr(scheduler, "_deliver_tick_text", deliver)
+    return posted
+
+
+def test_a_run_now_confirmed_after_the_read_is_not_overwritten_by_the_claim(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.add_schedule(_note("ritual", start_at=TODAY_7AM))  # fixed interval, overdue
+    posted = _posts(monkeypatch)
+    _race(store, monkeypatch, lambda: store.mark_schedule_due("ritual", due_at=OVERDUE_TICK))
+
+    run_due(store=store, config=config, now=OVERDUE_TICK)
+
+    row = store.get_schedule("ritual")
+    assert row is not None
+    assert (row.next_run_at, row.resume_slot) == ("2026-11-28T15:05:00Z", None)  # not 15:00
+    assert posted == ["ritual"]  # one dispatch for the one claim
+
+
+def test_a_run_now_after_the_read_keeps_the_saved_future_slot(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.add_schedule(_note("ritual", start_at=TOMORROW_7AM))
+    store.mark_schedule_due("ritual", due_at=TODAY_2PM)
+    posted = _posts(monkeypatch)
+    _race(
+        store, monkeypatch, lambda: store.mark_schedule_due("ritual", due_at="2026-11-27T22:00:20Z")
+    )
+
+    run_due(store=store, config=config, now="2026-11-27T22:00:30Z")
+
+    row = store.get_schedule("ritual")
+    assert row is not None and (row.next_run_at, row.resume_slot) == (TOMORROW_7AM, None)
+    assert posted == ["ritual"]
+
+
+def test_a_slot_moved_to_the_future_after_the_read_is_not_dispatched(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tick claimed it first (or the operator moved it): nothing runs."""
+    store.add_schedule(_note("ritual", start_at=TODAY_7AM))
+    posted = _posts(monkeypatch)
+    _race(store, monkeypatch, lambda: store.mark_schedule_due("ritual", due_at=TOMORROW_7AM))
+
+    assert run_due(store=store, config=config, now=OVERDUE_TICK) == []
+
+    row = store.get_schedule("ritual")
+    assert row is not None and row.next_run_at == TOMORROW_7AM and row.last_run_at is None
+    assert posted == []
+
+
+# review r2 (N1): the claim sits right before the side effect
+
+
+def _worker(tmp: Path) -> ScheduleRecord:
+    return make_schedule(
+        name="nightly", repo=tmp / "repo", instructions="x", interval_seconds=DAY,
+        worker_kind="coding", start_at=TODAY_7AM,
+    )  # fmt: skip
+
+
+def test_a_crash_after_preflight_before_the_side_effect_leaves_the_schedule_due(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skep.supervisor import scheduler
+
+    class _ServeDied(BaseException):
+        pass
+
+    def _dies(*_a: object, **_k: object) -> None:
+        raise _ServeDied
+
+    store.add_schedule(_worker(tmp_path))
+    monkeypatch.setattr(scheduler, "_uses_worker_provider", lambda *_a: False)
+    monkeypatch.setattr(scheduler, "_external_gates", _dies)  # the last check before dispatch
+    with pytest.raises(_ServeDied):
+        run_due(store=store, config=config, now=TICK)
+
+    row = store.get_schedule("nightly")
+    assert row is not None and row.next_run_at == TODAY_7AM  # still due: nothing ran
+    assert [r.name for r in store.due_schedules(TICK)] == ["nightly"]
+
+
+@pytest.mark.parametrize("exit_", ["provider_blocked", "prompt_failed", "dispatch_error", "gate"])
+def test_each_deliberate_no_dispatch_exit_advances_the_slot_once(
+    exit_: str,
+    store: RunStore,
+    config: SupervisorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import dataclasses
+
+    from skep import status
+    from skep.supervisor import scheduler
+
+    schedule = _worker(tmp_path)
+    if exit_ == "provider_blocked":
+        monkeypatch.setattr(scheduler, "_uses_worker_provider", lambda *_a: True)
+        monkeypatch.setattr(
+            status, "worker_provider_check", lambda *_a: {"kind": "auth", "detail": "401"}
+        )
+    else:
+        monkeypatch.setattr(scheduler, "_uses_worker_provider", lambda *_a: False)
+    if exit_ == "prompt_failed":
+        schedule = dataclasses.replace(schedule, worker_kind="prompt", repo="")
+    elif exit_ == "dispatch_error":
+        schedule = dataclasses.replace(schedule, template_name="gone")
+    elif exit_ == "gate":
+        monkeypatch.setattr(
+            scheduler, "_external_gates", lambda *_a, **_k: ("policy_blocked: no", None)
+        )
+    store.add_schedule(schedule)
+    claim = store.claim_schedule_slot
+    claims: list[object] = []
+
+    def counted(*args: object, **kwargs: object) -> object:
+        claims.append(args)
+        return claim(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "claim_schedule_slot", counted)
+    (result,) = run_due(store=store, config=config, now=TICK, dispatch=_never)
+
+    assert result.state.startswith(exit_ if exit_ != "gate" else "policy_blocked")
+    row = store.get_schedule("nightly")
+    assert row is not None and row.next_run_at == TOMORROW_7AM and row.last_state == result.state
+    assert len(claims) == 1
+
+
+def _never(*_a: object, **_k: object) -> NoReturn:
+    raise AssertionError("a no-dispatch exit dispatched")
 
 
 # -- F7: wall-clock daily schedules ---------------------------------------------

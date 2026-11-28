@@ -2957,15 +2957,19 @@ class RunStore:
         return True
 
     @_locked
-    def claim_schedule_slot(self, name: str, *, next_run_at: str) -> None:
+    def claim_schedule_slot(self, seen: ScheduleRecord, *, next_run_at: str) -> bool:
         """v135-F6 review: the tick advances the slot BEFORE its side effect
         and consumes ``resume_slot``, so a run-now confirmed while the run is
-        going is saved against the new slot and nothing after rewrites it."""
-        self._conn.execute(
-            "UPDATE schedules SET next_run_at = ?, resume_slot = NULL WHERE name = ?",
-            (next_run_at, name),
+        going is saved against the new slot and nothing after rewrites it.
+        Review r2: only while the row still holds the slot the tick ``seen``
+        — False if a run-now (or anything else) moved it since the read."""
+        cursor = self._conn.execute(
+            "UPDATE schedules SET next_run_at = ?, resume_slot = NULL"
+            " WHERE name = ? AND next_run_at = ? AND resume_slot IS ?",
+            (next_run_at, seen.name, seen.next_run_at, seen.resume_slot),
         )
         self._conn.commit()
+        return cursor.rowcount > 0
 
     @_locked
     def mark_schedule_ran(self, name: str, *, ran_at: str, task_id: str | None, state: str) -> None:

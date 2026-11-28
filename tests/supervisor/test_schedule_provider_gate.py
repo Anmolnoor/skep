@@ -187,7 +187,9 @@ def test_doctor_names_the_provider_skipped_schedules(tmp_path: Path) -> None:
     store = RunStore(home / "supervisor" / "supervisor.sqlite3")
     try:
         _add(store, tmp_path, "nightly")
-        store.claim_schedule_slot("nightly", next_run_at="2026-06-12T09:00:00Z")
+        seen = store.get_schedule("nightly")
+        assert seen is not None
+        store.claim_schedule_slot(seen, next_run_at="2026-06-12T09:00:00Z")
         store.mark_schedule_ran(
             "nightly",
             ran_at=NOW,
