@@ -19,7 +19,12 @@ import pytest
 
 from skep.supervisor import RunStore, sandbox
 from skep.supervisor.forge import ForgedPlugin, save_plugin
-from skep.supervisor.mcp_client import MCPError, MCPServerConfig, runner_for_config
+from skep.supervisor.mcp_client import (
+    MCPError,
+    MCPServerConfig,
+    runner_for_config,
+    save_mcp_server,
+)
 
 _TOOL = """
 import json, sys
@@ -63,10 +68,14 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
 ) -> None:
     seen: dict[str, Any] = {}
 
-    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen["argv"], seen["env"] = argv, kwargs.get("env")
-        out = '{"jsonrpc": "2.0", "id": 2, "result": {"content": "ok"}}\n'
-        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+    class FakePopen:  # forged_lane's bounded run (ADR 0069 review r2 N13)
+        pid, returncode = 0, 0
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            seen["argv"], seen["env"] = argv, kwargs.get("env")
+
+        def communicate(self, payload: Any = None, timeout: Any = None) -> tuple[str, str]:
+            return '{"jsonrpc": "2.0", "id": 2, "result": {"content": "ok"}}\n', ""
 
     monkeypatch.setattr(
         sandbox, "availability", lambda backend=None: sandbox.SandboxAvailability(True)
@@ -75,11 +84,11 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
         sandbox, "wrap_command", lambda argv, profile, backend=None: ["SANDBOX", *argv]
     )
     monkeypatch.setattr(sandbox, "write_profile", lambda path, **_: path)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
     monkeypatch.setenv("SKEP_FAKE_SECRET", "CANARY")
-    config = _forged(tmp_path, tmp_path / "x")
     home = tmp_path / "home"
     store = _bound_store(home, tmp_path / "x")
+    config = save_mcp_server(store, _forged(tmp_path, tmp_path / "x"))  # the one in force
     try:
         run = runner_for_config(config, skep_home=home, store=store)
         assert run("tools/call", {"name": "t"}) == {"content": "ok"}
@@ -118,9 +127,10 @@ def test_forged_tool_cannot_write_outside_its_workspace(tmp_path: Path) -> None:
     target = tmp_path / "escape.txt"
     store = _bound_store(tmp_path / "home", target)
     try:
-        result = runner_for_config(
-            _forged(tmp_path, target), skep_home=tmp_path / "home", store=store
-        )("tools/call", {"name": "t"})
+        config = save_mcp_server(store, _forged(tmp_path, target))  # the one in force
+        result = runner_for_config(config, skep_home=tmp_path / "home", store=store)(
+            "tools/call", {"name": "t"}
+        )
     finally:
         store.close()
     assert result == {"content": "blocked"}

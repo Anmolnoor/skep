@@ -863,6 +863,36 @@ def redacted_reply(lines: list[str], values: Mapping[str, str]) -> Mapping[str, 
     return _stdio_reply(lines, scrub=lambda message: redact(message, values))
 
 
+def _refuse_moved_roots(config: MCPServerConfig, wrapped: list[str] | None = None) -> None:
+    """Review S6 (reverify._moved_read_roots): a recorded root that is a link
+    now, or no longer resolves to itself, would read what it points at today.
+    Review r2 N7: with the built wall's argv (bubblewrap), each recorded root
+    must also be bound exactly at its recorded path and never made a link."""
+    from .mcp_client import MCPNotRun
+
+    moved = [raw for raw in config.read_paths if Path(raw).is_symlink() or _resolved(raw) != raw]
+    if moved:
+        raise MCPNotRun(
+            f"not run: read path(s) {', '.join(moved)} of {config.server_id!r} no longer resolves "
+            "to itself (it, or a directory above it, is a link now), so the wall would read "
+            "somewhere its card never showed. Put the directory back, or register the server "
+            "again: the new card shows where each path resolves"
+        )
+    if wrapped is None or "--ro-bind" not in wrapped:  # Seatbelt: rules on paths, no binds
+        return
+    triples = [tuple(wrapped[i : i + 3]) for i in range(len(wrapped) - 2)]
+    links = {dest for flag, _target, dest in triples if flag == "--symlink"}
+    unbound = [
+        raw for raw in config.read_paths if ("--ro-bind", raw, raw) not in triples or raw in links
+    ]
+    if unbound:
+        raise MCPNotRun(
+            f"not run: the wall built for {config.server_id!r} binds read path(s) "
+            f"{', '.join(unbound)} somewhere else: that is not the path its card showed. Nothing "
+            "was started; ask again, or register the server again for a card that shows it"
+        )
+
+
 @contextlib.contextmanager
 def _launch_snapshot(
     skep_home: Path, server_id: str, values: Mapping[str, str]
@@ -955,16 +985,7 @@ def strict_exchange(
             f"not run: read path(s) {', '.join(gone)} of {config.server_id!r} do not exist; "
             "create them, or register the server again without them"
         )
-    # review S6 (reverify._moved_read_roots): a recorded root that is a link
-    # now, or no longer resolves to itself, would read what it points at today
-    moved = [raw for raw in config.read_paths if Path(raw).is_symlink() or _resolved(raw) != raw]
-    if moved:
-        raise MCPNotRun(
-            f"not run: read path(s) {', '.join(moved)} of {config.server_id!r} no longer resolves "
-            "to itself (it, or a directory above it, is a link now), so the wall would read "
-            "somewhere its card never showed. Put the directory back, or register the server "
-            "again: the new card shows where each path resolves"
-        )
+    _refuse_moved_roots(config)
     tool_env = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
     own = {name: secret_values[name] for name in config.secret_names}
@@ -995,6 +1016,9 @@ def strict_exchange(
                 unmasked=unmasked,
                 deny_local=True,  # review S8
             ) as (wrapped, wall_env):
+                # review r2 N7: checked again once the wall is built, against
+                # what it binds — a root swapped while it was built is refused
+                _refuse_moved_roots(config, wrapped)
                 env = {**wall_env, **RUNTIME_ENV, **tool_env}  # no secret value (S1)
                 if clash := sorted(set(own) & set(env)):
                     raise MCPNotRun(

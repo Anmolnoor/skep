@@ -135,7 +135,14 @@ left open:
   and the registry keeps, where each `read_paths` entry resolves; a confirm
   whose grant no longer matches its card registers nothing, and a launch
   whose recorded root is a link now, or no longer resolves to itself, is
-  refused (the idea of `reverify._moved_read_roots`).
+  refused (the idea of `reverify._moved_read_roots`). The check runs again
+  once the wall is built (review r2 N7), and on bubblewrap the built wall's
+  argv must bind each recorded root exactly at its recorded path, never as
+  a link: a root swapped while the wall was built is refused, so the wall
+  never grants a directory the card did not show. What remains is the
+  instant between that check and bubblewrap's own mount (it mounts by
+  path); binding each root from a descriptor opened at the check
+  (`--ro-bind-fd`) would close it and is a follow-up.
 - **An http registration leaves the sandbox fields out** (review S12): it
   is stored as `host` (the mode that confines nothing); naming any sandbox
   field for it, `sandbox='host'` included, is refused with a teaching error.
@@ -230,7 +237,11 @@ left open:
   deny_local=True)`) refuses serve's ports on every address this host owns —
   `0.0.0.0`, an interface address, an IP literal or a resolved answer — not
   only on loopback names. Dispatch, re-verify, forged tools and script
-  schedules keep their proxies as they were.
+  schedules keep their proxies as they were. serve binds its listener
+  before the app starts and records the port it actually listens on (`--port
+  0` picks one) before any MCP work can run (review r2 N8), and every wall's
+  proxy reads the recorded ports at each admission, not once when it
+  started, so a port recorded later is still refused.
 - **A valid reply, or outcome unknown** (review S11, r2 N11): only a valid
   `initialize` result advances the handshake — a JSON-RPC 2.0 response whose
   result holds `protocolVersion`, `capabilities` and `serverInfo`, which the

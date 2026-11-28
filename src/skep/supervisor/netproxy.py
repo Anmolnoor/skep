@@ -490,11 +490,13 @@ class _ProxyServer(ThreadingTCPServer):
         port: int = 0,
         relay: ProviderRelay | None = None,
         deny_local: bool = False,
+        control_plane_home: Path | None = None,
     ) -> None:
         super().__init__(("127.0.0.1", port), _ProxyHandler)
         self.deny_local = deny_local  # review S8: the strict MCP lane only
         self.allowlist = allowlist
-        self.denied_ports = denied_ports
+        self._denied_ports = denied_ports
+        self.control_plane_home = control_plane_home
         self.asks = asks  # W30: named in the 403, never admitted
         self.loopback_ports = loopback_ports  # D6: the only loopback it admits
         self.relay = relay
@@ -503,6 +505,16 @@ class _ProxyServer(ThreadingTCPServer):
         self.denied = 0
         self.relayed = 0
         self.relay_refused = 0
+
+    @property
+    def denied_ports(self) -> tuple[int, ...]:
+        """The fixed ports, plus — with ``control_plane_home`` (review r2 N8)
+        — serve's ports as recorded NOW, read at each admission, so a serve
+        that recorded its port after this proxy started is still refused."""
+        if self.control_plane_home is None:
+            return self._denied_ports
+        live = control_plane_ports(self.control_plane_home)
+        return tuple(sorted({*self._denied_ports, *live}))
 
     @property
     def own_port(self) -> int:
@@ -930,6 +942,7 @@ class FilteringProxy:
         port: int = 0,  # ADR 0060: a re-adopted worker's profile names its port
         relay: ProviderRelay | None = None,
         deny_local: bool = False,  # review S8: serve's port on every local address
+        control_plane_home: Path | None = None,  # review r2 N8: serve's ports, read live
     ) -> None:
         self._server = _ProxyServer(
             tuple(allowlist),
@@ -939,6 +952,7 @@ class FilteringProxy:
             port,
             relay,
             deny_local,
+            control_plane_home,
         )
         self._unix_path = unix_socket_path
         self._unix_server = (

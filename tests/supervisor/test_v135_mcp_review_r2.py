@@ -4,6 +4,7 @@ round-2 item (N1-N13) it pins.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -479,3 +480,98 @@ def test_a_forged_listing_waits_for_a_publication_in_progress(
     lister.join(5)
     assert started_during_publication == []
     assert ran == ["forge-x"]
+
+
+# -- N7: the root the wall binds is the root the card showed ------------------------
+
+
+@needs_strict_wall
+def test_a_root_swapped_while_the_wall_is_built_is_refused(
+    store: RunStore, skep_home: Path, server: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    base = Path(os.path.realpath(tmp_path))
+    shown, other = base / "shown", base / "other"
+    shown.mkdir()
+    other.mkdir()
+    (other / "b.txt").write_text("never on the card", encoding="utf-8")
+    save_mcp_server(store, MCPServerConfig(
+        "roots", "stdio", command=(sys.executable, str(server / "server.py")), sandbox="strict",
+        read_paths=(os.path.realpath(server), str(shown)),
+    ))  # fmt: skip
+    real = sandbox.write_profile
+
+    def swapped_mid_build(*args: Any, **kwargs: Any) -> Path:
+        shown.rename(base / "shown-moved")
+        shown.symlink_to(other)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "write_profile", swapped_mid_build)
+    got = _call(store, skep_home, "roots", "probe", paths=[str(shown / "b.txt")])
+    assert got.outcome == "not_run", got
+    assert "no longer resolves" in str(got.error) or "not the path" in str(got.error)
+
+
+# -- N8: serve's live port, recorded before any MCP work, read at admission ----------
+
+
+def test_serve_records_the_port_it_listens_on_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+
+    import uvicorn
+
+    from skep.supervisor import netproxy
+    from skep.supervisor.serve.serve_cmds import cmd_serve
+
+    seen: dict[str, Any] = {}
+
+    def run(self: uvicorn.Server, sockets: Any = None) -> None:
+        seen["listening"] = [sock.getsockname()[1] for sock in sockets or ()]
+        (recorded,) = (tmp_path / "home").rglob(netproxy.SERVE_PORT_FILE)
+        seen["recorded"] = netproxy.control_plane_ports(recorded.parent)
+
+    monkeypatch.setattr(uvicorn.Server, "run", run)
+    args = argparse.Namespace(
+        home=tmp_path / "home", worker_cmd=None, auto_approve=False, host="127.0.0.1", port=0
+    )
+    cmd_serve(args)
+    (port,) = seen["listening"]
+    assert port != 0 and port in seen["recorded"]
+
+
+@needs_strict_wall
+def test_the_strict_proxy_reads_serves_port_at_admission(
+    skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import netproxy, wall
+
+    built: list[Any] = []
+    real = netproxy.FilteringProxy
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        built.append(real(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(netproxy, "FilteringProxy", spy)
+    work = tmp_path / "work"
+    work.mkdir()
+    with wall.walled(["true"], skep_home=skep_home, hosts=("api.example.test",),
+                     workspace=work, deny_local=True):  # fmt: skip
+        netproxy.record_serve_port(skep_home / "supervisor", 9123)  # after it started
+        (proxy,) = built
+        assert 9123 in proxy._server.denied_ports
+
+
+def test_a_root_the_built_wall_binds_elsewhere_is_refused(tmp_path: Path) -> None:
+    root = os.path.realpath(tmp_path)
+    config = dataclasses.replace(_strict_config(tmp_path), read_paths=(root,))
+    good = ["bwrap", "--ro-bind", root, root, "--", "srv"]
+    mcp_sandbox._refuse_moved_roots(config, good)  # bound in place: it stands
+    for wrapped in (
+        ["bwrap", "--ro-bind", "/elsewhere", "/elsewhere", "--", "srv"],
+        [*good[:4], "--symlink", "/elsewhere", root, "--", "srv"],
+    ):
+        with pytest.raises(mcp_client.MCPNotRun, match="not the path its card showed"):
+            mcp_sandbox._refuse_moved_roots(config, wrapped)

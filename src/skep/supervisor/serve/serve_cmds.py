@@ -189,9 +189,6 @@ def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
     print(access_token_line(config.home, sys.stdout.isatty()), flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
-    # ES-F6 (B05) + #58 ES-F4: every run's proxy and every Seatbelt profile for
-    # this home refuse this port on loopback (both read <home>/serve-port).
-    record_serve_port(config.home, args.port)
     server = make_server(
         app,
         host=args.host,
@@ -199,6 +196,12 @@ def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
         log_level="info",
         log_config=serve_log_config(log_path),
     )
+    # ES-F6 (B05) + #58 ES-F4: every run's proxy and every Seatbelt profile for
+    # this home refuse this port on loopback (both read <home>/serve-port).
+    # ADR 0069 review r2 N8: the port it LISTENS on (--port 0 picks one), bound
+    # and recorded before the app starts, so no MCP work runs before it is known.
+    listener = server.config.bind_socket()
+    record_serve_port(config.home, listener.getsockname()[1])
 
     def request_restart() -> None:
         # v130: a graceful shutdown (lifespan stops the ticker and channels),
@@ -207,7 +210,10 @@ def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
         server.should_exit = True
 
     app.state.request_restart = request_restart
-    server.run()
+    try:
+        server.run(sockets=[listener])
+    finally:
+        listener.close()
     if getattr(app.state, "restart_requested", False):
         return RESTART_AFTER_UPDATE
     return 0 if server.started else 3  # uvicorn.run's startup-failure code

@@ -58,13 +58,8 @@ def walled(
     in-wall ``skep.secretenv`` step sets its values and the launcher never
     holds one. ``deny_local`` (review S8): the proxy refuses serve's port on
     every address this host owns, not only on loopback names."""
-    from . import sandbox
-    from .netproxy import (
-        FilteringProxy,
-        control_plane_ports,
-        forge_host_entry_problem,
-        host_entry_problem,
-    )
+    from . import netproxy, sandbox
+    from .netproxy import forge_host_entry_problem, host_entry_problem
     from .spawner import proxy_env
 
     # R2 (N1): `*` would make the wall allow-all, past the proxy. R3 (S15):
@@ -93,10 +88,11 @@ def walled(
                 socket_dir = tempfile.mkdtemp(prefix="skep-fx-", dir=proxy_socket_root())
                 stack.callback(shutil.rmtree, socket_dir, ignore_errors=True)
                 socket_path = str(Path(socket_dir) / "p.sock")
-            proxy = FilteringProxy(
+            proxy = netproxy.FilteringProxy(
                 hosts,
                 unix_socket_path=socket_path,
-                denied_loopback_ports=control_plane_ports(skep_home / "supervisor"),
+                # review r2 N8: serve's ports as recorded at each admission
+                control_plane_home=skep_home / "supervisor",
                 deny_local=deny_local,
             ).start()
             stack.callback(proxy.stop)
