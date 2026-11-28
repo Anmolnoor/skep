@@ -550,6 +550,8 @@ def test_call_mcp_tool_errors_name_the_next_step(
         silent = execute_mutation(
             "call_mcp_tool", args, store=store, holder=holder,
             runner=cast(Dispatcher, None), actor="test",
+            # v135 (ADR 0069 1.6): the card it confirms names this registration
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
         )  # fmt: skip
         assert silent["ok"] is False and "no JSON-RPC response" in silent["error"]
         assert "list_mcp_tools server_id=plain" in silent["next_step"]
@@ -558,11 +560,14 @@ def test_call_mcp_tool_errors_name_the_next_step(
             raise mcp_client.MCPError("unsupported MCP transport 'x'")
 
         monkeypatch.setattr(mcp_client, "runner_for_config", unbuildable)
-        with pytest.raises(ValueError, match=r"plain:get_x.*list_mcp_tools server_id=plain"):
-            execute_mutation(
-                "call_mcp_tool", args, store=store, holder=holder,
-                runner=cast(Dispatcher, None), actor="test",
-            )  # fmt: skip
+        unbuilt = execute_mutation(
+            "call_mcp_tool", args, store=store, holder=holder,
+            runner=cast(Dispatcher, None), actor="test",
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
+        )  # fmt: skip
+        # v135 (ADR 0069 1.7): nothing was sent, so it is recorded as not run
+        assert unbuilt["outcome"] == "not_run" and "unsupported MCP transport" in unbuilt["error"]
+        assert "list_mcp_tools server_id=plain" in unbuilt["next_step"]
 
         def refuses(config_: Any, **_: Any) -> Any:
             return lambda method, params: {"content": "missing text", "isError": True}
@@ -571,6 +576,8 @@ def test_call_mcp_tool_errors_name_the_next_step(
         result = execute_mutation(
             "call_mcp_tool", args, store=store, holder=holder,
             runner=cast(Dispatcher, None), actor="test",
+            # v135 (ADR 0069 1.6): the card it confirms names this registration
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
         )  # fmt: skip
         assert result["ok"] is False and "inputSchema" in result["next_step"]
     finally:
@@ -1188,3 +1195,40 @@ def test_replacing_a_dangling_venv_link_leaves_no_backup_behind(tmp_path: Path) 
     forge.commit_locked_venv(tmp_path, "p", "c" * 64, staging, seal)
     assert forge.seal_venv(home) == seal
     assert sorted(p.name for p in home.parent.iterdir()) == [home.name]
+
+
+def test_a_publication_holds_the_registry_gate_across_source_registration_and_record(
+    config: SupervisorConfig, shelf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0069 review S13: no call can see the new incarnation and still
+    run the old plugin binding — a reader waits out the whole publication."""
+    import threading
+
+    from skep.supervisor.mcp_sandbox import REGISTRY_GATE
+
+    store = RunStore(config.db_path)
+    try:
+        _seed(store, shelf, ECHO_SERVER_SOURCE)
+        _passing_stage_one(monkeypatch)
+        _Lanes(monkeypatch)
+        entered: list[bool] = []
+        real = forge.save_plugin
+
+        def save_plugin(store_: RunStore, record: Any) -> None:
+            if record.state == "active" and not entered:  # the registration is saved by now
+
+                def read() -> None:
+                    with REGISTRY_GATE.reading():
+                        pass
+
+                reader = threading.Thread(target=read, daemon=True)
+                reader.start()
+                reader.join(0.5)
+                entered.append(not reader.is_alive())
+            real(store_, record)
+
+        monkeypatch.setattr(forge, "save_plugin", save_plugin)
+        assert _promote(config, store, _card(store))["state"] == "active"
+        assert entered == [False]  # the reader waited until the record matched
+    finally:
+        store.close()

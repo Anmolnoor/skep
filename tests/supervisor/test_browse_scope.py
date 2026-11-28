@@ -19,6 +19,7 @@ from skep.supervisor.mcp_client import (
     MCPServerConfig,
     MCPTool,
     classify_browse_action,
+    load_mcp_servers,
     mcp_scope_decision,
     mcp_tool_scope_action,
     save_mcp_server,
@@ -221,6 +222,7 @@ def test_register_mcp_server_accepts_scope_browse(config: SupervisorConfig) -> N
                 "transport": "stdio",
                 "command": ["npx", "@playwright/mcp@latest"],
                 "scope": "browse",
+                "sandbox": "host",  # v135: a new registration is strict unless told
             },
             store=store,
             holder=holder,
@@ -333,10 +335,11 @@ def test_es_f160_a_browse_read_lists_the_servers_tools_once_until_re_registered(
         for _ in range(2):  # two reads: gate, card tier, last guard, the call
             assert mcp_scope_decision(store, holder, _tool("browser_snapshot")).verdict == "allow"
             assert mcp_call_is_read(store, "playwright", "browser_snapshot")
+            bound = {"incarnation": load_mcp_servers(store)["playwright"].incarnation}
             result = execute_mutation(
                 "call_mcp_tool", args, store=store, holder=holder,
                 runner=None,  # type: ignore[arg-type]  # an MCP call never dispatches
-                actor="test",
+                actor="test", card=bound,  # v135: the confirmed card's binding
             )  # fmt: skip
             assert result["ok"] is True
         assert calls == ["tools/list", "tools/call", "tools/call"]

@@ -7,11 +7,18 @@ follow the forge contract (single file, JSON-RPC lines, zero-argument
 `self_test`), so `python -m skep.mcp_servers.mail` is drivable by the same
 harness that trials forged tools.
 
+Both read their configuration from `skep serve`'s environment and the mail
+server speaks IMAP and SMTP, which the sandbox's HTTP proxy cannot carry, so
+both are registered `sandbox=host`: unsandboxed, as you, a HIGH card that
+says so (ADR 0069). A new stdio registration without `sandbox` is strict and
+would get none of that environment. `skep doctor` lists each server with its
+configured and enforced mode.
+
 ## Mail (`scope=email` — v41-F3 finally has its server)
 
 Register from chat (a card) or the API:
 
-    register_mcp_server server_id=mail transport=stdio
+    register_mcp_server server_id=mail transport=stdio sandbox=host
       command=["python","-m","skep.mcp_servers.mail"] scope=email
 
 Under the email scope: `list_recent` and `read_message` classify as
@@ -38,7 +45,7 @@ app-specific password where your provider offers one.
 
 ## Calendar (plain `mcp` scope — read-only by construction)
 
-    register_mcp_server server_id=calendar transport=stdio
+    register_mcp_server server_id=calendar transport=stdio sandbox=host
       command=["python","-m","skep.mcp_servers.calendar"]
 
 One env var: `SKEP_CALENDAR_ICS` = a local `.ics` path or an https URL
@@ -54,6 +61,9 @@ naive local time.
 
 Email and calendar are the two the daily-driver record demanded. For any
 other integration: registry first (an existing community MCP server via
-`register_mcp_server`), and where none exists, the forge (`forge_tool`)
+`register_mcp_server`, sandboxed by default: a pinned `install=` or an
+absolute entry point, only the hosts, read paths and secret names it needs,
+secrets set with `skep mcp secret set`, Linux only in this release: on macOS a
+sandboxed server that lists secrets is refused), and where none exists, the forge (`forge_tool`)
 authors one under the same trial + card + registration discipline. No
 integration ever ships its own permission system.

@@ -376,8 +376,8 @@ def test_doctor_names_the_fast_lane_and_diagnose_walls_as_they_now_are(
         "diagnose re-runs take their run's recorded strict setting and extra read paths, "
         "plus today's system and toolchain dirs" in detail
     )
-    # Wave 2's job, still true today: never claimed confined
-    assert "MCP servers you register run on the host, unsandboxed" in detail
+    # Wave 2a (ADR 0069): strict by default, host only when registered so
+    assert "stdio MCP servers you register run strict unless registered sandbox='host'" in detail
 
 
 def _kept_git_dir(kept: Path) -> Path:

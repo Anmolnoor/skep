@@ -5250,6 +5250,11 @@ def register_supervisor_commands(
 
     register_role_commands(subcommands)
 
+    # v135 (ADR 0069 2.5): a strict MCP server's own secrets file.
+    from .mcp_cmds import register_mcp_commands
+
+    register_mcp_commands(subcommands)
+
     # ADR 0054 (B1-3): the ACP governor an outside client spawns.
     from .acp_cmds import register_acp_commands
 

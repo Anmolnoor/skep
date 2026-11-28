@@ -66,6 +66,7 @@ def _build_status(
             _provider_advisories(home, provider_ready=False)
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
+            + _mcp_posture_advisories(home)
             + _verify_pin_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
@@ -103,6 +104,7 @@ def _build_status(
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
+        + _mcp_posture_advisories(home)
         + _verify_pin_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
@@ -675,9 +677,8 @@ def _browse_advisories(home: Path) -> list[str]:
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
-    import shutil
-
     from .supervisor.mcp_client import load_mcp_servers
+    from .supervisor.mcp_sandbox import launcher_missing
     from .supervisor.store import RunStore
 
     store = RunStore(db_path, readonly=True)
@@ -685,16 +686,39 @@ def _browse_advisories(home: Path) -> list[str]:
         servers = load_mcp_servers(store)
     finally:
         store.close()
-    return [
-        f"Browser MCP server {config.server_id!r} launches via {config.command[0]!r}, "
-        "which is not on PATH — its tools cannot spawn. Install the launcher "
-        "(e.g. npm provides npx) or re-register the server with a full path."
-        for config in servers.values()
-        if config.scope == "browse"
-        and config.transport == "stdio"
-        and config.command
-        and shutil.which(config.command[0]) is None
-    ]
+    lines = []
+    for config in servers.values():
+        if config.scope != "browse" or config.transport != "stdio":
+            continue
+        # v135 review S16: an installed strict server is checked at its entry point
+        if (missing := launcher_missing(config, home)) is None:
+            continue
+        fix = (
+            "Register it again to reinstall it."
+            if config.sandbox == "strict"
+            else "Install the launcher (e.g. npm provides npx) or re-register the server "
+            "with a full path."
+        )
+        lines.append(
+            f"Browser MCP server {config.server_id!r}: {missing} — its tools cannot spawn. {fix}"
+        )
+    return lines
+
+
+def _mcp_posture_advisories(home: Path) -> list[str]:
+    """v135 (ADR 0069 1.8): each registered stdio MCP server, configured and
+    enforced, with the chat request that hardens a host one."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.mcp_sandbox import posture_lines
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        return posture_lines(store, home)
+    finally:
+        store.close()
 
 
 def _verify_pin_advisories(home: Path) -> list[str]:
@@ -1426,7 +1450,8 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
             f" available; {n_strict} of {len(projects)} sandboxed projects strict; forged tools, "
             "script schedules and the fast lane always strict; diagnose re-runs take their run's "
             "recorded strict setting and extra read paths, plus today's system and toolchain "
-            "dirs; MCP servers you register run on the host, unsandboxed"
+            "dirs; stdio MCP servers you register run strict unless registered "
+            "sandbox='host' (each is listed in the advisories)"
             if strict
             else " (reads stay open but the secret floor)"
         )

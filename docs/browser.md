@@ -7,7 +7,10 @@ server is Playwright's official one.
 
 ## Register it
 
-From chat (the Queen proposes, you confirm the card), or ask for exactly:
+Ask the chat to set up the browser (`setup_browser`, or `/browser` in the
+command deck). It proposes Playwright's MCP server, `npx
+@playwright/mcp@latest`, under the `browse` scope, as a HIGH card; nothing
+starts before you answer it. Or ask for exactly:
 
 ```
 register_mcp_server
@@ -15,7 +18,19 @@ register_mcp_server
   transport: stdio
   command: ["npx", "@playwright/mcp@latest"]
   scope: browse
+  sandbox: host
 ```
+
+**It runs unsandboxed (`sandbox: host`) in this release.** A new stdio
+registration is sandboxed by default (`strict`, ADR 0069), but a sandboxed
+browser cannot browse yet: the strict lane reaches only listed hosts, and
+open web access from inside the wall arrives with the browse session pool
+(v135 Wave 2b). So the browser is registered `host`, and its card says what
+that means: it runs as you, reads every file your user can read, reaches
+the network, and can read skep's own serve token, so it could answer its
+own cards. The card discloses that; it does not prevent it. `@latest` is
+accepted only for `host`; a strict server needs a pinned version.
+`skep doctor` lists each MCP server with its configured and enforced mode.
 
 Requirements: `npx` on PATH (npm ships it). `skep doctor` warns if a
 registered browse server's launcher is missing. No npm? Run the server any
@@ -49,8 +64,9 @@ Tools on a browse-bound server decide as `browse/read` or `browse/act`
   outbound fetch, and `read_url` set the parity: every fetch is one
   operator decision.
 
-Each call starts the server, waits for its answer, then stops it (one
-process per call). A page does not carry over from one call to the next:
+Each call starts the server, sends `initialize`, waits for its answer,
+sends `notifications/initialized` and the request, waits for the reply, then
+stops it (one process per call). A page does not carry over from one call to the next:
 `browser_navigate` answers with the snapshot of the page it opened, and a
 later `browser_snapshot` starts on `about:blank`. The server runs in
 `~/.skep/browser/`, never in the folder serve runs from: Playwright writes

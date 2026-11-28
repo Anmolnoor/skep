@@ -13,9 +13,10 @@ module only discovers and calls; authorization lives in the capability engine.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import subprocess
@@ -41,6 +42,19 @@ class MCPError(Exception):
     """An MCP transport or protocol error."""
 
 
+class MCPNotRun(MCPError):
+    """v135 (ADR 0069 1.7): refused or failed BEFORE the request was sent."""
+
+
+class MCPOutcomeUnknown(MCPError):
+    """v135 (ADR 0069 1.7): the request was sent, then the server died or
+    passed its deadline. It may have acted: never retried, never "failed"."""
+
+
+class MCPReplyError(MCPError):
+    """The server answered the request with a JSON-RPC error: it ran."""
+
+
 @dataclass(frozen=True)
 class MCPServerConfig:
     server_id: str
@@ -48,6 +62,17 @@ class MCPServerConfig:
     command: tuple[str, ...] = ()  # stdio: argv
     url: str | None = None  # http/sse: endpoint
     scope: str = "mcp"  # v41-F3: the policy scope this server's tools decide under
+    # v135 (ADR 0069 1.1): the confinement fields (mcp_sandbox). The dataclass
+    # default is what a stored registration from before 2.4.0 loads as —
+    # ``host``; a NEW registration without the field is ``strict``
+    # (``mcp_sandbox.registration_from_args``).
+    sandbox: str = "host"
+    egress: str = "none"
+    allowed_hosts: tuple[str, ...] = ()
+    read_paths: tuple[str, ...] = ()
+    secret_names: tuple[str, ...] = ()
+    install: tuple[str, ...] = ()  # (kind, pinned spec): ("npm", "pkg@1.2.3")
+    incarnation: str = ""  # supervisor-issued, new on every save
 
     def validate(self) -> None:
         if self.transport not in MCP_TRANSPORTS:
@@ -62,6 +87,10 @@ class MCPServerConfig:
             raise MCPError(
                 f"scope must be one of {sorted(MCP_SERVER_SCOPES)!r}, got {self.scope!r}"
             )
+        from .mcp_sandbox import confinement_problem
+
+        if (problem := confinement_problem(self)) is not None:
+            raise MCPError(problem)
 
 
 @dataclass(frozen=True)
@@ -84,6 +113,9 @@ class MCPCallResult:
     ok: bool
     content: object = None
     error: str | None = None
+    # v135 (ADR 0069 1.7): ran (the server answered: ``ok`` or its own tool
+    # error) | not_run (nothing was sent) | unknown (sent, then no answer)
+    outcome: str = "ran"
 
 
 # Keyword heuristics for classifying an MCP tool's risk (highest wins). A tool
@@ -313,10 +345,24 @@ class MCPClient:
         return tools
 
     def call_tool(self, name: str, arguments: Mapping[str, object]) -> MCPCallResult:
+        """One call, never retried. A failure says whether the request was
+        sent (ADR 0069 1.7): a transport failure before it is ``not_run``,
+        after it ``unknown``; a JSON-RPC error reply ran."""
         try:
             response = self._runner("tools/call", {"name": name, "arguments": dict(arguments)})
+        except MCPOutcomeUnknown as exc:
+            return MCPCallResult(False, error=str(exc), outcome="unknown")
+        except MCPReplyError as exc:
+            return MCPCallResult(False, error=str(exc))
         except Exception as exc:
-            return MCPCallResult(False, error=str(exc) or exc.__class__.__name__)
+            return MCPCallResult(False, error=str(exc) or exc.__class__.__name__, outcome="not_run")
+        if "content" not in response:  # review r2 N11: a tool result must carry it
+            return MCPCallResult(
+                False,
+                error="the server's reply held no tool result (no 'content'), so whether it "
+                "acted is unknown",
+                outcome="unknown",
+            )
         if response.get("isError"):
             return MCPCallResult(False, error=str(response.get("content") or "tool error"))
         return MCPCallResult(True, content=response.get("content"))
@@ -352,6 +398,14 @@ def load_mcp_servers(store: RunStore) -> dict[str, MCPServerConfig]:
                 command=tuple(str(part) for part in entry.get("command") or ()),
                 url=None if entry.get("url") is None else str(entry.get("url")),
                 scope=str(entry.get("scope") or "mcp"),
+                # ADR 0069 1.2: no field = registered before 2.4.0 = host
+                sandbox=str(entry.get("sandbox") or "host"),
+                egress=str(entry.get("egress") or "none"),
+                allowed_hosts=tuple(str(h) for h in entry.get("allowed_hosts") or ()),
+                read_paths=tuple(str(p) for p in entry.get("read_paths") or ()),
+                secret_names=tuple(str(n) for n in entry.get("secret_names") or ()),
+                install=tuple(str(part) for part in entry.get("install") or ()),
+                incarnation=str(entry.get("incarnation") or ""),
             )
             if config.server_id:
                 servers[config.server_id] = config
@@ -371,6 +425,13 @@ def _store_servers(store: RunStore, servers: dict[str, MCPServerConfig]) -> None
                     "command": list(entry.command),
                     "url": entry.url,
                     "scope": entry.scope,
+                    "sandbox": entry.sandbox,
+                    "egress": entry.egress,
+                    "allowed_hosts": list(entry.allowed_hosts),
+                    "read_paths": list(entry.read_paths),
+                    "secret_names": list(entry.secret_names),
+                    "install": list(entry.install),
+                    "incarnation": entry.incarnation,
                 }
                 for entry in servers.values()
             ],
@@ -379,30 +440,106 @@ def _store_servers(store: RunStore, servers: dict[str, MCPServerConfig]) -> None
     )
 
 
-def save_mcp_server(store: RunStore, config: MCPServerConfig) -> None:
+def save_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    """Validate and save ``config`` under a NEW incarnation (ADR 0069 1.1:
+    every save, a remove and re-register with identical settings included),
+    serialized against every running call (1.4). Returns what was saved."""
+    from .mcp_sandbox import new_incarnation
+
     config.validate()
-    servers = load_mcp_servers(store)
-    servers[config.server_id] = config
-    _store_servers(store, servers)
-    _LISTED.pop((str(store.db_path), config.server_id), None)
+    return _write_mcp_server(store, replace(config, incarnation=new_incarnation()))
+
+
+def restore_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    """A rollback puts back the registration that was in force, incarnation
+    and all: the approvals proposed for it are still for it (forge publish)."""
+    return _write_mcp_server(store, config)
+
+
+def _write_mcp_server(store: RunStore, config: MCPServerConfig) -> MCPServerConfig:
+    from .mcp_sandbox import REGISTRY_GATE, retire_trees
+
+    with REGISTRY_GATE.writing():
+        servers = load_mcp_servers(store)
+        servers[config.server_id] = config
+        _store_servers(store, servers)
+        _LISTED.pop((str(store.db_path), config.server_id), None)
+        retire_trees(store.db_path.parent.parent, config.server_id, keep=config.incarnation)
+    return config
 
 
 def remove_mcp_server(store: RunStore, server_id: str) -> None:
     """v47-F2: the unregister half of save_mcp_server. Learned allow rules for
     the server's scope are left in place (re-registering the id reuses them)."""
-    servers = load_mcp_servers(store)
-    if server_id not in servers:
-        raise MCPError(f"no MCP server registered as {server_id!r}")
-    del servers[server_id]
-    _store_servers(store, servers)
-    _LISTED.pop((str(store.db_path), server_id), None)
+    from .mcp_sandbox import REGISTRY_GATE, retire_trees
+
+    with REGISTRY_GATE.writing():
+        servers = load_mcp_servers(store)
+        if server_id not in servers:
+            raise MCPError(f"no MCP server registered as {server_id!r}")
+        del servers[server_id]
+        _store_servers(store, servers)
+        _LISTED.pop((str(store.db_path), server_id), None)
+        retire_trees(store.db_path.parent.parent, server_id, keep=None)
+
+
+def _envelope_problem(message: Mapping[str, object]) -> str | None:
+    """Review r2 N11: why ``message`` is not a JSON-RPC 2.0 response — one
+    result object, or one error object with an integer code and a message."""
+    if message.get("jsonrpc") != "2.0":
+        return "it is not a JSON-RPC 2.0 response"
+    if ("result" in message) == ("error" in message):
+        return "it holds both a result and an error, or neither"
+    error = message.get("error")
+    if "error" in message and not (
+        isinstance(error, Mapping)
+        and type(error.get("code")) is int
+        and isinstance(error.get("message"), str)
+    ):
+        return "its error is not a JSON-RPC error object (an integer code and a message)"
+    if "result" in message and not isinstance(message["result"], Mapping):
+        return "its result is not an object"
+    return None
+
+
+def _initialize_problem(
+    message: Mapping[str, object], scrub: Callable[[object], object] | None = None
+) -> str | None:
+    """Review r2 N11: why ``message`` is not a successful ``initialize``
+    reply; the MCP lifecycle requires protocolVersion, capabilities and
+    serverInfo in its result (nothing else is required). Review r3 M5: read
+    as the server sent it; ``scrub`` masks only the error data shown."""
+    if (problem := _envelope_problem(message)) is not None:
+        return problem
+    result = message.get("result")
+    if not isinstance(result, Mapping):
+        error = message.get("error")
+        return f"it answered with an error: {error if scrub is None else scrub(error)}"
+    missing = [
+        key
+        for key, kind in (
+            ("protocolVersion", str),
+            ("capabilities", Mapping),
+            ("serverInfo", Mapping),
+        )
+        if not isinstance(result.get(key), kind)
+    ]
+    if missing:
+        return f"its result has no valid {', '.join(missing)}, which the MCP lifecycle requires"
+    return None
 
 
 def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
+    if (problem := _envelope_problem(message)) is not None:  # review S11, r2 N11
+        raise MCPOutcomeUnknown(
+            f"the server's reply to the request was not a valid JSON-RPC response ({problem}), "
+            "so whether it acted is unknown"
+        )
     if "error" in message:
-        raise MCPError(str(message["error"]))
-    result = message.get("result")
-    return result if isinstance(result, Mapping) else {}
+        raise MCPReplyError(str(message["error"]))
+    result = message["result"]
+    assert isinstance(result, Mapping)  # _envelope_problem checked it
+    return result
 
 
 def runner_for_config(
@@ -413,9 +550,38 @@ def runner_for_config(
     A forged server (``forge-*``) runs only from its bound plugin record in
     ``store`` (Phase 07, ``forge.runtime_launch``), behind ``forged_lane``.
 
+    v135 (ADR 0069 1.4, review S4): with ``store``, every launch of a stdio
+    server first checks, under the registry gate, that ``config`` IS the
+    registration in force (incarnation included) and holds the gate through
+    the exchange — a config read before a replacement (the startup warm, a
+    discovery, a cache miss) starts nothing.
+
     ponytail: one-shot per call (initialize -> request -> done) — a persistent
     session pool is the upgrade path if call volume matters.
     """
+    inner = _transport_runner(config, skep_home=skep_home, store=store)
+    # http starts no process here. A forged tool re-derives what it runs from
+    # its bound plugin record on every launch (``forge.runtime_launch``) —
+    # under the same read hold as this check (review r2 N13), so a
+    # publication in progress is never half seen: the new registration with
+    # the old record's hosts, or the reverse.
+    if store is None or config.transport == "http":
+        return inner
+
+    def launch(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        from .mcp_sandbox import REGISTRY_GATE, stale_refusal
+
+        with REGISTRY_GATE.reading():
+            if (refusal := stale_refusal(store, config)) is not None:
+                raise MCPNotRun(refusal)
+            return inner(method, params)
+
+    return launch
+
+
+def _transport_runner(
+    config: MCPServerConfig, *, skep_home: Path | None, store: RunStore | None
+) -> MCPRunner:
     import json
 
     if config.server_id.startswith(FORGED_SERVER_PREFIX):
@@ -446,6 +612,7 @@ def runner_for_config(
             headers = {"Accept": "application/json, text/event-stream"}
             budget = MCP_CALL_DEADLINE_SECONDS
             deadline = time.monotonic() + budget
+            sent = False
             try:
                 # The per-read timeout bounds silence; the deadline bounds a trickle.
                 with httpx.Client(timeout=budget) as client:
@@ -481,6 +648,7 @@ def runner_for_config(
                         json={"jsonrpc": "2.0", "method": "notifications/initialized"},
                         headers=headers,
                     )
+                    sent = True  # ADR 0069 1.7: from here a failure is outcome-unknown
                     with client.stream(
                         "POST",
                         url,
@@ -516,19 +684,26 @@ def runner_for_config(
                             if isinstance(message, dict) and message.get("id") == 2:
                                 return _jsonrpc_result(message)
                         raise MCPError("no JSON-RPC response for the tool request")
-            except MCPError:
+            except MCPReplyError:
                 raise
-            except json.JSONDecodeError as exc:
-                raise MCPError(f"http MCP response was not JSON-RPC: {exc}") from exc
-            except httpx.HTTPError as exc:
-                raise MCPError(
-                    f"http MCP transport error: {exc.__class__.__name__}: {exc}"
-                ) from exc
+            except (MCPError, json.JSONDecodeError, httpx.HTTPError) as exc:
+                kind = MCPOutcomeUnknown if sent else MCPNotRun
+                if isinstance(exc, json.JSONDecodeError):
+                    raise kind(f"http MCP response was not JSON-RPC: {exc}") from exc
+                if isinstance(exc, httpx.HTTPError):
+                    raise kind(
+                        f"http MCP transport error: {exc.__class__.__name__}: {exc}"
+                    ) from exc
+                raise kind(str(exc)) from exc
 
         return run_http
 
     if config.transport != "stdio":
         raise MCPError(f"unsupported MCP transport {config.transport!r}")
+    if config.sandbox == "strict":  # v135 (ADR 0069 2.3): behind the shared wall
+        from .mcp_sandbox import strict_runner
+
+        return strict_runner(config, skep_home=skep_home)
 
     def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
         payload = _stdio_payload(method, params)
@@ -566,7 +741,12 @@ def _stdio_payload(method: str, params: Mapping[str, object]) -> str:
     return "".join(json.dumps(r) + "\n" for r in requests)
 
 
-def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
+def _stdio_reply(
+    lines: list[str], *, scrub: Callable[[object], object] | None = None
+) -> Mapping[str, object]:
+    """Request 2's reply in ``lines``. ``scrub`` (ADR 0069 2.5, review S2)
+    rewrites each PARSED message before it is read, so redaction sees the
+    server's own data, never its JSON escaping."""
     import json
 
     for line in lines:
@@ -577,34 +757,76 @@ def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if scrub is not None:
+            message = scrub(message)
         if isinstance(message, dict) and message.get("id") == 2:
             return _jsonrpc_result(message)
-    raise MCPError("no JSON-RPC response for the tool request")
+    # review S14: every caller has fed the request in by now (a forged tool
+    # reads it with the rest of its stdin), so the server may have acted
+    raise MCPOutcomeUnknown(
+        "no JSON-RPC response for the tool request: whether the server acted is unknown"
+    )
 
 
-def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -> list[str]:
-    """ES-F162 (R6): send ``payload`` and keep stdin open until the server
-    answers request 2, or the deadline passes. A server that stops when its
-    stdin closes (Playwright's does, ~0.4 s) never answered a call that takes
-    longer than that: stdin used to close with the request. Returns the
-    stdout lines read; stops the server either way."""
+def _stdio_exchange(
+    argv: list[str],
+    payload: str,
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    diagnostics: list[str] | None = None,
+    scrub: Callable[[Any], Any] | None = None,
+) -> list[str]:
+    """One compliant one-shot exchange (ADR 0069 2.4): the payload's first
+    line (``initialize``) alone, its reply, then ``notifications/initialized``,
+    then the request; the reply is matched by id. ES-F162 (R6): stdin stays
+    open until the server answers request 2 or the deadline passes. Returns
+    the stdout lines read; stops the server either way.
+
+    A failure before the request was written is ``MCPNotRun``; after it,
+    ``MCPOutcomeUnknown`` — the server may have acted (1.7). ``env`` None
+    inherits serve's (a host server, as before 2.4.0). ``diagnostics``
+    collects a bounded stderr tail; None discards stderr, as before. ``scrub``
+    masks each whole stderr line BEFORE it is cropped (review S2), and the
+    parsed ``initialize`` reply before any of it is formatted (review r2 N3)."""
+    import collections
+    import contextlib
     import json
+    import os
     import queue
+    import selectors
+    import signal
     import subprocess
     import threading
     import time
 
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        cwd=cwd,
-    )
-    assert proc.stdin is not None and proc.stdout is not None
+    first, *rest = [line for line in payload.splitlines() if line.strip()]
+    # review r2 N4: stdin is a raw pipe written without blocking (never a
+    # buffered stream a writer thread holds, which close() would wait on),
+    # and the child leads its own process group, so a descendant holding a
+    # pipe end is stopped with it
+    read_end, write_end = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=read_end,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL if diagnostics is None else subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+            start_new_session=True,
+        )
+    except OSError as exc:
+        os.close(write_end)
+        raise MCPNotRun(f"the MCP server did not start: {exc}") from exc
+    finally:
+        os.close(read_end)
+    os.set_blocking(write_end, False)
+    assert proc.stdout is not None
     stdout = proc.stdout
     read: queue.Queue[str | None] = queue.Queue()
+    tail: collections.deque[str] = collections.deque(maxlen=40)
 
     def pump() -> None:
         for line in stdout:
@@ -612,34 +834,109 @@ def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -
         read.put(None)
 
     threading.Thread(target=pump, daemon=True).start()
+    if diagnostics is not None and proc.stderr is not None:
+        stderr = proc.stderr
+
+        def drain() -> None:
+            for line in stderr:
+                tail.append((line if scrub is None else str(scrub(line)))[:500])
+
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
     lines: list[str] = []
+    # review S11: ONE deadline for the whole exchange — every read and every
+    # write is bounded by it, whatever the server floods or stops reading
     deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
-    try:
-        proc.stdin.write(payload)
-        proc.stdin.flush()
+    sent = False
+
+    def stop_group() -> None:  # before the leader is reaped, so its id is still its own
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+    def overdue(during_request: bool = False) -> MCPError:
+        stop_group()  # a server that went quiet gets no grace period
+        if sent or during_request:
+            return MCPOutcomeUnknown(
+                f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline after the "
+                "request was sent"
+                + (" (the server stopped reading it)" if during_request and not sent else "")
+            )
+        return MCPNotRun(f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline")
+
+    def await_reply(wanted: int) -> dict[str, object] | None:
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise overdue()
             try:
-                line = read.get(timeout=max(0.0, deadline - time.monotonic()))
+                line = read.get(timeout=remaining)
             except queue.Empty:
-                proc.kill()  # a server that went quiet gets no grace period
-                raise MCPError(
-                    f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline"
-                ) from None
+                raise overdue() from None
             if line is None:
-                return lines
+                return None
             lines.append(line)
             try:
-                if json.loads(line).get("id") == 2:
-                    return lines
+                message = json.loads(line)
             except ValueError:
                 continue
-    finally:
+            if isinstance(message, dict) and message.get("id") == wanted:
+                return message
+
+    def send(data: str, *, request: bool = False) -> None:
+        pending = data.encode("utf-8")
+        with selectors.DefaultSelector() as ready:
+            ready.register(write_end, selectors.EVENT_WRITE)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise overdue(during_request=request)
+                if not ready.select(remaining):
+                    continue
+                try:
+                    pending = pending[os.write(write_end, pending) :]
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    raise BrokenPipeError(str(exc)) from None
+
+    try:
         try:
-            proc.stdin.close()
+            send(first + "\n")
+            init = await_reply(1)
+            if init is None:
+                raise MCPNotRun("the MCP server exited before it answered initialize")
+            if (problem := _initialize_problem(init, scrub)) is not None:
+                # review S11, r2 N11: only a valid initialize result advances
+                raise MCPNotRun(
+                    f"the MCP server did not accept initialize ({problem}), so the request "
+                    "was never sent"
+                )
+            send(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+            send("".join(line + "\n" for line in rest), request=True)
+        except BrokenPipeError:
+            raise MCPNotRun("the MCP server closed its input before the request") from None
+        sent = True
+        if await_reply(2) is None:
+            raise MCPOutcomeUnknown(
+                "no JSON-RPC response for the tool request: the server exited after the "
+                "request was sent, so whether it acted is unknown"
+            )
+        return lines
+    finally:
+        # review r2 N4: nothing here waits without a bound — the caller may
+        # hold the registry gate across this exchange
+        os.close(write_end)  # a raw fd with nothing buffered: never blocks
+        try:
             proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            proc.kill()
-            proc.wait()
+        except subprocess.TimeoutExpired:
+            stop_group()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # unkillable for now: reaped when it goes
+                threading.Thread(target=proc.wait, daemon=True).start()
+        if diagnostics is not None:
+            drainer.join(timeout=2)
+            diagnostics.extend(tail)
 
 
 # ES (B115): promote_tool registers every activated forged/seed tool as
@@ -751,17 +1048,48 @@ def forged_lane(
         except sandbox.SandboxUnavailableError as exc:
             raise MCPError(f"the forged-tool lane could not build its wall: {exc}") from exc
         try:
-            return subprocess.run(
-                wrapped,
-                input=payload,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workspace,
-                env=env,
-            )
+            return _bounded_run(wrapped, payload=payload, timeout=timeout, cwd=workspace, env=env)
         except subprocess.TimeoutExpired as exc:
-            raise MCPError(f"the forged tool passed its {timeout:g}s deadline") from exc
+            # ADR 0069 1.7 (review S14): its request was already fed in
+            kind = MCPError if payload is None else MCPOutcomeUnknown
+            raise kind(f"the forged tool passed its {timeout:g}s deadline") from exc
+
+
+def _bounded_run(
+    argv: list[str], *, payload: str | None, timeout: float, cwd: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with every wait bounded (review r2 N4, N13: a call
+    or a listing holds the registry gate across it): the child leads its own
+    process group; past ``timeout`` the whole group is killed and waited on
+    for at most 5 s more, then left to a background reaper. Raises
+    ``subprocess.TimeoutExpired``."""
+    import contextlib
+    import os
+    import signal
+    import subprocess
+    import threading
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=None if payload is None else subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=dict(env),
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # unkillable for now: reaped when it goes
+            threading.Thread(target=proc.wait, daemon=True).start()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 # ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
@@ -802,6 +1130,7 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
     """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
     spawns a server (the prompt's MCP index reads this every turn)."""
     hit = _LISTED.get((str(store.db_path), config.server_id))
+    # review S4: keyed by the exact registration, incarnation included
     if hit is None or hit[0] != config or hit[1] != _binding(store, config):
         return None  # L11: never a listing from another binding
     return hit[2]
@@ -809,10 +1138,17 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
 
 def refresh_listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
     """List ``config``'s tools now and keep them (list_mcp_tools, the startup
-    warm). A failed listing raises and keeps nothing."""
-    binding = _binding(store, config)
+    warm). A failed listing raises and keeps nothing. The binding and the
+    listing are read under one hold of the registry gate (review r2 N13)."""
+    from .mcp_sandbox import REGISTRY_GATE
+
     runner = runner_for_config(config, skep_home=store.db_path.parent.parent, store=store)
-    tools = tuple(MCPClient(config, runner=runner).list_tools())
+    # review r3 M2: a forged listing only — a stdio launch takes its own
+    # bounded hold, and an http listing (no total deadline) holds none
+    forged = config.server_id.startswith(FORGED_SERVER_PREFIX)
+    with REGISTRY_GATE.reading() if forged else contextlib.nullcontext():
+        binding = _binding(store, config)
+        tools = tuple(MCPClient(config, runner=runner).list_tools())
     if _binding(store, config) != binding:
         # L11: a promotion (or suspend) published mid-listing — this answer
         # describes a tool that no longer runs; the refresh after it wins.

@@ -8,8 +8,8 @@ description: query and update Airtable bases via the vendor MCP server
 Tools: register_mcp_server, list_mcp_tools, call_mcp_tool, allow_fetch_domain, read_url
 
 Same shape as Notion: one-time vendor MCP registration (operator
-confirms; the personal access token lives in the server config env,
-never in chat).
+confirms; the personal access token is one of its `secret_names`, set
+with `skep mcp secret set <server_id> <NAME>`, never in chat).
 
 1. Reads: MCP read tools, or `read_url` against the granted domain
    (`allow_fetch_domain api.airtable.com`). List records with

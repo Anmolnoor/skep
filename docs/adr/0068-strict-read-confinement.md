@@ -142,9 +142,9 @@ readable. A denylist cannot keep up with every place a person keeps files.
    available; N of M sandboxed projects strict; forged tools, script
    schedules and the fast lane always strict; diagnose re-runs take their
    run's recorded strict setting and extra read paths, plus today's system
-   and toolchain dirs; MCP servers you register run on the host,
-   unsandboxed` (v135 wording; see "The fast lane and diagnose re-runs join
-   the wall")
+   and toolchain dirs; stdio MCP servers you register run strict unless
+   registered sandbox='host'` (v135 Wave 2a wording, ADR 0069; each server's
+   configured and enforced mode is listed in the advisories)
    (`strict_projects` and `sandboxed_projects` in the JSON); on a backend
    that cannot enforce it, `read confinement: denylist-only (reads stay
    open but the secret floor)`.
@@ -354,8 +354,10 @@ in the worker wall. The same tests run on Linux against bubblewrap.
   not `unavailable`, as it does for a secret-floor file deleted in that
   window.
 
-- MCP servers the operator registers were never in a sandbox at all: they
-  run on the host as the operator, by design (I5 decides their calls).
+- MCP servers the operator registers were never in a sandbox at all until
+  v135 Wave 2a (ADR 0069): a new stdio registration is now `strict` (this
+  wall, through `wall.walled`); one registered `sandbox='host'`, and every
+  one registered before 2.4.0, still runs on the host as the operator.
   Forged tools moved to the strict wall in Phase 07, the fast lane and the
   `diagnose` re-run in v135 Wave 1 (both below).
 - The worker's prompt teaches the write and network walls, not the read
@@ -530,9 +532,10 @@ What did not move, and why:
   re-runs a kept worktree and should take the run's recorded wall, as G10
   does; the fast lane runs a throwaway script. Each is its own change.
 - **Operator-registered MCP servers** (`register_mcp_server`, `/browser`)
-  run on the host, unsandboxed, as the operator. Putting them in a wall is
-  a product decision (Playwright needs its browser, a mail server its
-  credentials), not a profile flag.
+  ran on the host, unsandboxed, as the operator. v135 Wave 2a (ADR 0069)
+  put new stdio registrations behind this wall by default; `host` remains
+  for a server registered that way, for the browser until the session pool
+  lands, and for servers registered before 2.4.0.
 - **The dispatched half of the trial** keeps the Queen's role chain (R3-F2)
   and nothing else: since the Phase 07 review (R1) it runs a one-line gate
   script, never the candidate. Every execution of a forged tool — its two
@@ -702,4 +705,5 @@ that each lane reads none of four home canaries
 (`~/Downloads`, `~/Documents`, `~/.ssh`, a sibling repo) while a Python
 script and a `pytest` run still pass
 (`tests/supervisor/test_v135_strict_reads_remaining.py`). Operator-registered
-MCP servers are still unconfined; ADR 0069 is that change.
+stdio MCP servers joined in v135 Wave 2a (ADR 0069): strict by default,
+unconfined only when registered `sandbox='host'` or before 2.4.0.

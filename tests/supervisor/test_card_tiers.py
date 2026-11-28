@@ -18,6 +18,7 @@ import pytest
 from fastapi import HTTPException
 
 from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.mcp_client import load_mcp_servers
 from skep.supervisor.scheduler import make_schedule
 from skep.supervisor.serve import chat as chat_module
 from skep.supervisor.serve.cards import card_summary, high_tier
@@ -392,6 +393,8 @@ def test_a_granted_non_read_mcp_call_cards_high_instead_of_running(live: Any) ->
     # W39: the decision rides the record too, so a reloaded card is the live one
     assert pending.card == {
         "tier": "high", "high": card["card"]["high"], "decision": card["decision"],
+        # v135 (ADR 0069 1.6): bound to the registration it was proposed for
+        "incarnation": load_mcp_servers(env.store)["tracker"].incarnation,
     }  # fmt: skip
 
 

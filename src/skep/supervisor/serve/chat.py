@@ -50,6 +50,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..mcp_sandbox import UNCAPTURED, card_incarnation
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from ..secret_floor import own_secret_in, own_secret_refusal
@@ -418,13 +419,21 @@ def pending_duplicate_action(
     args: dict[str, Any],
     *,
     merge: dict[str, Any] | None = None,
+    incarnation: Any = UNCAPTURED,
 ) -> tuple[ChatActionRecord, bool] | None:
     """The pending card already asking this question, with whether its args
     are byte-identical. Only 'proposed' rows count — a denied card is a
     verdict, and re-proposing after one is a new question for the human.
-    ``merge`` is a merge_pr proposal's pin, already read (R3 S6)."""
+    ``merge`` is a merge_pr proposal's pin, already read (R3 S6).
+    ``incarnation``: an MCP card's registration as its proposal read it
+    (review S5: one read for the decision, this check and the card);
+    ``UNCAPTURED`` reads it now (review r2 N6: "" is a legacy registration's)."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
+    # ADR 0069 1.6: an MCP card is also its registration — one for a replaced server is stale
+    bound = None
+    if tool == "call_mcp_tool":
+        bound = card_incarnation(store, args) if incarnation is UNCAPTURED else incarnation
     proposed = None
     if tool == "merge_pr":
         proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
@@ -444,7 +453,7 @@ def pending_duplicate_action(
         if proposed is not None and merge_target(store, record.args) == proposed[:2]:
             return record, False  # R3 (S7/N4): it pins nothing; a valid proposal stands
         if _canonical_args(record.args) == args_key:
-            return record, True
+            return record, (record.card or {}).get("incarnation") == bound
         if subject is not None and _proposal_subject(record.tool, record.args) == subject:
             # A gate mirror is the standing question for a live review (its
             # Deny denies the review, v87-F2) — it is never superseded by a
@@ -623,11 +632,18 @@ def executed_payload(tool: str, result: Any) -> dict[str, Any]:
     # that did not happen is a failed card (github.merge_record).
     if tool == "merge_pr" and isinstance(result, dict) and result.get("ok") is False:
         return {"ok": False, "result": result}
+    if tool == "call_mcp_tool" and isinstance(result, dict) and result.get("ok") is False:
+        # ADR 0069 1.7: not run, outcome unknown, or the tool's own error — never "confirmed"
+        said = {k: result[k] for k in ("error", "note") if k in result}
+        return {"ok": False, "outcome": result.get("outcome"), **said, "result": result}
     return {"ok": True, "result": result}
 
 
 def executed_status(payload: dict[str, Any]) -> str:
-    """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
+    """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8).
+    ADR 0069 1.7: one whose outcome is unknown is 'interrupted', never failed."""
+    if payload.get("outcome") == "unknown":
+        return "interrupted"
     return "confirmed" if payload.get("ok") else "failed"
 
 
@@ -2993,6 +3009,13 @@ class ChatEngine:
                         yield ("tool", {"tool": name, "args": shown_args, "result": refusal,
                                         "message_id": row_id})  # fmt: skip
                         continue
+                    # ADR 0069 1.6 (review S5): ONE registration snapshot, read
+                    # before the decision classifies the call — the in-turn
+                    # dispatch, the de-duplication and the card all bind to it
+                    bound = None
+                    if name == "call_mcp_tool":
+                        args.pop("incarnation", None)  # card_json carries it, never args
+                        bound = card_incarnation(self.store, args)
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
                     )
@@ -3155,6 +3178,7 @@ class ChatEngine:
                                 actor=CHAT_ACTOR,
                                 decision=decision,
                                 chat_id=chat_id,
+                                card=({"incarnation": bound} if name == "call_mcp_tool" else None),
                             )
                             payload = executed_payload(name, result)
                         except HTTPException as exc:
@@ -3174,6 +3198,10 @@ class ChatEngine:
                             args=args,
                             result=payload,
                             decided_by=decision.decided_by or decision.reason,
+                            # ADR 0069 1.7 (review S14): an MCP call's typed outcome
+                            status=(
+                                executed_status(payload) if name == "call_mcp_tool" else "confirmed"
+                            ),
                         )
                         row_id = self.store.add_chat_message(
                             chat_id,
@@ -3250,7 +3278,9 @@ class ChatEngine:
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
                     # superseded and the fresh one stands alone.
-                    duplicate = pending_duplicate_action(self.store, chat_id, name, args, merge=pin)
+                    duplicate = pending_duplicate_action(
+                        self.store, chat_id, name, args, merge=pin, incarnation=bound
+                    )
                     if duplicate is not None and (
                         duplicate[1]
                         # I7: a model proposal never supersedes an operator's
@@ -3300,6 +3330,8 @@ class ChatEngine:
                                     if name == "propose_schedule"
                                     else None,
                                     merge=pin,
+                                    # review S5, r2 N6: the snapshot the decision used
+                                    incarnation=bound,
                                 )
                                 or {}
                             ),

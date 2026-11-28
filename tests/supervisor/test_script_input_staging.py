@@ -101,7 +101,8 @@ def test_walled_writes_nothing_for_its_inputs(
         ["/bin/true"], skep_home=home, hosts=(), workspace=workspace, read_files=(data,)
     ) as (argv, _env):
         assert _binds(argv)[str(data)] == str(data)
-        new = set(home.rglob("*")) - before  # write_profile may mint relay-secret
+        # write_profile may mint relay-secret, and the (empty) MCP secrets dir
+        new = set(home.rglob("*")) - before - {home / "supervisor" / "mcp-secret"}
         assert not [p for p in new if p.is_dir() or p.name.endswith("in.txt")], new
     assert made == []
     assert sorted(p.name for p in data.parent.iterdir()) == ["in.txt"]

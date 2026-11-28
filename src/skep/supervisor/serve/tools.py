@@ -811,19 +811,22 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
 MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "register_mcp_server",
-        "PROPOSE registering an MCP server (requires user confirmation). "
-        "stdio servers need a command argv; http servers need a url (an MCP "
-        "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
-        "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
-        "email/read, everything else as email/send (cards every time). "
-        "scope='browse' binds a browser server (e.g. command "
-        "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
-        "screenshot/console are browse/read; navigation, clicks, typing, and JS "
-        "card until the user allows them (allow_mcp_tool). Reads flow unless "
-        "the policy asks for them.",
+        "PROPOSE registering an MCP server (requires user confirmation; nothing "
+        "starts before). http servers need a url (an MCP Streamable HTTP endpoint, "
+        "usually ending in /mcp; legacy /sse-style servers are not supported). "
+        "A stdio server is sandboxed by default (sandbox='strict'): it reads only "
+        "system and toolchain dirs plus read_paths, reaches no network unless "
+        "allowed_hosts lists hosts, and gets only its secret_names. Give it "
+        "install='npm:<pkg>@<x.y.z>' or 'pypi:<pkg>==<v>' (exact version; @latest "
+        "is refused) with command=[<entry point name>, args...], or command=[<absolute "
+        "path>, args...]; npx/uvx are refused. Use sandbox='host' only when the user "
+        "asks for it: it runs unsandboxed as the user (HIGH card). "
+        "scope='email' binds a mail server (reads email/read, the rest email/send, "
+        "cards every time); scope='browse' binds a browser (prefer setup_browser): "
+        "page-state reads are browse/read, navigation/clicks/typing card until "
+        "allow_mcp_tool.",
         {
-            "server_id": {"type": "string"},
+            "server_id": {"type": "string", "description": "lowercase slug, e.g. 'weather'"},
             "transport": {"type": "string", "description": "stdio or http"},
             "command": {"type": "array", "items": {"type": "string"}},
             "url": {"type": "string"},
@@ -831,6 +834,32 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "enum": ["mcp", "email", "browse"],
                 "description": "policy scope for this server's tools (default mcp)",
+            },
+            "sandbox": {
+                "type": "string",
+                "enum": ["strict", "host"],
+                "description": "stdio only; default strict. host = unsandboxed, only if asked",
+            },
+            "install": {
+                "type": "string",
+                "description": "strict only: pinned package, 'npm:<pkg>@<x.y.z>' or "
+                "'pypi:<pkg>==<v>'; installed once after approval, no package scripts",
+            },
+            "allowed_hosts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: concrete hosts it may reach (none if omitted)",
+            },
+            "read_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: absolute dirs it may read, only if it needs them",
+            },
+            "secret_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "strict only: env names of its keys; the user sets each with "
+                "`skep mcp secret set <server_id> <NAME>` (never in chat)",
             },
         },
         ["server_id", "transport"],
@@ -893,8 +922,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "setup_browser",
         "PROPOSE registering the built-in browser (requires user "
-        "confirmation, once): the Playwright MCP server "
-        "(npx @playwright/mcp@latest) under the 'browse' policy scope. "
+        "confirmation, once — a HIGH card; nothing starts before): the Playwright "
+        "MCP server (npx @playwright/mcp@latest) under the 'browse' policy scope, "
+        "unsandboxed (sandbox='host') until a sandboxed browser can browse. "
         "After setup, page-STATE reads (snapshot, console, images) flow "
         "free unless the policy asks (the builder and operator baselines "
         "do); every ACTING tool (navigate, click, type, press, JS) cards "
@@ -4940,33 +4970,10 @@ def _execute_mutation(
     if name in TAINT_ASKED_STORE_WRITES:
         # W21: a store write an untrusted chat had to ask for, now confirmed
         return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
-    if name == "register_mcp_server":
-        from ..mcp_client import FORGED_SERVER_PREFIX, MCPError, MCPServerConfig, save_mcp_server
+    if name == "register_mcp_server":  # v135: the strict lane (ADR 0069, mcp_sandbox)
+        from ..mcp_sandbox import register
 
-        if str(args["server_id"]).startswith(FORGED_SERVER_PREFIX):
-            raise ValueError(
-                f"server ids starting {FORGED_SERVER_PREFIX!r} are reserved for forged tools, "
-                "which run only from their bound record inside the sandbox — pick another id; "
-                "promote_tool registers a forged tool itself"
-            )
-        config = MCPServerConfig(
-            server_id=str(args["server_id"]),
-            transport=str(args["transport"]),
-            command=tuple(str(part) for part in args.get("command") or ()),
-            url=None if args.get("url") is None else str(args["url"]),
-            scope=str(args.get("scope") or "mcp"),
-        )
-        try:
-            save_mcp_server(store, config)
-        except MCPError as exc:
-            raise ValueError(str(exc)) from exc
-        return {
-            "registered": config.server_id,
-            "transport": config.transport,
-            "command": list(config.command),
-            "url": config.url,
-            "scope": config.scope,
-        }
+        return register(store, args, chat_id=chat_id, card=card)
     if name == "read_url":
         # v47-F4: Queen search ≠ Queen fetch — the fetch happens HERE, strictly
         # after the card confirm; a failed read degrades to a clean tool error.
@@ -5092,22 +5099,11 @@ def _execute_mutation(
         # only registers the documented server. Handshake is best-effort —
         # a missing npx reports honestly instead of leaving a dead entry
         # silently registered (I8).
-        from ..mcp_client import (
-            MCPError,
-            MCPServerConfig,
-            refresh_listed_tools,
-            save_mcp_server,
-        )
+        from ..mcp_client import MCPError, refresh_listed_tools, save_mcp_server
+        from ..mcp_sandbox import browser_config as host_browser
 
-        browser_config = MCPServerConfig(
-            server_id="browser",
-            transport="stdio",
-            command=("npx", "@playwright/mcp@latest"),
-            url=None,
-            scope="browse",
-        )
-        try:
-            save_mcp_server(store, browser_config)
+        try:  # v135 (ADR 0069 2.8): host, a HIGH card; started only after it
+            browser_config = save_mcp_server(store, host_browser())
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
         result_view: dict[str, Any] = {
@@ -5566,6 +5562,7 @@ def _execute_mutation(
             load_mcp_servers,
             refresh_listed_tools,
             remove_mcp_server,
+            restore_mcp_server,
             save_mcp_server,
         )
         from ..plugin_lifecycle import require_transition
@@ -5738,18 +5735,27 @@ def _execute_mutation(
             server_id = record.server_id
             previous = load_mcp_servers(store).get(server_id)
 
+            saved: list[MCPServerConfig] = []
+
             def commit() -> None:
-                save_mcp_server(store, server)
+                saved.append(save_mcp_server(store, server))  # its incarnation (ADR 0069 1.1)
                 forge.save_plugin(store, published)
 
             def unregister() -> None:  # registered ⟺ active, also on failure
                 if previous is not None:
-                    save_mcp_server(store, previous)
+                    restore_mcp_server(store, previous)
                 elif server_id in load_mcp_servers(store):
                     remove_mcp_server(store, server_id)
 
+            from ..mcp_sandbox import REGISTRY_GATE
+
             try:
-                forge.publish_source(holder.current, plugin_id, source, commit, unregister)
+                # ADR 0069 review S13: one publication under the registry gate —
+                # the source, the registration, the plugin record and any
+                # rollback — so no call sees the new incarnation with the old
+                # binding (or the reverse)
+                with REGISTRY_GATE.writing():
+                    forge.publish_source(holder.current, plugin_id, source, commit, unregister)
             except MCPError as exc:
                 raise ValueError(f"{exc} — {kept}") from exc
         record = published
@@ -5763,7 +5769,7 @@ def _execute_mutation(
             )
         try:
             # Phase 06 (6.2): the Queen's next turn names its tools.
-            discovered: Any = [tool.name for tool in refresh_listed_tools(store, server)]
+            discovered: Any = [tool.name for tool in refresh_listed_tools(store, saved[0])]
         except MCPError as exc:
             discovered = f"not listed yet ({exc}); list_mcp_tools {record.server_id} retries"
         return {
@@ -5870,59 +5876,36 @@ def _execute_mutation(
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
         return {"unregistered": str(args["server_id"])}
-    if name == "call_mcp_tool":
-        from ..mcp_client import (
-            MCPClient,
-            MCPError,
-            MCPTool,
-            load_mcp_servers,
-            mcp_scope_decision,
-            runner_for_config,
-        )
+    if name == "call_mcp_tool":  # v135 (ADR 0069 1.6, 1.7): bound, typed (mcp_sandbox)
+        from ..mcp_client import MCPTool, mcp_scope_decision
+        from ..mcp_sandbox import call_registered
 
-        server_id = str(args["server_id"])
-        tool_name = str(args["tool"])
-        server_config = load_mcp_servers(store).get(server_id)
-        if server_config is None:
-            raise ValueError(f"no MCP server {server_id!r}; register_mcp_server first")
-        # Last guard: a deny rule refuses even on a confirmed card — denied
-        # space stays unreachable by confirmation.
-        last_guard = mcp_scope_decision(
-            store,
-            holder,
-            MCPTool(server_id=server_id, name=tool_name, description=""),
-            role=_chat_role(store, holder, chat_id),
-        )
-        if last_guard.verdict == "deny":
-            raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
-        try:
-            client = MCPClient(
-                server_config,
-                runner=runner_for_config(
-                    server_config, skep_home=holder.current.home.parent, store=store
-                ),
-            )
-            call = client.call_tool(tool_name, _object_arg(args, "arguments"))
-        except MCPError as exc:
-            # I9: the failure says which call, what broke and where to look next.
-            raise ValueError(
-                f"MCP call {server_id}:{tool_name} failed: {exc}. Next: list_mcp_tools "
-                f"server_id={server_id} shows whether the server starts and which tools and "
-                "arguments it offers"
-            ) from exc
-        if not call.ok:
-            return {
-                "server_id": server_id,
-                "tool": tool_name,
-                "ok": False,
-                "error": call.error,
-                # One call result carries both a tool's own error reply and
-                # a server that never answered, so the step names both.
-                "next_step": f"if the tool replied, check the arguments against "
-                f"{tool_name}'s inputSchema and call again; if the server did not start or "
-                f"answered nothing, list_mcp_tools server_id={server_id} shows why",
-            }
-        return {"server_id": server_id, "tool": tool_name, "ok": True, "content": call.content}
+        server_id, tool_name = str(args["server_id"]), str(args["tool"])
+
+        def last_guard() -> str | None:
+            """A deny refuses even a confirmed card; in-turn (``decision``
+            set, no human) the final decide() must still ALLOW (review S5)."""
+            verdict = mcp_scope_decision(
+                store, holder, MCPTool(server_id=server_id, name=tool_name, description=""),
+                role=_chat_role(store, holder, chat_id), chat_id=chat_id,
+            )  # fmt: skip
+            why = verdict.decided_by or verdict.reason
+            if verdict.verdict == "deny":
+                return f"not run: denied by policy: {why}"
+            if decision is not None and not verdict.allows_execution():
+                return (
+                    f"not run: the policy no longer allows {server_id}:{tool_name} without "
+                    f"asking ({why}), so it did not run in this turn. Ask again: the call "
+                    "gets a card"
+                )
+            return None
+
+        # Both bind (review S5): a confirm to its card, an in-turn call to the
+        # incarnation its allow was decided for (chat.py puts it in ``card``).
+        return call_registered(
+            store, server_id, tool_name, _object_arg(args, "arguments"),
+            skep_home=holder.current.home.parent, guard=last_guard, card=card or {},
+        )  # fmt: skip
     if name in ("allow_fetch_domain", "allow_mcp_tool"):
         # v90-F3: one shared writer; P3-5: it runs the write-time check first.
         grant = _learned_grant(store, name, args)

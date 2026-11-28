@@ -232,7 +232,11 @@ def resolved_read_allowlist(paths: Iterable[Path], skep_home: Path) -> tuple[Pat
 
 
 def strict_read_roots(
-    skep_home: Path, *, worker_llm_key: bool = False, extra: Iterable[Path] = ()
+    skep_home: Path,
+    *,
+    worker_llm_key: bool = False,
+    extra: Iterable[Path] = (),
+    skep_home_roots: bool = True,
 ) -> list[Path]:
     """ADR 0068: what a strict run reads beyond the OS's system roots and its
     own workspace/git roots — the half every backend's profile shares.
@@ -247,8 +251,21 @@ def strict_read_roots(
     (G2); an extra path at or above the home, in or over
     the skep home, or on /etc's reserved entries refuses the run
     (``extra_read_path_problem``). The secret masks still land after every one."""
-    roots = _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=extra)
+    roots = _strict_candidates(
+        skep_home, worker_llm_key=worker_llm_key, extra=extra, skep_home_roots=skep_home_roots
+    )
     return list(dict.fromkeys(path.resolve() for path in roots))
+
+
+def strict_reads_cover(path: Path, skep_home: Path) -> bool:
+    """ADR 0069 (review r3 M4): a strict wall with no skep-home roots already
+    reads ``path`` where it resolves — under the backend's system roots or a
+    detected toolchain (``strict_read_roots``)."""
+    system = _SEATBELT_SYSTEM_ROOTS if availability().backend == "seatbelt" else _SYSTEM_ROOTS
+    roots = [Path(root).resolve() for root in system]
+    roots += strict_read_roots(skep_home, skep_home_roots=False)
+    real = path.resolve()
+    return any(real.is_relative_to(root) for root in roots)
 
 
 def _in_place(path: Path, skep_home: Path) -> bool:
@@ -326,7 +343,7 @@ def _found_link(found: str | None) -> list[Path]:
 
 
 def _strict_candidates(
-    skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path]
+    skep_home: Path, *, worker_llm_key: bool, extra: Iterable[Path], skep_home_roots: bool = True
 ) -> list[Path]:
     """``strict_read_roots`` as written (absolute, not resolved): bwrap
     recreates a written path that is a link (uv's ``cpython-3.12-…`` minor
@@ -373,6 +390,8 @@ def _strict_candidates(
             detected.append(root)
     supervisor = skep_home / "supervisor"
     own = [skep_home / "profile.json", skep_home / "worker_plugins", skep_home / "tools" / ".venvs"]
+    if not skep_home_roots:  # ADR 0069 2.1: an MCP server and its installer use none
+        own = []
     if worker_llm_key:
         names = (*_LIVE_STORE_FILES, "llm-secret", *_active_llm_key_names(supervisor))
         own += [supervisor / name for name in names]
@@ -918,6 +937,10 @@ def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None
                 "Move the home (SKEP_HOME / --home) out of that directory."
             )
 
+
+# ADR 0069 2.5: the per-server MCP secrets live here (``mcp_sandbox``); the
+# ``*-secret`` name puts the whole dir on the secret floor.
+MCP_SECRETS_DIR = "mcp-secret"
 
 _LIVE_STORE_FILES = ("supervisor.sqlite3", "supervisor.sqlite3-wal", "supervisor.sqlite3-shm")
 
@@ -1499,6 +1522,8 @@ def write_profile(
     read_allowlist: Iterable[Path] | None = None,
     read_files: Iterable[Path] = (),
     git_common: Path | Literal[False] | None = None,
+    trusted_read_roots: Iterable[Path] = (),
+    skep_home_roots: bool = True,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1544,12 +1569,25 @@ def write_profile(
     binds; its masks and walk links come from it, not from asking the
     workspace again. False (M1): the caller checked and the tree has
     none, so nothing is asked. None keeps asking the workspace.
+
+    ``trusted_read_roots`` (ADR 0069 2.1): supervisor-chosen roots a strict
+    wall reads, bound read-only WITHOUT ``extra_read_path_problem`` — one MCP
+    server's install tree under the skep home. Never an operator path. The
+    secret masks still land last. ``skep_home_roots`` False leaves out the
+    skep-home roots strict mode grants on its own (``profile.json``,
+    ``worker_plugins``, the forged-tool venvs). Existing callers pass neither.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]
     read_allowlist = None if read_allowlist is None else tuple(read_allowlist)
     read_files = [Path(path) for path in read_files]  # R4 (N4): judged as named, no abspath
+    trusted = [Path(root).resolve() for root in trusted_read_roots]
     probe = require_usable(backend)
+    if trusted and read_allowlist is None:
+        raise SandboxUnavailableError(
+            "trusted read roots are bound on a strict wall only (read_allowlist given); "
+            "a denylist wall already reads everything but the secret floor"
+        )
     if read_files and (read_allowlist is None or probe.backend not in STRICT_READ_BACKENDS):
         raise SandboxUnavailableError(
             f"input files are bound one by one on a strict bubblewrap or Seatbelt wall "
@@ -1589,6 +1627,11 @@ def write_profile(
 
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
+    # ADR 0069 2.5 (review S3): the same for the MCP secrets dir — made before
+    # any sandbox starts and masked while still empty, so a run already going
+    # cannot read the first value set after it started.
+    with contextlib.suppress(OSError):
+        (skep_home / "supervisor" / MCP_SECRETS_DIR).mkdir(mode=0o700, exist_ok=True)
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     # inside the common dir bound whole (3I)
     git_masked = git_metadata_masked(workspace, common=git_common)
@@ -1605,13 +1648,18 @@ def write_profile(
                 "in-progress git message would be readable; replace it with a regular file"
             )
         read_denied += [p for p in git_masked if _exists(p)]
-        extra_readable = list(extra_readable)
+        extra_readable = [*extra_readable, *trusted]
         # ponytail: the detected toolchains are not walked for sockets (~/.rustup
         # alone is tens of thousands of files); the operator's paths are.
         extra_roots = [path.resolve() for path in _validated_extra(read_allowlist or (), skep_home)]
         read_denied += _sockets_under([*extra_readable, *extra_roots])
         aliases = (
-            _strict_candidates(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist)
+            _strict_candidates(
+                skep_home,
+                worker_llm_key=worker_llm_key,
+                extra=read_allowlist,
+                skep_home_roots=skep_home_roots,
+            )
             if read_allowlist is not None
             else []
         )
@@ -1666,8 +1714,14 @@ def write_profile(
     strict_roots = None
     if read_allowlist is not None:  # ADR 0068: what it reads beyond macOS and its roots
         strict_roots = [
-            *strict_read_roots(skep_home, worker_llm_key=worker_llm_key, extra=read_allowlist),
+            *strict_read_roots(
+                skep_home,
+                worker_llm_key=worker_llm_key,
+                extra=read_allowlist,
+                skep_home_roots=skep_home_roots,
+            ),
             *extra_readable,
+            *trusted,
             *unmasked,  # still masked but for the literal allow after the masks
         ]
         read_denied = [

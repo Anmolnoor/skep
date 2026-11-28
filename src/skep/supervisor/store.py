@@ -5231,8 +5231,11 @@ class RunStore:
         result: Any,
         source: str = "assistant",
         decided_by: str | None = None,
+        status: str = "confirmed",
     ) -> str:
         """v61-F1: an auto-allowed mutation records its row born resolved.
+        ``status``: ADR 0069 1.7 (review S14) — an MCP call's typed outcome
+        (``chat.executed_status``); every other tool stays 'confirmed'.
 
         Auto-allowed mutations execute inside the turn with no card, so
         nothing landed in chat_actions and chat_for_task could not route
@@ -5245,12 +5248,13 @@ class RunStore:
             "INSERT INTO chat_actions"
             " (action_id, chat_id, tool, args_json, status, result_json,"
             "  created_at, resolved_at, source, decided_by, resolved_by)"
-            " VALUES (?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 action_id,
                 chat_id,
                 tool,
                 json.dumps(args, ensure_ascii=True),
+                status,
                 json.dumps(result, ensure_ascii=True),
                 now,
                 now,

@@ -278,8 +278,10 @@ exactly where the boundary stops:
   the system and toolchain dirs detected when it runs. Projects set up before
   strict reads (until you move them; `skep doctor` names them) and the podman
   backend still read most of the disk, with only a list of credential paths
-  (the secret floor) hidden. MCP servers you register run on the host,
-  unsandboxed. Workers get environment variables by an allowlist of names.
+  (the secret floor) hidden. A stdio MCP server you register is sandboxed
+  (strict) by default; one registered `sandbox='host'` (the browser, for
+  now) or before 2.4.0 runs on the host, unsandboxed, and can read skep's
+  serve token. Workers get environment variables by an allowlist of names.
 - **Workspace mode has no sandbox.** The built-in worker may run there; the
   external engines never do.
 - **Verification is only as strong as the verify command.** If a project's

@@ -171,7 +171,8 @@ def test_http_runner_jsonrpc_error_raises_mcp_error(
         if "id" not in body:
             return httpx.Response(202)
         return httpx.Response(
-            200, json={"jsonrpc": "2.0", "id": 2, "error": {"message": "no such tool"}}
+            200,
+            json={"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "no such tool"}},
         )
 
     _patch_http(monkeypatch, handler)
@@ -244,12 +245,16 @@ def answer(msg_id):
     time.sleep(0.5)
     reply = {"content": [{"type": "text", "text": "page"}]} if greeted else None
     out = {"jsonrpc": "2.0", "id": msg_id}
-    out.update({"result": reply} if reply else {"error": {"message": "no clientInfo"}})
+    refused = {"error": {"code": -32602, "message": "no clientInfo"}}
+    out.update({"result": reply} if reply else refused)
     print(json.dumps(out), flush=True)
 for line in sys.stdin:
     request = json.loads(line)
     if request.get("method") == "initialize":
         greeted = isinstance(request["params"].get("clientInfo"), dict)
+        result = {"protocolVersion": "2024-11-05", "capabilities": {},
+                  "serverInfo": {"name": "fx", "version": "1"}}
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
     elif request.get("method") == "tools/call":
         threading.Thread(target=answer, args=(request["id"],)).start()
 os._exit(0)
@@ -291,11 +296,19 @@ def test_r6_stdio_runner_reports_a_server_that_exits_without_answering() -> None
     config = MCPServerConfig(
         server_id="gone",
         transport="stdio",
-        command=(sys.executable, "-c", "print('starting up'); print('{\"id\": 1}')"),
+        command=(
+            sys.executable,
+            "-c",
+            "import json; print('starting up'); print(json.dumps({'jsonrpc': '2.0', 'id': 1, "
+            "'result': {'protocolVersion': '2024-11-05', 'capabilities': {}, "
+            "'serverInfo': {'name': 'fx', 'version': '1'}}}))",
+        ),
     )
     call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
     assert not call.ok
-    assert call.error == "no JSON-RPC response for the tool request"
+    # v135 (ADR 0069 1.7): it answered initialize, so the request was sent
+    assert call.outcome == "unknown"
+    assert str(call.error).startswith("no JSON-RPC response for the tool request")
 
 
 # A browse server shaped like Playwright's file output: a relative `filename`
@@ -304,6 +317,10 @@ _FILE_WRITING_SERVER = r"""
 import json, os, sys
 for line in sys.stdin:
     request = json.loads(line)
+    if request.get("method") == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {},
+                  "serverInfo": {"name": "fx", "version": "1"}}
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
     if request.get("method") == "tools/call":
         name = request["params"]["arguments"]["filename"]
         open(name, "w").write("console log")
