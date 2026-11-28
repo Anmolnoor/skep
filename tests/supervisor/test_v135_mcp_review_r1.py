@@ -222,3 +222,97 @@ def test_a_recorded_read_root_that_moved_refuses_the_launch(
     with pytest.raises(MCPNotRun, match="no longer resolves to itself"):
         runner("tools/list", {})
     assert spawned == []
+
+
+# -- S11: a valid reply, or outcome unknown ------------------------------------------
+
+_SCRIPTED = r"""
+import json, sys
+mode = sys.argv[1]
+init_reply = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}
+if mode == "init-error":
+    init_reply = {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "no"}}
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        sys.stdout.write(json.dumps(init_reply) + "\n"); sys.stdout.flush()
+        if mode == "flood":
+            line = json.dumps({"jsonrpc": "2.0", "method": "log"}) + "\n"
+            while True:  # faster than any reader: the queue never runs dry
+                sys.stdout.write(line * 1000)
+                sys.stdout.flush()
+        if mode == "deaf":
+            import time; time.sleep(60)
+    elif msg.get("id") == 2:
+        reply = {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "ok"}]}}
+        if mode == "malformed":
+            reply = {"jsonrpc": "2.0", "id": 2}
+        sys.stdout.write(json.dumps(reply) + "\n"); sys.stdout.flush()
+"""
+
+
+def _scripted_call(tmp_path: Path, mode: str, **arguments: Any) -> Any:
+    script = tmp_path / "scripted.py"
+    script.write_text(_SCRIPTED, encoding="utf-8")
+    config = MCPServerConfig("s", "stdio", command=(sys.executable, str(script), mode))
+    client = mcp_client.MCPClient(config, runner=mcp_client.runner_for_config(config))
+    return client.call_tool("t", arguments)
+
+
+def test_an_initialize_error_does_not_advance_the_handshake(tmp_path: Path) -> None:
+    result = _scripted_call(tmp_path, "init-error")
+    assert result.outcome == "not_run" and "initialize" in str(result.error)
+
+
+def test_a_malformed_reply_to_the_request_is_outcome_unknown(tmp_path: Path) -> None:
+    result = _scripted_call(tmp_path, "malformed")
+    assert not result.ok and result.outcome == "unknown", result
+
+
+def _bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, **arguments: Any) -> Any:
+    """Runs the call on a thread: a hang is a failure, not a stuck suite."""
+    import threading
+
+    monkeypatch.setattr(mcp_client, "MCP_CALL_DEADLINE_SECONDS", 2.0)
+    procs: list[Any] = []
+    real = subprocess.Popen
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        procs.append(real(*args, **kwargs))
+        return procs[-1]
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    out: list[Any] = []
+    worker = threading.Thread(
+        target=lambda: out.append(_scripted_call(tmp_path, mode, **arguments)), daemon=True
+    )
+    worker.start()
+    worker.join(15)
+    for proc in procs:
+        proc.kill()
+    assert not worker.is_alive(), f"{mode}: the exchange passed its deadline and kept going"
+    return out[0]
+
+
+def test_one_deadline_bounds_a_server_that_floods_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import time
+
+    real = json.loads
+
+    def slow(*args: Any, **kwargs: Any) -> Any:  # a loaded machine: the reader lags
+        time.sleep(0.001)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", slow)
+    result = _bounded(tmp_path, monkeypatch, "flood")
+    assert not result.ok and result.outcome == "unknown" and "deadline" in str(result.error)
+
+
+def test_a_write_to_a_server_that_stops_reading_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _bounded(tmp_path, monkeypatch, "deaf", blob="x" * (4 << 20))
+    assert not result.ok and result.outcome == "unknown", result

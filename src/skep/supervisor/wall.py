@@ -31,6 +31,7 @@ def walled(
     trusted_read_roots: tuple[Path, ...] = (),
     skep_home_roots: bool = True,
     unmasked: tuple[Path, ...] = (),
+    deny_local: bool = False,
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """``argv`` wrapped in the wall, and the env it runs with, for the life
     of the block. Reads: the ADR 0068 strict allowlist (system dirs,
@@ -54,7 +55,8 @@ def walled(
     ``skep_home_roots`` go to ``sandbox.write_profile``. ``unmasked`` (review
     S1): the one server's own secrets file, read back past its mask, so the
     in-wall ``skep.secretenv`` step sets its values and the launcher never
-    holds one."""
+    holds one. ``deny_local`` (review S8): the proxy refuses serve's port on
+    every address this host owns, not only on loopback names."""
     from . import sandbox
     from .netproxy import (
         FilteringProxy,
@@ -94,6 +96,7 @@ def walled(
                 hosts,
                 unix_socket_path=socket_path,
                 denied_loopback_ports=control_plane_ports(skep_home / "supervisor"),
+                deny_local=deny_local,
             ).start()
             stack.callback(proxy.stop)
         try:

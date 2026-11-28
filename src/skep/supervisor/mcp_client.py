@@ -479,7 +479,12 @@ def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
     if "error" in message:
         raise MCPReplyError(str(message["error"]))
     result = message.get("result")
-    return result if isinstance(result, Mapping) else {}
+    if not isinstance(result, Mapping):  # review S11: never an empty success
+        raise MCPOutcomeUnknown(
+            "the server's reply to the request was neither a JSON-RPC result nor an error, "
+            "so whether it acted is unknown"
+        )
+    return result
 
 
 def runner_for_config(
@@ -766,45 +771,78 @@ def _stdio_exchange(
         drainer = threading.Thread(target=drain, daemon=True)
         drainer.start()
     lines: list[str] = []
+    # review S11: ONE deadline for the whole exchange — every read and every
+    # write is bounded by it, whatever the server floods or stops reading
     deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
     sent = False
+    stdin = proc.stdin
 
-    def await_reply(wanted: int) -> bool:
+    def overdue(during_request: bool = False) -> MCPError:
+        proc.kill()  # a server that went quiet gets no grace period
+        if sent or during_request:
+            return MCPOutcomeUnknown(
+                f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline after the "
+                "request was sent"
+                + (" (the server stopped reading it)" if during_request and not sent else "")
+            )
+        return MCPNotRun(f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline")
+
+    def await_reply(wanted: int) -> dict[str, object] | None:
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise overdue()
             try:
-                line = read.get(timeout=max(0.0, deadline - time.monotonic()))
+                line = read.get(timeout=remaining)
             except queue.Empty:
-                proc.kill()  # a server that went quiet gets no grace period
-                kind = MCPOutcomeUnknown if sent else MCPNotRun
-                raise kind(
-                    f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline"
-                    + (" after the request was sent" if sent else "")
-                ) from None
+                raise overdue() from None
             if line is None:
-                return False
+                return None
             lines.append(line)
             try:
-                if json.loads(line).get("id") == wanted:
-                    return True
-            except (ValueError, AttributeError):
+                message = json.loads(line)
+            except ValueError:
                 continue
+            if isinstance(message, dict) and message.get("id") == wanted:
+                return message
+
+    def send(data: str, *, request: bool = False) -> None:
+        failed: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                stdin.write(data)
+                stdin.flush()
+            except (OSError, ValueError) as exc:
+                failed.append(exc)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(max(0.0, deadline - time.monotonic()))
+        if writer.is_alive():
+            raise overdue(during_request=request)
+        if failed:
+            raise BrokenPipeError(str(failed[0]))
 
     try:
         try:
-            proc.stdin.write(first + "\n")
-            proc.stdin.flush()
-            if not await_reply(1):
+            send(first + "\n")
+            init = await_reply(1)
+            if init is None:
                 raise MCPNotRun("the MCP server exited before it answered initialize")
-            proc.stdin.write(
-                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
-            )
-            proc.stdin.flush()
-            proc.stdin.write("".join(line + "\n" for line in rest))
-            proc.stdin.flush()
+            if "error" in init or not isinstance(init.get("result"), Mapping):
+                # review S11: only a successful initialize advances the handshake
+                raise MCPNotRun(
+                    "the MCP server did not accept initialize "
+                    f"({init.get('error') or 'its reply held no result'}), so the request "
+                    "was never sent"
+                )
+            send(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+            send("".join(line + "\n" for line in rest), request=True)
         except BrokenPipeError:
             raise MCPNotRun("the MCP server closed its input before the request") from None
         sent = True
-        if not await_reply(2):
+        if await_reply(2) is None:
             raise MCPOutcomeUnknown(
                 "no JSON-RPC response for the tool request: the server exited after the "
                 "request was sent, so whether it acted is unknown"
@@ -812,7 +850,7 @@ def _stdio_exchange(
         return lines
     finally:
         try:
-            proc.stdin.close()
+            stdin.close()
             proc.wait(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             proc.kill()

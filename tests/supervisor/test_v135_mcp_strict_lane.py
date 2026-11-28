@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from skep.supervisor import mcp_client, netproxy, sandbox
+from skep.supervisor import mcp_client, mcp_sandbox, netproxy, sandbox
 from skep.supervisor.mcp_client import (
     MCPClient,
     MCPNotRun,
@@ -293,3 +293,77 @@ def test_a_host_server_keeps_serves_environment_one_process_per_call(
     _register(store, "open", _command("python", servers), sandbox="host")
     env = _json(_call(store, skep_home, "open", "env", names=["SKEP_FAKE_SERVE_SECRET", "HOME"]))
     assert env == {"SKEP_FAKE_SERVE_SECRET": "serve-env-value-1234", "HOME": os.environ["HOME"]}
+
+
+# -- review round 1 (S7, S8) -----------------------------------------------------------
+
+
+def test_no_browser_path_is_bound_into_a_strict_wall_in_2a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S7: the browser is Wave 2b's, bound only for the registration that
+    needs it — never every strict server's trusted read root."""
+    browsers = tmp_path / "ms-playwright"
+    browsers.mkdir()
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browsers))
+    env = mcp_sandbox.hidden_toolchains()
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in env and str(browsers) not in env.values()
+
+
+def _serving(host: str) -> tuple[http.server.ThreadingHTTPServer, list[str]]:
+    hits: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.write(b"serve")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, hits
+
+
+@needs_strict_wall
+def test_serves_port_is_refused_on_every_local_address(
+    store: RunStore, skep_home: Path, servers: Path
+) -> None:
+    """S8: serve bound to every interface is reachable as 0.0.0.0, an IP
+    literal an allowlist may name; the strict MCP proxy refuses serve's port
+    there too. The control: the same literal on a port that is not serve's."""
+    serve, serve_hits = _serving("0.0.0.0")
+    other, other_hits = _serving("0.0.0.0")
+    try:
+        serve_port, other_port = serve.server_address[1], other.server_address[1]
+        (skep_home / "supervisor" / netproxy.SERVE_PORT_FILE).write_text(str(serve_port))
+        hosts = (f"0.0.0.0:{serve_port}", f"0.0.0.0:{other_port}")
+        _register(store, "net", _command("python", servers), sandbox="strict",
+                  read_paths=(str(servers),), egress="hosts", allowed_hosts=hosts)  # fmt: skip
+        to_serve, control = (f"http://{host}/x" for host in hosts)
+        out = _json(_call(store, skep_home, "net", "fetch", urls=[to_serve, control]))
+        assert out[control] == "reached:serve", out
+        assert out[to_serve].startswith("blocked") and serve_hits == [], out
+        assert other_hits == ["/x"]
+    finally:
+        for server in (serve, other):
+            server.shutdown()
+            server.server_close()
+
+
+def test_a_local_interface_address_is_serve_too_only_for_the_mcp_proxy() -> None:
+    """S8, unit: an address this host owns is local; other proxy users keep
+    taking an allowlisted IP literal as stated."""
+    for host in ("0.0.0.0", "127.0.0.1"):
+        assert netproxy.is_local_address(host)
+    assert not netproxy.is_local_address("192.0.2.1")  # TEST-NET-1, owned by nobody
+    admitted = netproxy.admit_target("0.0.0.0", 8765, ("0.0.0.0:8765",), denied_ports=(8765,))
+    assert admitted[0] == 200  # unchanged for dispatch, re-verify and the other walls
+    refused = netproxy.admit_target(
+        "0.0.0.0", 8765, ("0.0.0.0:8765",), denied_ports=(8765,), deny_local=True
+    )
+    assert refused[0] == 403 and "control plane" in refused[1]

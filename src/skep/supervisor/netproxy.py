@@ -182,6 +182,7 @@ def admit_target(
     resolve: Resolver = socket.getaddrinfo,
     asks: tuple[str, ...] = (),
     loopback_ports: tuple[int, ...] = (),
+    deny_local: bool = False,
 ) -> tuple[int, str, list[tuple[str, int]]]:
     """ES-F6 (B54): (200, "", addresses to dial) or (status, reason, []).
 
@@ -191,10 +192,63 @@ def admit_target(
     IP literal the operator allowlisted is taken as stated. W30: a refusal
     names host and port, where else the host is allowed, and whether it is
     one of the run's deferred asks (``asks``: ``network_ask``). D6: loopback
-    is admitted only on ``loopback_ports`` (``run_loopback_ports``)."""
+    is admitted only on ``loopback_ports`` (``run_loopback_ports``).
+
+    ``deny_local`` (ADR 0069, review S8; the strict MCP lane's proxy only):
+    serve can listen on every interface, so ``denied_ports`` are refused on
+    EVERY address this host owns — an IP literal and a resolved answer
+    alike — not only on the loopback names."""
+    status, reason, addresses = _admit(
+        host, port, allowlist, denied_ports=denied_ports, resolve=resolve, asks=asks,
+        loopback_ports=loopback_ports,
+    )  # fmt: skip
+    if (
+        deny_local
+        and status == 200
+        and port in denied_ports
+        and any(is_local_address(address) for address, _port in addresses)
+    ):
+        return 403, f"Forbidden: {_CONTROL_PLANE}", []
+    return status, reason, addresses
+
+
+_CONTROL_PLANE = "the skep control plane is not reachable from a run"
+
+
+def is_local_address(address: str) -> bool:
+    """Review S8: an address of THIS host — loopback, unspecified (which
+    reaches it), or one a socket can bind here (a non-wildcard address binds
+    only where an interface holds it)."""
+    try:
+        ip = ipaddress.ip_address(address.strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_unspecified:
+        return True
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((str(ip), 0))
+        except OSError:
+            return False
+    return True
+
+
+def _admit(
+    host: str,
+    port: int,
+    allowlist: tuple[str, ...],
+    *,
+    denied_ports: tuple[int, ...],
+    resolve: Resolver,
+    asks: tuple[str, ...],
+    loopback_ports: tuple[int, ...],
+) -> tuple[int, str, list[tuple[str, int]]]:
     if _plain_loopback(host):
         if port in denied_ports:
-            return 403, "Forbidden: the skep control plane is not reachable from a run", []
+            return 403, f"Forbidden: {_CONTROL_PLANE}", []
         if port not in loopback_ports:
             return 403, f"Forbidden: {closed_loopback_reason(port)}", []
         return 200, "", [(host.strip("[]"), port)]
@@ -435,8 +489,10 @@ class _ProxyServer(ThreadingTCPServer):
         loopback_ports: tuple[int, ...] = (),
         port: int = 0,
         relay: ProviderRelay | None = None,
+        deny_local: bool = False,
     ) -> None:
         super().__init__(("127.0.0.1", port), _ProxyHandler)
+        self.deny_local = deny_local  # review S8: the strict MCP lane only
         self.allowlist = allowlist
         self.denied_ports = denied_ports
         self.asks = asks  # W30: named in the 403, never admitted
@@ -496,6 +552,10 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     @property
     def loopback_ports(self) -> tuple[int, ...]:
         return self._tcp.loopback_ports
+
+    @property
+    def deny_local(self) -> bool:
+        return self._tcp.deny_local
 
     @property
     def relay(self) -> ProviderRelay | None:
@@ -581,6 +641,7 @@ class _ProxyHandler(StreamRequestHandler):
             denied_ports=self.server.denied_ports,
             asks=self.server.asks,
             loopback_ports=self.server.loopback_ports,
+            deny_local=self.server.deny_local,
         )
         if status == 200:
             mismatch = _host_header_mismatch(headers, host, port)
@@ -868,6 +929,7 @@ class FilteringProxy:
         loopback_ports: Iterable[int] = (),
         port: int = 0,  # ADR 0060: a re-adopted worker's profile names its port
         relay: ProviderRelay | None = None,
+        deny_local: bool = False,  # review S8: serve's port on every local address
     ) -> None:
         self._server = _ProxyServer(
             tuple(allowlist),
@@ -876,6 +938,7 @@ class FilteringProxy:
             tuple(loopback_ports),
             port,
             relay,
+            deny_local,
         )
         self._unix_path = unix_socket_path
         self._unix_server = (

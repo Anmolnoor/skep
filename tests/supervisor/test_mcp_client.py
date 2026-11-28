@@ -292,7 +292,11 @@ def test_r6_stdio_runner_reports_a_server_that_exits_without_answering() -> None
     config = MCPServerConfig(
         server_id="gone",
         transport="stdio",
-        command=(sys.executable, "-c", "print('starting up'); print('{\"id\": 1}')"),
+        command=(
+            sys.executable,
+            "-c",
+            "print('starting up'); print('{\"id\": 1, \"result\": {}}')",
+        ),
     )
     call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
     assert not call.ok

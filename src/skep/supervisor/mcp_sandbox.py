@@ -752,23 +752,17 @@ def sandbox_refusal(server_id: str) -> str | None:
     )
 
 
-def hidden_toolchains() -> tuple[dict[str, str], tuple[Path, ...]]:
+def hidden_toolchains() -> dict[str, str]:
     """Toolchain paths a moved HOME hides from the child, passed explicitly
-    and read-only (2.3): uv's managed Pythons (already a strict root) and
-    Playwright's browsers (bound as a trusted read root)."""
+    and read-only (2.3): uv's managed Pythons (already a strict root). No
+    browser path in 2a (review S7): Wave 2b binds a validated one only for
+    the registration that needs it."""
     import os
 
-    home = Path.home()
-    env: dict[str, str] = {}
-    roots: list[Path] = []
-    uv_python = Path(os.environ.get("UV_PYTHON_INSTALL_DIR") or home / ".local/share/uv/python")
-    if uv_python.is_dir():
-        env["UV_PYTHON_INSTALL_DIR"] = str(uv_python)
-    browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or home / ".cache/ms-playwright")
-    if browsers.is_dir() and not browsers.is_symlink():
-        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
-        roots.append(browsers.resolve())
-    return env, tuple(roots)
+    uv_python = Path(
+        os.environ.get("UV_PYTHON_INSTALL_DIR") or Path.home() / ".local/share/uv/python"
+    )
+    return {"UV_PYTHON_INSTALL_DIR": str(uv_python)} if uv_python.is_dir() else {}
 
 
 def node_note(config: MCPServerConfig, argv: list[str]) -> str:
@@ -893,7 +887,7 @@ def strict_exchange(
             "somewhere its card never showed. Put the directory back, or register the server "
             "again: the new card shows where each path resolves"
         )
-    tool_env, tool_roots = hidden_toolchains()
+    tool_env = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
     own = {name: secret_values[name] for name in config.secret_names}
     # Review S1: the values never enter the launcher's environment or argv —
@@ -917,9 +911,10 @@ def strict_exchange(
                 workspace=Path(scratch),
                 profile_dir=Path(profiles),
                 read_allowlist=tuple(Path(raw) for raw in config.read_paths),
-                trusted_read_roots=(*trusted, *tool_roots),
+                trusted_read_roots=tuple(trusted),
                 skep_home_roots=False,
                 unmasked=unmasked,
+                deny_local=True,  # review S8
             ) as (wrapped, wall_env):
                 env = {**wall_env, **RUNTIME_ENV, **tool_env}  # no secret value (S1)
                 if clash := sorted(set(own) & set(env)):
@@ -1106,7 +1101,7 @@ def npm_tree_problem(tree: Path) -> str | None:
 
 def _installer_env(scratch: Path, wall_env: Mapping[str, str]) -> dict[str, str]:
     proxy = wall_env.get("HTTPS_PROXY", "")
-    tool_env, _ = hidden_toolchains()
+    tool_env = hidden_toolchains()
     return {
         **wall_env,
         **tool_env,
@@ -1151,6 +1146,7 @@ def _run_installer(config: MCPServerConfig, tree: Path, skep_home: Path, timeout
                     profile_dir=Path(profiles),
                     read_allowlist=(),
                     skep_home_roots=False,
+                    deny_local=True,  # review S8
                 ) as (wrapped, wall_env):
                     proc = subprocess.run(
                         wrapped,
