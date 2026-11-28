@@ -320,10 +320,11 @@ _SANDBOX_FIELDS = ("sandbox", "egress", "allowed_hosts", "read_paths", "secret_n
 def http_fields_problem(args: Mapping[str, Any]) -> str | None:
     """Review S12: an http registration leaves every sandbox field out (the
     tool description says so); naming one — even ``sandbox='host'`` — is
-    refused, never defaulted into meaning something."""
+    refused, never defaulted into meaning something. Review r2 N12: by key
+    presence — an empty list, "" or null names the field too."""
     if str(args.get("transport") or "stdio") == "stdio":
         return None
-    named = [field for field in _SANDBOX_FIELDS if args.get(field) not in (None, "", [], ())]
+    named = [field for field in _SANDBOX_FIELDS if field in args]
     if not named:
         return None
     return (

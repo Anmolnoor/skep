@@ -145,7 +145,9 @@ left open:
   (`--ro-bind-fd`) would close it and is a follow-up.
 - **An http registration leaves the sandbox fields out** (review S12): it
   is stored as `host` (the mode that confines nothing); naming any sandbox
-  field for it, `sandbox='host'` included, is refused with a teaching error.
+  field for it, `sandbox='host'` included, is refused with a teaching error
+  — by key presence, so an empty list, `""` or `null` names it too (review
+  r2 N12).
 - **Pins are exact, and so is the tree's source** (review S9). An npm pin is
   semver 2.0.0 exactly (semver.org's pattern, with node-semver's length and
   size limits): npm reads a malformed prerelease such as `1.2.3-a..b` as a

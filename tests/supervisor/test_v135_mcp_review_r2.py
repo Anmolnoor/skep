@@ -575,3 +575,22 @@ def test_a_root_the_built_wall_binds_elsewhere_is_refused(tmp_path: Path) -> Non
     ):
         with pytest.raises(mcp_client.MCPNotRun, match="not the path its card showed"):
             mcp_sandbox._refuse_moved_roots(config, wrapped)
+
+
+# -- N12: an http registration names no sandbox field, empty or not ----------------
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("read_paths", []), ("secret_names", []), ("install", ""), ("allowed_hosts", []),
+     ("egress", ""), ("sandbox", None)],
+)  # fmt: skip
+def test_an_http_registration_naming_any_sandbox_field_is_refused(
+    store: RunStore, field: str, value: Any
+) -> None:
+    args = {"server_id": "web", "transport": "http", "url": "http://x/mcp", field: value}
+    problem = mcp_sandbox.http_fields_problem(args)
+    assert problem is not None and field in problem
+    with pytest.raises(ValueError, match="http server"):
+        mcp_sandbox.register(store, args, chat_id=None)
+    assert mcp_sandbox.http_fields_problem({k: v for k, v in args.items() if k != field}) is None
