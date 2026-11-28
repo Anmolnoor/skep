@@ -63,6 +63,7 @@ Email and calendar are the two the daily-driver record demanded. For any
 other integration: registry first (an existing community MCP server via
 `register_mcp_server`, sandboxed by default: a pinned `install=` or an
 absolute entry point, only the hosts, read paths and secret names it needs,
-secrets set with `skep mcp secret set`), and where none exists, the forge (`forge_tool`)
+secrets set with `skep mcp secret set`, Linux only in this release: on macOS a
+sandboxed server that lists secrets is refused), and where none exists, the forge (`forge_tool`)
 authors one under the same trial + card + registration discipline. No
 integration ever ships its own permission system.
