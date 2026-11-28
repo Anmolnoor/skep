@@ -50,6 +50,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..mcp_sandbox import card_incarnation
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from ..secret_floor import own_secret_in, own_secret_refusal
@@ -425,6 +426,8 @@ def pending_duplicate_action(
     ``merge`` is a merge_pr proposal's pin, already read (R3 S6)."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
+    # ADR 0069 1.6: an MCP card is also its registration — one for a replaced server is stale
+    bound = card_incarnation(store, args) if tool == "call_mcp_tool" else None
     proposed = None
     if tool == "merge_pr":
         proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
@@ -444,7 +447,7 @@ def pending_duplicate_action(
         if proposed is not None and merge_target(store, record.args) == proposed[:2]:
             return record, False  # R3 (S7/N4): it pins nothing; a valid proposal stands
         if _canonical_args(record.args) == args_key:
-            return record, True
+            return record, (record.card or {}).get("incarnation") == bound
         if subject is not None and _proposal_subject(record.tool, record.args) == subject:
             # A gate mirror is the standing question for a live review (its
             # Deny denies the review, v87-F2) — it is never superseded by a
@@ -623,11 +626,18 @@ def executed_payload(tool: str, result: Any) -> dict[str, Any]:
     # that did not happen is a failed card (github.merge_record).
     if tool == "merge_pr" and isinstance(result, dict) and result.get("ok") is False:
         return {"ok": False, "result": result}
+    if tool == "call_mcp_tool" and isinstance(result, dict) and result.get("ok") is False:
+        # ADR 0069 1.7: not run, outcome unknown, or the tool's own error — never "confirmed"
+        said = {k: result[k] for k in ("error", "note") if k in result}
+        return {"ok": False, "outcome": result.get("outcome"), **said, "result": result}
     return {"ok": True, "result": result}
 
 
 def executed_status(payload: dict[str, Any]) -> str:
-    """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
+    """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8).
+    ADR 0069 1.7: one whose outcome is unknown is 'interrupted', never failed."""
+    if payload.get("outcome") == "unknown":
+        return "interrupted"
     return "confirmed" if payload.get("ok") else "failed"
 
 
@@ -3218,6 +3228,8 @@ class ChatEngine:
                     # could only fail, B22); one it passes carries the replay.
                     # R3 (S6): a merge_pr proposal reads its pin ONCE; the
                     # check, the de-duplication and the card all use it.
+                    if name == "call_mcp_tool":  # ADR 0069 1.6: card_json carries it, not args
+                        args.pop("incarnation", None)
                     pin = merge_pin(self.store, args) if name == "merge_pr" else None
                     try:
                         checked = policy_write_preview(

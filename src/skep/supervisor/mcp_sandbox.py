@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .mcp_client import MCPError, MCPRunner, MCPServerConfig
+from .mcp_client import MCPCallResult, MCPError, MCPRunner, MCPServerConfig
 
 if TYPE_CHECKING:
     from .store import RunStore
@@ -445,7 +445,7 @@ _REFUSED_EXACT = frozenset(
      "PLAYWRIGHT_BROWSERS_PATH", "PIP_NO_INDEX", "PIP_INDEX_URL", "SSL_CERT_FILE",
      "SSL_CERT_DIR", "BASH_ENV", "ENV"}
 )  # fmt: skip
-_REFUSED_PREFIXES = ("LD_", "DYLD_", "NPM_CONFIG_", "UV_", "PIP_", "SKEP_")
+_REFUSED_PREFIXES = ("LD_", "DYLD_", "NPM_CONFIG_", "UV_", "PIP_")
 _PROXY_NAMES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
 
 
@@ -1036,3 +1036,62 @@ def unset_secret(skep_home: Path, server_id: str, name: str) -> bool:
     del held[name]
     _write_secrets(skep_home, server_id, held)
     return True
+
+
+# -- an approved call, bound to its registration (1.6, 1.7) ------------------------
+
+
+def call_registered(
+    store: RunStore,
+    server_id: str,
+    tool: str,
+    arguments: Mapping[str, object],
+    *,
+    skep_home: Path,
+    card: Mapping[str, Any] | None,
+    guard: Any,
+) -> dict[str, Any]:
+    """``call_mcp_tool``'s executor. Under ``REGISTRY_GATE.reading`` (no
+    registration change can land between the check and the call): the
+    registration is reloaded, ``guard`` (the final ``decide()``) runs, a
+    confirmed ``card`` must name the registration's incarnation, and the
+    call is made once, never retried. The result says which of the three
+    happened: ran, not run, outcome unknown."""
+    from .mcp_client import MCPClient, load_mcp_servers, runner_for_config
+
+    head = {"server_id": server_id, "tool": tool}
+    with REGISTRY_GATE.reading():
+        config = load_mcp_servers(store).get(server_id)
+        if config is None:
+            raise ValueError(f"no MCP server {server_id!r}; register_mcp_server first")
+        guard()
+        refusal = None if card is None else card_binding_refusal(card, config)
+        if refusal is not None:
+            return {**head, "ok": False, "outcome": "not_run", "error": refusal}
+        try:
+            runner = runner_for_config(config, skep_home=skep_home, store=store)
+            call = MCPClient(config, runner=runner).call_tool(tool, arguments)
+        except MCPError as exc:
+            call = MCPCallResult(False, error=str(exc), outcome="not_run")
+    look = f"list_mcp_tools server_id={server_id} shows whether it starts and what it offers"
+    if call.ok:
+        return {**head, "ok": True, "outcome": "ran", "content": call.content}
+    if call.outcome == "unknown":
+        return {
+            **head, "ok": False, "outcome": "unknown",
+            "note": f"outcome unknown: the request was sent, then {call.error}. It was not "
+            "retried; check whether it took effect before asking for it again",
+        }  # fmt: skip
+    if call.outcome == "not_run":
+        error = str(call.error)
+        return {
+            **head, "ok": False, "outcome": "not_run",
+            "error": error if error.startswith("not run") else f"not run: {error}",
+            "next_step": look,
+        }  # fmt: skip
+    return {
+        **head, "ok": False, "outcome": "ran", "tool_error": call.error,
+        "error": f"the tool answered with an error: {call.error}",
+        "next_step": f"check the arguments against {tool}'s inputSchema and call again",
+    }  # fmt: skip
+

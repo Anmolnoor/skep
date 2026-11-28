@@ -875,6 +875,10 @@ def recorded_card(
             record["schedule"] = facts
     if tool == "promote_tool":
         record["forge"] = promotion_card(store, args)
+    if tool == "call_mcp_tool":  # ADR 0069 1.6: the supervisor's, never the model's
+        from ..mcp_sandbox import card_incarnation
+
+        record["incarnation"] = card_incarnation(store, args)
     if tool in ("register_mcp_server", "setup_browser"):  # ADR 0069 1.3, built with no launch
         from ..mcp_sandbox import card_grant
 

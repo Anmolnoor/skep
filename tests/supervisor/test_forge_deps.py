@@ -550,6 +550,8 @@ def test_call_mcp_tool_errors_name_the_next_step(
         silent = execute_mutation(
             "call_mcp_tool", args, store=store, holder=holder,
             runner=cast(Dispatcher, None), actor="test",
+            # v135 (ADR 0069 1.6): the card it confirms names this registration
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
         )  # fmt: skip
         assert silent["ok"] is False and "no JSON-RPC response" in silent["error"]
         assert "list_mcp_tools server_id=plain" in silent["next_step"]
@@ -558,11 +560,14 @@ def test_call_mcp_tool_errors_name_the_next_step(
             raise mcp_client.MCPError("unsupported MCP transport 'x'")
 
         monkeypatch.setattr(mcp_client, "runner_for_config", unbuildable)
-        with pytest.raises(ValueError, match=r"plain:get_x.*list_mcp_tools server_id=plain"):
-            execute_mutation(
-                "call_mcp_tool", args, store=store, holder=holder,
-                runner=cast(Dispatcher, None), actor="test",
-            )  # fmt: skip
+        unbuilt = execute_mutation(
+            "call_mcp_tool", args, store=store, holder=holder,
+            runner=cast(Dispatcher, None), actor="test",
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
+        )  # fmt: skip
+        # v135 (ADR 0069 1.7): nothing was sent, so it is recorded as not run
+        assert unbuilt["outcome"] == "not_run" and "unsupported MCP transport" in unbuilt["error"]
+        assert "list_mcp_tools server_id=plain" in unbuilt["next_step"]
 
         def refuses(config_: Any, **_: Any) -> Any:
             return lambda method, params: {"content": "missing text", "isError": True}
@@ -571,6 +576,8 @@ def test_call_mcp_tool_errors_name_the_next_step(
         result = execute_mutation(
             "call_mcp_tool", args, store=store, holder=holder,
             runner=cast(Dispatcher, None), actor="test",
+            # v135 (ADR 0069 1.6): the card it confirms names this registration
+            card={"incarnation": mcp_client.load_mcp_servers(store)["plain"].incarnation},
         )  # fmt: skip
         assert result["ok"] is False and "inputSchema" in result["next_step"]
     finally:
