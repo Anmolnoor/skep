@@ -1095,3 +1095,49 @@ def call_registered(
         "next_step": f"check the arguments against {tool}'s inputSchema and call again",
     }  # fmt: skip
 
+
+# -- skep doctor (1.8, 2.6) ----------------------------------------------------------
+
+
+def posture_lines(store: RunStore, skep_home: Path) -> list[str]:
+    """One line per registered stdio server (forged tools keep their own
+    lane): the mode configured, the mode enforced here, and for ``host`` the
+    exact chat request that hardens it; a server registered before 2.4.0 is
+    flagged as inheriting serve's environment."""
+    from .mcp_client import FORGED_SERVER_PREFIX, load_mcp_servers
+
+    lines = []
+    for config in load_mcp_servers(store).values():
+        if config.transport != "stdio" or config.server_id.startswith(FORGED_SERVER_PREFIX):
+            continue
+        sid = config.server_id
+        if config.sandbox == "host":
+            older = (
+                " Registered before 2.4.0: it inherits serve's whole environment (serve.env "
+                "keys included)."
+                if not config.incarnation
+                else ""
+            )
+            lines.append(
+                f"MCP server {sid!r}: configured host, enforced host — unsandboxed, as you, "
+                f"with your files, the network and skep's serve token.{older} To harden it, ask "
+                f'in chat: "register the MCP server {sid} again with sandbox strict" (it needs '
+                "a pinned install= or an absolute entry point; a browser waits for 2b)."
+            )
+            continue
+        refusal = sandbox_refusal(sid)
+        enforced = "strict" if refusal is None else "none: every call is refused here"
+        net = (
+            "no network" if config.egress == "none" else f"hosts {', '.join(config.allowed_hosts)}"
+        )
+        line = f"MCP server {sid!r}: configured strict, enforced {enforced} ({net})."
+        if config.install and not published_marker(skep_home, sid, config.incarnation).is_file():
+            line += " Its install has not finished or failed: calls are refused until it does."
+        if unset := secret_names_unset(skep_home, config):
+            steps = "; ".join(f"`skep mcp secret set {sid} {name}`" for name in unset)
+            line += f" Secret(s) not set: {steps}."
+        note = node_note(config, runtime_argv(config, skep_home))
+        if note:
+            line += note
+        lines.append(line)
+    return lines

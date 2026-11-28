@@ -11,8 +11,8 @@ Notion is MCP-only. `read_url` sends no headers and no auth, so it can
 never reach the Notion API; do not try it.
 
 One-time setup: register Notion's MCP server (`register_mcp_server` —
-the operator confirms the card; the token rides the server config env,
-never chat). Until then, honestly say Notion is not connected.
+the operator confirms the card; the token is one of its `secret_names`,
+set with `skep mcp secret set <server_id> <NAME>`, never chat). Until then, honestly say Notion is not connected.
 
 1. Reads: the server's read tools through `call_mcp_tool`
    (`list_mcp_tools` shows them and what policy decides for each).

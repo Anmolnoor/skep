@@ -66,6 +66,7 @@ def _build_status(
             _provider_advisories(home, provider_ready=False)
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
+            + _mcp_posture_advisories(home)
             + _verify_pin_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
@@ -103,6 +104,7 @@ def _build_status(
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
+        + _mcp_posture_advisories(home)
         + _verify_pin_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
@@ -695,6 +697,22 @@ def _browse_advisories(home: Path) -> list[str]:
         and config.command
         and shutil.which(config.command[0]) is None
     ]
+
+
+def _mcp_posture_advisories(home: Path) -> list[str]:
+    """v135 (ADR 0069 1.8): each registered stdio MCP server, configured and
+    enforced, with the chat request that hardens a host one."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.mcp_sandbox import posture_lines
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        return posture_lines(store, home)
+    finally:
+        store.close()
 
 
 def _verify_pin_advisories(home: Path) -> list[str]:
@@ -1426,7 +1444,8 @@ def _sandbox_check(home: Path) -> dict[str, Any]:
             f" available; {n_strict} of {len(projects)} sandboxed projects strict; forged tools, "
             "script schedules and the fast lane always strict; diagnose re-runs take their run's "
             "recorded strict setting and extra read paths, plus today's system and toolchain "
-            "dirs; MCP servers you register run on the host, unsandboxed"
+            "dirs; stdio MCP servers you register run strict unless registered "
+            "sandbox='host' (each is listed in the advisories)"
             if strict
             else " (reads stay open but the secret floor)"
         )
