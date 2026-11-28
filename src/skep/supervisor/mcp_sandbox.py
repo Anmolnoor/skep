@@ -22,7 +22,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .mcp_client import MCPError, MCPServerConfig
+from .mcp_client import MCPError, MCPRunner, MCPServerConfig
 
 if TYPE_CHECKING:
     from .store import RunStore
@@ -531,3 +531,203 @@ def register(store: RunStore, args: Mapping[str, Any], *, chat_id: str | None) -
     if config.transport == "stdio" and config.sandbox == "strict":
         result |= {"egress": config.egress, "allowed_hosts": list(config.allowed_hosts)}
     return result
+
+
+# -- the run-time wall (2.3, 2.4, 2.6, 2.7) --------------------------------------
+
+# The package managers set offline at run time (2.3), and Node told to use the
+# proxy the wall names (2.6: a Node before 24 / 22.21 ignores it).
+RUNTIME_ENV = {
+    "npm_config_offline": "true",
+    "npm_config_update_notifier": "false",
+    "UV_OFFLINE": "1",
+    "PIP_NO_INDEX": "1",
+    "NODE_USE_ENV_PROXY": "1",
+}
+
+
+def sandbox_refusal(server_id: str) -> str | None:
+    """2.7 (I12, I9): no backend that confines reads refuses the call, saying
+    what to install; None when the strict wall can be built here."""
+    from . import sandbox
+
+    probe = sandbox.availability()
+    if probe.usable and probe.backend in sandbox.STRICT_READ_BACKENDS:
+        return None
+    here = f"the {probe.backend} backend" if probe.usable else (probe.reason or "none usable")
+    return (
+        f"not run: {server_id!r} is a strict MCP server, and it runs only inside a sandbox "
+        f"that confines reads (bubblewrap on Linux, sandbox-exec on macOS); here: {here}. "
+        "Install bubblewrap (`sudo dnf install bubblewrap` or `sudo apt install "
+        "bubblewrap`) and run `skep doctor`, or register it again with sandbox='host' "
+        "(unsandboxed, a HIGH card)"
+    )
+
+
+def hidden_toolchains() -> tuple[dict[str, str], tuple[Path, ...]]:
+    """Toolchain paths a moved HOME hides from the child, passed explicitly
+    and read-only (2.3): uv's managed Pythons (already a strict root) and
+    Playwright's browsers (bound as a trusted read root)."""
+    import os
+
+    home = Path.home()
+    env: dict[str, str] = {}
+    roots: list[Path] = []
+    uv_python = Path(os.environ.get("UV_PYTHON_INSTALL_DIR") or home / ".local/share/uv/python")
+    if uv_python.is_dir():
+        env["UV_PYTHON_INSTALL_DIR"] = str(uv_python)
+    browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or home / ".cache/ms-playwright")
+    if browsers.is_dir() and not browsers.is_symlink():
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+        roots.append(browsers.resolve())
+    return env, tuple(roots)
+
+
+def node_note(config: MCPServerConfig, argv: list[str]) -> str:
+    """2.6: when a Node server's listed host fails, the version that decides
+    whether it honours the proxy; "" for anything else."""
+    import shutil
+    import subprocess
+
+    node_program = config.install[:1] == ("npm",) or Path(argv[0]).name == "node"
+    if config.egress != "hosts" or not node_program:
+        return ""
+    node = shutil.which("node")
+    try:
+        version = subprocess.run(
+            [node or "node", "--version"], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        version = "not found"
+    return (
+        f" (Node here: {version or 'unknown'}; a Node before 24, or 22 before 22.21, ignores "
+        "NODE_USE_ENV_PROXY, so its fetch skips the proxy and every listed host fails)"
+    )
+
+
+def redact(value: Any, values: Mapping[str, str]) -> Any:
+    """2.5: this server's own secret values, replaced wherever they appear in
+    what it returned (strings, nested lists and objects)."""
+    secrets_ = [v for v in values.values() if len(v) >= 4]
+    if not secrets_:
+        return value
+    if isinstance(value, str):
+        for secret in sorted(secrets_, key=len, reverse=True):
+            value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, Mapping):
+        return {redact(k, values): redact(v, values) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [redact(item, values) for item in value]
+    return value
+
+
+def strict_exchange(
+    config: MCPServerConfig,
+    payload: str,
+    *,
+    skep_home: Path,
+    secret_values: Mapping[str, str],
+    require_published: bool = True,
+) -> list[str]:
+    """One exchange with a strict server behind the shared wall (2.3): the
+    strict read allowlist plus ``read_paths`` and its install tree (a trusted
+    read root), per-launch scratch as HOME and temp, its egress through the
+    FilteringProxy, the package managers offline, nothing from serve's
+    environment but PATH and LANG, and its own secrets. Refused before
+    anything starts: no backend, an unpublished install, an unset secret."""
+    import tempfile
+
+    from . import sandbox
+    from .mcp_client import MCPNotRun, _stdio_exchange
+    from .wall import walled
+
+    if (refusal := sandbox_refusal(config.server_id)) is not None:
+        raise MCPNotRun(refusal)
+    argv = runtime_argv(config, skep_home)
+    trusted: list[Path] = []
+    if config.install:
+        marker = published_marker(skep_home, config.server_id, config.incarnation)
+        if require_published and not marker.is_file():
+            raise MCPNotRun(
+                f"not run: {config.server_id!r} has no finished install for this registration "
+                f"({config.install[0]}:{config.install[1]}): it is still installing, or the "
+                "install failed (its result is in the chat that registered it). Register it "
+                "again to retry the install"
+            )
+        trusted.append(install_tree(skep_home, config).resolve())
+    unset = [name for name in config.secret_names if not secret_values.get(name)]
+    if unset:
+        steps = "; ".join(f"`skep mcp secret set {config.server_id} {n}`" for n in unset)
+        raise MCPNotRun(
+            f"not run: {config.server_id!r} lists secret(s) {', '.join(unset)} with no value "
+            f"set. The operator sets each on this machine (never in chat): {steps}"
+        )
+    gone = [raw for raw in config.read_paths if not Path(raw).exists()]
+    if gone:
+        raise MCPNotRun(
+            f"not run: read path(s) {', '.join(gone)} of {config.server_id!r} do not exist; "
+            "create them, or register the server again without them"
+        )
+    tool_env, tool_roots = hidden_toolchains()
+    hosts = config.allowed_hosts if config.egress == "hosts" else ()
+    own = {name: secret_values[name] for name in config.secret_names}
+    with (
+        tempfile.TemporaryDirectory(prefix="skep-mcp-") as scratch,
+        tempfile.TemporaryDirectory(prefix="skep-mcp-profile-") as profiles,
+    ):
+        try:
+            with walled(
+                argv,
+                skep_home=skep_home,
+                hosts=hosts,
+                workspace=Path(scratch),
+                profile_dir=Path(profiles),
+                read_allowlist=tuple(Path(raw) for raw in config.read_paths),
+                trusted_read_roots=(*trusted, *tool_roots),
+                skep_home_roots=False,
+            ) as (wrapped, wall_env):
+                # the wall's own names win; the refusal is checked on the FINAL env
+                env = {**own, **wall_env, **RUNTIME_ENV, **tool_env}
+                for name, value in own.items():
+                    if secret_name_problem(name) is not None or env.get(name) != value:
+                        raise MCPNotRun(
+                            f"not run: secret name {name!r} collides with a name the wall "
+                            "sets; register the server again with another name"
+                        )
+                diagnostics: list[str] = []
+                try:
+                    return _stdio_exchange(
+                        wrapped, payload, cwd=Path(scratch), env=env, diagnostics=diagnostics
+                    )
+                except MCPError as exc:
+                    said = "".join(diagnostics).strip()[-800:]
+                    detail = f"{exc}{node_note(config, argv)}"
+                    if said:
+                        detail += f". The server's stderr ended with: {said}"
+                    raise type(exc)(detail) from None
+        except sandbox.SandboxUnavailableError as exc:
+            raise MCPNotRun(
+                f"not run: the strict wall for {config.server_id!r} could not be built: {exc}"
+            ) from exc
+
+
+def strict_runner(config: MCPServerConfig, *, skep_home: Path | None) -> MCPRunner:
+    """``runner_for_config``'s strict branch: an MCPRunner whose results and
+    errors carry none of this server's own secret values (2.5)."""
+    from .mcp_client import MCPNotRun, _stdio_payload, _stdio_reply
+
+    def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        if skep_home is None:
+            raise MCPNotRun(f"strict MCP server {config.server_id!r} needs its skep home")
+        values = load_secrets(skep_home, config.server_id)
+        try:
+            lines = strict_exchange(
+                config, _stdio_payload(method, params), skep_home=skep_home, secret_values=values
+            )
+            reply = _stdio_reply(lines)
+        except MCPError as exc:
+            raise type(exc)(redact(str(exc), values)) from None
+        return dict(redact(reply, values))
+
+    return run

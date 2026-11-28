@@ -250,6 +250,7 @@ for line in sys.stdin:
     request = json.loads(line)
     if request.get("method") == "initialize":
         greeted = isinstance(request["params"].get("clientInfo"), dict)
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {}}), flush=True)
     elif request.get("method") == "tools/call":
         threading.Thread(target=answer, args=(request["id"],)).start()
 os._exit(0)
@@ -295,7 +296,9 @@ def test_r6_stdio_runner_reports_a_server_that_exits_without_answering() -> None
     )
     call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
     assert not call.ok
-    assert call.error == "no JSON-RPC response for the tool request"
+    # v135 (ADR 0069 1.7): it answered initialize, so the request was sent
+    assert call.outcome == "unknown"
+    assert str(call.error).startswith("no JSON-RPC response for the tool request")
 
 
 # A browse server shaped like Playwright's file output: a relative `filename`
@@ -304,6 +307,8 @@ _FILE_WRITING_SERVER = r"""
 import json, os, sys
 for line in sys.stdin:
     request = json.loads(line)
+    if request.get("method") == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {}}), flush=True)
     if request.get("method") == "tools/call":
         name = request["params"]["arguments"]["filename"]
         open(name, "w").write("console log")

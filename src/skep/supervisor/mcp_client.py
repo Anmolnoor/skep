@@ -41,6 +41,19 @@ class MCPError(Exception):
     """An MCP transport or protocol error."""
 
 
+class MCPNotRun(MCPError):
+    """v135 (ADR 0069 1.7): refused or failed BEFORE the request was sent."""
+
+
+class MCPOutcomeUnknown(MCPError):
+    """v135 (ADR 0069 1.7): the request was sent, then the server died or
+    passed its deadline. It may have acted: never retried, never "failed"."""
+
+
+class MCPReplyError(MCPError):
+    """The server answered the request with a JSON-RPC error: it ran."""
+
+
 @dataclass(frozen=True)
 class MCPServerConfig:
     server_id: str
@@ -99,6 +112,9 @@ class MCPCallResult:
     ok: bool
     content: object = None
     error: str | None = None
+    # v135 (ADR 0069 1.7): ran (the server answered: ``ok`` or its own tool
+    # error) | not_run (nothing was sent) | unknown (sent, then no answer)
+    outcome: str = "ran"
 
 
 # Keyword heuristics for classifying an MCP tool's risk (highest wins). A tool
@@ -328,10 +344,17 @@ class MCPClient:
         return tools
 
     def call_tool(self, name: str, arguments: Mapping[str, object]) -> MCPCallResult:
+        """One call, never retried. A failure says whether the request was
+        sent (ADR 0069 1.7): a transport failure before it is ``not_run``,
+        after it ``unknown``; a JSON-RPC error reply ran."""
         try:
             response = self._runner("tools/call", {"name": name, "arguments": dict(arguments)})
+        except MCPOutcomeUnknown as exc:
+            return MCPCallResult(False, error=str(exc), outcome="unknown")
+        except MCPReplyError as exc:
+            return MCPCallResult(False, error=str(exc))
         except Exception as exc:
-            return MCPCallResult(False, error=str(exc) or exc.__class__.__name__)
+            return MCPCallResult(False, error=str(exc) or exc.__class__.__name__, outcome="not_run")
         if response.get("isError"):
             return MCPCallResult(False, error=str(response.get("content") or "tool error"))
         return MCPCallResult(True, content=response.get("content"))
@@ -454,7 +477,7 @@ def remove_mcp_server(store: RunStore, server_id: str) -> None:
 
 def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
     if "error" in message:
-        raise MCPError(str(message["error"]))
+        raise MCPReplyError(str(message["error"]))
     result = message.get("result")
     return result if isinstance(result, Mapping) else {}
 
@@ -500,6 +523,7 @@ def runner_for_config(
             headers = {"Accept": "application/json, text/event-stream"}
             budget = MCP_CALL_DEADLINE_SECONDS
             deadline = time.monotonic() + budget
+            sent = False
             try:
                 # The per-read timeout bounds silence; the deadline bounds a trickle.
                 with httpx.Client(timeout=budget) as client:
@@ -535,6 +559,7 @@ def runner_for_config(
                         json={"jsonrpc": "2.0", "method": "notifications/initialized"},
                         headers=headers,
                     )
+                    sent = True  # ADR 0069 1.7: from here a failure is outcome-unknown
                     with client.stream(
                         "POST",
                         url,
@@ -570,19 +595,26 @@ def runner_for_config(
                             if isinstance(message, dict) and message.get("id") == 2:
                                 return _jsonrpc_result(message)
                         raise MCPError("no JSON-RPC response for the tool request")
-            except MCPError:
+            except MCPReplyError:
                 raise
-            except json.JSONDecodeError as exc:
-                raise MCPError(f"http MCP response was not JSON-RPC: {exc}") from exc
-            except httpx.HTTPError as exc:
-                raise MCPError(
-                    f"http MCP transport error: {exc.__class__.__name__}: {exc}"
-                ) from exc
+            except (MCPError, json.JSONDecodeError, httpx.HTTPError) as exc:
+                kind = MCPOutcomeUnknown if sent else MCPNotRun
+                if isinstance(exc, json.JSONDecodeError):
+                    raise kind(f"http MCP response was not JSON-RPC: {exc}") from exc
+                if isinstance(exc, httpx.HTTPError):
+                    raise kind(
+                        f"http MCP transport error: {exc.__class__.__name__}: {exc}"
+                    ) from exc
+                raise kind(str(exc)) from exc
 
         return run_http
 
     if config.transport != "stdio":
         raise MCPError(f"unsupported MCP transport {config.transport!r}")
+    if config.sandbox == "strict":  # v135 (ADR 0069 2.3): behind the shared wall
+        from .mcp_sandbox import strict_runner
+
+        return strict_runner(config, skep_home=skep_home)
 
     def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
         payload = _stdio_payload(method, params)
@@ -636,29 +668,48 @@ def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
     raise MCPError("no JSON-RPC response for the tool request")
 
 
-def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -> list[str]:
-    """ES-F162 (R6): send ``payload`` and keep stdin open until the server
-    answers request 2, or the deadline passes. A server that stops when its
-    stdin closes (Playwright's does, ~0.4 s) never answered a call that takes
-    longer than that: stdin used to close with the request. Returns the
-    stdout lines read; stops the server either way."""
+def _stdio_exchange(
+    argv: list[str],
+    payload: str,
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    diagnostics: list[str] | None = None,
+) -> list[str]:
+    """One compliant one-shot exchange (ADR 0069 2.4): the payload's first
+    line (``initialize``) alone, its reply, then ``notifications/initialized``,
+    then the request; the reply is matched by id. ES-F162 (R6): stdin stays
+    open until the server answers request 2 or the deadline passes. Returns
+    the stdout lines read; stops the server either way.
+
+    A failure before the request was written is ``MCPNotRun``; after it,
+    ``MCPOutcomeUnknown`` — the server may have acted (1.7). ``env`` None
+    inherits serve's (a host server, as before 2.4.0). ``diagnostics``
+    collects a bounded stderr tail; None discards stderr, as before."""
+    import collections
     import json
     import queue
     import subprocess
     import threading
     import time
 
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        cwd=cwd,
-    )
+    first, *rest = [line for line in payload.splitlines() if line.strip()]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL if diagnostics is None else subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+        )
+    except OSError as exc:
+        raise MCPNotRun(f"the MCP server did not start: {exc}") from exc
     assert proc.stdin is not None and proc.stdout is not None
     stdout = proc.stdout
     read: queue.Queue[str | None] = queue.Queue()
+    tail: collections.deque[str] = collections.deque(maxlen=40)
 
     def pump() -> None:
         for line in stdout:
@@ -666,27 +717,60 @@ def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -
         read.put(None)
 
     threading.Thread(target=pump, daemon=True).start()
+    if diagnostics is not None and proc.stderr is not None:
+        stderr = proc.stderr
+
+        def drain() -> None:
+            for line in stderr:
+                tail.append(line[:500])
+
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
     lines: list[str] = []
     deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
-    try:
-        proc.stdin.write(payload)
-        proc.stdin.flush()
+    sent = False
+
+    def await_reply(wanted: int) -> bool:
         while True:
             try:
                 line = read.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 proc.kill()  # a server that went quiet gets no grace period
-                raise MCPError(
+                kind = MCPOutcomeUnknown if sent else MCPNotRun
+                raise kind(
                     f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline"
+                    + (" after the request was sent" if sent else "")
                 ) from None
             if line is None:
-                return lines
+                return False
             lines.append(line)
             try:
-                if json.loads(line).get("id") == 2:
-                    return lines
-            except ValueError:
+                if json.loads(line).get("id") == wanted:
+                    return True
+            except (ValueError, AttributeError):
                 continue
+
+    try:
+        try:
+            proc.stdin.write(first + "\n")
+            proc.stdin.flush()
+            if not await_reply(1):
+                raise MCPNotRun("the MCP server exited before it answered initialize")
+            proc.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+            )
+            proc.stdin.flush()
+            proc.stdin.write("".join(line + "\n" for line in rest))
+            proc.stdin.flush()
+        except BrokenPipeError:
+            raise MCPNotRun("the MCP server closed its input before the request") from None
+        sent = True
+        if not await_reply(2):
+            raise MCPOutcomeUnknown(
+                "no JSON-RPC response for the tool request: the server exited after the "
+                "request was sent, so whether it acted is unknown"
+            )
+        return lines
     finally:
         try:
             proc.stdin.close()
@@ -694,6 +778,9 @@ def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -
         except (OSError, subprocess.TimeoutExpired):
             proc.kill()
             proc.wait()
+        if diagnostics is not None:
+            drainer.join(timeout=2)
+            diagnostics.extend(tail)
 
 
 # ES (B115): promote_tool registers every activated forged/seed tool as
