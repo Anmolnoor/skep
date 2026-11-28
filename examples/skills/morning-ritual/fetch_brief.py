@@ -30,8 +30,9 @@ that cannot be read says why in one line and the script exits 1, so schedule
 health shows it; the other sections still print. Each section gets a fair
 share of the script lane's 4,000-character cap (a short one leaves its rest
 to the ones after it), so a long feed is clipped, not the mail after it, and
-a fair share of the lane's 120 s (a source that trickles bytes is cut off at
-its own deadline). Each section is flushed as it finishes.
+a fair share of the lane's 120 s (a source slow to answer or trickling bytes
+is cut off at its own deadline, by SIGALRM, so Linux and macOS only). Each
+section is flushed as it finishes.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import signal
 import sys
 import time
 import urllib.parse
@@ -64,6 +66,18 @@ OUTPUT_CAP = 4000  # the script lane's output cap (scheduler.SCRIPT_OUTPUT_CAP)
 CAP_NOTE = "(output cap reached: the remaining sections are left out)"
 TIME_BUDGET = 100.0  # seconds of the lane's 120 for every network source together
 SOCKET_TIMEOUT = 10.0
+LABEL_WIDTH = 60  # a section heading's label, at most
+NOTE_WIDTH = 120  # a failed section's one "(unavailable: ...)" line, at most
+
+
+class TimeShareSpent(Exception):
+    """A source's whole fetch (connect, headers, body) passed its time share.
+    Raised from SIGALRM; not an OSError, so no socket or urllib layer turns
+    it into a retry (create_connection tries the next address on OSError)."""
+
+
+def _out_of_time(*_args: object) -> None:
+    raise TimeShareSpent("the source did not finish in its time share")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -75,20 +89,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
-_deadline = math.inf  # the current source's (main sets it per section)
 
 
 def _get(url: str, what: str) -> bytes:
     body = bytearray()
-    timeout = max(0.1, min(SOCKET_TIMEOUT, _deadline - time.monotonic()))
-    with _OPENER.open(url, timeout=timeout) as response:
+    with _OPENER.open(url, timeout=SOCKET_TIMEOUT) as response:
         while chunk := response.read1(FETCH_CAP_BYTES + 1 - len(body)):
             body += chunk
             if len(body) > FETCH_CAP_BYTES:
                 raise ValueError(f"the {what} answer passed {FETCH_CAP_BYTES // 1024} KiB")
-            if time.monotonic() > _deadline:  # one socket read waits SOCKET_TIMEOUT at most
-                raise TimeoutError(f"the {what} answer did not finish in its time share")
     return bytes(body)
+
+
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def _one_line(text: object) -> str:
@@ -199,13 +213,12 @@ def mail(count: int) -> str:
 
 def _feed_label(url: str) -> str:
     try:
-        return f"Feed {_one_line(urllib.parse.urlsplit(url).hostname or url)}"
+        return f"Feed {_clip(_one_line(urllib.parse.urlsplit(url).hostname or url), LABEL_WIDTH)}"
     except ValueError:  # e.g. an unmatched bracket in the host: feed() says why
         return "Feed (malformed URL)"
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _deadline
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--weather", metavar="LAT,LON")
     parser.add_argument("--calendar-days", type=int, metavar="N")
@@ -236,22 +249,31 @@ def main(argv: list[str] | None = None) -> int:
     end = time.monotonic() + TIME_BUDGET
     # Every print adds a newline; CAP_NOTE's line is always kept in reserve.
     left = OUTPUT_CAP - (len(header) + 1) - (len(CAP_NOTE) + 1)
-    for index, (title, read) in enumerate(wanted):
-        remaining = len(wanted) - index
-        share = max(0, left // remaining)  # a short section leaves its rest to the next
-        if share < len(f"\n## {title}\n …\n"):
-            print(CAP_NOTE, flush=True)
-            break
-        _deadline = time.monotonic() + max(0.0, end - time.monotonic()) / remaining
-        try:
-            body = read()
-        except Exception as exc:  # one dead source never hides the others
-            body, failed = f"(unavailable: {type(exc).__name__}: {_one_line(exc)})", True
-        block = f"\n## {title}\n{body}"
-        if len(block) + 1 > share:
-            block = block[: share - len(" …\n")] + " …"
-        print(block, flush=True)
-        left -= len(block) + 1
+    previous = signal.signal(signal.SIGALRM, _out_of_time)
+    try:
+        for index, (title, read) in enumerate(wanted):
+            remaining = len(wanted) - index
+            share = max(0, left // remaining)  # a short section leaves its rest to the next
+            if share < len(f"\n## {title}\n\n") + NOTE_WIDTH:  # room to say why it failed
+                print(CAP_NOTE, flush=True)
+                break
+            try:
+                try:
+                    seconds = max(0.0, end - time.monotonic()) / remaining
+                    signal.setitimer(signal.ITIMER_REAL, max(0.01, seconds))
+                    body = read()
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+            except Exception as exc:  # one dead source never hides the others
+                why = _clip(f"{type(exc).__name__}: {_one_line(exc)}", NOTE_WIDTH - 15)
+                body, failed = f"(unavailable: {why})", True
+            block = f"\n## {title}\n{body}"
+            if len(block) + 1 > share:
+                block = block[: share - len(" …\n")] + " …"
+            print(block, flush=True)
+            left -= len(block) + 1
+    finally:
+        signal.signal(signal.SIGALRM, previous)
     return 1 if failed else 0
 
 

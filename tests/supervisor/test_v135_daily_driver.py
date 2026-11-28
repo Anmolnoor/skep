@@ -9,6 +9,9 @@ time across daylight-saving changes.
 
 from __future__ import annotations
 
+import http.server
+import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -325,33 +328,76 @@ def test_fetch_brief_a_malformed_feed_url_fails_only_its_own_section(
     assert "- Python 3.15 released — https://blog.example/py" in out
 
 
-def test_fetch_brief_a_trickling_feed_hits_its_own_deadline(
+def _no_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+class _Trickle(http.server.BaseHTTPRequestHandler):
+    """Loopback only: /rss answers at once; /headers never finishes its
+    header block and /body never finishes a chunk-size line, one byte at a
+    time, each well inside the socket timeout."""
+
+    def do_GET(self) -> None:
+        if self.path == "/rss":
+            body = RSS_XML.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        head = b"HTTP/1.1 200 OK\r\n"
+        if self.path == "/body":
+            head += b"Transfer-Encoding: chunked\r\n\r\n"
+        try:
+            self.wfile.write(head)
+            for _ in range(200):  # gives up after ~10 s
+                self.wfile.write(b"X" if self.path == "/headers" else b"0")
+                time.sleep(0.05)
+        except OSError:
+            return  # the reader hung up
+
+    def log_message(self, *args: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize("slow", ["/headers", "/body"])
+def test_fetch_brief_a_trickling_source_costs_only_its_share(
+    slow: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _no_proxy(monkeypatch)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Trickle)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        module = _brief_module()
+        monkeypatch.setattr(module, "TIME_BUDGET", 1.0)
+        began = time.monotonic()
+        code = module.main(["--rss", base + slow, "--rss", base + "/rss"])  # type: ignore[attr-defined]
+        spent = time.monotonic() - began
+    finally:
+        server.shutdown()
+        server.server_close()
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "(unavailable: TimeShareSpent: the source did not finish in its time share" in out
+    assert "- Python 3.15 released" in out  # time was left for the next source
+    assert spent < 2.5  # the first source's half of 1 s, not the trickle's 10 s
+
+
+def test_fetch_brief_a_long_bad_url_costs_one_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     module = _brief_module()
-    clock = [0.0]
-
-    class _Trickle(_Body):
-        def read1(self, limit: int = -1) -> bytes:
-            clock[0] += 9.0  # each byte arrives just inside the socket timeout
-            return b" "
-
-    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])  # type: ignore[attr-defined]
     _fake_web(monkeypatch, module, {"https://blog.example/rss": RSS_XML})
-    real = module._OPENER.open  # type: ignore[attr-defined]
-
-    def open_(url: str, timeout: float) -> _Body:
-        return _Trickle(b"") if "slow" in url else real(url, timeout=timeout)
-
-    monkeypatch.setattr(module._OPENER, "open", open_)  # type: ignore[attr-defined]
-    code = module.main(  # type: ignore[attr-defined]
-        ["--rss", "https://slow.example/rss", "--rss", "https://blog.example/rss"]
-    )
+    bad = "https:///" + "a" * 4000  # no hostname: the label would be the whole URL
+    code = module.main(["--rss", bad, "--rss", "https://blog.example/rss"])  # type: ignore[attr-defined]
     out = capsys.readouterr().out
     assert code == 1
-    assert "## Feed slow.example\n(unavailable: TimeoutError:" in out
-    assert "- Python 3.15 released" in out  # time was left for the next source
-    assert clock[0] < 120
+    assert "- Python 3.15 released" in out  # the other feed still prints
+    section = out.split("## ")[1].strip().splitlines()
+    assert len(section) == 2 and section[1].startswith("(unavailable: ")  # heading + one line
+    assert max(len(line) for line in section) <= 200
 
 
 @pytest.mark.parametrize("target", ["https://moved.example/feed", "ftp://moved.example/feed"])
