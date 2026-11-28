@@ -268,3 +268,75 @@ def test_a_replaced_registration_never_publishes_the_old_install(
         assert not list((skep_home / "mcp" / "fx").glob("*.published"))
     finally:
         store.close()
+
+
+# -- review round 1 ---------------------------------------------------------------
+
+VALUE = "install-report-secret-value-77"
+
+
+@needs_strict_wall
+@needs_uv
+def test_install_discovery_redacts_a_reply_error_and_its_stderr(
+    skep_home: Path, reg: Registry, tmp_path: Path
+) -> None:
+    """S2: discovery takes the one redaction path calls take — a JSON-RPC
+    error and the stderr behind it reach the install report masked."""
+    reg.add_python(build_wheel(tmp_path), project="fxmcp")
+    mcp_sandbox.set_secret(skep_home, "fxpy", "FX_LIST_ERROR", VALUE)
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    _register(store, chat_id, server_id="fxpy", command=["fx-mcp"],
+              install="pypi:fxmcp==1.0.0", secret_names=["FX_LIST_ERROR"])  # fmt: skip
+    report = _reported(store, chat_id)
+    assert "NOT installed" in report and "bad key" in report, report
+    assert VALUE not in report and "[redacted]" in report
+    store.close()
+
+
+class _FixedTemp:
+    """``tempfile.TemporaryDirectory`` at a name the test knows (S17)."""
+
+    base: Path
+
+    def __init__(self, *args: Any, prefix: str = "tmp", **kwargs: Any) -> None:
+        self.name = str(self.base / f"fixed-{prefix}")
+        Path(self.name).mkdir(parents=True, exist_ok=True)
+
+    def __enter__(self) -> str:
+        return self.name
+
+    def __exit__(self, *exc: object) -> None:
+        shutil.rmtree(self.name, ignore_errors=True)
+
+
+@needs_strict_wall
+@needs_uv
+def test_a_strict_server_cannot_write_its_install_tree_or_its_profile(
+    skep_home: Path, reg: Registry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S17: the published tree is read-only and the profile is out of reach,
+    while its own HOME is writable — on bubblewrap and on Seatbelt."""
+    import tempfile
+
+    reg.add_python(build_wheel(tmp_path), project="fxmcp")
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    _register(store, chat_id, server_id="fxpy", command=["fx-mcp"],
+              install="pypi:fxmcp==1.0.0")  # fmt: skip
+    tree = mcp_sandbox.install_tree(skep_home, load_mcp_servers(store)["fxpy"])
+    entry, bins = tree / "bin" / "fx-mcp", tree / "bin" / "new-file"
+    _FixedTemp.base = tmp_path / "fixed"
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", _FixedTemp)
+    profile = _FixedTemp.base / "fixed-skep-mcp-profile-" / "sandbox.profile"
+    paths = [str(entry), str(bins), str(profile), "$HOME/scratch-ok"]
+    result = _call(store, skep_home, "fxpy", "write", paths=paths)
+    assert result.ok, result.error
+    seen = json.loads(result.content[0]["text"])
+    assert seen["$HOME/scratch-ok"] == "wrote"  # the in-wall control
+    for path in paths[:3]:
+        assert seen[path] != "wrote", seen
+    with entry.open("a"):  # the unconfined control: the host may write both
+        pass
+    assert not bins.exists()
+    store.close()

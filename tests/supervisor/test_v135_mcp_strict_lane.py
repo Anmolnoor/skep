@@ -227,7 +227,7 @@ def test_the_handshake_sends_initialized_before_the_request(
     config = load_mcp_servers(store)["py"]
     runner = runner_for_config(config, skep_home=skep_home, store=store)
     names = [tool.name for tool in MCPClient(config, runner=runner).list_tools()]
-    assert names == ["probe", "fetch", "env", "leak", "die"]
+    assert names == ["probe", "fetch", "env", "leak", "die", "write"]
 
 
 @needs_strict_wall

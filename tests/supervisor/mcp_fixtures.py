@@ -58,8 +58,18 @@ def _call(name, args):
         return _text(json.dumps(out))
     if name == "env":
         return _text(json.dumps({n: os.environ.get(n) for n in args.get("names", [])}))
+    if name == "write":
+        out = {}
+        for path in args.get("paths", []):
+            try:
+                with open(os.path.expandvars(path), "a") as handle:
+                    handle.write("x")
+                out[path] = "wrote"
+            except OSError as exc:
+                out[path] = type(exc).__name__
+        return _text(json.dumps(out))
     if name == "leak":
-        value = "value=" + str(os.environ.get(args.get("name", "")))
+        value = "x" * int(args.get("pad", 0)) + "value=" + str(os.environ.get(args.get("name", "")))
         if args.get("stderr"):
             sys.stderr.write(value + "\n")
             sys.stderr.flush()
@@ -88,9 +98,14 @@ def main():
         elif not initialized:
             reply = {"jsonrpc": "2.0", "id": mid,
                      "error": {"code": -32002, "message": "not initialized"}}
+        elif method == "tools/list" and os.environ.get("FX_LIST_ERROR"):
+            said = "bad key " + os.environ["FX_LIST_ERROR"]
+            sys.stderr.write(said + "\n")
+            sys.stderr.flush()
+            reply = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": said}}
         elif method == "tools/list":
             tools = [{"name": n, "inputSchema": {"type": "object"}}
-                     for n in ("probe", "fetch", "env", "leak", "die")]
+                     for n in ("probe", "fetch", "env", "leak", "die", "write")]
             reply = {"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}}
         else:
             params = msg.get("params") or {}

@@ -652,7 +652,12 @@ def _stdio_payload(method: str, params: Mapping[str, object]) -> str:
     return "".join(json.dumps(r) + "\n" for r in requests)
 
 
-def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
+def _stdio_reply(
+    lines: list[str], *, scrub: Callable[[object], object] | None = None
+) -> Mapping[str, object]:
+    """Request 2's reply in ``lines``. ``scrub`` (ADR 0069 2.5, review S2)
+    rewrites each PARSED message before it is read, so redaction sees the
+    server's own data, never its JSON escaping."""
     import json
 
     for line in lines:
@@ -663,6 +668,8 @@ def _stdio_reply(lines: list[str]) -> Mapping[str, object]:
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if scrub is not None:
+            message = scrub(message)
         if isinstance(message, dict) and message.get("id") == 2:
             return _jsonrpc_result(message)
     raise MCPError("no JSON-RPC response for the tool request")
@@ -675,6 +682,7 @@ def _stdio_exchange(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     diagnostics: list[str] | None = None,
+    scrub: Callable[[str], str] | None = None,
 ) -> list[str]:
     """One compliant one-shot exchange (ADR 0069 2.4): the payload's first
     line (``initialize``) alone, its reply, then ``notifications/initialized``,
@@ -685,7 +693,8 @@ def _stdio_exchange(
     A failure before the request was written is ``MCPNotRun``; after it,
     ``MCPOutcomeUnknown`` — the server may have acted (1.7). ``env`` None
     inherits serve's (a host server, as before 2.4.0). ``diagnostics``
-    collects a bounded stderr tail; None discards stderr, as before."""
+    collects a bounded stderr tail; None discards stderr, as before. ``scrub``
+    masks each whole stderr line BEFORE it is cropped (review S2)."""
     import collections
     import json
     import queue
@@ -722,7 +731,7 @@ def _stdio_exchange(
 
         def drain() -> None:
             for line in stderr:
-                tail.append(line[:500])
+                tail.append((line if scrub is None else scrub(line))[:500])
 
         drainer = threading.Thread(target=drain, daemon=True)
         drainer.start()

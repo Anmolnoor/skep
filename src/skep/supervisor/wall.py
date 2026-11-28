@@ -30,6 +30,7 @@ def walled(
     home: Path | None = None,
     trusted_read_roots: tuple[Path, ...] = (),
     skep_home_roots: bool = True,
+    unmasked: tuple[Path, ...] = (),
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """``argv`` wrapped in the wall, and the env it runs with, for the life
     of the block. Reads: the ADR 0068 strict allowlist (system dirs,
@@ -50,7 +51,10 @@ def walled(
     ``profile_dir`` holds the profile instead of the workspace, and must lie
     outside every root the child writes; ``home`` is HOME and TMPDIR,
     writable, apart from the workspace; ``trusted_read_roots`` and
-    ``skep_home_roots`` go to ``sandbox.write_profile``."""
+    ``skep_home_roots`` go to ``sandbox.write_profile``. ``unmasked`` (review
+    S1): the one server's own secrets file, read back past its mask, so the
+    in-wall ``skep.secretenv`` step sets its values and the launcher never
+    holds one."""
     from . import sandbox
     from .netproxy import (
         FilteringProxy,
@@ -107,6 +111,7 @@ def walled(
                 read_files=read_files,
                 trusted_read_roots=trusted_read_roots,
                 skep_home_roots=skep_home_roots,
+                unmasked=unmasked,
             )
             wrapped = sandbox.wrap_command(argv, profile)
         except sandbox.SandboxAllowlistUnsupported as exc:

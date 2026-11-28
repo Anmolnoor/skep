@@ -197,3 +197,130 @@ def test_redaction_reaches_nested_results() -> None:
     got = mcp_sandbox.redact({"a": [f"x{VALUE}y", {VALUE: 1}], "b": 2}, values)
     assert got == {"a": ["x[redacted]y", {"[redacted]": 1}], "b": 2}
     assert os.environ.get("WEATHER_KEY") == "from-serve-env-not-the-file"
+
+
+# -- review round 1 (S1, S2, S3, S17) ---------------------------------------------
+
+
+@needs_strict_wall
+@pytest.mark.parametrize("hosts", [(), ("api.example.test",)])
+def test_the_launcher_never_holds_a_secret_and_the_server_still_gets_it(
+    store: RunStore, skep_home: Path, server: Path, monkeypatch: pytest.MonkeyPatch,
+    hosts: tuple[str, ...],
+) -> None:  # fmt: skip
+    """S1: bwrap / sandbox-exec and the netshim start with no secret in their
+    environment or argv; only the process inside the wall gets it."""
+    import subprocess
+
+    mcp_sandbox.set_secret(skep_home, "weather", "WEATHER_KEY", VALUE)
+    save_mcp_server(store, MCPServerConfig(
+        "weather", "stdio", command=(sys.executable, str(server / "server.py")),
+        sandbox="strict", read_paths=(str(server),), secret_names=("WEATHER_KEY",),
+        egress="hosts" if hosts else "none", allowed_hosts=hosts,
+    ))  # fmt: skip
+    launched: list[tuple[list[str], dict[str, str]]] = []
+    real = subprocess.Popen
+
+    def spy(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        launched.append((list(argv), dict(kwargs.get("env") or os.environ)))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    got = _call(store, skep_home, "weather", "env", names=["WEATHER_KEY"])
+    assert got.ok, got.error
+    assert json.loads(got.content[0]["text"]) == {"WEATHER_KEY": "[redacted]"}  # it arrived
+    assert launched
+    for argv, env in launched:
+        assert not any(VALUE in part for part in argv)
+        assert not any(VALUE in value for value in env.values())
+
+
+def test_a_value_too_short_to_redact_is_refused_at_set(skep_home: Path) -> None:
+    """S2: a value redaction cannot mask safely is refused, naming the minimum."""
+    with pytest.raises(mcp_client.MCPError, match=f"at least {mcp_sandbox.MIN_SECRET_LENGTH}"):
+        mcp_sandbox.set_secret(skep_home, "weather", "WEATHER_KEY", "abc")
+    assert not mcp_sandbox.secrets_file(skep_home, "weather").exists()
+    assert mcp_sandbox.redact("x-abcdefgh-y", {"K": "abcdefgh"}) == "x-[redacted]-y"
+
+
+@needs_strict_wall
+def test_stderr_is_masked_before_it_is_cropped(
+    store: RunStore, skep_home: Path, server: Path
+) -> None:
+    """S2: a value cut by the stderr crop leaves no fragment behind."""
+    mcp_sandbox.set_secret(skep_home, "weather", "WEATHER_KEY", VALUE)
+    _strict(store, "weather", server, "WEATHER_KEY")
+    pad = 500 - len("value=") - 10  # the per-line crop lands 10 chars into the value
+    got = _call(store, skep_home, "weather", "leak", name="WEATHER_KEY", stderr=True, pad=pad)
+    assert got.outcome == "unknown" and "stderr ended with" in str(got.error)
+    assert VALUE[:10] not in str(got.error)
+
+
+def test_a_reply_error_is_redacted_after_it_is_parsed() -> None:
+    """S2: protocol fields first, then the server's data — a value JSON escapes
+    (a quote, a backslash) is still masked in a JSON-RPC error."""
+    tricky = 'key"with\\odd-chars-1234'
+    line = json.dumps({"jsonrpc": "2.0", "id": 2, "error": {"message": f"bad {tricky}"}})
+    with pytest.raises(mcp_client.MCPReplyError) as caught:
+        mcp_sandbox.redacted_reply([line], {"K": tricky})
+    assert tricky not in str(caught.value) and "[redacted]" in str(caught.value)
+    assert "odd-chars" not in str(caught.value)
+
+
+def _denylist_wall(skep_home: Path, work: Path, argv: list[str]) -> list[str]:
+    """A wall that reads everything but the secret floor: only a mask stands
+    between it and the secrets dir (S17)."""
+    profile = sandbox.write_profile(
+        work.parent / f"{work.name}.profile", workspace=work, skep_home=skep_home
+    )
+    return sandbox.wrap_command(argv, profile)
+
+
+@needs_strict_wall
+def test_a_sandbox_started_before_the_first_secret_cannot_read_it(
+    skep_home: Path, tmp_path: Path
+) -> None:
+    """S3 + S17: the secrets dir is made before any sandbox starts and masked
+    while empty, in a wall that would otherwise read it."""
+    import subprocess
+
+    path = mcp_sandbox.secrets_file(skep_home, "weather")
+    beside = skep_home / "supervisor" / "not-a-key.txt"
+    beside.write_text("readable", encoding="utf-8")  # the control: the wall reads the dir
+    work = tmp_path / "work"
+    work.mkdir()
+    probe = (
+        "import sys; sys.stdin.readline(); "
+        f"print(open({str(beside)!r}).read()); "
+        f"print(open({str(path)!r}).read())"
+    )
+    argv = _denylist_wall(skep_home, work, [sys.executable, "-c", probe])
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)  # fmt: skip
+    mcp_sandbox.set_secret(skep_home, "weather", "WEATHER_KEY", VALUE)  # after it started
+    out, err = proc.communicate("go\n", timeout=60)
+    assert "readable" in out, err
+    assert VALUE not in out and proc.returncode != 0
+    assert VALUE in path.read_text()  # the unconfined control
+
+
+def test_the_in_wall_step_sets_only_listed_names_and_refuses_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """S1: ``skep.secretenv`` — what the wall's last step does, run here."""
+    from skep import secretenv
+
+    held = tmp_path / "x-secret"
+    held.write_text(json.dumps({"A_KEY": VALUE, "OTHER": "y" * 9}), encoding="utf-8")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(os, "execvp", lambda head, argv: ran.append(list(argv)))
+    monkeypatch.delenv("A_KEY", raising=False)
+    assert secretenv.main([str(held), "A_KEY", "--", "srv", "-v"]) == 127
+    assert ran == [["srv", "-v"]] and os.environ.pop("A_KEY") == VALUE
+    assert "OTHER" not in os.environ
+    monkeypatch.setenv("A_KEY", "the-wall-set-it")
+    for argv in ([str(held), "A_KEY", "--", "srv"], [str(held), "MISSING", "--", "srv"],
+                 [str(tmp_path / "none"), "A_KEY", "--", "srv"], [str(held), "A_KEY", "--"],
+                 [str(held), "A_KEY"]):  # fmt: skip
+        assert secretenv.main(argv) == 2
+    assert len(ran) == 1 and VALUE not in capsys.readouterr().err

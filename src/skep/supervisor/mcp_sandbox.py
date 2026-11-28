@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import re
 import secrets
+import sys
 import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -434,7 +435,10 @@ def card_binding_refusal(card: Mapping[str, Any], config: MCPServerConfig) -> st
 # Under the supervisor dir and named ``*-secret``: on the secret floor of every
 # sandbox (``sandbox.secret_paths`` masks the whole dir) and of the Queen's
 # file reads (``secret_floor``: each file is ``<server_id>-secret`` too).
-SECRETS_DIR = "mcp-secret"
+SECRETS_DIR = "mcp-secret"  # sandbox.MCP_SECRETS_DIR: made before any sandbox starts (S3)
+# Review S2: every value is masked wherever it appears, so one too short to
+# mask without eating ordinary text ("abc") is refused when it is set.
+MIN_SECRET_LENGTH = 8
 SECRET_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Names the wall sets itself, and loader controls (2.5).
 _REFUSED_EXACT = frozenset(
@@ -614,8 +618,9 @@ def node_note(config: MCPServerConfig, argv: list[str]) -> str:
 
 def redact(value: Any, values: Mapping[str, str]) -> Any:
     """2.5: this server's own secret values, replaced wherever they appear in
-    what it returned (strings, nested lists and objects)."""
-    secrets_ = [v for v in values.values() if len(v) >= 4]
+    what it returned (strings, nested lists and objects). Every value set is
+    masked (review S2: ``set_secret`` refuses one under MIN_SECRET_LENGTH)."""
+    secrets_ = [v for v in values.values() if v]
     if not secrets_:
         return value
     if isinstance(value, str):
@@ -627,6 +632,15 @@ def redact(value: Any, values: Mapping[str, str]) -> Any:
     if isinstance(value, list | tuple):
         return [redact(item, values) for item in value]
     return value
+
+
+def redacted_reply(lines: list[str], values: Mapping[str, str]) -> Mapping[str, object]:
+    """Request 2's reply with the protocol read first and the server's data
+    masked after (review S2): each line is parsed, then redacted, then read,
+    so a value the JSON escapes is still caught, in a result or an error."""
+    from .mcp_client import _stdio_reply
+
+    return _stdio_reply(lines, scrub=lambda message: redact(message, values))
 
 
 def strict_exchange(
@@ -664,12 +678,22 @@ def strict_exchange(
             )
         trusted.append(install_tree(skep_home, config).resolve())
     unset = [name for name in config.secret_names if not secret_values.get(name)]
-    if unset:
-        steps = "; ".join(f"`skep mcp secret set {config.server_id} {n}`" for n in unset)
+    short = [
+        n for n in config.secret_names if 0 < len(secret_values.get(n) or "") < MIN_SECRET_LENGTH
+    ]
+    if unset or short:
+        steps = "; ".join(f"`skep mcp secret set {config.server_id} {n}`" for n in unset + short)
+        why = "with no value set" if unset else f"shorter than {MIN_SECRET_LENGTH} characters"
         raise MCPNotRun(
-            f"not run: {config.server_id!r} lists secret(s) {', '.join(unset)} with no value "
-            f"set. The operator sets each on this machine (never in chat): {steps}"
+            f"not run: {config.server_id!r} lists secret(s) {', '.join(unset or short)} {why}. "
+            f"The operator sets each on this machine (never in chat): {steps}"
         )
+    for name in config.secret_names:
+        if secret_name_problem(name) is not None:
+            raise MCPNotRun(
+                f"not run: secret name {name!r} collides with a name the wall sets; register "
+                "the server again with another name"
+            )
     gone = [raw for raw in config.read_paths if not Path(raw).exists()]
     if gone:
         raise MCPNotRun(
@@ -679,6 +703,15 @@ def strict_exchange(
     tool_env, tool_roots = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
     own = {name: secret_values[name] for name in config.secret_names}
+    # Review S1: the values never enter the launcher's environment or argv —
+    # ``skep.secretenv``, the last step inside the wall, reads them from the
+    # server's own file (read back past its mask for this wall alone).
+    unmasked: tuple[Path, ...] = ()
+    if own:
+        held = secrets_file(skep_home, config.server_id).resolve()
+        unmasked = (held,)
+        step = [sys.executable, "-E", "-P", "-m", "skep.secretenv", str(held), *own, "--"]
+        argv = [*step, *argv]
     with (
         tempfile.TemporaryDirectory(prefix="skep-mcp-") as scratch,
         tempfile.TemporaryDirectory(prefix="skep-mcp-profile-") as profiles,
@@ -693,20 +726,20 @@ def strict_exchange(
                 read_allowlist=tuple(Path(raw) for raw in config.read_paths),
                 trusted_read_roots=(*trusted, *tool_roots),
                 skep_home_roots=False,
+                unmasked=unmasked,
             ) as (wrapped, wall_env):
-                # the wall's own names win; the refusal is checked on the FINAL env
-                env = {**own, **wall_env, **RUNTIME_ENV, **tool_env}
-                for name, value in own.items():
-                    if secret_name_problem(name) is not None or env.get(name) != value:
-                        raise MCPNotRun(
-                            f"not run: secret name {name!r} collides with a name the wall "
-                            "sets; register the server again with another name"
-                        )
+                env = {**wall_env, **RUNTIME_ENV, **tool_env}  # no secret value (S1)
+                if clash := sorted(set(own) & set(env)):
+                    raise MCPNotRun(
+                        f"not run: secret name {clash[0]!r} collides with a name the wall "
+                        "sets; register the server again with another name"
+                    )
                 diagnostics: list[str] = []
                 try:
                     return _stdio_exchange(
-                        wrapped, payload, cwd=Path(scratch), env=env, diagnostics=diagnostics
-                    )
+                        wrapped, payload, cwd=Path(scratch), env=env, diagnostics=diagnostics,
+                        scrub=lambda line: str(redact(line, own)),
+                    )  # fmt: skip
                 except MCPError as exc:
                     said = "".join(diagnostics).strip()[-800:]
                     detail = f"{exc}{node_note(config, argv)}"
@@ -719,23 +752,38 @@ def strict_exchange(
             ) from exc
 
 
+def redacted_call(
+    config: MCPServerConfig,
+    method: str,
+    params: Mapping[str, object],
+    *,
+    skep_home: Path,
+    require_published: bool = True,
+) -> Mapping[str, object]:
+    """THE one redaction path (2.5, review S2) — every call and the install's
+    discovery handshake: the reply and every error carry none of this
+    server's own values; stderr is masked line by line before it is cropped."""
+    from .mcp_client import _stdio_payload
+
+    values = load_secrets(skep_home, config.server_id)
+    try:
+        lines = strict_exchange(
+            config, _stdio_payload(method, params), skep_home=skep_home,
+            secret_values=values, require_published=require_published,
+        )  # fmt: skip
+        return dict(redacted_reply(lines, values))
+    except MCPError as exc:
+        raise type(exc)(redact(str(exc), values)) from None
+
+
 def strict_runner(config: MCPServerConfig, *, skep_home: Path | None) -> MCPRunner:
-    """``runner_for_config``'s strict branch: an MCPRunner whose results and
-    errors carry none of this server's own secret values (2.5)."""
-    from .mcp_client import MCPNotRun, _stdio_payload, _stdio_reply
+    """``runner_for_config``'s strict branch: ``redacted_call`` per exchange."""
+    from .mcp_client import MCPNotRun
 
     def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
         if skep_home is None:
             raise MCPNotRun(f"strict MCP server {config.server_id!r} needs its skep home")
-        values = load_secrets(skep_home, config.server_id)
-        try:
-            lines = strict_exchange(
-                config, _stdio_payload(method, params), skep_home=skep_home, secret_values=values
-            )
-            reply = _stdio_reply(lines)
-        except MCPError as exc:
-            raise type(exc)(redact(str(exc), values)) from None
-        return dict(redact(reply, values))
+        return redacted_call(config, method, params, skep_home=skep_home)
 
     return run
 
@@ -903,7 +951,7 @@ def install_server(
     import os
     import shutil
 
-    from .mcp_client import _LISTED, MCPClient, MCPTool, _stdio_payload, _stdio_reply
+    from .mcp_client import _LISTED, MCPClient, MCPTool
 
     skep_home = store.db_path.parent.parent
     if (refusal := sandbox_refusal(config.server_id)) is not None:
@@ -929,14 +977,11 @@ def install_server(
                 f"(it offers: {', '.join(offered) or 'none'}); register it again with "
                 "command[0] set to one of those"
             )
-        values = load_secrets(skep_home, config.server_id)
 
         def handshake(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
-            lines = strict_exchange(
-                config, _stdio_payload(method, params), skep_home=skep_home,
-                secret_values=values, require_published=False,
-            )  # fmt: skip
-            return dict(redact(_stdio_reply(lines), values))
+            return redacted_call(
+                config, method, params, skep_home=skep_home, require_published=False
+            )
 
         tools: list[MCPTool] = MCPClient(config, runner=handshake).list_tools()
         with REGISTRY_GATE.writing():
@@ -1025,6 +1070,12 @@ def set_secret(skep_home: Path, server_id: str, name: str, value: str) -> Path:
     _secret_target(server_id, name)
     if not value:
         raise MCPError(f"no value given for {name}; nothing was stored")
+    if len(value) < MIN_SECRET_LENGTH:
+        raise MCPError(
+            f"the value for {name} is {len(value)} characters; a secret must be at least "
+            f"{MIN_SECRET_LENGTH}, because skep masks it wherever the server's replies show "
+            "it and a shorter one would mask ordinary text. Nothing was stored"
+        )
     return _write_secrets(skep_home, server_id, {**load_secrets(skep_home, server_id), name: value})
 
 

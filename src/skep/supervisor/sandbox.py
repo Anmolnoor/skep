@@ -927,6 +927,10 @@ def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None
             )
 
 
+# ADR 0069 2.5: the per-server MCP secrets live here (``mcp_sandbox``); the
+# ``*-secret`` name puts the whole dir on the secret floor.
+MCP_SECRETS_DIR = "mcp-secret"
+
 _LIVE_STORE_FILES = ("supervisor.sqlite3", "supervisor.sqlite3-wal", "supervisor.sqlite3-shm")
 
 
@@ -1612,6 +1616,11 @@ def write_profile(
 
     with contextlib.suppress(OSError):
         relay_secret(skep_home / "supervisor")
+    # ADR 0069 2.5 (review S3): the same for the MCP secrets dir — made before
+    # any sandbox starts and masked while still empty, so a run already going
+    # cannot read the first value set after it started.
+    with contextlib.suppress(OSError):
+        (skep_home / "supervisor" / MCP_SECRETS_DIR).mkdir(mode=0o700, exist_ok=True)
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     # inside the common dir bound whole (3I)
     git_masked = git_metadata_masked(workspace, common=git_common)

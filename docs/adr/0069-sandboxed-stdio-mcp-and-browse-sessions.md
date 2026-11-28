@@ -114,6 +114,22 @@ left open:
   each name not yet set. Values may be set before the registration.
 - **The secrets file** is `~/.skep/supervisor/mcp-secret/<server_id>-secret`:
   both secret floors already key on `*-secret`, so no floor code changed.
+  Every profile build makes the `mcp-secret` dir first (as it makes the relay
+  secret), so it is masked while still empty and a sandbox already running
+  cannot read the first value set after it started (review S3).
+- **A value never reaches the launcher** (review S1). bubblewrap or
+  sandbox-exec, the netshim and the Landlock step start with no secret in
+  their environment or argv (`--setenv` would put it in a world-readable
+  `/proc/<pid>/cmdline`). The last step inside the wall, `skep.secretenv`,
+  reads the server's own secrets file — bound back read-only past its mask
+  for that one wall (`walled(unmasked=)`, a fifth wall parameter) — sets the
+  listed names and execs the server. A name the wall already set refuses.
+- **One redaction path** (review S2): every call and the install's discovery
+  handshake go through `redacted_call`. Each reply line is parsed first and
+  the server's data masked after, so a value the JSON escapes is still caught
+  in a result or a JSON-RPC error; stderr is masked a whole line at a time
+  before it is cropped. Every value set is masked, so `skep mcp secret set`
+  refuses one shorter than 8 characters, naming the minimum.
 - **Outcome unknown is recorded as the card status `interrupted`** (the
   existing status for "it may have run"), with the payload's `outcome`
   saying `unknown`; not run is `failed` with `outcome: not_run`. The card
