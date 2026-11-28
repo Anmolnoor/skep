@@ -229,7 +229,8 @@ def test_a_recorded_read_root_that_moved_refuses_the_launch(
 _SCRIPTED = r"""
 import json, sys
 mode = sys.argv[1]
-init_reply = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}
+init_reply = {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05",
+              "capabilities": {}, "serverInfo": {"name": "fx", "version": "1"}}}
 if mode == "init-error":
     init_reply = {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "no"}}
 for line in sys.stdin:

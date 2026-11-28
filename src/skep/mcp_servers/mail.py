@@ -442,7 +442,11 @@ def main() -> None:
         method = request.get("method")
         result: dict[str, Any]
         if method == "initialize":
-            result = {"protocolVersion": "2024-11-05", "capabilities": {}}
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "skep-mail", "version": "1"},
+            }
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":

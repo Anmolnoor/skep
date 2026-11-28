@@ -220,11 +220,25 @@ left open:
   `0.0.0.0`, an interface address, an IP literal or a resolved answer — not
   only on loopback names. Dispatch, re-verify, forged tools and script
   schedules keep their proxies as they were.
-- **A valid reply, or outcome unknown** (review S11): only a successful
-  `initialize` result advances the handshake; a reply to the request that is
-  neither a result nor an error is outcome unknown, never an empty success;
-  one deadline bounds the whole exchange, every read and every write (a
-  server that floods stdout or stops reading its input is stopped at it).
+- **A valid reply, or outcome unknown** (review S11, r2 N11): only a valid
+  `initialize` result advances the handshake — a JSON-RPC 2.0 response whose
+  result holds `protocolVersion`, `capabilities` and `serverInfo`, which the
+  MCP lifecycle requires (nothing optional is required). After the request
+  is sent, a reply that is not one JSON-RPC 2.0 result object or one error
+  object (an integer `code` and a `message`) is outcome unknown, and so is a
+  `tools/call` result with no `content`, never an empty success. `content`
+  is required to be present, not to be an array: skep's own servers, seeds
+  and the forge template return it as text. skep's mail and calendar
+  servers now send `serverInfo`.
+- **One deadline bounds the whole exchange, cleanup included** (review S11,
+  r2 N4): every read and every write — the request is written to a raw,
+  non-blocking pipe, never through a buffered stream a writer thread holds —
+  so a server that floods stdout or stops reading its input is stopped at
+  it. The server leads its own process group; at the deadline the whole
+  group is killed, so a descendant still holding a pipe end goes with it,
+  and every wait in cleanup is bounded: a process that will not die is left
+  to a background reaper, so the registry gate a call holds is released
+  within the bound.
 - **The host disclosure is in the grant line** (review S15): a `host`
   card's risk line itself says the server runs as you and can read skep's
   serve token, so it could answer its own cards — so the disclosure stays

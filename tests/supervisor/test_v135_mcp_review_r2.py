@@ -197,3 +197,140 @@ def test_an_initialize_error_is_scrubbed_before_it_is_formatted(tmp_path: Path) 
         )  # fmt: skip
     assert "odd-chars" not in str(caught.value) and "[redacted]" in str(caught.value)
     assert os.environ.get("K") is None
+
+
+# -- N4: a stuck write is bounded, and so is its cleanup -----------------------------
+
+_INIT_OK = (
+    '{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05", '
+    '"capabilities": {}, "serverInfo": {"name": "fx", "version": "1"}}}'
+)
+
+
+def _gone(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return True
+    return state == "Z"
+
+
+def test_a_write_stuck_behind_a_descendant_never_holds_the_gate(
+    store: RunStore, skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server answers initialize, starts a child that inherits its stdin
+    and reads nothing, and stops reading: the request write blocks, the child
+    is killed at the deadline, and the descendant still holds the pipe."""
+    import signal
+    import threading
+
+    monkeypatch.setattr(mcp_client, "MCP_CALL_DEADLINE_SECONDS", 2)
+    pidfile = tmp_path / "descendant.pid"
+    script = tmp_path / "stuck.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "sys.stdin.readline()\n"
+        f"print({_INIT_OK!r}, flush=True)\n"
+        "sys.stdin.readline()\n"
+        "child = subprocess.Popen(['sleep', '120'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    config = save_mcp_server(store, MCPServerConfig(
+        "stuck", "stdio", command=(sys.executable, str(script))))  # fmt: skip
+    runner = runner_for_config(config, skep_home=skep_home, store=store)
+    done: list[Any] = []
+    blob = {"blob": "x" * 400_000}  # past any pipe buffer
+    worker = threading.Thread(
+        target=lambda: done.append(MCPClient(config, runner=runner).call_tool("t", blob)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(25)
+    try:
+        assert not worker.is_alive(), "the exchange did not end within its bound"
+        assert done[0].outcome == "unknown"
+        assert mcp_sandbox.REGISTRY_GATE._readers == 0  # released
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            if _gone(pid):
+                break
+            threading.Event().wait(0.1)
+        assert _gone(pid), "the descendant outlived its group"
+    finally:
+        if pidfile.exists() and not _gone(pid := int(pidfile.read_text())):
+            os.kill(pid, signal.SIGKILL)
+
+
+# -- N11: a valid envelope and the method's required fields, or not a success --------
+
+
+def _server(tmp_path: Path, init: str, reply: str) -> Path:
+    script = tmp_path / "srv_n11.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdin.readline()\n"
+        f"print({init!r}, flush=True)\n"
+        "sys.stdin.readline(); sys.stdin.readline()\n"
+        f"print({reply!r}, flush=True)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _host_call(store: RunStore, skep_home: Path, script: Path) -> Any:
+    config = save_mcp_server(store, MCPServerConfig(
+        "n11", "stdio", command=(sys.executable, str(script))))  # fmt: skip
+    runner = runner_for_config(config, skep_home=skep_home, store=store)
+    return MCPClient(config, runner=runner).call_tool("t", {})
+
+
+_CALL_OK = '{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "hi"}]}}'
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        '{"jsonrpc": "2.0", "id": 1, "result": {}}',
+        '{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05", '
+        '"capabilities": {}}}',
+        '{"id": 1, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, '
+        '"serverInfo": {"name": "x", "version": "1"}}}',
+    ],
+)
+def test_an_initialize_without_its_required_fields_sends_nothing(
+    store: RunStore, skep_home: Path, tmp_path: Path, init: str
+) -> None:
+    got = _host_call(store, skep_home, _server(tmp_path, init, _CALL_OK))
+    assert got.outcome == "not_run" and "did not accept initialize" in str(got.error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"jsonrpc": "2.0", "id": 2, "result": {}}',
+        '{"jsonrpc": "2.0", "id": 2, "result": {"isError": false}}',
+        '{"id": 2, "result": {"content": []}}',
+        '{"jsonrpc": "2.0", "id": 2, "result": {"content": []}, "error": {"code": 1, '
+        '"message": "x"}}',
+        '{"jsonrpc": "2.0", "id": 2, "error": "not an error object"}',
+    ],
+)
+def test_a_reply_without_a_valid_tool_result_is_outcome_unknown(
+    store: RunStore, skep_home: Path, tmp_path: Path, reply: str
+) -> None:
+    got = _host_call(store, skep_home, _server(tmp_path, _INIT_OK, reply))
+    assert not got.ok and got.outcome == "unknown", got
+
+
+def test_a_server_that_omits_optional_fields_is_not_refused(
+    store: RunStore, skep_home: Path, tmp_path: Path
+) -> None:
+    got = _host_call(store, skep_home, _server(tmp_path, _INIT_OK, _CALL_OK))
+    assert got.ok and got.content == [{"type": "text", "text": "hi"}]
+    error = '{"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "bad args"}}'
+    mcp_client._LISTED.clear()
+    ran = _host_call(store, skep_home, _server(tmp_path, _INIT_OK, error))
+    assert not ran.ok and ran.outcome == "ran" and "bad args" in str(ran.error)
+

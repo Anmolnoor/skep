@@ -355,6 +355,13 @@ class MCPClient:
             return MCPCallResult(False, error=str(exc))
         except Exception as exc:
             return MCPCallResult(False, error=str(exc) or exc.__class__.__name__, outcome="not_run")
+        if "content" not in response:  # review r2 N11: a tool result must carry it
+            return MCPCallResult(
+                False,
+                error="the server's reply held no tool result (no 'content'), so whether it "
+                "acted is unknown",
+                outcome="unknown",
+            )
         if response.get("isError"):
             return MCPCallResult(False, error=str(response.get("content") or "tool error"))
         return MCPCallResult(True, content=response.get("content"))
@@ -475,15 +482,58 @@ def remove_mcp_server(store: RunStore, server_id: str) -> None:
         retire_trees(store.db_path.parent.parent, server_id, keep=None)
 
 
-def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
-    if "error" in message:
-        raise MCPReplyError(str(message["error"]))
+def _envelope_problem(message: Mapping[str, object]) -> str | None:
+    """Review r2 N11: why ``message`` is not a JSON-RPC 2.0 response — one
+    result object, or one error object with an integer code and a message."""
+    if message.get("jsonrpc") != "2.0":
+        return "it is not a JSON-RPC 2.0 response"
+    if ("result" in message) == ("error" in message):
+        return "it holds both a result and an error, or neither"
+    error = message.get("error")
+    if "error" in message and not (
+        isinstance(error, Mapping)
+        and type(error.get("code")) is int
+        and isinstance(error.get("message"), str)
+    ):
+        return "its error is not a JSON-RPC error object (an integer code and a message)"
+    if "result" in message and not isinstance(message["result"], Mapping):
+        return "its result is not an object"
+    return None
+
+
+def _initialize_problem(message: Mapping[str, object]) -> str | None:
+    """Review r2 N11: why ``message`` is not a successful ``initialize``
+    reply; the MCP lifecycle requires protocolVersion, capabilities and
+    serverInfo in its result (nothing else is required)."""
+    if (problem := _envelope_problem(message)) is not None:
+        return problem
     result = message.get("result")
-    if not isinstance(result, Mapping):  # review S11: never an empty success
+    if not isinstance(result, Mapping):
+        return f"it answered with an error: {message.get('error')}"
+    missing = [
+        key
+        for key, kind in (
+            ("protocolVersion", str),
+            ("capabilities", Mapping),
+            ("serverInfo", Mapping),
+        )
+        if not isinstance(result.get(key), kind)
+    ]
+    if missing:
+        return f"its result has no valid {', '.join(missing)}, which the MCP lifecycle requires"
+    return None
+
+
+def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
+    if (problem := _envelope_problem(message)) is not None:  # review S11, r2 N11
         raise MCPOutcomeUnknown(
-            "the server's reply to the request was neither a JSON-RPC result nor an error, "
+            f"the server's reply to the request was not a valid JSON-RPC response ({problem}), "
             "so whether it acted is unknown"
         )
+    if "error" in message:
+        raise MCPReplyError(str(message["error"]))
+    result = message["result"]
+    assert isinstance(result, Mapping)  # _envelope_problem checked it
     return result
 
 
@@ -736,26 +786,40 @@ def _stdio_exchange(
     masks each whole stderr line BEFORE it is cropped (review S2), and the
     parsed ``initialize`` reply before any of it is formatted (review r2 N3)."""
     import collections
+    import contextlib
     import json
+    import os
     import queue
+    import selectors
+    import signal
     import subprocess
     import threading
     import time
 
     first, *rest = [line for line in payload.splitlines() if line.strip()]
+    # review r2 N4: stdin is a raw pipe written without blocking (never a
+    # buffered stream a writer thread holds, which close() would wait on),
+    # and the child leads its own process group, so a descendant holding a
+    # pipe end is stopped with it
+    read_end, write_end = os.pipe()
     try:
         proc = subprocess.Popen(
             argv,
-            stdin=subprocess.PIPE,
+            stdin=read_end,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL if diagnostics is None else subprocess.PIPE,
             text=True,
             cwd=cwd,
             env=None if env is None else dict(env),
+            start_new_session=True,
         )
     except OSError as exc:
+        os.close(write_end)
         raise MCPNotRun(f"the MCP server did not start: {exc}") from exc
-    assert proc.stdin is not None and proc.stdout is not None
+    finally:
+        os.close(read_end)
+    os.set_blocking(write_end, False)
+    assert proc.stdout is not None
     stdout = proc.stdout
     read: queue.Queue[str | None] = queue.Queue()
     tail: collections.deque[str] = collections.deque(maxlen=40)
@@ -780,10 +844,13 @@ def _stdio_exchange(
     # write is bounded by it, whatever the server floods or stops reading
     deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
     sent = False
-    stdin = proc.stdin
+
+    def stop_group() -> None:  # before the leader is reaped, so its id is still its own
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
     def overdue(during_request: bool = False) -> MCPError:
-        proc.kill()  # a server that went quiet gets no grace period
+        stop_group()  # a server that went quiet gets no grace period
         if sent or during_request:
             return MCPOutcomeUnknown(
                 f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline after the "
@@ -812,22 +879,21 @@ def _stdio_exchange(
                 return message
 
     def send(data: str, *, request: bool = False) -> None:
-        failed: list[BaseException] = []
-
-        def write() -> None:
-            try:
-                stdin.write(data)
-                stdin.flush()
-            except (OSError, ValueError) as exc:
-                failed.append(exc)
-
-        writer = threading.Thread(target=write, daemon=True)
-        writer.start()
-        writer.join(max(0.0, deadline - time.monotonic()))
-        if writer.is_alive():
-            raise overdue(during_request=request)
-        if failed:
-            raise BrokenPipeError(str(failed[0]))
+        pending = data.encode("utf-8")
+        with selectors.DefaultSelector() as ready:
+            ready.register(write_end, selectors.EVENT_WRITE)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise overdue(during_request=request)
+                if not ready.select(remaining):
+                    continue
+                try:
+                    pending = pending[os.write(write_end, pending) :]
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    raise BrokenPipeError(str(exc)) from None
 
     try:
         try:
@@ -837,11 +903,10 @@ def _stdio_exchange(
                 raise MCPNotRun("the MCP server exited before it answered initialize")
             if scrub is not None:
                 init = scrub(init)
-            if "error" in init or not isinstance(init.get("result"), Mapping):
-                # review S11: only a successful initialize advances the handshake
+            if (problem := _initialize_problem(init)) is not None:
+                # review S11, r2 N11: only a valid initialize result advances
                 raise MCPNotRun(
-                    "the MCP server did not accept initialize "
-                    f"({init.get('error') or 'its reply held no result'}), so the request "
+                    f"the MCP server did not accept initialize ({problem}), so the request "
                     "was never sent"
                 )
             send(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
@@ -856,12 +921,17 @@ def _stdio_exchange(
             )
         return lines
     finally:
+        # review r2 N4: nothing here waits without a bound — the caller may
+        # hold the registry gate across this exchange
+        os.close(write_end)  # a raw fd with nothing buffered: never blocks
         try:
-            stdin.close()
             proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            proc.kill()
-            proc.wait()
+        except subprocess.TimeoutExpired:
+            stop_group()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # unkillable for now: reaped when it goes
+                threading.Thread(target=proc.wait, daemon=True).start()
         if diagnostics is not None:
             drainer.join(timeout=2)
             diagnostics.extend(tail)

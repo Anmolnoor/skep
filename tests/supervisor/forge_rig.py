@@ -9,6 +9,7 @@ test wrote itself)."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -34,8 +35,11 @@ def host_runner(source: str, python: str, *, skep_home: Path, hosts: tuple[str, 
             tool = Path(tmp) / "tool.py"
             tool.write_text(source, encoding="utf-8")
             payload = mcp_client._stdio_payload(method, params)
-            lines = mcp_client._stdio_exchange([python, str(tool)], payload, cwd=Path(tmp))
-        return mcp_client._stdio_reply(lines)
+            proc = subprocess.run(  # forged_exchange's shape: the whole stdin at once
+                [python, str(tool)], input=payload, capture_output=True, text=True,
+                timeout=mcp_client.MCP_CALL_DEADLINE_SECONDS, cwd=tmp,
+            )  # fmt: skip
+        return mcp_client._stdio_reply(proc.stdout.splitlines())
 
     return run
 

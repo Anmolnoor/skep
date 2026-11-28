@@ -260,7 +260,9 @@ def test_a_reply_error_is_redacted_after_it_is_parsed() -> None:
     """S2: protocol fields first, then the server's data — a value JSON escapes
     (a quote, a backslash) is still masked in a JSON-RPC error."""
     tricky = 'key"with\\odd-chars-1234'
-    line = json.dumps({"jsonrpc": "2.0", "id": 2, "error": {"message": f"bad {tricky}"}})
+    line = json.dumps(
+        {"jsonrpc": "2.0", "id": 2, "error": {"code": -1, "message": f"bad {tricky}"}}
+    )
     with pytest.raises(mcp_client.MCPReplyError) as caught:
         mcp_sandbox.redacted_reply([line], {"K": tricky})
     assert tricky not in str(caught.value) and "[redacted]" in str(caught.value)
