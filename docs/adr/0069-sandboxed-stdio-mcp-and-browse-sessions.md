@@ -204,6 +204,13 @@ left open:
   neither a result nor an error is outcome unknown, never an empty success;
   one deadline bounds the whole exchange, every read and every write (a
   server that floods stdout or stops reading its input is stopped at it).
+- **The host disclosure is in the grant line** (review S15): a `host`
+  card's risk line itself says the server runs as you and can read skep's
+  serve token, so it could answer its own cards — so the disclosure stays
+  when another HIGH reason (a doubly tainted chat's) takes the HIGH line.
+- **The doctor checks what a launch would run** (review S16): an installed
+  strict server's published entry point, a pre-installed one's absolute
+  path; only a `host` launcher is looked up on PATH.
 - **The host browser keeps its cwd under `~/.skep/browser/`** and inherits
   serve's environment, as before.
 

@@ -61,10 +61,15 @@ _BIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _RUNTIME_RESOLVERS = frozenset({"npx", "uvx", "pipx", "bunx", "pnpx", "yarn", "pnpm", "npm"})
 MCP_TREE_DIR = "mcp"
 
+# Review S15: said in the host grant line itself too, so it survives any
+# other HIGH reason (a doubly tainted chat's replaces the HIGH line).
+HOST_REACH = (
+    "it can read every file your user can read, reach the network, and read skep's own "
+    "serve token, so it could answer its own cards"
+)
 HOST_HIGH = (
-    "it runs this MCP server unsandboxed, as you: it can read every file your user can "
-    "read, reach the network, and read skep's own serve token, so it could answer its "
-    "own cards. This card discloses that; it does not prevent it"
+    f"it runs this MCP server unsandboxed, as you: {HOST_REACH}. This card discloses that; "
+    "it does not prevent it"
 )
 STRICT_HIGH = "it adds an MCP server whose tools can act as you"
 INSTALL_SENTENCE = (
@@ -508,7 +513,10 @@ def grant_line(view: Mapping[str, Any]) -> str:
         return f"connects to {view.get('url')} over http (no process starts here)"
     argv = " ".join(str(part) for part in view["argv"])
     if view["mode"] == "host":
-        return f"runs `{argv}` on this host, unsandboxed, with serve's environment"
+        return (
+            f"runs `{argv}` on this host, unsandboxed, as you, with serve's environment: "
+            f"{HOST_REACH} (this card discloses that; it does not prevent it)"
+        )
     reads = "system and toolchain dirs only"
     if view.get("read_paths"):
         reads += f", plus {', '.join(view['read_paths'])}"
@@ -1418,6 +1426,28 @@ def call_registered(
 
 
 # -- skep doctor (1.8, 2.6) ----------------------------------------------------------
+
+
+def launcher_missing(config: MCPServerConfig, skep_home: Path) -> str | None:
+    """Review S16: what a stdio server's launch would not find, or None. An
+    installed strict server runs its published entry point (an unfinished
+    install is ``posture_lines``' to say); a pre-installed strict one its
+    absolute path; only a host launcher is looked up on PATH."""
+    import shutil
+
+    if not config.command:
+        return None
+    if config.sandbox == "strict" and config.install:
+        if not published_marker(skep_home, config.server_id, config.incarnation).is_file():
+            return None
+        entry = entry_point(install_tree(skep_home, config), config)
+        return None if entry.exists() else f"its installed entry point {entry} is missing"
+    if config.sandbox == "strict":
+        head = Path(config.command[0])
+        return None if head.exists() else f"its entry point {head} does not exist"
+    if shutil.which(config.command[0]) is None:
+        return f"it launches via {config.command[0]!r}, which is not on PATH"
+    return None
 
 
 def posture_lines(store: RunStore, skep_home: Path) -> list[str]:

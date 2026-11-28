@@ -291,3 +291,20 @@ def test_setup_browser_saves_host_and_lists_only_after_the_verdict(
     saved = load_mcp_servers(store)["browser"]
     assert saved.sandbox == "host" and "npx" in result["handshake_failed"]
     assert listed == [saved]  # the committed registration, with its incarnation
+
+
+def test_the_host_disclosure_survives_a_doubly_tainted_chat(
+    store: RunStore, no_launch: list[Any]
+) -> None:
+    """Review S15: the trifecta reason replaces the HIGH line, so the host
+    grant line itself says it can read the serve token and self-approve."""
+    from skep.supervisor.store import ChatTaint
+
+    tainted = ChatTaint(private=1, untrusted=2)
+    args = {"server_id": "loose", "transport": "stdio", "command": ["/usr/bin/x"],
+            "sandbox": "host"}  # fmt: skip
+    for tool, tool_args in (("register_mcp_server", args), ("setup_browser", {})):
+        summary = card_summary(tool, tool_args, store=store, taint=tainted)
+        assert "serve token" not in summary["high"]  # the trifecta reason won the HIGH line
+        assert "serve token" in summary["risk"] and "answer its own cards" in summary["risk"]
+    assert no_launch == []

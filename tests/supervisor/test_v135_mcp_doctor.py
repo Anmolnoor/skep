@@ -130,3 +130,33 @@ def test_the_sandbox_line_no_longer_says_every_registered_server_is_unsandboxed(
     detail = status._sandbox_check(tmp_path)["detail"]
     assert "MCP servers you register run on the host, unsandboxed" not in detail
     assert "run strict unless registered sandbox='host'" in detail
+
+
+def test_the_doctor_checks_an_installed_servers_entry_point_not_the_host_path(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review S16: an installed strict server's bin name is not on the host
+    PATH, and need not be; the doctor looks at its published entry point."""
+    from skep.status import _browse_advisories
+
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    store = _store(home)
+    try:
+        config = save_mcp_server(store, MCPServerConfig(
+            "browsey", "stdio", command=("fx-mcp",), scope="browse", sandbox="strict",
+            install=("npm", "fx-mcp@1.0.0"),
+        ))  # fmt: skip
+        tree = mcp_sandbox.install_tree(home, config)
+        bins = tree / "node_modules" / ".bin"
+        bins.mkdir(parents=True)
+        (bins / "fx-mcp").write_text("", encoding="utf-8")
+        mcp_sandbox.published_marker(home, "browsey", config.incarnation).write_text("{}")
+        save_mcp_server(store, MCPServerConfig(
+            "hosty", "stdio", command=("npx", "@playwright/mcp@latest"), scope="browse",
+            sandbox="host",
+        ))  # fmt: skip
+    finally:
+        store.close()
+    said = " ".join(_browse_advisories(home))
+    assert "'hosty'" in said and "'npx'" in said  # a host launcher still checks PATH
+    assert "browsey" not in said
