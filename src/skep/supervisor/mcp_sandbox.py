@@ -78,6 +78,15 @@ INSTALL_SENTENCE = (
     "are resolved when the install runs"
 )
 SECRET_SENTENCE = "a secret you give it is its to use, including sending it to a host it may reach"
+# Review r2 N1: Seatbelt masks the secrets file, but does not by itself stop
+# another sandboxed process of the same user reading a running server's
+# environment (XNU exposes it through sysctl); bubblewrap's PID namespace does.
+SEATBELT_SECRETS = (
+    "secret injection for sandboxed (strict) MCP servers is not available on macOS in this "
+    "release: Seatbelt hides the secrets file, but does not stop another sandboxed process of "
+    "your user from reading a running server's environment. Register it without "
+    "secret_names, or with sandbox='host' (unsandboxed, a HIGH card)"
+)
 
 
 def new_incarnation() -> str:
@@ -278,10 +287,22 @@ def registration_problem(config: MCPServerConfig, skep_home: Path) -> str | None
 
     if (problem := confinement_problem(config)) is not None:
         return problem
+    if (problem := seatbelt_secrets_problem(config)) is not None:
+        return problem
     for raw in config.read_paths:
         if (problem := sandbox.extra_read_path_problem(Path(raw), skep_home)) is not None:
             return f"read_paths: {problem}"
     return None
+
+
+def seatbelt_secrets_problem(config: MCPServerConfig) -> str | None:
+    """Review r2 N1: a strict server that lists secrets, on Seatbelt — refused
+    at registration, at launch and in the doctor (fail closed, I12)."""
+    from . import sandbox
+
+    if config.sandbox != "strict" or not config.secret_names:
+        return None
+    return SEATBELT_SECRETS if sandbox.availability().backend == "seatbelt" else None
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -836,6 +857,33 @@ def redacted_reply(lines: list[str], values: Mapping[str, str]) -> Mapping[str, 
     return _stdio_reply(lines, scrub=lambda message: redact(message, values))
 
 
+@contextlib.contextmanager
+def _launch_snapshot(
+    skep_home: Path, server_id: str, values: Mapping[str, str]
+) -> Iterator[Path | None]:
+    """Review r2 N2: the values one launch injects, written once to a file of
+    its own (0400, in the masked secrets dir: outside every child-writable
+    root and every other sandbox's reads) and deleted after it — so a
+    ``skep mcp secret set`` mid-launch changes neither what the server gets
+    nor what is redacted, and a value it does not list is never in its wall.
+    None when it lists none."""
+    import json
+    import os
+
+    if not values:
+        yield None
+        return
+    folder = _private_dir(skep_home / "supervisor", SECRETS_DIR)
+    path = folder / f"{server_id}.{secrets.token_hex(8)}.launch-secret"
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(values), handle)
+        yield path.resolve()
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def strict_exchange(
     config: MCPServerConfig,
     payload: str,
@@ -858,6 +906,8 @@ def strict_exchange(
 
     if (refusal := sandbox_refusal(config.server_id)) is not None:
         raise MCPNotRun(refusal)
+    if (problem := seatbelt_secrets_problem(config)) is not None:
+        raise MCPNotRun(f"not run: {config.server_id!r}: {problem}")
     argv = runtime_argv(config, skep_home)
     trusted: list[Path] = []
     if config.install:
@@ -912,19 +962,20 @@ def strict_exchange(
     tool_env = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
     own = {name: secret_values[name] for name in config.secret_names}
-    # Review S1: the values never enter the launcher's environment or argv —
-    # ``skep.secretenv``, the last step inside the wall, reads them from the
-    # server's own file (read back past its mask for this wall alone).
-    unmasked: tuple[Path, ...] = ()
-    if own:
-        held = secrets_file(skep_home, config.server_id).resolve()
-        unmasked = (held,)
-        step = [sys.executable, "-E", "-P", "-m", "skep.secretenv", str(held), *own, "--"]
-        argv = [*step, *argv]
     with (
         tempfile.TemporaryDirectory(prefix="skep-mcp-") as scratch,
         tempfile.TemporaryDirectory(prefix="skep-mcp-profile-") as profiles,
+        _launch_snapshot(skep_home, config.server_id, own) as snapshot,
     ):
+        # Review S1: the values never enter the launcher's environment or
+        # argv — ``skep.secretenv``, the last step inside the wall, reads them
+        # from this launch's own snapshot (review r2 N2: exactly ``own``, the
+        # values redaction masks; bound back past its mask for this wall alone).
+        unmasked: tuple[Path, ...] = ()
+        if snapshot is not None:
+            unmasked = (snapshot,)
+            step = [sys.executable, "-E", "-P", "-m", "skep.secretenv", str(snapshot), *own, "--"]
+            argv = [*step, *argv]
         try:
             with walled(
                 argv,
@@ -948,7 +999,7 @@ def strict_exchange(
                 try:
                     return _stdio_exchange(
                         wrapped, payload, cwd=Path(scratch), env=env, diagnostics=diagnostics,
-                        scrub=lambda line: str(redact(line, own)),
+                        scrub=lambda value: redact(value, own),
                     )  # fmt: skip
                 except MCPError as exc:
                     said = "".join(diagnostics).strip()[-800:]
@@ -975,7 +1026,10 @@ def redacted_call(
     server's own values; stderr is masked line by line before it is cropped."""
     from .mcp_client import _stdio_payload
 
-    values = load_secrets(skep_home, config.server_id)
+    # review r2 N2: only the listed names — the snapshot injects these, and
+    # redaction masks these, on every path
+    held = load_secrets(skep_home, config.server_id)
+    values = {name: held[name] for name in config.secret_names if name in held}
     try:
         lines = strict_exchange(
             config, _stdio_payload(method, params), skep_home=skep_home,
@@ -1484,7 +1538,9 @@ def posture_lines(store: RunStore, skep_home: Path) -> list[str]:
         line = f"MCP server {sid!r}: configured strict, enforced {enforced} ({net})."
         if config.install and not published_marker(skep_home, sid, config.incarnation).is_file():
             line += " Its install has not finished or failed: calls are refused until it does."
-        if unset := secret_names_unset(skep_home, config):
+        if (problem := seatbelt_secrets_problem(config)) is not None:
+            line += f" Every call is refused: {problem}."
+        elif unset := secret_names_unset(skep_home, config):
             steps = "; ".join(f"`skep mcp secret set {sid} {name}`" for name in unset)
             line += f" Secret(s) not set: {steps}."
         note = node_note(config, runtime_argv(config, skep_home))

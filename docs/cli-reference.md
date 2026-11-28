@@ -772,7 +772,13 @@ card. The file is on the secret floor, so no other sandbox and no chat file
 read can open it, and the server's own values are redacted from its results,
 errors and diagnostics; a value must be at least 8 characters, since every
 value is masked wherever it appears. A value never reaches the sandbox's
-launcher: the server's last in-wall step reads it from this file. A server you give a secret can still send it to any
+launcher: each launch copies the values of the names the server lists, and
+only those, into a snapshot of its own, which the server's last in-wall step
+reads; the server never sees this file itself. On macOS a strict server
+that lists secrets is refused in this release (Seatbelt does not by itself
+keep another sandboxed process of your user from reading a running server's
+environment): register it without secrets, or with `sandbox='host'` behind
+its HIGH card. A server you give a secret can still send it to any
 host it may reach; the registration card says so. Names the wall sets itself
 (`HOME`, `PATH`, `TMPDIR`, `npm_config_*`, `UV_*`, proxy variables) and
 loader controls (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `NODE_PATH`,

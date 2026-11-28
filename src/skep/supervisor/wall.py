@@ -53,7 +53,8 @@ def walled(
     outside every root the child writes; ``home`` is HOME and TMPDIR,
     writable, apart from the workspace; ``trusted_read_roots`` and
     ``skep_home_roots`` go to ``sandbox.write_profile``. ``unmasked`` (review
-    S1): the one server's own secrets file, read back past its mask, so the
+    S1): the one launch's own secrets snapshot (review r2 N2), read back
+    past its mask, so the
     in-wall ``skep.secretenv`` step sets its values and the launcher never
     holds one. ``deny_local`` (review S8): the proxy refuses serve's port on
     every address this host owns, not only on loopback names."""

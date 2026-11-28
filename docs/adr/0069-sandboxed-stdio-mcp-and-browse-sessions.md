@@ -164,14 +164,35 @@ left open:
   sandbox-exec, the netshim and the Landlock step start with no secret in
   their environment or argv (`--setenv` would put it in a world-readable
   `/proc/<pid>/cmdline`). The last step inside the wall, `skep.secretenv`,
-  reads the server's own secrets file — bound back read-only past its mask
+  reads this launch's own snapshot — bound back read-only past its mask
   for that one wall (`walled(unmasked=)`, a fifth wall parameter) — sets the
   listed names and execs the server. A name the wall already set refuses.
+- **Each launch gets an immutable snapshot of what it injects** (review r2
+  N2): the values of the names the server lists, and only those, read once
+  and written to a file of that launch's own (mode 0400, in the masked
+  `mcp-secret` dir, outside every root a child can write), deleted when the
+  exchange ends. The server's own secrets file is never in its wall, so it
+  cannot read a value set for a name it does not list, and a `skep mcp
+  secret set` during a launch changes neither what the server gets nor what
+  is redacted: redaction masks exactly the snapshot's values, on every path.
+- **Secrets for strict servers are Linux-only in this release** (review r2
+  N1). A strict server receives its values in its environment. On Linux each
+  bubblewrap sandbox has its own PID namespace, so no other sandbox can see
+  that process. On macOS, Seatbelt hides the secrets file but does not by
+  itself stop another sandboxed process of the same user from reading a
+  process's environment (XNU exposes it through `sysctl`), and no Seatbelt
+  rule for that has been verified. So on a Seatbelt backend a strict server
+  that lists `secret_names` is refused at registration (its card shows the
+  error), at launch, and in `skep doctor`, naming the alternatives: no
+  secrets, or `sandbox='host'` behind its HIGH card. Follow-up: a verified
+  Seatbelt rule (or another delivery) that keeps a value out of every other
+  sandbox's reach.
 - **One redaction path** (review S2): every call and the install's discovery
   handshake go through `redacted_call`. Each reply line is parsed first and
   the server's data masked after, so a value the JSON escapes is still caught
-  in a result or a JSON-RPC error; stderr is masked a whole line at a time
-  before it is cropped. Every value set is masked, so `skep mcp secret set`
+  in a result or a JSON-RPC error, an `initialize` error included (review r2
+  N3: it is masked before it is formatted into the error text); stderr is
+  masked a whole line at a time before it is cropped. Every value set is masked, so `skep mcp secret set`
   refuses one shorter than 8 characters, naming the minimum.
 - **Outcome unknown is recorded as the card status `interrupted`** (the
   existing status for "it may have run"), with the payload's `outcome`
@@ -223,6 +244,7 @@ left open:
   - Only the top package is pinned; its dependencies float at install time. Packages that need install scripts or source builds do not install in the strict lane.
   - A `host` server holds the operator's authority, including skep's serve token; `allowed_hosts` and `read_paths` mean nothing for it.
   - A secret you give a server is that server's to use, including sending it to any host it may reach.
+  - Secrets for strict servers are Linux-only in this release: on macOS a strict server that lists `secret_names` is refused (Seatbelt does not by itself keep another same-user sandboxed process from reading a server's environment). A follow-up must verify a rule that does.
   - Tool-name classification (read or act) is a heuristic over names.
   - On Linux, socket scoping by Landlock depends on the kernel; `skep doctor` reports the mode that is enforced, not only the one configured.
   - A platform where the spike fails has no sandboxed browser, and so no multi-step browsing, in `2.4.0`.

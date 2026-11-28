@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import subprocess
@@ -721,7 +721,7 @@ def _stdio_exchange(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     diagnostics: list[str] | None = None,
-    scrub: Callable[[str], str] | None = None,
+    scrub: Callable[[Any], Any] | None = None,
 ) -> list[str]:
     """One compliant one-shot exchange (ADR 0069 2.4): the payload's first
     line (``initialize``) alone, its reply, then ``notifications/initialized``,
@@ -733,7 +733,8 @@ def _stdio_exchange(
     ``MCPOutcomeUnknown`` — the server may have acted (1.7). ``env`` None
     inherits serve's (a host server, as before 2.4.0). ``diagnostics``
     collects a bounded stderr tail; None discards stderr, as before. ``scrub``
-    masks each whole stderr line BEFORE it is cropped (review S2)."""
+    masks each whole stderr line BEFORE it is cropped (review S2), and the
+    parsed ``initialize`` reply before any of it is formatted (review r2 N3)."""
     import collections
     import json
     import queue
@@ -770,7 +771,7 @@ def _stdio_exchange(
 
         def drain() -> None:
             for line in stderr:
-                tail.append((line if scrub is None else scrub(line))[:500])
+                tail.append((line if scrub is None else str(scrub(line)))[:500])
 
         drainer = threading.Thread(target=drain, daemon=True)
         drainer.start()
@@ -834,6 +835,8 @@ def _stdio_exchange(
             init = await_reply(1)
             if init is None:
                 raise MCPNotRun("the MCP server exited before it answered initialize")
+            if scrub is not None:
+                init = scrub(init)
             if "error" in init or not isinstance(init.get("result"), Mapping):
                 # review S11: only a successful initialize advances the handshake
                 raise MCPNotRun(
