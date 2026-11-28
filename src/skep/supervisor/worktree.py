@@ -9,6 +9,7 @@ import subprocess
 import threading
 from collections.abc import Iterable, MutableMapping
 from pathlib import Path
+from typing import Literal
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
 # the same directory tree, and locking each step is not enough. A sweeper's
@@ -180,24 +181,31 @@ def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     return () if common is None else (common,)
 
 
-def git_metadata_masked(workspace: Path, *, common: Path | None = None) -> tuple[Path, ...]:
+def git_metadata_masked(
+    workspace: Path, *, common: Path | Literal[False] | None = None
+) -> tuple[Path, ...]:
     """The main checkout's own state no git in the run reads, masked over
     the common dir ``git_metadata_readable_roots`` binds: its in-progress
     messages. ``common``: a linked common dir the caller already checked
-    (N2), used instead of asking the tree again."""
-    common = common or _linked_common_dir(workspace)
-    return () if common is None else tuple(common / name for name in _COMMON_DIR_PRIVATE)
+    (N2), used instead of asking the tree again; False (M1) for a tree it
+    checked that has none."""
+    if common is None:
+        common = _linked_common_dir(workspace) or False
+    return () if not common else tuple(common / name for name in _COMMON_DIR_PRIVATE)
 
 
-def git_walk_links(workspace: Path, *, common: Path | None = None) -> tuple[Path, ...]:
+def git_walk_links(
+    workspace: Path, *, common: Path | Literal[False] | None = None
+) -> tuple[Path, ...]:
     """I2 (3I): the entries git's reachability walk reads that are links out
     of the common dir. Such a link resolves inside the wall, where its
     target is absent, so a ``git prune`` there would walk without those
     pointers — a strict run refuses. (A linked ``worktrees/`` already stops
     git: the run's gitfile no longer finds its common dir.) ``common`` as
     for ``git_metadata_masked``."""
-    common = common or _linked_common_dir(workspace)
     if common is None:
+        common = _linked_common_dir(workspace) or False
+    if not common:
         return ()
     return tuple(
         entry
@@ -274,11 +282,13 @@ def _backlink(git_dir: Path) -> Path | None:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        raw = os.read(fd, 4096)
+        raw = os.read(fd, 4097)
     finally:
         os.close(fd)
     text = os.fsdecode(raw).strip()
-    return None if "\0" in text else _resolve_git_path(git_dir, text)
+    if len(raw) > 4096 or "\0" in text:  # M2: past the bound is not git's one line
+        return None
+    return _resolve_git_path(git_dir, text)
 
 
 def _git_dirs(workspace: Path, timeout: float | None = None) -> tuple[Path, Path] | None:

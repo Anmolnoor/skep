@@ -4104,13 +4104,13 @@ def diagnose_run(
         read_allowlist, dirs = diagnose_wall(store, task_id, workspace, Path(record.repo))
         writable: tuple[Path, ...] = ()
         readable: tuple[Path, ...] = ()
-        linked_common: Path | None = None
+        linked_common: Path | Literal[False] = False  # M1: checked — never asked again
         if dirs is not None:
             git_dir, common = dirs
             linked = git_dir != common
             writable = (git_dir, common / "objects") if linked else (common / "objects",)
             readable = (common,) if linked else ()
-            linked_common = common if linked else None
+            linked_common = common if linked else False
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
         try:
             sandbox.write_profile(

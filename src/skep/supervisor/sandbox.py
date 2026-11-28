@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from .. import landlock
@@ -1498,7 +1498,7 @@ def write_profile(
     unmasked: Iterable[Path] = (),
     read_allowlist: Iterable[Path] | None = None,
     read_files: Iterable[Path] = (),
-    git_common: Path | None = None,
+    git_common: Path | Literal[False] | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -1542,7 +1542,8 @@ def write_profile(
 
     ``git_common`` (v135 N2): a linked common dir the caller checked and
     binds; its masks and walk links come from it, not from asking the
-    workspace again. None keeps asking the workspace.
+    workspace again. False (M1): the caller checked and the tree has
+    none, so nothing is asked. None keeps asking the workspace.
     """
     write_denied = list(write_denied)
     unmasked = [Path(own).resolve() for own in unmasked]

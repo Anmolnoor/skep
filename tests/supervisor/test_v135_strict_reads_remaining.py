@@ -590,3 +590,46 @@ def test_diagnose_masks_the_checked_common_dir_even_if_the_tree_flips_after(
     assert str(common) in args  # the checked common dir is bound
     for name in ("COMMIT_EDITMSG", "MERGE_MSG"):
         assert str(common / name) in args, name
+
+
+def test_an_oversized_backlink_is_refused_not_read_by_its_prefix(
+    repo: Path, tmp_path: Path
+) -> None:
+    """M2: a backlink past the read bound was judged by its first bytes — a
+    valid path followed by padding passed. Git writes one short line."""
+    from skep.supervisor.worktree import WorktreeError, kept_tree_git_dirs
+
+    kept = tmp_path / "kept"
+    git(repo, "worktree", "add", "-q", "--detach", str(kept))
+    backlink = _kept_git_dir(kept) / "gitdir"
+    backlink.write_text(backlink.read_text(encoding="utf-8") + " " * 5000, encoding="utf-8")
+    with pytest.raises(WorktreeError, match="leads outside its run"):
+        kept_tree_git_dirs(kept, repo)
+
+
+def test_a_checked_tree_with_no_linked_common_dir_is_not_asked_again(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: ``git_common=None`` meant "ask the tree", so a checked tree with no
+    linked common dir (standalone, or no git at all) was asked again by the
+    profile helpers, with no timeout. ``False`` says: checked, none."""
+    from skep.supervisor import worktree
+
+    seen: list[Any] = []
+    monkeypatch.setattr(sandbox, "write_profile", lambda *a, **kw: seen.append(kw["git_common"]))
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile: ["true"])
+    store = RunStore(config.db_path)
+    try:
+        task_id = _kept_run(store, repo, tmp_path, {"read_allowlist": []})
+        (tmp_path / "kept" / ".git").unlink()  # the kept tree is no checkout now
+        diagnose_run(store, config, task_id, command="true")
+    finally:
+        store.close()
+    assert seen == [False]
+
+    def never(*_a: Any, **_kw: Any) -> None:
+        raise AssertionError("the tree was asked again")
+
+    monkeypatch.setattr(worktree, "_git_dirs", never)
+    assert worktree.git_metadata_masked(tmp_path, common=False) == ()
+    assert worktree.git_walk_links(tmp_path, common=False) == ()
