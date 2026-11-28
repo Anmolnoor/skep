@@ -30,7 +30,10 @@ needs_strict_wall = pytest.mark.skipif(
     reason="real sandbox proof (runs where bwrap or sandbox-exec is the backend)",
 )
 NPM, NODE, UV = shutil.which("npm"), shutil.which("node"), shutil.which("uv")
-needs_npm = pytest.mark.skipif(NPM is None or NODE is None, reason="needs node and npm on PATH")
+needs_npm = pytest.mark.skipif(
+    NPM is None or NODE is None or (mcp_sandbox.npm_version(NPM) or (0,)) < mcp_sandbox.MIN_NPM,
+    reason=f"needs node and npm {'.'.join(map(str, mcp_sandbox.MIN_NPM))}+ on PATH (review S9)",
+)
 needs_uv = pytest.mark.skipif(UV is None, reason="needs uv on PATH")
 
 
@@ -341,4 +344,136 @@ def test_a_strict_server_cannot_write_its_install_tree_or_its_profile(
     with entry.open("a"):  # the unconfined control: the host may write both
         pass
     assert not bins.exists()
+    store.close()
+
+
+# -- S9: exact versions, a new-enough npm, registry sources for the whole tree --------
+
+# Strings the old pattern took that npm does not read as one exact version
+# (npm-package-arg: a tag, or an error), or that strict semver refuses.
+NPM_NOT_EXACT = ("1.2.3-a..b", "1.2.3-a.", "1.2.3-.a", "1.2.3-", "1.2.3-01", "01.2.3",
+                 "1.2.99999999999999999", "1.2.3+a..b", "1.2.3+")  # fmt: skip
+NPM_EXACT = ("1.2.3", "0.0.1", "1.2.3-rc.1+build.5", "1.2.3--", "2025.9.25", "1.0.0-0a")
+PYPI_NOT_EXACT = ("1.0+local", "1.0.0a", "01.0", "1.0.0-rc1", "1.0.*", "v1.0", "1.0.0.post")
+PYPI_EXACT = ("1.0.0", "2!1.0", "1.0rc1", "1.0.post1", "1.0.dev3", "1.0a1.post2.dev0")
+
+
+def test_only_exact_versions_are_pinned() -> None:
+    for version in NPM_NOT_EXACT:
+        assert mcp_sandbox.install_spec_problem(("npm", f"fx-mcp@{version}")), version
+    for version in NPM_EXACT:
+        assert mcp_sandbox.install_spec_problem(("npm", f"@s/fx-mcp@{version}")) is None, version
+    for version in PYPI_NOT_EXACT:
+        assert mcp_sandbox.install_spec_problem(("pypi", f"fxmcp=={version}")), version
+    for version in PYPI_EXACT:
+        assert mcp_sandbox.install_spec_problem(("pypi", f"fxmcp=={version}")) is None, version
+
+
+@needs_npm
+def test_every_npm_pin_accepted_is_an_exact_version_to_npm_itself() -> None:
+    """The cross-check against npm's own parser (npm-package-arg)."""
+    npa = Path(str(NPM)).resolve().parent.parent / "node_modules" / "npm-package-arg"
+    if not npa.is_dir():
+        pytest.skip(f"npm-package-arg not found beside {NPM}")
+    probe = (
+        f"const npa = require({json.dumps(str(npa))});"
+        "for (const v of JSON.parse(process.argv[1])) {"
+        " let t; try { t = npa('x@' + v).type } catch (e) { t = 'error' }"
+        " console.log(t) }"
+    )
+    out = subprocess.run([str(NODE), "-e", probe, json.dumps(NPM_EXACT)],
+                         capture_output=True, text=True, check=True).stdout.split()  # fmt: skip
+    assert out == ["version"] * len(NPM_EXACT)
+    tagged = subprocess.run([str(NODE), "-e", probe, json.dumps(["1.2.3-a..b", "1.2.3-a."])],
+                            capture_output=True, text=True, check=True).stdout.split()  # fmt: skip
+    assert tagged == ["tag", "tag"]  # what the old pattern let through: mutable tags
+
+
+def test_an_npm_older_than_the_minimum_is_refused_with_the_fix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mcp_sandbox, "npm_version", lambda npm: (11, 9, 2))
+    config = mcp_client.MCPServerConfig("fx", "stdio", command=("fx-mcp",), sandbox="strict",
+                                        install=("npm", "fx-mcp@1.0.0"))  # fmt: skip
+    with pytest.raises(mcp_client.MCPError, match=r"npm 11\.9\.2.*11\.10\.0 or later"):
+        mcp_sandbox._installer_steps(config, tmp_path)
+    monkeypatch.setattr(mcp_sandbox, "npm_version", lambda npm: (11, 10, 0))
+    (step,) = mcp_sandbox._installer_steps(config, tmp_path)
+    assert "--allow-git=none" in step and "--ignore-scripts" in step
+
+
+@needs_strict_wall
+@needs_npm
+def test_a_dependency_from_outside_the_registry_refuses_the_whole_install(
+    skep_home: Path, reg: Registry
+) -> None:
+    """A directory dependency (npm links it in) is not a registry source."""
+    local = Path(str(NPM)).resolve().parent.parent / "node_modules" / "npm-package-arg"
+    reg.add_npm(build_npm_package(dependencies={"npm-package-arg": f"file:{local}"}))
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    _register(store, chat_id, server_id="fx", command=["fx-mcp"], install="npm:fx-mcp@1.0.0")
+    report = _reported(store, chat_id)
+    assert "NOT installed" in report and "not from the registry" in report, report
+    assert not list((skep_home / "mcp" / "fx").glob("*.published"))
+    store.close()
+
+
+# -- S10: the entry point is the pinned package's own ----------------------------------
+
+
+@needs_strict_wall
+@needs_npm
+def test_a_dependencys_bin_is_not_the_pinned_packages_entry_point(
+    skep_home: Path, reg: Registry
+) -> None:
+    reg.add_npm(build_npm_package(name="fx-dep", bins=("fx-other",)), name="fx-dep")
+    reg.add_npm(build_npm_package(dependencies={"fx-dep": "1.0.0"}))
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    _register(store, chat_id, server_id="fx", command=["fx-other"], install="npm:fx-mcp@1.0.0")
+    report = _reported(store, chat_id)
+    assert "NOT installed" in report and "not an entry point fx-mcp itself declares" in report
+    assert "fx-mcp" in report.split("declares")[-1]  # it names the package's own
+    store.close()
+
+
+@needs_strict_wall
+@needs_uv
+def test_the_venvs_own_python_is_not_the_pinned_packages_entry_point(
+    skep_home: Path, reg: Registry, tmp_path: Path
+) -> None:
+    reg.add_python(build_wheel(tmp_path), project="fxmcp")
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    # the venv's own python, running the package's server: it would answer
+    _register(store, chat_id, server_id="fxpy",
+              command=["python", "-c", "import fxmcp; fxmcp.main()"],
+              install="pypi:fxmcp==1.0.0")  # fmt: skip
+    report = _reported(store, chat_id)
+    assert "NOT installed" in report and "not a console script fxmcp declares" in report, report
+    store.close()
+
+
+@needs_strict_wall
+@needs_uv
+def test_an_entry_point_swapped_after_publication_refuses_the_launch(
+    skep_home: Path, reg: Registry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg.add_python(build_wheel(tmp_path), project="fxmcp")
+    store = _store(skep_home)
+    chat_id = store.create_chat(title="t", model=None).chat_id
+    _register(store, chat_id, server_id="fxpy", command=["fx-mcp"],
+              install="pypi:fxmcp==1.0.0")  # fmt: skip
+    assert "' installed (" in _reported(store, chat_id)
+    entry = mcp_sandbox.install_tree(skep_home, load_mcp_servers(store)["fxpy"]) / "bin" / "fx-mcp"
+    entry.unlink()
+    entry.symlink_to("/usr/bin/true")
+    from skep.supervisor import wall
+
+    started: list[Any] = []
+    monkeypatch.setattr(wall, "walled", lambda *a, **k: started.append(a))
+    result = _call(store, skep_home, "fxpy", "env", names=[])
+    assert started == [] and result.outcome == "not_run"  # refused before any wall
+    assert "resolves outside its install tree" in str(result.error)
     store.close()

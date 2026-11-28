@@ -770,7 +770,9 @@ lists in `secret_names` come from its own file,
 this command writes: the value never passes through an argument, a chat or a
 card. The file is on the secret floor, so no other sandbox and no chat file
 read can open it, and the server's own values are redacted from its results,
-errors and diagnostics. A server you give a secret can still send it to any
+errors and diagnostics; a value must be at least 8 characters, since every
+value is masked wherever it appears. A value never reaches the sandbox's
+launcher: the server's last in-wall step reads it from this file. A server you give a secret can still send it to any
 host it may reach; the registration card says so. Names the wall sets itself
 (`HOME`, `PATH`, `TMPDIR`, `npm_config_*`, `UV_*`, proxy variables) and
 loader controls (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `NODE_PATH`,

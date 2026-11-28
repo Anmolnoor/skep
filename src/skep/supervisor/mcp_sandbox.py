@@ -35,11 +35,27 @@ EGRESS_MODES = ("none", "hosts", "open")
 SERVER_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
 INSTALL_KINDS = ("npm", "pypi")
 _NPM_NAME = r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*"
-_SEMVER = r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
-NPM_PINNED = re.compile(rf"({_NPM_NAME})@({_SEMVER})")
-PYPI_PINNED = re.compile(
-    r"([A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._,-]+\])?==([0-9][0-9A-Za-z.!+-]*)"
+# Review S9: semver 2.0.0 exactly (semver.org's own pattern) — a string npm
+# does not parse as a version (``1.2.3-a..b``) it reads as a mutable TAG.
+_NUM = r"(?:0|[1-9][0-9]*)"
+_PRE_ID = rf"(?:{_NUM}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+_SEMVER = (
+    rf"{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE_ID}(?:\.{_PRE_ID})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
+NPM_PINNED = re.compile(rf"({_NPM_NAME})@({_SEMVER})")
+_NPM_MAX_VERSION = (256, 2**53 - 1)  # node-semver: longer, or a bigger part, is no version
+# PEP 440's canonical public version (Appendix B): no local label, no ``*``.
+_PEP440 = (
+    rf"(?:[1-9][0-9]*!)?{_NUM}(?:\.{_NUM})*(?:(?:a|b|rc){_NUM})?"
+    rf"(?:\.post{_NUM})?(?:\.dev{_NUM})?"
+)
+PYPI_PINNED = re.compile(rf"([A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._,-]+\])?==({_PEP440})")
+# Review S9: npm 11.10.0 added --allow-git (GitHub changelog 2026-02-18, "npm
+# bulk trusted publishing config and script security now generally
+# available"); an older npm can fetch, and pack with its prepare script, a
+# git dependency anywhere in the tree.
+MIN_NPM = (11, 10, 0)
 _BIN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # Runners that resolve a package at run time: never the strict lane's argv.
 _RUNTIME_RESOLVERS = frozenset({"npx", "uvx", "pipx", "bunx", "pnpx", "yarn", "pnpm", "npm"})
@@ -52,8 +68,9 @@ HOST_HIGH = (
 )
 STRICT_HIGH = "it adds an MCP server whose tools can act as you"
 INSTALL_SENTENCE = (
-    "the install runs no package scripts (npm --ignore-scripts, or wheels only); only "
-    "the top package is pinned, and its dependencies are resolved when the install runs"
+    "the install runs no package scripts (npm --ignore-scripts, or wheels only) and takes "
+    "every package from the registry; only the top package is pinned, and its dependencies "
+    "are resolved when the install runs"
 )
 SECRET_SENTENCE = "a secret you give it is its to use, including sending it to a host it may reach"
 
@@ -121,20 +138,28 @@ def install_spec_problem(install: tuple[str, ...]) -> str | None:
             "version>', e.g. 'npm:@modelcontextprotocol/server-everything@2025.9.25'"
         )
     kind, spec = install
-    if kind == "npm" and NPM_PINNED.fullmatch(spec) is None:
+    pinned = NPM_PINNED.fullmatch(spec) if kind == "npm" else None
+    if pinned is not None:
+        version = pinned.group(2)
+        core = version.split("-", 1)[0].split("+", 1)[0].split(".")
+        if len(version) > _NPM_MAX_VERSION[0] or max(map(int, core)) > _NPM_MAX_VERSION[1]:
+            pinned = None
+    if kind == "npm" and pinned is None:
         name = (
             spec.rsplit("@", 1)[0] if spec.count("@") > (1 if spec.startswith("@") else 0) else spec
         )
         return (
-            f"npm spec {spec!r} is not pinned to one exact version (@latest, a range, a tag, "
-            f"a git or tarball URL are refused): use 'npm:{name or '<package>'}@<x.y.z>' — "
+            f"npm spec {spec!r} is not pinned to one exact semver version (@latest, a range, a "
+            "tag, a malformed prerelease, a git or tarball URL are refused): use "
+            f"'npm:{name or '<package>'}@<x.y.z>' — "
             f"`npm view {name or '<package>'} version` prints the current one"
         )
     if kind == "pypi" and PYPI_PINNED.fullmatch(spec) is None:
         name = re.split(r"[<>=!~\[ @]", spec, maxsplit=1)[0]
         return (
-            f"pypi spec {spec!r} is not pinned to one exact version (a range, no version or "
-            f"a URL are refused): use 'pypi:{name or '<package>'}==<version>'"
+            f"pypi spec {spec!r} is not pinned to one exact version (a range, a wildcard, a "
+            "local label, a non-canonical spelling, no version or a URL are refused): use "
+            f"'pypi:{name or '<package>'}==<version>' as PyPI lists it, e.g. ==1.4.0 or ==2.0rc1"
         )
     return None
 
@@ -346,6 +371,78 @@ def entry_point(tree: Path, config: MCPServerConfig) -> Path:
     if config.install[0] == "npm":
         return tree / "node_modules" / ".bin" / config.command[0]
     return tree / "bin" / config.command[0]
+
+
+def _site_packages(tree: Path) -> list[Path]:
+    return sorted(tree.glob("lib/python*/site-packages"))
+
+
+def entry_point_problem(tree: Path, config: MCPServerConfig) -> str | None:
+    """Review S10: why ``command[0]`` in ``tree`` is not the pinned package's
+    OWN entry point, or None. npm: a ``bin`` its own package.json declares,
+    linked to that file; Python: a console script its own distribution
+    declares (entry_points) whose launcher its RECORD lists. Either way the
+    executable must resolve inside the tree. Checked at publication and at
+    every launch."""
+    import json
+    import os
+
+    name, (kind, spec) = config.command[0], config.install
+    entry = entry_point(tree, config)
+    real = Path(os.path.realpath(entry))
+    outside = None
+    if not real.is_relative_to(Path(os.path.realpath(tree))):
+        outside = f"{name!r} resolves outside its install tree (to {real})"
+    if kind == "npm":
+        package = NPM_PINNED.fullmatch(spec).group(1)  # type: ignore[union-attr]
+        own = tree / "node_modules" / package
+        try:
+            declared = json.loads((own / "package.json").read_text(encoding="utf-8")).get("bin")
+        except (OSError, ValueError, AttributeError):
+            return f"{package} has no readable package.json in its install tree"
+        bins = (
+            {package.rsplit("/", 1)[-1]: declared}
+            if isinstance(declared, str)
+            else {str(k): str(v) for k, v in declared.items()}
+            if isinstance(declared, dict)
+            else {}
+        )
+        if name not in bins:
+            return (
+                f"{name!r} is not an entry point {package} itself declares (its package.json "
+                f"bin offers: {', '.join(sorted(bins)) or 'none'})"
+            )
+        if outside is not None:
+            return outside
+        if real != Path(os.path.realpath(own / bins[name])):
+            return f"{name!r} does not lead to {package}'s own {bins[name]}"
+        return None
+    import importlib.metadata as metadata
+
+    project = PYPI_PINNED.fullmatch(spec).group(1)  # type: ignore[union-attr]
+    canon = re.sub(r"[-_.]+", "-", project).lower()
+    found = [
+        dist
+        for dist in metadata.distributions(path=[str(p) for p in _site_packages(tree)])
+        if re.sub(r"[-_.]+", "-", dist.metadata["Name"] or "").lower() == canon
+    ]
+    if not found:
+        return f"{project} has no installed metadata in its install tree"
+    dist = found[0]
+    scripts = sorted(
+        ep.name for ep in dist.entry_points if ep.group in ("console_scripts", "gui_scripts")
+    )
+    if name not in scripts:
+        return (
+            f"{name!r} is not a console script {project} declares (it declares: "
+            f"{', '.join(scripts) or 'none'})"
+        )
+    if outside is not None:
+        return outside
+    listed = {Path(os.path.realpath(str(dist.locate_file(f)))) for f in dist.files or ()}
+    if real not in listed:
+        return f"{name!r} is not a file {project}'s RECORD lists"
+    return None
 
 
 def runtime_argv(
@@ -756,7 +853,13 @@ def strict_exchange(
                 "install failed (its result is in the chat that registered it). Register it "
                 "again to retry the install"
             )
-        trusted.append(install_tree(skep_home, config).resolve())
+        tree = install_tree(skep_home, config)
+        if (problem := entry_point_problem(tree, config)) is not None:  # review S10
+            raise MCPNotRun(
+                f"not run: {config.server_id!r}'s installed entry point is no longer the pinned "
+                f"package's own: {problem}. Register it again to reinstall"
+            )
+        trusted.append(tree.resolve())
     unset = [name for name in config.secret_names if not secret_values.get(name)]
     short = [
         n for n in config.secret_names if 0 < len(secret_values.get(n) or "") < MIN_SECRET_LENGTH
@@ -900,7 +1003,8 @@ INSTALL_SOURCES: dict[str, InstallSource] = {
 INSTALL_TIMEOUT_SECONDS = 300.0
 INSTALL_LIMITS = (
     "This lane installs with no package scripts, from wheels only (no source builds), and "
-    "from the registry only (a dependency given as a git or tarball URL cannot be fetched). "
+    "every package from the registry (a dependency given as a git, tarball, file or link "
+    "source is refused). "
     "A package that needs one of those does not install here: register it with "
     "sandbox='host' (unsandboxed, a HIGH card), or install it yourself and register its "
     "absolute entry point (command=['/abs/path/to/server', ...])"
@@ -938,8 +1042,18 @@ def _installer_steps(config: MCPServerConfig, tree: Path) -> list[list[str]]:
         npm = shutil.which("npm")
         if npm is None:
             raise MCPError("npm is not on PATH here; install Node.js (it brings npm)")
-        return [[npm, "install", "--ignore-scripts", "--no-audit", "--no-fund",
-                 "--prefix", str(tree), *source.args, spec]]  # fmt: skip
+        version = npm_version(npm)
+        if version is None or version < MIN_NPM:
+            shown = "an unknown version" if version is None else ".".join(map(str, version))
+            need = ".".join(map(str, MIN_NPM))
+            raise MCPError(
+                f"npm here is {'npm ' if version else ''}{shown}; the strict install lane needs "
+                f"npm {need} or later, the first that refuses git dependencies anywhere in the "
+                f"tree (--allow-git=none). Update it (`npm install -g npm@^{MIN_NPM[0]}`), or "
+                "register the server with sandbox='host' (unsandboxed, a HIGH card)"
+            )
+        return [[npm, "install", "--ignore-scripts", "--allow-git=none", "--no-audit",
+                 "--no-fund", "--prefix", str(tree), *source.args, spec]]  # fmt: skip
     uv = shutil.which("uv")
     if uv is None:
         raise MCPError("uv is not on PATH here; install uv (https://docs.astral.sh/uv/)")
@@ -949,6 +1063,45 @@ def _installer_steps(config: MCPServerConfig, tree: Path) -> list[list[str]]:
         [uv, "pip", "install", "--python", str(python), "--only-binary", ":all:",
          *source.args, spec],
     ]  # fmt: skip
+
+
+def npm_version(npm: str) -> tuple[int, ...] | None:
+    """npm's version from its own package.json beside the binary it links to
+    (nothing runs), or None when that cannot be read."""
+    import json
+    import os
+
+    manifest = Path(os.path.realpath(npm)).parent.parent / "package.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        found = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+).*", str(data.get("version")))
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None if found is None or data.get("name") != "npm" else tuple(map(int, found.groups()))
+
+
+def npm_tree_problem(tree: Path) -> str | None:
+    """Review S9: every package npm installed came from the registry the
+    install named — a tarball under it with an integrity hash, or bundled in
+    one — never a git, file, directory, link or other-host source."""
+    import json
+
+    args = INSTALL_SOURCES["npm"].args
+    registry = args[args.index("--registry") + 1].rstrip("/") + "/"
+    try:
+        lock = json.loads((tree / "package-lock.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "npm wrote no readable package-lock.json, so where each package came from is unknown"
+    bad = []
+    for path, entry in (lock.get("packages") or {}).items():
+        if not path or not isinstance(entry, dict) or entry.get("inBundle"):
+            continue
+        resolved = str(entry.get("resolved") or "")
+        if entry.get("link") or not resolved.startswith(registry) or not entry.get("integrity"):
+            bad.append(f"{path.removeprefix('node_modules/')} ({resolved or 'no source'})")
+    if not bad:
+        return None
+    return f"package(s) not from the registry {registry}: {', '.join(sorted(bad)[:5])}"
 
 
 def _installer_env(scratch: Path, wall_env: Mapping[str, str]) -> dict[str, str]:
@@ -1068,6 +1221,13 @@ def install_server(
                 f"(it offers: {', '.join(offered) or 'none'}); register it again with "
                 "command[0] set to one of those"
             )
+        if (problem := entry_point_problem(tree, config)) is not None:  # review S10
+            raise MCPError(
+                f"the package installed, but {problem}; register it again with command[0] set "
+                "to one of the package's own entry points"
+            )
+        if config.install[0] == "npm" and (problem := npm_tree_problem(tree)) is not None:
+            raise MCPError(f"{problem}. {INSTALL_LIMITS}")  # review S9: the whole tree
 
         def handshake(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
             with REGISTRY_GATE.reading():  # review S4: the check holds through the launch

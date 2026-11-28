@@ -128,6 +128,25 @@ left open:
 - **An http registration leaves the sandbox fields out** (review S12): it
   is stored as `host` (the mode that confines nothing); naming any sandbox
   field for it, `sandbox='host'` included, is refused with a teaching error.
+- **Pins are exact, and so is the tree's source** (review S9). An npm pin is
+  semver 2.0.0 exactly (semver.org's pattern, with node-semver's length and
+  size limits): npm reads a malformed prerelease such as `1.2.3-a..b` as a
+  mutable tag, which the old pattern let through. A PyPI pin is a canonical
+  PEP 440 public version (no local label, no wildcard). The npm lane needs
+  npm 11.10.0 or later, read from npm's own `package.json` (nothing runs):
+  that release added `--allow-git` (GitHub changelog, 2026-02-18), and the
+  install passes `--allow-git=none`, so no git dependency is fetched or
+  packed (with its prepare script) anywhere in the tree; an older npm is a
+  teaching error. After the install every `package-lock.json` entry must be
+  a tarball under the named registry with an integrity hash, or bundled in
+  one; a link, file, directory, git or other-host source refuses the whole
+  install.
+- **The entry point is the pinned package's own** (review S10): npm, a
+  `bin` the package's own `package.json` declares, linked to that file;
+  Python, a console script its own distribution declares whose launcher its
+  `RECORD` lists. It must resolve inside the install tree. Checked at
+  publication and again before every launch, so a dependency's bin or the
+  venv's own `python` is refused.
 - **The install is not staged and renamed** (a Python install's launchers
   hold absolute paths): it installs straight into the incarnation's tree,
   and publication is a marker file written beside the tree, never inside it
