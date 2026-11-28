@@ -128,7 +128,17 @@ def test_sandbox_fields_mean_nothing_on_http_or_host(store: RunStore) -> None:
         _register(store, server_id="h", transport="http", url="http://x/mcp", sandbox="strict")
     with pytest.raises(ValueError, match="sandbox='host'"):
         _register(store, server_id="h", command=["x"], sandbox="host", allowed_hosts=["a.b"])
-    _register(store, server_id="web", transport="http", url="http://x/mcp", sandbox="host")
+    # review S12: an http server omits them (as the tool description says) and
+    # passes; one that names any of them, even sandbox='host', is refused
+    _register(store, server_id="web", transport="http", url="http://x/mcp")
+    assert load_mcp_servers(store)["web"].sandbox == "host"
+    for field, value in (("sandbox", "host"), ("read_paths", ["/srv"]), ("egress", "none")):
+        with pytest.raises(ValueError, match=f"{field}.*http server"):
+            _register(store, server_id="h", transport="http", url="http://x/mcp", **{field: value})
+    assert "error" not in mcp_sandbox.grant_view(
+        mcp_sandbox.registration_from_args({"server_id": "w", "transport": "http", "url": "u"}),
+        store.db_path.parent.parent,
+    )
 
 
 def test_a_pinned_install_with_its_entry_point_name_is_accepted(store: RunStore) -> None:

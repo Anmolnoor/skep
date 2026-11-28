@@ -104,6 +104,30 @@ left open:
   `~/.skep/mcp/<server_id>/<incarnation>/`. Without it, a strict server's
   `command[0]` must be an absolute path; `npx`, `uvx` and other run-time
   resolvers are refused for `strict`.
+- **Every launch checks the registration in force** (review S4): with a
+  store, `runner_for_config` checks under the registry gate that the config
+  it was given IS the registration now (incarnation included) and holds the
+  gate through the exchange, so the startup warm, a discovery or a cache miss
+  that read a config before a replacement starts nothing. A cached listing
+  is keyed by the exact incarnation. A queued install checks before it
+  starts and its discovery handshake runs with the check held; a tree an
+  installer is writing is left to it by `retire_trees`, and a stale install
+  deletes its own tree. Forged tools are exempt: they re-derive what runs
+  from their bound record on every launch.
+- **One registration snapshot per call decision** (review S5): the chat
+  reads the incarnation once, before the decision classifies the call; the
+  in-turn dispatch, the de-duplication and the card all bind to that value.
+  In-turn, the final `decide()` must still allow (an ask is not run, "ask
+  again"); on a confirm the card's binding is checked before any policy
+  lookup that could list the server.
+- **Read roots are resolved at registration** (review S6): the card shows,
+  and the registry keeps, where each `read_paths` entry resolves; a confirm
+  whose grant no longer matches its card registers nothing, and a launch
+  whose recorded root is a link now, or no longer resolves to itself, is
+  refused (the idea of `reverify._moved_read_roots`).
+- **An http registration leaves the sandbox fields out** (review S12): it
+  is stored as `host` (the mode that confines nothing); naming any sandbox
+  field for it, `sandbox='host'` included, is refused with a teaching error.
 - **The install is not staged and renamed** (a Python install's launchers
   hold absolute paths): it installs straight into the incarnation's tree,
   and publication is a marker file written beside the tree, never inside it

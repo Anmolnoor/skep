@@ -105,6 +105,9 @@ class _RegistryGate:
 
 
 REGISTRY_GATE = _RegistryGate()
+# Review S4: (skep home, server id, incarnation) of every install writing its
+# tree now; ``retire_trees`` leaves those trees to their installer.
+_IN_FLIGHT: set[tuple[str, str, str]] = set()
 
 
 # -- validation ---------------------------------------------------------------
@@ -245,22 +248,53 @@ def _strings(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+_SANDBOX_FIELDS = ("sandbox", "egress", "allowed_hosts", "read_paths", "secret_names", "install")
+
+
+def http_fields_problem(args: Mapping[str, Any]) -> str | None:
+    """Review S12: an http registration leaves every sandbox field out (the
+    tool description says so); naming one — even ``sandbox='host'`` — is
+    refused, never defaulted into meaning something."""
+    if str(args.get("transport") or "stdio") == "stdio":
+        return None
+    named = [field for field in _SANDBOX_FIELDS if args.get(field) not in (None, "", [], ())]
+    if not named:
+        return None
+    return (
+        f"{', '.join(named)} {'means' if len(named) == 1 else 'mean'} nothing for an http server "
+        "(skep starts no process for it, so there is nothing to sandbox): leave "
+        f"{'it' if len(named) == 1 else 'them'} out and give only server_id, transport='http', "
+        "url and scope"
+    )
+
+
+def _resolved(raw: str) -> str:
+    """Review S6: a read root is recorded where it resolves at registration,
+    so the card shows, and the registry keeps, the directory that is read."""
+    import os
+
+    return os.path.realpath(raw) if Path(raw).is_absolute() else raw
+
+
 def registration_from_args(args: Mapping[str, Any]) -> MCPServerConfig:
-    """A NEW registration from ``register_mcp_server``'s arguments: one that
-    does not name ``sandbox`` is ``strict`` (1.2; a stored registration
-    without the field loads as ``host``, ``load_mcp_servers``). ``egress``
-    defaults to ``hosts`` when hosts are listed, else ``none``."""
+    """A NEW registration from ``register_mcp_server``'s arguments: a stdio
+    one that does not name ``sandbox`` is ``strict`` (1.2; a stored
+    registration without the field loads as ``host``, ``load_mcp_servers``);
+    an http one is ``host``, the mode that confines nothing (review S12).
+    ``egress`` defaults to ``hosts`` when hosts are listed, else ``none``.
+    ``read_paths`` are resolved here (review S6)."""
     hosts = _strings(args.get("allowed_hosts"))
+    transport = str(args.get("transport") or "stdio")
     return MCPServerConfig(
         server_id=str(args.get("server_id") or ""),
-        transport=str(args.get("transport") or "stdio"),
+        transport=transport,
         command=_strings(args.get("command")),
         url=None if args.get("url") is None else str(args["url"]),
         scope=str(args.get("scope") or "mcp"),
-        sandbox=str(args.get("sandbox") or "strict"),
+        sandbox=str(args.get("sandbox") or ("strict" if transport == "stdio" else "host")),
         egress=str(args.get("egress") or ("hosts" if hosts else "none")),
         allowed_hosts=hosts,
-        read_paths=_strings(args.get("read_paths")),
+        read_paths=tuple(_resolved(raw) for raw in _strings(args.get("read_paths"))),
         secret_names=_strings(args.get("secret_names")),
         install=parse_install(str(args.get("install") or "")),
     )
@@ -293,8 +327,13 @@ def retire_trees(skep_home: Path, server_id: str, *, keep: str | None) -> None:
     root = tree_root(skep_home, server_id)
     if SERVER_SLUG.fullmatch(server_id) is None or root.is_symlink() or not root.is_dir():
         return
+    # review S4: a tree an installer is writing is left to it — the stale
+    # install deletes its own tree when it ends (``install_server``)
+    busy = {inc for home, sid, inc in _IN_FLIGHT if (home, sid) == (str(skep_home), server_id)}
     for child in root.iterdir():
         if keep is not None and child.name in (keep, f"{keep}.published"):
+            continue
+        if child.name in busy:
             continue
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child, ignore_errors=True)
@@ -391,6 +430,8 @@ def card_grant(tool: str, args: Mapping[str, Any], store: RunStore) -> dict[str,
     if tool == "setup_browser":
         return grant_view(browser_config(), skep_home)
     if tool == "register_mcp_server":
+        if (problem := http_fields_problem(args)) is not None:
+            return {"error": problem}
         return grant_view(registration_from_args(args), skep_home)
     return None
 
@@ -417,6 +458,21 @@ def card_incarnation(store: RunStore, args: Mapping[str, Any]) -> str | None:
     return None if config is None else config.incarnation
 
 
+def stale_refusal(store: RunStore, config: MCPServerConfig) -> str | None:
+    """Review S4: why ``config`` is not the registration in force (another
+    incarnation, other settings, or none), or None. Every launch asks this
+    under ``REGISTRY_GATE.reading`` (``mcp_client.runner_for_config``)."""
+    from .mcp_client import load_mcp_servers
+
+    if load_mcp_servers(store).get(config.server_id) == config:
+        return None
+    return (
+        f"not run: the MCP server {config.server_id!r} was registered again or removed after "
+        "this call or listing was prepared, so nothing was started for it. Ask again: "
+        f"list_mcp_tools server_id={config.server_id} lists the one registered now"
+    )
+
+
 def card_binding_refusal(card: Mapping[str, Any], config: MCPServerConfig) -> str | None:
     """Why a confirmed MCP card no longer names the registration it was
     proposed for (1.6), or None. Recorded as **not run**. A card with no
@@ -425,8 +481,9 @@ def card_binding_refusal(card: Mapping[str, Any], config: MCPServerConfig) -> st
         return None
     return (
         f"not run: the MCP server {config.server_id!r} was registered again (or removed and "
-        "re-registered) after this card was shown, so this approval is not for the server "
-        "that is registered now. Nothing was sent. Ask again to get a card for it"
+        "re-registered) after this card was shown or this call was decided, so this approval "
+        "is not for the server that is registered now. Nothing was sent. Ask again to get a "
+        "card for it"
     )
 
 
@@ -503,11 +560,25 @@ def secret_names_unset(skep_home: Path, config: MCPServerConfig) -> list[str]:
 # -- the registration verb -------------------------------------------------------
 
 
-def register(store: RunStore, args: Mapping[str, Any], *, chat_id: str | None) -> dict[str, Any]:
+def _granted(view: Mapping[str, Any]) -> dict[str, Any]:
+    """What a grant binds: all it shows but which secrets are still unset
+    (the card tells the operator to set them before approving)."""
+    return {key: value for key, value in view.items() if key != "secrets_unset"}
+
+
+def register(
+    store: RunStore,
+    args: Mapping[str, Any],
+    *,
+    chat_id: str | None,
+    card: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """``register_mcp_server``'s executor — it runs only after the card's
     verdict (1.3). Saves the registration under a new incarnation; a strict
     server with ``install`` starts its install off this request, and the
-    result is reported in ``chat_id``. Nothing else starts here."""
+    result is reported in ``chat_id``. Nothing else starts here. A ``card``
+    that recorded its grant must show exactly what would be granted now
+    (review S6: a read path that resolves elsewhere since is a new card)."""
     from .mcp_client import FORGED_SERVER_PREFIX, save_mcp_server
 
     if str(args.get("server_id") or "").startswith(FORGED_SERVER_PREFIX):
@@ -517,10 +588,19 @@ def register(store: RunStore, args: Mapping[str, Any], *, chat_id: str | None) -
             "which run only from their bound record inside the sandbox — pick another id; "
             "promote_tool registers a forged tool itself"
         )
+    if (problem := http_fields_problem(args)) is not None:
+        raise ValueError(problem)
     config = registration_from_args(args)
     skep_home = store.db_path.parent.parent
     if (problem := registration_problem(config, skep_home)) is not None:
         raise ValueError(problem)
+    shown = (card or {}).get("mcp_grant")
+    if isinstance(shown, Mapping) and _granted(grant_view(config, skep_home)) != _granted(shown):
+        raise ValueError(
+            f"not registered: what {config.server_id!r} would be granted now is not what its card "
+            f"showed (a read path resolves elsewhere now: {list(config.read_paths)}). Nothing "
+            "was saved; ask again for a card that shows it"
+        )
     try:
         config = save_mcp_server(store, config)
     except MCPError as exc:
@@ -699,6 +779,16 @@ def strict_exchange(
         raise MCPNotRun(
             f"not run: read path(s) {', '.join(gone)} of {config.server_id!r} do not exist; "
             "create them, or register the server again without them"
+        )
+    # review S6 (reverify._moved_read_roots): a recorded root that is a link
+    # now, or no longer resolves to itself, would read what it points at today
+    moved = [raw for raw in config.read_paths if Path(raw).is_symlink() or _resolved(raw) != raw]
+    if moved:
+        raise MCPNotRun(
+            f"not run: read path(s) {', '.join(moved)} of {config.server_id!r} no longer resolves "
+            "to itself (it, or a directory above it, is a link now), so the wall would read "
+            "somewhere its card never showed. Put the directory back, or register the server "
+            "again: the new card shows where each path resolves"
         )
     tool_env, tool_roots = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
@@ -932,11 +1022,8 @@ def _run_installer(config: MCPServerConfig, tree: Path, skep_home: Path, timeout
 
 
 def _require_current(store: RunStore, config: MCPServerConfig) -> None:
-    from .mcp_client import load_mcp_servers
-
-    current = load_mcp_servers(store).get(config.server_id)
-    if current is None or current.incarnation != config.incarnation:
-        raise MCPError("it was registered again or removed while it installed")
+    if stale_refusal(store, config) is not None:
+        raise MCPError("it was registered again or removed before its install finished")
 
 
 def install_server(
@@ -963,8 +1050,12 @@ def install_server(
             f"nothing was downloaded. Set them on this machine ({steps}), then ask to "
             "register the server again"
         )
-    root = _private_dir(_private_dir(skep_home, MCP_TREE_DIR), config.server_id)
-    tree = _private_dir(root, config.incarnation, fresh=True)
+    flight = (str(skep_home), config.server_id, config.incarnation)
+    with REGISTRY_GATE.reading():  # review S4: a queued install checks before it starts
+        _require_current(store, config)
+        root = _private_dir(_private_dir(skep_home, MCP_TREE_DIR), config.server_id)
+        tree = _private_dir(root, config.incarnation, fresh=True)
+        _IN_FLIGHT.add(flight)
     try:
         _run_installer(config, tree, skep_home, timeout)
         _require_current(store, config)
@@ -979,9 +1070,11 @@ def install_server(
             )
 
         def handshake(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
-            return redacted_call(
-                config, method, params, skep_home=skep_home, require_published=False
-            )
+            with REGISTRY_GATE.reading():  # review S4: the check holds through the launch
+                _require_current(store, config)
+                return redacted_call(
+                    config, method, params, skep_home=skep_home, require_published=False
+                )
 
         tools: list[MCPTool] = MCPClient(config, runner=handshake).list_tools()
         with REGISTRY_GATE.writing():
@@ -994,6 +1087,8 @@ def install_server(
     except BaseException:
         shutil.rmtree(tree, ignore_errors=True)
         raise
+    finally:
+        _IN_FLIGHT.discard(flight)
     return tuple(tool.name for tool in tools)
 
 
@@ -1099,25 +1194,30 @@ def call_registered(
     arguments: Mapping[str, object],
     *,
     skep_home: Path,
-    card: Mapping[str, Any] | None,
+    card: Mapping[str, Any],
     guard: Any,
 ) -> dict[str, Any]:
     """``call_mcp_tool``'s executor. Under ``REGISTRY_GATE.reading`` (no
     registration change can land between the check and the call): the
-    registration is reloaded, ``guard`` (the final ``decide()``) runs, a
-    confirmed ``card`` must name the registration's incarnation, and the
-    call is made once, never retried. The result says which of the three
-    happened: ran, not run, outcome unknown."""
+    registration is reloaded; ``card`` — the confirmed card, or in-turn the
+    incarnation the allow was decided for — must name its incarnation,
+    checked BEFORE ``guard`` (the final ``decide()``, which can list a
+    server to learn a hint: review S5); then ``guard`` returns a refusal or
+    None; the call is made once, never retried. The result says which of the
+    three happened: ran, not run, outcome unknown."""
     from .mcp_client import MCPClient, load_mcp_servers, runner_for_config
 
     head = {"server_id": server_id, "tool": tool}
     with REGISTRY_GATE.reading():
         config = load_mcp_servers(store).get(server_id)
-        if config is None:
-            raise ValueError(f"no MCP server {server_id!r}; register_mcp_server first")
-        guard()
-        refusal = None if card is None else card_binding_refusal(card, config)
-        if refusal is not None:
+        if config is None:  # review S14: typed, never "bad arguments"
+            refusal: str | None = (
+                f"not run: no MCP server {server_id!r} is registered now (it was removed, or "
+                "never registered); register_mcp_server first"
+            )
+        else:
+            refusal = card_binding_refusal(card, config) or guard()
+        if refusal is not None or config is None:
             return {**head, "ok": False, "outcome": "not_run", "error": refusal}
         try:
             runner = runner_for_config(config, skep_home=skep_home, store=store)

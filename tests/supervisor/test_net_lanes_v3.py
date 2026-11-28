@@ -22,6 +22,7 @@ import pytest
 from skep.cli import main
 from skep.supervisor import RunStore
 from skep.supervisor.cli_cmds import build_config
+from skep.supervisor.mcp_client import load_mcp_servers
 from skep.supervisor.policy_schema import _VERDICT_RANK, POLICY_DOCUMENT_SETTINGS_KEY
 from skep.supervisor.roles import SHIPPED_ROLES
 from skep.supervisor.serve import tools
@@ -207,10 +208,20 @@ def _mcp(store: RunStore, holder: ConfigHolder, tool: str, chat: str | None = No
 
 def _execute(store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any],
              decision: Any = None, chat: str | None = None) -> Any:  # fmt: skip
+    # ADR 0069 1.6: a confirmed MCP card names the registration it was shown for
+    card = None
+    if name == "call_mcp_tool":
+        card = {"incarnation": load_mcp_servers(store)[args["server_id"]].incarnation}
     return execute_mutation(
         name, args, store=store, holder=holder, runner=cast(Any, None), actor="op",
-        decision=decision, chat_id=chat,
+        decision=decision, chat_id=chat, card=card,
     )  # fmt: skip
+
+
+def _not_run(result: dict[str, Any], says: str) -> None:
+    """v135 (ADR 0069 1.7, review S14): a refused call is typed not run."""
+    assert result["ok"] is False and result["outcome"] == "not_run", result
+    assert says in result["error"], result
 
 
 def test_b29_a_baseline_fetch_allow_runs_read_url_and_a_baseline_deny_fetches_nothing(
@@ -242,8 +253,10 @@ def test_b29_a_baseline_mcp_rule_reaches_call_mcp_tool(net: Callable[..., Any]) 
     assert (read.verdict, read.decided_by) == ("allow", "template:builder/mcp-kb")
     bank = _mcp(store, holder, "bank:get_balance")
     assert (bank.verdict, bank.decided_by) == ("deny", "template:builder/no-bank")
-    with pytest.raises(ValueError, match="denied by policy"):
-        _execute(store, holder, "call_mcp_tool", {"server_id": "bank", "tool": "get_balance"})
+    _not_run(
+        _execute(store, holder, "call_mcp_tool", {"server_id": "bank", "tool": "get_balance"}),
+        "denied by policy",
+    )
 
 
 def test_b29_a_tampered_baseline_makes_every_network_lane_ask_or_refuse(
@@ -596,8 +609,10 @@ def test_every_network_lane_fails_closed_when_the_policy_will_not_load(
     for tool in ("kb:get_doc", "browser:browser_snapshot", "mail:list_messages"):
         decision = _mcp(store, holder, tool)
         assert decision.verdict == "deny" and decision.reason.endswith("policy_unloadable")
-    with pytest.raises(ValueError, match="denied by policy"):
-        _execute(store, holder, "call_mcp_tool", {"server_id": "kb", "tool": "get_doc"})
+    _not_run(
+        _execute(store, holder, "call_mcp_tool", {"server_id": "kb", "tool": "get_doc"}),
+        "denied by policy",
+    )
     assert "tools/call" not in calls
 
 

@@ -490,9 +490,39 @@ def runner_for_config(
     A forged server (``forge-*``) runs only from its bound plugin record in
     ``store`` (Phase 07, ``forge.runtime_launch``), behind ``forged_lane``.
 
+    v135 (ADR 0069 1.4, review S4): with ``store``, every launch of a stdio
+    server first checks, under the registry gate, that ``config`` IS the
+    registration in force (incarnation included) and holds the gate through
+    the exchange — a config read before a replacement (the startup warm, a
+    discovery, a cache miss) starts nothing.
+
     ponytail: one-shot per call (initialize -> request -> done) — a persistent
     session pool is the upgrade path if call volume matters.
     """
+    inner = _transport_runner(config, skep_home=skep_home, store=store)
+    # http starts no process here; a forged tool re-derives what it runs from
+    # its bound plugin record on every launch (``forge.runtime_launch``)
+    if (
+        store is None
+        or config.transport == "http"
+        or config.server_id.startswith(FORGED_SERVER_PREFIX)
+    ):
+        return inner
+
+    def launch(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        from .mcp_sandbox import REGISTRY_GATE, stale_refusal
+
+        with REGISTRY_GATE.reading():
+            if (refusal := stale_refusal(store, config)) is not None:
+                raise MCPNotRun(refusal)
+            return inner(method, params)
+
+    return launch
+
+
+def _transport_runner(
+    config: MCPServerConfig, *, skep_home: Path | None, store: RunStore | None
+) -> MCPRunner:
     import json
 
     if config.server_id.startswith(FORGED_SERVER_PREFIX):
@@ -952,9 +982,8 @@ def cached_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...
     """Phase 06 (6.2): the cached tools/list for ``config``, or None — never
     spawns a server (the prompt's MCP index reads this every turn)."""
     hit = _LISTED.get((str(store.db_path), config.server_id))
-    # a save drops the entry (a new incarnation): the rest of the settings match
-    same = hit is not None and replace(hit[0], incarnation="") == replace(config, incarnation="")
-    if hit is None or not same or hit[1] != _binding(store, config):
+    # review S4: keyed by the exact registration, incarnation included
+    if hit is None or hit[0] != config or hit[1] != _binding(store, config):
         return None  # L11: never a listing from another binding
     return hit[2]
 

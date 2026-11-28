@@ -264,7 +264,9 @@ def test_a_replaced_registration_never_publishes_the_old_install(
             '{"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}'])  # fmt: skip
         chat_id = store.create_chat(title="t", model=None).chat_id
         _register(store, chat_id, server_id="fx", command=["fx-mcp"], install="npm:fx-mcp@1.0.0")
-        assert "registered again or removed while it installed" in _reported(store, chat_id)
+        assert "registered again or removed before its install finished" in _reported(
+            store, chat_id
+        )
         assert not list((skep_home / "mcp" / "fx").glob("*.published"))
     finally:
         store.close()

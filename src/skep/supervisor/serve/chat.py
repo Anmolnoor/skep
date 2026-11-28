@@ -419,15 +419,21 @@ def pending_duplicate_action(
     args: dict[str, Any],
     *,
     merge: dict[str, Any] | None = None,
+    incarnation: str | None = "",
 ) -> tuple[ChatActionRecord, bool] | None:
     """The pending card already asking this question, with whether its args
     are byte-identical. Only 'proposed' rows count — a denied card is a
     verdict, and re-proposing after one is a new question for the human.
-    ``merge`` is a merge_pr proposal's pin, already read (R3 S6)."""
+    ``merge`` is a merge_pr proposal's pin, already read (R3 S6).
+    ``incarnation``: an MCP card's registration as its proposal read it
+    (review S5: one read for the decision, this check and the card); ""
+    reads it now."""
     subject = _proposal_subject(tool, args)
     args_key = _canonical_args(args)
     # ADR 0069 1.6: an MCP card is also its registration — one for a replaced server is stale
-    bound = card_incarnation(store, args) if tool == "call_mcp_tool" else None
+    bound = None
+    if tool == "call_mcp_tool":
+        bound = card_incarnation(store, args) if incarnation == "" else incarnation
     proposed = None
     if tool == "merge_pr":
         proposed = _merge_key(merge_pin(store, args) if merge is None else merge, args)
@@ -3003,6 +3009,13 @@ class ChatEngine:
                         yield ("tool", {"tool": name, "args": shown_args, "result": refusal,
                                         "message_id": row_id})  # fmt: skip
                         continue
+                    # ADR 0069 1.6 (review S5): ONE registration snapshot, read
+                    # before the decision classifies the call — the in-turn
+                    # dispatch, the de-duplication and the card all bind to it
+                    bound = None
+                    if name == "call_mcp_tool":
+                        args.pop("incarnation", None)  # card_json carries it, never args
+                        bound = card_incarnation(self.store, args)
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
                     )
@@ -3165,6 +3178,7 @@ class ChatEngine:
                                 actor=CHAT_ACTOR,
                                 decision=decision,
                                 chat_id=chat_id,
+                                card=({"incarnation": bound} if name == "call_mcp_tool" else None),
                             )
                             payload = executed_payload(name, result)
                         except HTTPException as exc:
@@ -3228,8 +3242,6 @@ class ChatEngine:
                     # could only fail, B22); one it passes carries the replay.
                     # R3 (S6): a merge_pr proposal reads its pin ONCE; the
                     # check, the de-duplication and the card all use it.
-                    if name == "call_mcp_tool":  # ADR 0069 1.6: card_json carries it, not args
-                        args.pop("incarnation", None)
                     pin = merge_pin(self.store, args) if name == "merge_pr" else None
                     try:
                         checked = policy_write_preview(
@@ -3262,7 +3274,9 @@ class ChatEngine:
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
                     # superseded and the fresh one stands alone.
-                    duplicate = pending_duplicate_action(self.store, chat_id, name, args, merge=pin)
+                    duplicate = pending_duplicate_action(
+                        self.store, chat_id, name, args, merge=pin, incarnation=bound
+                    )
                     if duplicate is not None and (
                         duplicate[1]
                         # I7: a model proposal never supersedes an operator's
@@ -3316,6 +3330,8 @@ class ChatEngine:
                                 or {}
                             ),
                             **({"decision": asdict(decision)} if decision is not None else {}),
+                            # review S5: the snapshot the decision used, not a re-read
+                            **({"incarnation": bound} if name == "call_mcp_tool" else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),
                             # L30: the remote and branch an open-PR card pushes to

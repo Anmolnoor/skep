@@ -229,11 +229,19 @@ def build_sdist(dest: Path, *, name: str = "fxsrc", version: str = "1.0.0") -> P
 
 
 def build_npm_package(
-    *, name: str = "fx-mcp", version: str = "1.0.0", marker: Path | None = None
+    *,
+    name: str = "fx-mcp",
+    version: str = "1.0.0",
+    marker: Path | None = None,
+    bins: tuple[str, ...] = ("fx-mcp",),
+    dependencies: dict[str, str] | None = None,
 ) -> bytes:
-    """An npm tarball whose bin ``fx-mcp`` runs NODE_SERVER. With ``marker``,
+    """An npm tarball whose bins (``fx-mcp``) run NODE_SERVER. With ``marker``,
     its preinstall, install and postinstall scripts each write that file."""
-    manifest: dict[str, object] = {"name": name, "version": version, "bin": {"fx-mcp": "server.js"}}
+    manifest: dict[str, object] = {
+        "name": name, "version": version, "bin": dict.fromkeys(bins, "server.js"),
+        **({"dependencies": dependencies} if dependencies else {}),
+    }  # fmt: skip
     if marker is not None:
         script = f"node -e \"require('fs').writeFileSync('{marker}', 'ran')\""
         manifest["scripts"] = {"preinstall": script, "install": script, "postinstall": script}

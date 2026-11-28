@@ -177,3 +177,110 @@ def test_the_final_decide_passes_chat_id(live: Callable[[str], Live]) -> None:
     with mock.patch.object(mcp_client, "mcp_scope_decision", decide):
         _confirm(env, chat, card)
     assert seen and seen[0] == chat
+
+
+# -- review round 1 (S5, S14) ---------------------------------------------------------
+
+
+@pytest.fixture()
+def launched() -> Any:
+    """Every exchange any (fake) server was asked for, listings included."""
+    seen: list[tuple[str, str]] = []
+    real = mcp_client.runner_for_config
+
+    def runner(config: MCPServerConfig, **kw: Any) -> Any:
+        inner = real(config, **kw)
+
+        def run(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            seen.append((config.server_id, method))
+            return inner(method, params)
+
+        return run
+
+    with mock.patch.object(mcp_client, "runner_for_config", runner):
+        yield seen
+
+
+def test_an_in_turn_call_never_runs_against_a_registration_replaced_while_it_was_decided(
+    live: Callable[[str], Live], calls: list[tuple[str, str]]
+) -> None:
+    """S5: the allow was for the registration read before the decision; a
+    replacement landing during it means nothing runs in-turn."""
+    env = live("builder")
+    chat = env.chat()
+    from skep.supervisor.serve.tools import execute_mutation
+
+    execute_mutation(
+        "allow_mcp_tool", {"server_id": "kb", "tool": "get_doc"}, store=env.store,
+        holder=env.holder, runner=None, actor="operator", chat_id=chat,  # type: ignore[arg-type]
+    )  # fmt: skip
+    read = {"server_id": "kb", "tool": "get_doc", "arguments": {}}
+    env.ollama.script_tool_calls(("call_mcp_tool", read))
+    env.ollama.script_reply("ok")
+    env.turn(chat, "read the doc")
+    assert calls == [("kb", "get_doc")]  # the control: the grant runs it in-turn
+    calls.clear()
+    real = mcp_client.mcp_scope_decision
+
+    def decide(*args: Any, **kwargs: Any) -> Any:
+        verdict = real(*args, **kwargs)
+        if not getattr(decide, "done", False):
+            decide.done = True  # type: ignore[attr-defined]
+            save_mcp_server(env.store, load_mcp_servers(env.store)["kb"])  # replaced
+        return verdict
+
+    env.ollama.script_tool_calls(("call_mcp_tool", {"server_id": "kb", "tool": "get_doc"}))
+    env.ollama.script_reply("ok")
+    with mock.patch.object(mcp_client, "mcp_scope_decision", decide):
+        env.turn(chat, "read the doc")
+    assert calls == []
+
+
+def _in_turn(env: Live, chat: str, tool: str, incarnation: str) -> Any:
+    from skep.supervisor.autonomy import AutonomyDecision
+    from skep.supervisor.serve.tools import execute_mutation
+
+    return execute_mutation(
+        "call_mcp_tool", {"server_id": "plain", "tool": tool, "arguments": {}},
+        store=env.store, holder=env.holder, runner=None,  # type: ignore[arg-type]
+        actor="chat", chat_id=chat, card={"incarnation": incarnation},
+        decision=AutonomyDecision(verdict="allow", reason="mcp.allow.scope_rule"),
+    )  # fmt: skip
+
+
+def test_an_in_turn_call_needs_a_fresh_allow_not_just_no_deny(
+    live: Callable[[str], Live], calls: list[tuple[str, str]]
+) -> None:
+    """S5: in-turn, the final decision must still allow; one that now asks
+    is not run (only a card the operator answered may run an asked call)."""
+    env = live("builder")
+    chat = env.chat()
+    current = load_mcp_servers(env.store)["plain"].incarnation
+    result = _in_turn(env, chat, "delete_page", current)  # builder asks for this one
+    assert result["outcome"] == "not_run" and "Ask again" in result["error"]
+    assert calls == []
+
+
+def test_an_in_turn_call_for_another_incarnation_is_not_run(
+    live: Callable[[str], Live], calls: list[tuple[str, str]]
+) -> None:
+    env = live("builder")
+    chat = env.chat()
+    result = _in_turn(env, chat, "get_page", "decided-for-another")
+    assert result["outcome"] == "not_run" and "registered again" in result["error"]
+    assert calls == []
+
+
+def test_a_confirm_checks_its_binding_before_any_lookup_that_could_launch(
+    live: Callable[[str], Live], launched: list[tuple[str, str]]
+) -> None:
+    """S5: a read-shaped name makes the final decide() list the server to
+    learn its hint; for a replaced registration nothing may start at all."""
+    env = live("builder")
+    chat = env.chat()
+    card = _propose(env, chat, {"server_id": "plain", "tool": "list_things", "arguments": {}})
+    save_mcp_server(env.store, load_mcp_servers(env.store)["plain"])  # replaced
+    launched.clear()
+    action = _confirm(env, chat, card)
+    assert action.result["outcome"] == "not_run"
+    assert launched == []

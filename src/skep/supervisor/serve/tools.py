@@ -4963,7 +4963,7 @@ def _execute_mutation(
     if name == "register_mcp_server":  # v135: the strict lane (ADR 0069, mcp_sandbox)
         from ..mcp_sandbox import register
 
-        return register(store, args, chat_id=chat_id)
+        return register(store, args, chat_id=chat_id, card=card)
     if name == "read_url":
         # v47-F4: Queen search ≠ Queen fetch — the fetch happens HERE, strictly
         # after the card confirm; a failed read degrades to a clean tool error.
@@ -5725,8 +5725,10 @@ def _execute_mutation(
             server_id = record.server_id
             previous = load_mcp_servers(store).get(server_id)
 
+            saved: list[MCPServerConfig] = []
+
             def commit() -> None:
-                save_mcp_server(store, server)
+                saved.append(save_mcp_server(store, server))  # its incarnation (ADR 0069 1.1)
                 forge.save_plugin(store, published)
 
             def unregister() -> None:  # registered ⟺ active, also on failure
@@ -5750,7 +5752,7 @@ def _execute_mutation(
             )
         try:
             # Phase 06 (6.2): the Queen's next turn names its tools.
-            discovered: Any = [tool.name for tool in refresh_listed_tools(store, server)]
+            discovered: Any = [tool.name for tool in refresh_listed_tools(store, saved[0])]
         except MCPError as exc:
             discovered = f"not listed yet ({exc}); list_mcp_tools {record.server_id} retries"
         return {
@@ -5863,18 +5865,29 @@ def _execute_mutation(
 
         server_id, tool_name = str(args["server_id"]), str(args["tool"])
 
-        def last_guard() -> None:  # a deny refuses even a confirmed card; it passes chat_id
+        def last_guard() -> str | None:
+            """A deny refuses even a confirmed card; in-turn (``decision``
+            set, no human) the final decide() must still ALLOW (review S5)."""
             verdict = mcp_scope_decision(
                 store, holder, MCPTool(server_id=server_id, name=tool_name, description=""),
                 role=_chat_role(store, holder, chat_id), chat_id=chat_id,
             )  # fmt: skip
+            why = verdict.decided_by or verdict.reason
             if verdict.verdict == "deny":
-                raise ValueError(f"denied by policy: {verdict.decided_by or verdict.reason}")
+                return f"not run: denied by policy: {why}"
+            if decision is not None and not verdict.allows_execution():
+                return (
+                    f"not run: the policy no longer allows {server_id}:{tool_name} without "
+                    f"asking ({why}), so it did not run in this turn. Ask again: the call "
+                    "gets a card"
+                )
+            return None
 
+        # Both bind (review S5): a confirm to its card, an in-turn call to the
+        # incarnation its allow was decided for (chat.py puts it in ``card``).
         return call_registered(
             store, server_id, tool_name, _object_arg(args, "arguments"),
-            skep_home=holder.current.home.parent, guard=last_guard,
-            card=None if decision is not None else (card or {}),  # a confirm binds to its card
+            skep_home=holder.current.home.parent, guard=last_guard, card=card or {},
         )  # fmt: skip
     if name in ("allow_fetch_domain", "allow_mcp_tool"):
         # v90-F3: one shared writer; P3-5: it runs the write-time check first.
