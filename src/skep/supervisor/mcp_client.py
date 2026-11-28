@@ -502,15 +502,19 @@ def _envelope_problem(message: Mapping[str, object]) -> str | None:
     return None
 
 
-def _initialize_problem(message: Mapping[str, object]) -> str | None:
+def _initialize_problem(
+    message: Mapping[str, object], scrub: Callable[[object], object] | None = None
+) -> str | None:
     """Review r2 N11: why ``message`` is not a successful ``initialize``
     reply; the MCP lifecycle requires protocolVersion, capabilities and
-    serverInfo in its result (nothing else is required)."""
+    serverInfo in its result (nothing else is required). Review r3 M5: read
+    as the server sent it; ``scrub`` masks only the error data shown."""
     if (problem := _envelope_problem(message)) is not None:
         return problem
     result = message.get("result")
     if not isinstance(result, Mapping):
-        return f"it answered with an error: {message.get('error')}"
+        error = message.get("error")
+        return f"it answered with an error: {error if scrub is None else scrub(error)}"
     missing = [
         key
         for key, kind in (
@@ -901,9 +905,7 @@ def _stdio_exchange(
             init = await_reply(1)
             if init is None:
                 raise MCPNotRun("the MCP server exited before it answered initialize")
-            if scrub is not None:
-                init = scrub(init)
-            if (problem := _initialize_problem(init)) is not None:
+            if (problem := _initialize_problem(init, scrub)) is not None:
                 # review S11, r2 N11: only a valid initialize result advances
                 raise MCPNotRun(
                     f"the MCP server did not accept initialize ({problem}), so the request "

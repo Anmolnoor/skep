@@ -4,6 +4,7 @@ round-3 item (M1-M6) it pins.
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from collections.abc import Iterator
@@ -103,3 +104,52 @@ def test_a_slow_http_listing_does_not_block_a_registry_write(
         release.set()
         lister.join(5)
         writer.join(5)
+
+
+# -- M5: initialize is validated as sent; only what is shown is redacted ---------------
+
+_INIT_OK = (
+    '{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05", '
+    '"capabilities": {}, "serverInfo": {"name": "fx", "version": "1"}}}'
+)
+_CALL_OK = '{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "hi"}]}}'
+
+
+def _script(tmp_path: Path, init: str, reply: str = _CALL_OK) -> Path:
+    script = tmp_path / "srv_m5.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdin.readline()\n"
+        f"print({init!r}, flush=True)\n"
+        "sys.stdin.readline(); sys.stdin.readline()\n"
+        f"print({reply!r}, flush=True)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+@pytest.mark.parametrize("secret", ["serverInfo", "protocolVersion", "capabilities"])
+def test_a_secret_equal_to_a_required_field_name_does_not_refuse_the_handshake(
+    tmp_path: Path, secret: str
+) -> None:
+    script = _script(tmp_path, _INIT_OK)
+    payload = mcp_client._stdio_payload("tools/call", {"name": "t", "arguments": {}})
+    lines = mcp_client._stdio_exchange(
+        [sys.executable, str(script)], payload,
+        scrub=lambda value: mcp_sandbox.redact(value, {"K": secret}),
+    )  # fmt: skip
+    assert json.loads(lines[-1])["id"] == 2
+
+
+def test_an_initialize_error_is_still_shown_redacted(tmp_path: Path) -> None:
+    masked = "an-error-value-to-mask-77"  # never `secret = "…"`: the hygiene scan
+    init = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": f"bad {masked}"}}
+    )
+    payload = mcp_client._stdio_payload("tools/list", {})
+    with pytest.raises(mcp_client.MCPNotRun) as caught:
+        mcp_client._stdio_exchange(
+            [sys.executable, str(_script(tmp_path, init))], payload,
+            scrub=lambda value: mcp_sandbox.redact(value, {"K": masked}),
+        )  # fmt: skip
+    assert masked not in str(caught.value) and "[redacted]" in str(caught.value)
