@@ -11,6 +11,7 @@ handshake succeed; a failure deletes it.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -50,10 +51,10 @@ def clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     mcp_client._LISTED.clear()
     monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
     real_home = Path.home()
-    if NODE is not None and ".nvm" in Path(NODE).resolve().parts:
-        parts = Path(NODE).resolve().parts
-        monkeypatch.setenv("NVM_DIR", str(Path(*parts[: parts.index(".nvm") + 1])))
-    for name in (*sandbox._SOCKET_ENV, "UV_TOOL_DIR", "CARGO_HOME", "RUSTUP_HOME", "PYENV_ROOT"):
+    # review r3 M4: no NVM_DIR hint — the install wall binds the Node it
+    # resolved (an nvm, a CI tool cache) as its own trusted root
+    for name in (*sandbox._SOCKET_ENV, "UV_TOOL_DIR", "CARGO_HOME", "RUSTUP_HOME", "PYENV_ROOT",
+                 "NVM_DIR"):  # fmt: skip
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(real_home / ".local/share/uv/python"))
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
@@ -127,11 +128,13 @@ def test_an_npm_server_installs_without_its_scripts_and_runs_after_a_restart(
 ) -> None:
     marker = tmp_path / "scripts-ran"
     tarball = build_npm_package(marker=marker)
-    # the control: a plain npm install of the same package runs its scripts
+    # the control: an npm install of the same package that allows scripts runs
+    # them (npm 12 blocks any its allowScripts does not cover; 11 ignores this)
     (tmp_path / "pkg.tgz").write_bytes(tarball)
     control = tmp_path / "control"
+    allowed = {**os.environ, "npm_config_dangerously_allow_all_scripts": "true"}
     subprocess.run([str(NPM), "install", "--prefix", str(control), str(tmp_path / "pkg.tgz")],
-                   check=True, capture_output=True, timeout=120)  # fmt: skip
+                   check=True, capture_output=True, timeout=120, env=allowed)  # fmt: skip
     assert marker.read_text() == "ran"
     marker.unlink()
     reg.add_npm(tarball)

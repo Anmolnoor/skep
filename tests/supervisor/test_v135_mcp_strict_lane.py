@@ -49,13 +49,8 @@ def clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     mcp_client._LISTED.clear()
     monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
     real_home = Path.home()
-    # node under ~/.nvm stays readable once HOME is faked: name its root
-    if NODE is not None and ".nvm" in Path(NODE).resolve().parts:
-        parts = Path(NODE).resolve().parts
-        monkeypatch.setenv("NVM_DIR", str(Path(*parts[: parts.index(".nvm") + 1])))
-    else:
-        monkeypatch.delenv("NVM_DIR", raising=False)
-    for name in (*sandbox._SOCKET_ENV, "UV_TOOL_DIR", "CARGO_HOME", "RUSTUP_HOME", "PYENV_ROOT"):
+    for name in (*sandbox._SOCKET_ENV, "UV_TOOL_DIR", "CARGO_HOME", "RUSTUP_HOME", "PYENV_ROOT",
+                 "NVM_DIR"):  # fmt: skip
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(real_home / ".local/share/uv/python"))
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
@@ -138,6 +133,16 @@ def _command(kind: str, servers: Path) -> tuple[str, ...]:
     return (NODE, str(servers / "server.js"))
 
 
+def _reads(kind: str, servers: Path, skep_home: Path) -> tuple[str, ...]:
+    """The server's dir, plus Node's own install when no strict root holds
+    it (a CI tool cache): a pre-installed entry point's program is one of its
+    read paths, as the launch's refusal teaches (review r3 M4)."""
+    node = Path(NODE).resolve() if kind == "node" and NODE else None
+    if node is None or sandbox.strict_reads_cover(node, skep_home):
+        return (str(servers),)
+    return (str(servers), str(node.parent.parent))
+
+
 def _register(store: RunStore, server_id: str, command: tuple[str, ...], **fields: Any) -> Any:
     return save_mcp_server(store, MCPServerConfig(server_id, "stdio", command=command, **fields))
 
@@ -168,7 +173,9 @@ def test_a_strict_server_reads_no_home_canary(
     _register(store, "open", command, sandbox="host")  # the control
     seen = _json(_call(store, skep_home, "open", "probe", paths=canaries))
     assert [p for p in canaries if seen[p] == "read"] == canaries
-    _register(store, "walled", command, sandbox="strict", read_paths=(str(servers),))
+    _register(
+        store, "walled", command, sandbox="strict", read_paths=_reads(kind, servers, skep_home)
+    )
     seen = _json(_call(store, skep_home, "walled", "probe", paths=canaries))
     assert [p for p in canaries if seen[p] == "read"] == [], seen
 
@@ -183,7 +190,9 @@ def test_nothing_from_serves_environment_and_a_private_home(
     command = _command(kind, servers)
     _register(store, "open", command, sandbox="host")
     assert _json(_call(store, skep_home, "open", "env", names=names))["SKEP_FAKE_SERVE_SECRET"]
-    _register(store, "walled", command, sandbox="strict", read_paths=(str(servers),))
+    _register(
+        store, "walled", command, sandbox="strict", read_paths=_reads(kind, servers, skep_home)
+    )
     env = _json(_call(store, skep_home, "walled", "env", names=names))
     assert env["SKEP_FAKE_SERVE_SECRET"] is None
     assert env["HOME"] and not Path(env["HOME"]).is_relative_to(tmp_path / "fakehome")
@@ -204,10 +213,10 @@ def test_a_listed_host_is_reached_and_nothing_else(
     port, hits = upstream
     command = _command(kind, servers)
     ok, other = f"http://allowed.test:{port}/ok", f"http://other.test:{port}/no"
-    _register(store, "none", command, sandbox="strict", read_paths=(str(servers),))
+    _register(store, "none", command, sandbox="strict", read_paths=_reads(kind, servers, skep_home))
     blocked = _json(_call(store, skep_home, "none", "fetch", urls=[ok]))
     assert blocked[ok].startswith("blocked"), blocked  # egress none reaches nothing
-    _register(store, "net", command, sandbox="strict", read_paths=(str(servers),),
+    _register(store, "net", command, sandbox="strict", read_paths=_reads(kind, servers, skep_home),
               egress="hosts", allowed_hosts=(f"allowed.test:{port}",))  # fmt: skip
     out = _json(_call(store, skep_home, "net", "fetch", urls=[ok, other]))
     assert out[ok] == "reached:hello", out

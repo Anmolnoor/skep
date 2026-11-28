@@ -5,6 +5,7 @@ round-3 item (M1-M6) it pins.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import sys
 import threading
@@ -238,6 +239,102 @@ def test_a_registry_tarball_with_npms_sri_is_accepted(tmp_path: Path) -> None:
 def test_the_product_registry_is_https() -> None:
     args = mcp_sandbox.INSTALL_SOURCES["npm"].args
     assert args[args.index("--registry") + 1].startswith("https://")
+
+
+# -- M4: the wall reads the toolchain the supervisor resolved, and nothing else new ---
+
+
+def _toolchain(root: Path) -> Path:
+    """A Node install at ``root``: bin/node, and npm linking into its package."""
+    (root / "bin").mkdir(parents=True)
+    npm_bin = root / "lib" / "node_modules" / "npm" / "bin"
+    npm_bin.mkdir(parents=True)
+    for program in (root / "bin" / "node", npm_bin / "npm-cli.js"):
+        program.write_text("", encoding="utf-8")
+        program.chmod(0o755)
+    (root / "bin" / "npm").symlink_to(npm_bin / "npm-cli.js")
+    return root / "bin"
+
+
+def _npm_server() -> MCPServerConfig:
+    return MCPServerConfig(
+        "fx", "stdio", command=("fx-mcp",), sandbox="strict", install=("npm", "fx-mcp@1.0.0")
+    )
+
+
+def _on_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path) -> None:
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    linux = sandbox.SandboxAvailability(True, backend="bubblewrap")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: linux)
+
+
+def test_a_toolchain_outside_the_wall_roots_is_bound_as_its_resolved_prefix(
+    skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = (tmp_path / "toolcache" / "node" / "24.1.0" / "x64").resolve()
+    _on_path(monkeypatch, _toolchain(prefix))
+    assert mcp_sandbox.toolchain_roots(_npm_server(), skep_home) == (prefix,)
+    grant = mcp_sandbox.grant_view(_npm_server(), skep_home)
+    assert grant["toolchain"] == [str(prefix)]
+    assert f"plus the npm toolchain at {prefix}" in mcp_sandbox.grant_line(grant)
+
+
+def test_a_toolchain_already_in_the_wall_roots_adds_nothing(
+    skep_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "strict_reads_cover", lambda path, home: True)
+    assert mcp_sandbox.toolchain_roots(_npm_server(), skep_home) == ()
+    assert "toolchain" not in mcp_sandbox.grant_view(_npm_server(), skep_home)
+
+
+@pytest.mark.parametrize("where", ["home", "root", "skep"])
+def test_a_toolchain_prefix_over_the_home_or_the_skep_home_is_refused_before_any_download(
+    skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    home = Path(str(tmp_path / "fakehome"))
+    home.mkdir()
+    prefix = {"home": home, "root": Path("/"), "skep": skep_home.parent}[where]
+    if where == "root":  # nothing writes to /: a resolved prefix of / is faked
+        monkeypatch.setattr(mcp_sandbox, "_toolchain_programs", lambda config: [Path("/node")])
+    else:
+        _on_path(monkeypatch, _toolchain(prefix))
+    monkeypatch.setattr(sandbox, "strict_reads_cover", lambda path, home: False)
+    with pytest.raises(mcp_client.MCPError) as caught:
+        mcp_sandbox.toolchain_roots(_npm_server(), skep_home)
+    assert str(prefix.resolve()) in str(caught.value) and "sandbox='host'" in str(caught.value)
+    assert "toolchain_error" in mcp_sandbox.grant_view(_npm_server(), skep_home)
+    monkeypatch.setattr(mcp_sandbox, "_installer_steps", lambda *a: pytest.fail("downloaded"))
+    with pytest.raises(mcp_client.MCPError, match="toolchain"):
+        mcp_sandbox._run_installer(_npm_server(), tmp_path / "tree", skep_home, 5)
+
+
+def test_the_strict_reads_cover_the_system_roots_and_not_a_tool_cache(
+    skep_home: Path, tmp_path: Path
+) -> None:
+    assert sandbox.strict_reads_cover(Path("/usr/bin"), skep_home)
+    assert not sandbox.strict_reads_cover(tmp_path / "toolcache", skep_home)
+
+
+def test_a_pre_installed_entry_point_the_wall_cannot_read_is_refused_naming_the_fix(
+    store: RunStore, skep_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's own command[0] outside every root (a CI tool cache, asdf):
+    refused before the wall starts, naming the path and its read_paths fix."""
+    bin_dir = _toolchain((tmp_path / "toolcache" / "node" / "24.1.0").resolve())
+    monkeypatch.setattr(mcp_sandbox, "sandbox_refusal", lambda server_id: None)
+    started: list[Any] = []
+    from skep.supervisor import wall
+
+    monkeypatch.setattr(wall, "walled", lambda *a, **k: started.append(a))
+    config = mcp_client.save_mcp_server(store, MCPServerConfig(
+        "pre", "stdio", command=(str(bin_dir / "node"), "/srv/x.js"), sandbox="strict",
+    ))  # fmt: skip
+    with pytest.raises(mcp_client.MCPNotRun) as caught:
+        mcp_sandbox.strict_exchange(config, "", skep_home=skep_home, secret_values={})
+    assert str(bin_dir / "node") in str(caught.value) and "read_paths" in str(caught.value)
+    assert started == []
+    named = dataclasses.replace(config, read_paths=(str(bin_dir.parent),))
+    assert mcp_sandbox.entry_read_problem(named, skep_home) is None
 
 
 # -- M3: on a real Seatbelt host, secrets are refused, never injected ---------------

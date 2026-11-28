@@ -534,6 +534,11 @@ def grant_view(config: MCPServerConfig, skep_home: Path) -> dict[str, Any]:
     if config.install:
         view["install"] = f"{config.install[0]}:{config.install[1]}"
         view["install_note"] = INSTALL_SENTENCE
+        try:  # review r3 M4: the toolchain the walls bind, shown before approval
+            if toolchain := toolchain_roots(config, skep_home):
+                view["toolchain"] = [str(root) for root in toolchain]
+        except MCPError as exc:
+            view["toolchain_error"] = str(exc)
     return view
 
 
@@ -552,6 +557,9 @@ def grant_line(view: Mapping[str, Any]) -> str:
     reads = "system and toolchain dirs only"
     if view.get("read_paths"):
         reads += f", plus {', '.join(view['read_paths'])}"
+    if view.get("toolchain"):
+        reads += f", plus the {view['install'].split(':')[0]} toolchain at "
+        reads += ", ".join(view["toolchain"])
     net = "no network" if view.get("egress") == "none" else f"only {', '.join(view['hosts'])}"
     line = f"runs `{argv}` sandboxed (strict): reads {reads}; {net}"
     if view.get("secret_names"):
@@ -567,6 +575,8 @@ def grant_line(view: Mapping[str, Any]) -> str:
             f"; installs {view['install']} after you approve, off this request: "
             f"{view['install_note']}"
         )
+    if view.get("toolchain_error"):
+        line += f"; the install will be refused here: {view['toolchain_error']}"
     return line
 
 
@@ -824,6 +834,73 @@ def hidden_toolchains() -> dict[str, str]:
     return {"UV_PYTHON_INSTALL_DIR": str(uv_python)} if uv_python.is_dir() else {}
 
 
+def _toolchain_programs(config: MCPServerConfig) -> list[Path]:
+    """The programs the supervisor resolves to install and run ``config``:
+    node and npm, or uv and skep's own interpreter (the venv's base)."""
+    import shutil
+
+    names = ("node", "npm") if config.install[:1] == ("npm",) else ("uv",)
+    found = [Path(hit) for hit in map(shutil.which, names) if hit is not None]
+    return found if names[0] == "node" else [*found, Path(sys.executable)]
+
+
+def toolchain_roots(config: MCPServerConfig, skep_home: Path) -> tuple[Path, ...]:
+    """Review r3 M4: the toolchain prefixes an installed strict server's
+    walls bind read-only, as supervisor-trusted roots, because the strict
+    roots do not already cover them (a CI tool cache, asdf, a custom
+    prefix): each program resolved, its prefix two levels up (bin/node to
+    the install, npm-cli.js to npm's package). Nothing else new. Raises
+    MCPError naming the path when a prefix is the home or above it (``/``
+    included), holds the skep home, or is /etc's — before any download."""
+    from . import sandbox
+
+    if not config.install:
+        return ()
+    home = Path.home().resolve()
+    roots: list[Path] = []
+    for program in _toolchain_programs(config):
+        real = program.resolve()
+        if sandbox.strict_reads_cover(real, skep_home):
+            continue
+        prefix = real.parent.parent
+        if not sandbox._detected_root_ok(prefix, home) or sandbox._over(prefix, skep_home):
+            raise MCPError(
+                f"the {config.install[0]} toolchain here ({program}, at {real}) cannot be "
+                f"read inside the install and run walls: its prefix {prefix} is the home "
+                f"{home} or above it, holds the skep home {skep_home.resolve()}, or is /etc's, "
+                "and binding it would reopen what strict reads close. Install it under a "
+                "directory of its own (a version manager's dir, /usr/local, /opt), or "
+                "register the server with sandbox='host' (unsandboxed, a HIGH card)"
+            )
+        roots.append(prefix)
+    kept: list[Path] = []
+    for root in sorted(set(roots), key=lambda path: len(path.parts)):
+        if not any(root.is_relative_to(other) for other in kept):
+            kept.append(root)
+    return tuple(kept)
+
+
+def entry_read_problem(config: MCPServerConfig, skep_home: Path) -> str | None:
+    """Review r3 M4: a pre-installed entry point is the operator's own argv,
+    so skep binds no toolchain for it — its program must sit under the
+    strict roots or one of its ``read_paths``. Why not, naming the fix, or
+    None (an installed server's toolchain is ``toolchain_roots``')."""
+    from . import sandbox
+
+    if config.install or not config.command:
+        return None
+    real = Path(config.command[0]).resolve()
+    named = [Path(raw).resolve() for raw in config.read_paths]
+    if sandbox.strict_reads_cover(real, skep_home) or any(real.is_relative_to(r) for r in named):
+        return None
+    return (
+        f"its entry point {config.command[0]} (at {real}) is under no system or toolchain "
+        "dir the strict wall reads, and under none of its read_paths, so it cannot start "
+        f"there. Register it again with its install's directory in read_paths (e.g. "
+        f"{real.parent.parent}), or with sandbox='host' (unsandboxed, a HIGH card)"
+    )
+
+
 def node_note(config: MCPServerConfig, argv: list[str]) -> str:
     """2.6: when a Node server's listed host fails, the version that decides
     whether it honours the proxy; "" for anything else."""
@@ -972,6 +1049,10 @@ def strict_exchange(
                 f"package's own: {problem}. Register it again to reinstall"
             )
         trusted.append(tree.resolve())
+        try:  # review r3 M4: the toolchain it runs on, as the install's wall read it
+            trusted += toolchain_roots(config, skep_home)
+        except MCPError as exc:
+            raise MCPNotRun(f"not run: {config.server_id!r}: {exc}") from None
     unset = [name for name in config.secret_names if not secret_values.get(name)]
     short = [
         n for n in config.secret_names if 0 < len(secret_values.get(n) or "") < MIN_SECRET_LENGTH
@@ -996,6 +1077,8 @@ def strict_exchange(
             "create them, or register the server again without them"
         )
     _refuse_moved_roots(config)
+    if (problem := entry_read_problem(config, skep_home)) is not None:
+        raise MCPNotRun(f"not run: {config.server_id!r}: {problem}")
     tool_env = hidden_toolchains()
     hosts = config.allowed_hosts if config.egress == "hosts" else ()
     own = {name: secret_values[name] for name in config.secret_names}
@@ -1163,6 +1246,7 @@ def _installer_steps(config: MCPServerConfig, tree: Path) -> list[list[str]]:
                 f"tree (--allow-git=none). Update it (`npm install -g npm@^{MIN_NPM[0]}`), or "
                 "register the server with sandbox='host' (unsandboxed, a HIGH card)"
             )
+        npm = str(Path(npm).resolve())  # review r3 M4: the file the wall binds, not a link to it
         return [[npm, "install", "--ignore-scripts", "--allow-git=none", "--no-audit",
                  "--no-fund", "--prefix", str(tree), *source.args, spec]]  # fmt: skip
     uv = shutil.which("uv")
@@ -1347,6 +1431,7 @@ def _run_installer(config: MCPServerConfig, tree: Path, skep_home: Path, timeout
 
     kind, spec = config.install
     deadline = time.monotonic() + timeout
+    toolchain = toolchain_roots(config, skep_home)  # review r3 M4: before any download
     with (
         tempfile.TemporaryDirectory(prefix="skep-mcp-install-") as scratch,
         tempfile.TemporaryDirectory(prefix="skep-mcp-profile-") as profiles,
@@ -1361,6 +1446,7 @@ def _run_installer(config: MCPServerConfig, tree: Path, skep_home: Path, timeout
                     home=Path(scratch),
                     profile_dir=Path(profiles),
                     read_allowlist=(),
+                    trusted_read_roots=toolchain,
                     skep_home_roots=False,
                     deny_local=True,  # review S8
                 ) as (wrapped, wall_env):

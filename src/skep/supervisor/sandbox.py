@@ -257,6 +257,17 @@ def strict_read_roots(
     return list(dict.fromkeys(path.resolve() for path in roots))
 
 
+def strict_reads_cover(path: Path, skep_home: Path) -> bool:
+    """ADR 0069 (review r3 M4): a strict wall with no skep-home roots already
+    reads ``path`` where it resolves — under the backend's system roots or a
+    detected toolchain (``strict_read_roots``)."""
+    system = _SEATBELT_SYSTEM_ROOTS if availability().backend == "seatbelt" else _SYSTEM_ROOTS
+    roots = [Path(root).resolve() for root in system]
+    roots += strict_read_roots(skep_home, skep_home_roots=False)
+    real = path.resolve()
+    return any(real.is_relative_to(root) for root in roots)
+
+
 def _in_place(path: Path, skep_home: Path) -> bool:
     """G2: a skep-home root is bound only where it sits in the home, never
     through a link of its own or a linked parent — a ``worker_plugins``

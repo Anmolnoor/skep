@@ -121,13 +121,19 @@ left open:
   registration and a listing's binding are read under the same read hold,
   so a publication in progress (it holds the write side) is never half seen
   — never the new registration with the old record's hosts. A forged
-  exchange's waits are bounded as a stdio one's are.
+  exchange's waits are bounded as a stdio one's are. That outer hold is a
+  forged listing's alone (review r3 M2): a stdio launch takes its own
+  bounded hold, and an http listing, whose body read has a per-read timeout
+  but no total deadline, holds no gate, so a slow listing never stalls a
+  registry write.
 - **One registration snapshot per call decision** (review S5): the chat
   reads the incarnation once, before the decision classifies the call; the
   in-turn dispatch, the de-duplication and the card all bind to that value,
   passed to each, never read again (review r2 N6: "not read yet" is a value
   of its own, so a server registered before 2.4.0, whose incarnation is
-  empty, is a captured value like any other).
+  empty, is a captured value like any other; review r3 M1: so is "no
+  registration", so a server registered between the decision and the card
+  is not the one the card binds).
   In-turn, the final `decide()` must still allow (an ask is not run, "ask
   again"); on a confirm the card's binding is checked before any policy
   lookup that could list the server.
@@ -162,10 +168,14 @@ left open:
   lockfile version 2 or 3 with a `packages` map; its root asks for exactly
   the pinned package, which is installed at the pinned version; every other
   entry lies under `node_modules/` and is no link; an entry that names a
-  source (`resolved`), bundled or not, names a tarball under the named
-  registry with an integrity hash; and a bundled entry with no source of its
-  own must have no integrity of its own, its directory must exist, and its
-  nearest non-bundled ancestor must be such a registry tarball that declares
+  source (`resolved`), bundled or not, names exactly the tarball npm writes
+  for it under the named registry, `<registry><name>/-/<basename>-<version>.tgz`
+  (review r3 M6: so no other registry path, query, fragment or userinfo), and
+  its `integrity` is well-formed SRI — `sha512`, `sha384` or `sha256` entries
+  of their exact decoded lengths, at least one `sha512`, as npm writes; and
+  a bundled entry with no source of its own must have no integrity of its
+  own, its directory must exist, and its nearest non-bundled ancestor must
+  pass the same check and declare
   `bundleDependencies` — so it was unpacked from that verified archive. This
   follows npm 11's arborist: the lock marks `inBundle` from the tree's shape
   alone, and a bundled child missing from its parent's tarball is fetched on
@@ -190,6 +200,24 @@ left open:
   and publication is a marker file written beside the tree, never inside it
   (a wheel can drop files anywhere under its own prefix), after the install
   and the handshake both succeed. Any failure deletes the tree.
+- **The walls read the toolchain skep resolved, and nothing else new**
+  (review r3 M4). For an installed server skep resolves the programs itself:
+  `node` and `npm` (npm runs by its resolved path, not a link to it), or
+  `uv` and skep's own interpreter. Each is resolved to its real file; one
+  the strict roots already hold (the system dirs, the detected per-user
+  toolchains) adds nothing, and for any other — a CI tool cache, asdf, a
+  custom prefix — its prefix two levels up (`bin/node` to the Node install,
+  `npm-cli.js` to npm's own package) is bound read-only into the install
+  wall and the run-time wall as a supervisor-trusted root, and shown on the
+  registration card's grant ("plus the npm toolchain at …"). A prefix that
+  is the home or above it (`/` included), holds the skep home, or is /etc's
+  is refused before anything is downloaded, naming the path and the fix
+  (install it under a directory of its own, or `sandbox='host'`); the card
+  says the install will be refused. A pre-installed server's `command[0]`
+  is the operator's own argv, so no toolchain is bound for it: its program
+  must sit under the strict roots or one of its `read_paths`, or the launch
+  is refused before the wall starts, naming the path and the `read_paths`
+  fix.
 - **An unset listed secret refuses the install before anything is
   downloaded**, and the card names the `skep mcp secret set` command for
   each name not yet set. Values may be set before the registration.
@@ -229,7 +257,10 @@ left open:
   handshake go through `redacted_call`. Each reply line is parsed first and
   the server's data masked after, so a value the JSON escapes is still caught
   in a result or a JSON-RPC error, an `initialize` error included (review r2
-  N3: it is masked before it is formatted into the error text); stderr is
+  N3: it is masked before it is formatted into the error text; review r3
+  M5: the `initialize` reply is validated as the server sent it and only its
+  error data is masked, so a value equal to a required field name, such as
+  `serverInfo`, cannot rename the key and fail a valid handshake); stderr is
   masked a whole line at a time before it is cropped. Every value set is masked, so `skep mcp secret set`
   refuses one shorter than 8 characters, naming the minimum.
 - **Outcome unknown is recorded as the card status `interrupted`** (the
