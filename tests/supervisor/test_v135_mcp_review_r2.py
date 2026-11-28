@@ -599,7 +599,8 @@ def test_an_http_registration_naming_any_sandbox_field_is_refused(
 # -- N9: the lock's structure, its root, and every source, bundled ones included ----
 
 _REG = "https://registry.npmjs.org/"
-_TOP = {"version": "1.0.0", "resolved": f"{_REG}fx-mcp/-/fx-mcp-1.0.0.tgz", "integrity": "sha512-a"}
+_SRI = "sha512-" + "A" * 86 + "=="  # review r3 M6: well formed, as npm writes
+_TOP = {"version": "1.0.0", "resolved": f"{_REG}fx-mcp/-/fx-mcp-1.0.0.tgz", "integrity": _SRI}
 
 
 def _lock(tree: Path, packages: dict[str, Any] | None, version: int = 3) -> Path:

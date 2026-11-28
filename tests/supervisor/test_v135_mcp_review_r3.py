@@ -4,6 +4,7 @@ round-3 item (M1-M6) it pins.
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import threading
@@ -153,3 +154,87 @@ def test_an_initialize_error_is_still_shown_redacted(tmp_path: Path) -> None:
             scrub=lambda value: mcp_sandbox.redact(value, {"K": masked}),
         )  # fmt: skip
     assert masked not in str(caught.value) and "[redacted]" in str(caught.value)
+
+
+# -- M6: a registry tarball and a well-formed SRI, for every source -----------------
+
+_REG = "https://registry.npmjs.org/"
+_SHA512 = "sha512-" + base64.b64encode(bytes(64)).decode()
+_SHA256 = "sha256-" + base64.b64encode(bytes(32)).decode()
+_TARBALL = f"{_REG}fx-mcp/-/fx-mcp-1.0.0.tgz"
+_TOP = {"version": "1.0.0", "resolved": _TARBALL, "integrity": _SHA512}
+_NESTED = "node_modules/fx-mcp/node_modules/inner"
+
+
+def _tree(tmp_path: Path, top: dict[str, Any], **extra: Any) -> Path:
+    packages = {"": {"dependencies": {"fx-mcp": "^1.0.0"}}, "node_modules/fx-mcp": top, **extra}
+    tree = tmp_path / "tree"
+    tree.mkdir(parents=True)
+    lock = {"name": "t", "lockfileVersion": 3, "requires": True, "packages": packages}
+    (tree / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    for path in packages:
+        if path:
+            (tree / path).mkdir(parents=True, exist_ok=True)
+            (tree / path / "package.json").write_text("{}", encoding="utf-8")
+    return tree
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("resolved", f"{_REG}fx-mcp"),  # the packument, not a tarball
+        ("resolved", f"{_REG}fx-mcp/-/other-1.0.0.tgz"),
+        ("resolved", f"{_REG}fx-mcp/-/fx-mcp-1.0.1.tgz"),
+        ("resolved", f"{_TARBALL}?x=1"),
+        ("resolved", f"{_TARBALL}#frag"),
+        ("resolved", f"{_REG}evil/-/fx-mcp-1.0.0.tgz"),
+        ("resolved", _TARBALL.replace("https://", "https://u:p@")),
+        ("resolved", _TARBALL.replace("https://", "http://")),
+        ("integrity", "sha512-a"),
+        ("integrity", "yes"),
+        ("integrity", True),
+        ("integrity", _SHA256),  # well formed, but npm writes a sha512
+        ("integrity", "sha1-" + base64.b64encode(bytes(20)).decode()),
+        ("integrity", "sha512-" + base64.b64encode(bytes(32)).decode()),  # wrong length
+        ("integrity", f"{_SHA512} sha512-a"),
+        ("integrity", _SHA512.rstrip("=")),
+    ],
+)
+def test_a_source_that_is_not_a_registry_tarball_with_a_valid_sri_is_refused(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    tree = _tree(tmp_path, {**_TOP, field: value})
+    problem = mcp_sandbox.npm_tree_problem(tree, "fx-mcp@1.0.0")
+    assert problem is not None and "not from the registry" in problem, problem
+
+
+@pytest.mark.parametrize("field,value", [("resolved", f"{_REG}fx-mcp"), ("integrity", "x")])
+def test_a_bundling_ancestor_is_held_to_the_same_check(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    bundler = {**_TOP, "bundleDependencies": ["inner"]}
+    nested = {_NESTED: {"version": "1.0.0", "inBundle": True}}
+    assert mcp_sandbox._bundled_in_registry_parent(
+        _tree(tmp_path / "ok", bundler, **nested), _NESTED,
+        {"node_modules/fx-mcp": bundler, **nested}, _REG,
+    )  # fmt: skip
+    bad = {**bundler, field: value}
+    assert not mcp_sandbox._bundled_in_registry_parent(
+        _tree(tmp_path / "bad", bad, **nested), _NESTED,
+        {"node_modules/fx-mcp": bad, **nested}, _REG,
+    )  # fmt: skip
+
+
+def test_a_registry_tarball_with_npms_sri_is_accepted(tmp_path: Path) -> None:
+    scoped = {
+        "version": "2.0.0-beta.1",
+        "resolved": f"{_REG}@scope/dep/-/dep-2.0.0-beta.1.tgz",
+        "integrity": f"{_SHA512} {_SHA256}",
+    }
+    tree = _tree(tmp_path, dict(_TOP), **{"node_modules/@scope/dep": scoped})
+    assert mcp_sandbox.npm_tree_problem(tree, "fx-mcp@1.0.0") is None
+
+
+def test_the_product_registry_is_https() -> None:
+    args = mcp_sandbox.INSTALL_SOURCES["npm"].args
+    assert args[args.index("--registry") + 1].startswith("https://")

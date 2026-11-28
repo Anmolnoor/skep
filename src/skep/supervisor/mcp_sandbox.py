@@ -1196,8 +1196,9 @@ def npm_tree_problem(tree: Path, spec: str) -> str | None:
     from, or the install is refused. The lock is v2/v3 with a ``packages``
     map whose root asks for exactly the pinned package, installed at the
     pinned version. Every other entry lives under ``node_modules/``, is no
-    link, and either names a source — a tarball under the registry the
-    install named, with an integrity hash, bundled or not — or is bundled
+    link, and either names a source — the registry tarball npm writes for
+    it, with a well-formed sha512 integrity (``registry_tarball``), bundled
+    or not — or is bundled
     with no source of its own: then it must have been unpacked from its
     parent's archive (see ``_bundled_in_registry_parent``)."""
     import json
@@ -1238,7 +1239,7 @@ def npm_tree_problem(tree: Path, spec: str) -> str | None:
         if not path.startswith("node_modules/") or ".." in path.split("/") or entry.get("link"):
             bad.append(f"{path} (a link, or outside node_modules)")
         elif resolved is not None or not entry.get("inBundle"):
-            if not str(resolved or "").startswith(registry) or not entry.get("integrity"):
+            if not registry_tarball(path, entry, registry):
                 bad.append(f"{shown} ({resolved or 'no source'})")
         elif entry.get("integrity") or not _bundled_in_registry_parent(
             tree, path, packages, registry
@@ -1261,7 +1262,7 @@ def _bundled_in_registry_parent(
     (reify.js:703-711). One unpacked from the tarball carries only what its
     own package.json says (node.js:151-172, ``_resolved``/``_integrity``),
     usually nothing. So a source-less bundled entry is accepted only when its
-    nearest non-bundled ancestor is a registry tarball with an integrity hash
+    nearest non-bundled ancestor is a registry tarball (``registry_tarball``)
     that declares ``bundleDependencies`` (shrinkwrap.js:92 records it), and
     its directory exists under that ancestor's ``node_modules``."""
     if not (tree / path / "package.json").is_file():
@@ -1273,12 +1274,45 @@ def _bundled_in_registry_parent(
             return False
         if parent.get("inBundle"):
             continue  # bundled itself: its bundler is further up
-        return (
-            bool(parent.get("bundleDependencies"))
-            and str(parent.get("resolved") or "").startswith(registry)
-            and bool(parent.get("integrity"))
+        return bool(parent.get("bundleDependencies")) and registry_tarball(
+            "/node_modules/".join(parts[:depth]), parent, registry
         )
     return False
+
+
+_NPM_NAME = re.compile(r"(?:@[A-Za-z0-9][\w.~-]*/)?[A-Za-z0-9][\w.~-]*")
+_NPM_VERSION = re.compile(r"[0-9A-Za-z.+-]+")
+_SRI_BYTES = {"sha512": 64, "sha384": 48, "sha256": 32}
+
+
+def registry_tarball(path: str, entry: Mapping[str, Any], registry: str) -> bool:
+    """Review r3 M6: a lock entry's source is the tarball npm writes for it
+    under ``registry`` (``<name>/-/<basename>-<version>.tgz``; the product's
+    registry is https, so no query, fragment or userinfo fits), and its
+    ``integrity`` is well-formed SRI (sha512/sha384/sha256 at their exact
+    lengths) holding a sha512, as npm writes."""
+    import base64
+    import binascii
+
+    name = str(entry.get("name") or path.rsplit("node_modules/", 1)[-1])
+    version = str(entry.get("version") or "")
+    if not (_NPM_NAME.fullmatch(name) and _NPM_VERSION.fullmatch(version)):
+        return False
+    base = name.rsplit("/", 1)[-1]
+    if entry.get("resolved") != f"{registry}{name}/-/{base}-{version}.tgz":
+        return False
+    integrity = entry.get("integrity")
+    algorithms = []
+    for item in integrity.split() if isinstance(integrity, str) else ():
+        algorithm, _, digest = item.partition("-")
+        try:
+            raw = base64.b64decode(digest, validate=True)
+        except binascii.Error:
+            return False
+        if _SRI_BYTES.get(algorithm) != len(raw):
+            return False
+        algorithms.append(algorithm)
+    return "sha512" in algorithms
 
 
 def _installer_env(scratch: Path, wall_env: Mapping[str, str]) -> dict[str, str]:
