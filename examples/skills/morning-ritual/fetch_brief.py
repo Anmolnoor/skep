@@ -38,9 +38,7 @@ section is flushed as it finishes.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import datetime as dt
-import imaplib
 import json
 import math
 import signal
@@ -73,10 +71,11 @@ LABEL_WIDTH = 60  # a section heading's label, at most
 NOTE_WIDTH = 120  # a failed section's one "(unavailable: ...)" line, at most
 
 
-class TimeShareSpent(Exception):
+class TimeShareSpent(BaseException):
     """A source's whole fetch (connect, headers, body) passed its time share.
-    Raised from SIGALRM; not an OSError, so no socket or urllib layer turns
-    it into a retry (create_connection tries the next address on OSError)."""
+    Raised from SIGALRM. A BaseException, so no layer below takes it for an
+    ordinary failure: create_connection retries the next address on OSError,
+    and a mail digest reads "one bad message" on Exception."""
 
 
 def _out_of_time(*_args: object) -> None:
@@ -211,22 +210,7 @@ def calendar(days: int) -> str:
 def mail(count: int) -> str:
     from skep.mcp_servers import mail as imap
 
-    # The alarm is one-shot: spent inside an IMAP command, the ``with``
-    # block's LOGOUT would wait on the server. Shut the socket instead.
-    logout_exit = imaplib.IMAP4.__exit__
-
-    def exit_(self: imaplib.IMAP4, *exc: Any) -> None:
-        if exc[0] is not TimeShareSpent:
-            return logout_exit(self, *exc)
-        with contextlib.suppress(OSError):
-            self.shutdown()
-        return None
-
-    imaplib.IMAP4.__exit__ = exit_  # type: ignore[method-assign]
-    try:
-        return imap.digest(count)
-    finally:
-        imaplib.IMAP4.__exit__ = logout_exit  # type: ignore[method-assign]
+    return imap.digest(count)
 
 
 def _feed_label(url: str) -> str:
@@ -282,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
                     body = read()
                 finally:
                     signal.setitimer(signal.ITIMER_REAL, 0)
-            except Exception as exc:  # one dead source never hides the others
+            except (Exception, TimeShareSpent) as exc:  # one dead source never hides the others
                 why = _clip(f"{type(exc).__name__}: {_one_line(exc)}", NOTE_WIDTH - 15)
                 body, failed = f"(unavailable: {why})", True
             block = f"\n## {title}\n{body}"

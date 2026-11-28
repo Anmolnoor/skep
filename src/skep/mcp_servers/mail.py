@@ -24,6 +24,7 @@ Run: python -m skep.mcp_servers.mail
 from __future__ import annotations
 
 import argparse
+import contextlib
 import email
 import email.message
 import email.policy
@@ -35,6 +36,7 @@ import socket
 import ssl
 import sys
 import urllib.parse
+from collections.abc import Iterator
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -326,6 +328,23 @@ class _ProxiedIMAP4_SSL(imaplib.IMAP4_SSL):
         return wrapped
 
 
+@contextlib.contextmanager
+def _session(imap: imaplib.IMAP4) -> Iterator[imaplib.IMAP4]:
+    """``with imap`` for the digest, except when it is cancelled: a caller's
+    timer (a BaseException, e.g. the morning brief's time share) closes the
+    socket without the LOGOUT round trip, which would wait on the server."""
+    try:
+        yield imap
+    except Exception:
+        imap.__exit__(None, None, None)
+        raise
+    except BaseException:
+        with contextlib.suppress(OSError):
+            imap.shutdown()
+        raise
+    imap.__exit__(None, None, None)
+
+
 def digest(count: int, mailbox: str = "INBOX") -> str:
     """The newest ``count`` messages as blocks the v121 injection alarm
     parses: a ``---`` line, then ``From:``/``Subject:``/``Date:`` at column
@@ -348,7 +367,7 @@ def digest(count: int, mailbox: str = "INBOX") -> str:
         if not proxy
         else _ProxiedIMAP4_SSL(host, port, proxy=proxy)
     )
-    with connect as imap:
+    with _session(connect) as imap:
         imap.login(os.environ["SKEP_MAIL_USER"], password)
         imap.select(mailbox, readonly=True)
         _status, data = imap.uid("search", "ALL")

@@ -439,6 +439,70 @@ def test_fetch_brief_a_mail_source_that_times_out_closes_without_logout(
     assert imaplib.IMAP4.__exit__ is logout_exit  # put back for every other caller
 
 
+def _imap_one_message(listener: socket.socket, logout_delay: float) -> None:
+    """Loopback only: a mailbox with one message; LOGOUT answers late."""
+    body = b"From: a@example.org\r\nSubject: hi\r\n\r\nhello\r\n"
+    conn, _ = listener.accept()
+    with conn, conn.makefile("rb") as lines:
+        conn.sendall(b"* OK ready\r\n")
+        for line in lines:
+            words = line.split()
+            tag, command = words[0], words[1]
+            if command == b"CAPABILITY":
+                conn.sendall(b"* CAPABILITY IMAP4rev1\r\n" + tag + b" OK done\r\n")
+            elif command == b"LOGOUT":
+                time.sleep(logout_delay)
+                conn.sendall(b"* BYE\r\n" + tag + b" OK bye\r\n")
+                return
+            elif command == b"EXAMINE":
+                conn.sendall(b"* 1 EXISTS\r\n" + tag + b" OK [READ-ONLY] done\r\n")
+            elif command == b"UID" and words[2] == b"SEARCH":
+                conn.sendall(b"* SEARCH 1\r\n" + tag + b" OK done\r\n")
+            elif command == b"UID" and words[2] == b"FETCH":
+                head = b"* 1 FETCH (UID 1 BODY[] {%d}\r\n" % len(body)
+                conn.sendall(head + body + b")\r\n" + tag + b" OK done\r\n")
+            else:
+                conn.sendall(tag + b" OK done\r\n")
+
+
+def test_fetch_brief_a_time_share_spent_while_parsing_mail_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review r4 (C): the alarm can fire while a fetched message is parsed.
+    ``_digest_block`` caught it as "one bad message", the digest then left
+    its ``with`` block normally, and LOGOUT waited with no timer left."""
+    import email
+    import imaplib
+
+    from skep.mcp_servers import mail
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    threading.Thread(target=_imap_one_message, args=(listener, 2.0), daemon=True).start()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda host, port, **_k: imaplib.IMAP4(host, port))
+    monkeypatch.setattr(mail, "resolve_password", lambda: "pw")
+    for name in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKEP_MAIL_IMAP_HOST", "127.0.0.1")
+    monkeypatch.setenv("SKEP_MAIL_IMAP_PORT", str(listener.getsockname()[1]))
+    monkeypatch.setenv("SKEP_MAIL_USER", "me")
+    module = _brief_module()
+
+    def spent_mid_parse(*_a: object, **_k: object) -> None:
+        raise module.TimeShareSpent("the source did not finish in its time share")  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(email, "message_from_bytes", spent_mid_parse)
+    try:
+        began = time.monotonic()
+        code = module.main(["--mail", "1"])  # type: ignore[attr-defined]
+        spent = time.monotonic() - began
+    finally:
+        listener.close()
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "## Mail\n(unavailable: TimeShareSpent" in out
+    assert spent < 1.5  # not the 2 s LOGOUT reply
+
+
 def test_fetch_brief_a_long_bad_url_costs_one_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
